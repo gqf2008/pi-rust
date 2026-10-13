@@ -337,6 +337,13 @@ pub fn owned_caps(
     caps
 }
 
+/// Owners for compiled plugins start here, far above any registry id.
+fn next_compiled_owner() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1 << 32);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// UI capabilities, served by the interaction mailboxes.
 ///
 /// `UiDialog` / `SetStatus` / `SetEditorText` are handled by the bridge's own
@@ -346,6 +353,10 @@ pub struct UiCaps {
     dialog: rpi_extensions::UiDialogMailbox,
     status: rpi_extensions::ExtensionStatusMailbox,
     editor: rpi_extensions::EditorTextMailbox,
+    /// Component ownership. The native bridge keys components by the registry
+    /// id it assigned at load; compiled plugins have no registry entry, so they
+    /// draw from a high range that cannot collide with one.
+    owner: u64,
 }
 
 impl UiCaps {
@@ -358,6 +369,7 @@ impl UiCaps {
             dialog,
             status,
             editor,
+            owner: next_compiled_owner(),
         }
     }
 }
@@ -386,15 +398,19 @@ impl kiqi_plugin::UiApi for UiCaps {
             .map_err(kiqi_plugin::PluginError::Failed)
     }
 
+    /// Served by the status mailbox's component registry, exactly as the
+    /// bridge dispatches `UiComponent` (`ext_status.component(owner, args)`).
+    /// An earlier version of this returned `Denied` with the message from the
+    /// *non*-bridge dispatch - which is the branch that never runs when a
+    /// bridge is present, as it always is here.
     fn component(
         &self,
-        name: &str,
-        _payload: &serde_json::Value,
+        _name: &str,
+        payload: &serde_json::Value,
     ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
-        // The bridge refuses this today; so do we, rather than pretending.
-        Err(kiqi_plugin::PluginError::Denied(format!(
-            "UI component `{name}` requires a plugin bridge"
-        )))
+        self.status
+            .component(self.owner, payload.clone())
+            .map_err(kiqi_plugin::PluginError::Failed)
     }
 }
 
@@ -850,8 +866,8 @@ mod tests {
     /// binary, so nothing else would notice until a handler matched the wrong
     /// event.
     #[test]
-    fn ui_capabilities_reach_the_mailboxes_and_refuse_what_the_bridge_refuses() {
-        use kiqi_plugin::{PluginError, UiApi};
+    fn ui_capabilities_reach_the_mailboxes() {
+        use kiqi_plugin::UiApi;
 
         let ui = UiCaps::new(
             rpi_extensions::UiDialogMailbox::new(),
@@ -867,11 +883,17 @@ mod tests {
         }))
         .expect("editor text reaches the mailbox");
 
-        // UiComponent is refused by the bridge, so it must not pretend here.
-        let refused = ui
-            .component("anything", &serde_json::json!({}))
-            .unwrap_err();
-        assert!(matches!(refused, PluginError::Denied(_)), "got {refused:?}");
+        // UiComponent is served by the status mailbox's component registry
+        // (register/update/show/hide), exactly as the bridge dispatches it, so
+        // it must be accepted rather than refused.
+        ui.component(
+            "footer",
+            &serde_json::json!({
+                "op": "register", "id": "kiqi.test", "type": "text",
+                "slot": "footer.after"
+            }),
+        )
+        .expect("component registration reaches the status mailbox");
     }
 
     #[test]
