@@ -18,7 +18,10 @@ const CACHE_FILE: &str = "update-check.json";
 const CACHE_FALLBACK_MAX_AGE_MS: i64 = 6 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT_MS: u64 = 1800;
 const UPDATE_CHECK_CONCURRENCY: usize = 4;
-const CRATES_IO_API: &str = "https://crates.io/api/v1/crates/rpi-cli";
+/// Releases are cut from this fork only: the CLI is not published to crates.io
+/// and `ki update` must never install an upstream build over this one.
+const RELEASES_REPO: &str = "gqf2008/pi-rust";
+const RELEASES_LATEST_API: &str = "https://api.github.com/repos/gqf2008/pi-rust/releases/latest";
 const STAGED_RPI_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const MAX_STAGED_RPI_OUTPUT_BYTES: usize = 4 * 1024;
 const MAX_SELF_UPDATE_STATUS_BYTES: u64 = 64 * 1024;
@@ -82,6 +85,11 @@ struct UpdateCacheFreshness {
 }
 
 type RegistryCacheUpdate = (BTreeMap<String, String>, BTreeMap<String, i64>);
+
+#[derive(Debug, Deserialize)]
+struct ReleaseResponse {
+    tag_name: String,
+}
 
 #[derive(Debug, Deserialize)]
 struct CratesResponse {
@@ -391,6 +399,7 @@ fn normalize_windows_path(path: PathBuf) -> PathBuf {
     path
 }
 
+#[cfg(test)]
 fn windows_paths_equal(left: &Path, right: &Path) -> bool {
     let left = normalize_windows_path(left.to_path_buf());
     let right = normalize_windows_path(right.to_path_buf());
@@ -404,7 +413,212 @@ fn windows_paths_equal(left: &Path, right: &Path) -> bool {
 }
 
 async fn fetch_rpi_latest(client: &reqwest::Client) -> RegistryLookup {
-    fetch_crates_url(client, CRATES_IO_API).await
+    let response = match client
+        .get(RELEASES_LATEST_API)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", format!("ki/{}", crate::VERSION))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return RegistryLookup::TransientFailure,
+    };
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+    ) {
+        return RegistryLookup::Missing;
+    }
+    if !response.status().is_success() {
+        return RegistryLookup::TransientFailure;
+    }
+    match response.json::<ReleaseResponse>().await {
+        Ok(response) => {
+            let version = response.tag_name.trim().trim_start_matches('v').to_string();
+            if version.is_empty() {
+                RegistryLookup::TransientFailure
+            } else {
+                RegistryLookup::Found(version)
+            }
+        }
+        Err(_) => RegistryLookup::TransientFailure,
+    }
+}
+
+/// The release asset target triple for the platform this binary runs on.
+fn release_target_triple() -> Option<&'static str> {
+    Some(match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        _ => return None,
+    })
+}
+
+/// Install release `version` into `<staging>/bin/<COMMAND_NAME>` by downloading
+/// the prebuilt archive from GitHub Releases and verifying its `.sha256`.
+///
+/// `build_direct_update_plan` then consumes that staging directory exactly as
+/// it did for the previous `cargo install` flow, so the atomic replace, the
+/// rollback path and the staged-version validation are all unchanged.
+fn install_release_into(staging_root: &Path, version: &str) -> Result<(), String> {
+    let target = release_target_triple().ok_or_else(|| {
+        format!(
+            "no prebuilt ki release for {}-{}; build from source with `cargo build --release`",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let extension = if cfg!(windows) { "zip" } else { "tar.gz" };
+    let asset = format!("ki-v{version}-{target}.{extension}");
+    let url = format!("https://github.com/{RELEASES_REPO}/releases/download/v{version}/{asset}");
+
+    let work = tempfile::Builder::new()
+        .prefix("ki-release-")
+        .tempdir_in(staging_root)
+        .map_err(|error| format!("could not create a download directory: {error}"))?;
+    let archive = work.path().join(&asset);
+    let unpacked = work.path().join("unpacked");
+    let bin_dir = staging_root.join("bin");
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|error| format!("could not create {}: {error}", bin_dir.display()))?;
+
+    run_release_tool(
+        "curl",
+        &[
+            "-fsSL",
+            "--retry",
+            "2",
+            "-o",
+            &archive.to_string_lossy(),
+            &url,
+        ],
+    )?;
+    verify_release_checksum(&url, &archive)?;
+    std::fs::create_dir_all(&unpacked)
+        .map_err(|error| format!("could not create {}: {error}", unpacked.display()))?;
+    if cfg!(windows) {
+        run_release_tool(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+                    archive.display(),
+                    unpacked.display()
+                ),
+            ],
+        )?;
+    } else {
+        run_release_tool(
+            "tar",
+            &[
+                "-xzf",
+                &archive.to_string_lossy(),
+                "-C",
+                &unpacked.to_string_lossy(),
+            ],
+        )?;
+    }
+
+    let unpacked_bin = unpacked.join(crate::COMMAND_NAME);
+    let unpacked_bin = if cfg!(windows) {
+        unpacked_bin.with_extension("exe")
+    } else {
+        unpacked_bin
+    };
+    if !unpacked_bin.is_file() {
+        return Err(format!(
+            "the {} release asset did not contain `{}`",
+            asset,
+            unpacked_bin
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        ));
+    }
+    let staged = bin_dir.join(unpacked_bin.file_name().unwrap());
+    std::fs::rename(&unpacked_bin, &staged)
+        .map_err(|error| format!("could not stage the downloaded binary: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| format!("could not mark the staged binary executable: {error}"))?;
+    }
+    Ok(())
+}
+
+fn run_release_tool(program: &str, args: &[&str]) -> Result<(), String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| format!("could not run {program}: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{program} exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+/// Verify the downloaded archive against the `.sha256` published beside it.
+fn verify_release_checksum(url: &str, archive: &Path) -> Result<(), String> {
+    let checksum_url = format!("{url}.sha256");
+    let expected = run_release_tool_capture("curl", &["-fsSL", &checksum_url])?;
+    let expected = expected
+        .split_whitespace()
+        .next()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "the published checksum file was empty".to_string())?;
+    if expected.len() != 64 {
+        return Err("the published checksum file was not a SHA-256 digest".to_string());
+    }
+    let actual = sha256_file(archive)?;
+    if actual != expected {
+        return Err(format!(
+            "checksum mismatch for {}: expected {expected}, got {actual}",
+            archive.display()
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let path_arg = path.to_string_lossy().to_string();
+    if let Ok(digest) = run_release_tool_capture("shasum", &["-a", "256", &path_arg]) {
+        if let Some(digest) = digest.split_whitespace().next() {
+            return Ok(digest.to_ascii_lowercase());
+        }
+    }
+    let digest = run_release_tool_capture("sha256sum", &[&path_arg])?;
+    digest
+        .split_whitespace()
+        .next()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "could not compute the archive checksum".to_string())
+}
+
+fn run_release_tool_capture(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| format!("could not run {program}: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(format!(
+            "{program} exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
 }
 
 async fn fetch_crates_latest(client: &reqwest::Client, name: &str) -> RegistryLookup {
@@ -762,6 +976,7 @@ fn clear_cached_latest_rpi() {
     let _ = write_cache(&path, &cache);
 }
 
+#[cfg(test)]
 fn cargo_install_command(
     staging_root: Option<&Path>,
     isolated_cwd: &Path,
@@ -793,6 +1008,7 @@ fn cargo_install_command(
 /// untrusted project, a project-local `CARGO_HOME`, nor a world-writable system
 /// temp directory can join that discovery chain. Cargo still reads its
 /// explicitly configured user-level home through its normal environment.
+#[cfg(test)]
 fn create_self_update_command_dir() -> Result<tempfile::TempDir, String> {
     let configured_root =
         dirs::home_dir().ok_or_else(|| "could not resolve the user home directory".to_string())?;
@@ -843,12 +1059,14 @@ fn create_self_update_command_dir() -> Result<tempfile::TempDir, String> {
     Ok(directory)
 }
 
+#[cfg(test)]
 fn path_is_within(candidate: &Path, ancestor: &Path) -> bool {
     candidate
         .ancestors()
         .any(|component| windows_paths_equal(component, ancestor))
 }
 
+#[cfg(test)]
 fn validate_configured_cargo_home(project_root: Option<&Path>) -> Result<(), String> {
     let Some(configured) = std::env::var_os("CARGO_HOME") else {
         return Ok(());
@@ -870,6 +1088,7 @@ fn validate_configured_cargo_home(project_root: Option<&Path>) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(test)]
 fn cargo_home_is_project_local(configured: &Path, project_root: &Path) -> Result<bool, String> {
     if !configured.is_absolute() {
         return Err("CARGO_HOME must be absolute for self-update".to_string());
@@ -878,6 +1097,7 @@ fn cargo_home_is_project_local(configured: &Path, project_root: &Path) -> Result
     Ok(path_is_within(&configured, project_root))
 }
 
+#[cfg(test)]
 fn canonicalize_allow_missing(path: &Path, label: &str) -> Result<PathBuf, String> {
     if path.components().any(|component| {
         matches!(
@@ -920,6 +1140,7 @@ fn canonical_display(path: &Path) -> String {
         .unwrap_or_else(|_| "<unresolvable>".to_string())
 }
 
+#[cfg(test)]
 fn validated_self_update_command_dir(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err("self-update command directory must be absolute".to_string());
@@ -956,31 +1177,16 @@ fn run_direct_self_update() -> i32 {
             return 1;
         }
     };
-    let command_dir = match create_self_update_command_dir() {
-        Ok(directory) => directory,
-        Err(error) => {
-            eprintln!("error: could not create an isolated self-update directory: {error}");
+    let version = match lookup_latest_rpi_blocking() {
+        Some((latest, _)) => latest,
+        None => {
+            eprintln!("error: could not resolve the latest ki release from GitHub");
             return 1;
         }
     };
-    let mut command = match cargo_install_command(Some(staging.path()), command_dir.path()) {
-        Ok(command) => command,
-        Err(error) => {
-            eprintln!("error: invalid isolated self-update directory: {error}");
-            return 1;
-        }
-    };
-    let status = command.status();
-    match status {
-        Ok(status) if status.success() => {}
-        Ok(status) => {
-            eprintln!("error: cargo install exited with {status}");
-            return 1;
-        }
-        Err(error) => {
-            eprintln!("error: could not run cargo (install Rust/Cargo first): {error}");
-            return 1;
-        }
+    if let Err(error) = install_release_into(staging.path(), &version) {
+        eprintln!("error: {error}");
+        return 1;
     }
 
     let current_exe = match std::env::current_exe() {
@@ -1036,7 +1242,7 @@ fn build_direct_update_plan(
 ) -> Result<DirectUpdatePlan, String> {
     let staging_dir = validated_real_directory(staging_dir, "self-update staging directory")?;
     let staged_exe = validated_regular_file(
-        &staging_dir.join("bin").join(crate::APP_NAME),
+        &staging_dir.join("bin").join(crate::COMMAND_NAME),
         "staged ki executable",
     )?;
     let target_exe = validated_regular_file(target_exe, "current ki executable")?;
@@ -1502,39 +1708,19 @@ fn run_windows_self_update() -> i32 {
         }
     };
 
-    let command_dir = match create_self_update_command_dir() {
-        Ok(directory) => directory,
-        Err(error) => {
-            let message = format!("could not create an isolated Cargo directory: {error}");
+    let version = match lookup_latest_rpi_blocking() {
+        Some((latest, _)) => latest,
+        None => {
+            let message = "could not resolve the latest ki release from GitHub".to_string();
             let _ = write_windows_update_status(&status_file, "failed", &message);
             eprintln!("error: {message}");
             return 1;
         }
     };
-    let mut cargo = match cargo_install_command(Some(&staging_dir), command_dir.path()) {
-        Ok(command) => command,
-        Err(error) => {
-            let message = format!("invalid isolated Cargo directory: {error}");
-            let _ = write_windows_update_status(&status_file, "failed", &message);
-            eprintln!("error: {message}");
-            return 1;
-        }
-    };
-    let status = cargo.status();
-    match status {
-        Ok(status) if status.success() => {}
-        Ok(status) => {
-            let message = format!("cargo install exited with {status}");
-            let _ = write_windows_update_status(&status_file, "failed", &message);
-            eprintln!("error: {message}");
-            return 1;
-        }
-        Err(error) => {
-            let message = format!("could not run cargo (install Rust/Cargo first): {error}");
-            let _ = write_windows_update_status(&status_file, "failed", &message);
-            eprintln!("error: {message}");
-            return 1;
-        }
+    if let Err(error) = install_release_into(&staging_dir, &version) {
+        let _ = write_windows_update_status(&status_file, "failed", &error);
+        eprintln!("error: {error}");
+        return 1;
     }
 
     let plan = match build_windows_update_plan(&staging_dir, &current_exe, &status_file) {
@@ -2588,7 +2774,7 @@ mod tests {
     fn direct_update_replaces_the_selected_target_and_rejects_downgrades() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging");
-        let staged = staging.join("bin/kiqi");
+        let staged = staging.join("bin/ki");
         let target = temp.path().join("target/ki-current");
         fake_unix_rpi(&staged, "9.9.9", None);
         fake_unix_rpi(&target, crate::VERSION, None);
@@ -2612,7 +2798,7 @@ mod tests {
     fn direct_update_rolls_back_when_post_replace_validation_fails() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging");
-        let staged = staging.join("bin/kiqi");
+        let staged = staging.join("bin/ki");
         let target = temp.path().join("target/ki-current");
         fake_unix_rpi(&staged, "9.9.9", Some("ki-current"));
         fake_unix_rpi(&target, crate::VERSION, None);
@@ -2968,7 +3154,7 @@ mod tests {
     fn windows_update_helper_atomically_replaces_a_valid_target() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging 'semi;& with spaces");
-        let staged = staging.join("bin/kiqi.exe");
+        let staged = staging.join("bin/ki.exe");
         let target = temp.path().join("target 'semi;& with spaces/rpi-copy.exe");
         fake_windows_executable(&staged, b"new-version");
         fake_windows_executable(&target, b"old-version");
@@ -3030,7 +3216,7 @@ mod tests {
     fn windows_update_helper_failure_preserves_the_old_executable() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging with spaces");
-        let staged = staging.join("bin/kiqi.exe");
+        let staged = staging.join("bin/ki.exe");
         let target = temp.path().join("target with spaces/rpi-copy.exe");
         fake_windows_executable(&staged, b"new-version");
         fake_windows_executable(&target, b"old-version");
@@ -3078,7 +3264,7 @@ mod tests {
     fn windows_update_helper_rolls_back_after_post_replace_validation_failure() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging");
-        let staged = staging.join("bin/kiqi.exe");
+        let staged = staging.join("bin/ki.exe");
         let target = temp.path().join("target/rpi-copy.exe");
         fake_windows_executable(&staged, b"new-version");
         fake_windows_executable(&target, b"old-version");
@@ -3134,7 +3320,7 @@ mod tests {
     fn windows_update_plan_rejects_a_non_executable_staged_file() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging");
-        let staged = staging.join("bin/kiqi.exe");
+        let staged = staging.join("bin/ki.exe");
         let target = temp.path().join("target/ki.exe");
         std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
         std::fs::write(&staged, b"not-a-pe").unwrap();

@@ -593,7 +593,7 @@ pub fn print_help() {
         "{name} - AI coding assistant with read, bash, edit, write, docs tools
 
 {u}Usage:{r}
-  {name} [options] [@files...] [messages...]
+  {command} [options] [@files...] [messages...]
 
 {u}Options:{r}
   --provider <name>              Provider name (anthropic, openai-completions, openai-responses, or models.json id)
@@ -706,6 +706,7 @@ pub fn print_help() {
   cycling remain outside the current implementation.
 ",
         name = crate::APP_NAME,
+        command = crate::COMMAND_NAME,
         builtin = builtin,
         u = "\x1b[1m",
         r = "\x1b[0m",

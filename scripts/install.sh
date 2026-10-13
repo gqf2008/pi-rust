@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install the prebuilt `rpi` binary from GitHub Releases.
+# Install the prebuilt `ki` binary from GitHub Releases.
 #
 #   curl -fsSL https://raw.githubusercontent.com/bigfish1913/pi-rust/main/scripts/install.sh | sh
 #
@@ -8,12 +8,12 @@
 #   --dir <path>      Install into <path> instead of ~/.local/bin or /usr/local/bin
 #   --dry-run         Print what would be downloaded, then exit
 #
-# If you would rather build from source, use `cargo install rpi-cli`.
+# If you would rather build from source, run `cargo build --release` in a checkout of this fork.
 
 set -eu
 
-REPO="bigfish1913/pi-rust"
-BIN="rpi"
+REPO="gqf2008/pi-rust"
+BIN="ki"
 VERSION=""
 INSTALL_DIR=""
 DRY_RUN=0
@@ -45,19 +45,19 @@ case "${os}" in
   Linux)  os_part="unknown-linux-gnu" ;;
   Darwin) os_part="apple-darwin" ;;
   MINGW*|MSYS*|CYGWIN*) os_part="pc-windows-msvc" ;;
-  *) die "unsupported operating system: ${os}. Build from source with 'cargo install rpi-cli'." ;;
+  *) die "unsupported operating system: ${os}. Build from source with 'cargo build --release'." ;;
 esac
 
 case "${arch}" in
   x86_64|amd64) arch_part="x86_64" ;;
   aarch64|arm64) arch_part="aarch64" ;;
-  *) die "unsupported architecture: ${arch}. Build from source with 'cargo install rpi-cli'." ;;
+  *) die "unsupported architecture: ${arch}. Build from source with 'cargo build --release'." ;;
 esac
 
 # Only the combinations the release workflow actually builds.
 case "${arch_part}-${os_part}" in
   x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu|aarch64-apple-darwin|x86_64-apple-darwin|x86_64-pc-windows-msvc) ;;
-  *) die "no prebuilt binary for ${arch_part}-${os_part}. Build from source with 'cargo install rpi-cli'." ;;
+  *) die "no prebuilt binary for ${arch_part}-${os_part}. Build from source with 'cargo build --release'." ;;
 esac
 
 target="${arch_part}-${os_part}"

@@ -74,14 +74,14 @@ jobs:
             exit 1
           fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "Building rpi ${version} for ${{ matrix.target }}"
+          echo "Building kiqi ${version} for ${{ matrix.target }}"
 
       - name: Build release binary
         run: cargo build -p rpi-cli --release --locked --target ${{ matrix.target }}
 
       - name: Smoke test Intel macOS binary
         if: matrix.target == 'x86_64-apple-darwin'
-        run: target/${{ matrix.target }}/release/rpi --version
+        run: target/${{ matrix.target }}/release/ki --version
 
       - name: Stage artifact
         id: stage
@@ -90,13 +90,13 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
           target="${{ matrix.target }}"
-          name="rpi-v${version}-${target}"
+          name="ki-v${version}-${target}"
           mkdir -p dist
 
           if [[ "${target}" == *windows* ]]; then
-            bin="target/${target}/release/rpi.exe"
+            bin="target/${target}/release/ki.exe"
           else
-            bin="target/${target}/release/rpi"
+            bin="target/${target}/release/ki"
           fi
 
           if [[ ! -f "${bin}" ]]; then
@@ -166,6 +166,6 @@ jobs:
             gh release upload "${TAG}" dist/* --clobber
           else
             gh release create "${TAG}" dist/* \
-              --title "rpi ${TAG}" \
+              --title "kiqi ${TAG}" \
               --generate-notes
           fi
