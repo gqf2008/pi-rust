@@ -256,6 +256,11 @@ pub fn load_all() -> Vec<Registered> {
         id: "rpi-plan-mode",
         plugin: rpi_plan_mode::kiqi::factory(),
     });
+    #[cfg(feature = "plugin-rpi-codegraph")]
+    plugins.push(Registered {
+        id: "rpi-codegraph",
+        plugin: rpi_codegraph::kiqi::factory(),
+    });
     #[cfg(feature = "plugin-rpi-subagents")]
     plugins.push(Registered {
         id: "rpi-subagents",
@@ -710,6 +715,7 @@ mod tests {
             "rpi-permissions",
             "rpi-goal",
             "rpi-plan-mode",
+            "rpi-codegraph",
         ] {
             assert!(
                 ids.contains(&expected),
@@ -744,6 +750,7 @@ mod tests {
             "goal",
             "plan_mode_complete",
             "plan_mode_start",
+            "codegraph_search",
         ] {
             assert!(
                 tools.iter().any(|t| t == expected),

@@ -2290,6 +2290,7 @@ dependencies = [
  "rpassword",
  "rpi-agent",
  "rpi-ai",
+ "rpi-codegraph",
  "rpi-extensions",
  "rpi-goal",
  "rpi-harness",
@@ -2315,6 +2316,15 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rpi-codegraph"
+version = "0.1.5"
+dependencies = [
+ "kiqi-plugin",
+ "rpi-plugin-sdk",
+ "serde_json",
 ]
 
 [[package]]

@@ -12,6 +12,7 @@ members = [
     "plugins/rpi-todo",
     "plugins/rpi-goal",
     "plugins/rpi-plan-mode",
+    "plugins/rpi-codegraph",
     "plugins/rpi-subagents",
     "plugins/rpi-permissions",
     "plugins/rpi-lens",
