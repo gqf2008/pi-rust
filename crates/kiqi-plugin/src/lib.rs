@@ -148,6 +148,65 @@ impl std::fmt::Display for PluginError {
 
 impl std::error::Error for PluginError {}
 
+/// The event categories the host dispatches.
+///
+/// Mirrors the native ABI's `EventTag` **exactly**, discriminants included:
+/// the plugin and the host are one binary here, so there is no version skew to
+/// absorb - which is also why there is no `Other` escape hatch. An unknown tag
+/// cannot exist, and pretending otherwise would just mean matching on strings
+/// again.
+///
+/// Payloads travel as JSON (see [`Event`]): the native ABI already ships them
+/// that way, so this is parity, not a regression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum EventTag {
+    ProjectTrust = 0,
+    ResourcesDiscover = 1,
+    SessionStart = 2,
+    SessionInfoChanged = 3,
+    SessionBeforeSwitch = 4,
+    SessionBeforeFork = 5,
+    SessionBeforeCompact = 6,
+    SessionCompact = 7,
+    SessionShutdown = 8,
+    SessionBeforeTree = 9,
+    SessionTree = 10,
+    Context = 11,
+    BeforeProviderRequest = 12,
+    BeforeProviderHeaders = 13,
+    AfterProviderResponse = 14,
+    BeforeAgentStart = 15,
+    AgentStart = 16,
+    AgentEnd = 17,
+    AgentSettled = 18,
+    TurnStart = 19,
+    TurnEnd = 20,
+    MessageStart = 21,
+    MessageUpdate = 22,
+    MessageEnd = 23,
+    ToolExecutionStart = 24,
+    ToolExecutionUpdate = 25,
+    ToolExecutionEnd = 26,
+    ModelSelect = 27,
+    ThinkingLevelSelect = 28,
+    ToolCall = 29,
+    ToolResult = 30,
+    UserBash = 31,
+    Input = 32,
+    BeforeTuiStart = 33,
+    UiPromptStart = 34,
+    UiPromptEnd = 35,
+    EditorChange = 36,
+}
+
+impl EventTag {
+    /// The wire value, identical to the native ABI's `EventTag` discriminant.
+    pub fn as_u32(self) -> u32 {
+        self as u32
+    }
+}
+
 /// One runtime event delivered to plugins.
 ///
 /// Mirrors the host's event tags. Kinds the host adds later arrive as

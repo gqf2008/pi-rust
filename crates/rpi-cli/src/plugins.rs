@@ -738,6 +738,62 @@ mod tests {
         assert!(properties.contains_key("action"));
     }
 
+    /// Every mirrored tag must carry the native ABI's discriminant. Without
+    /// this the mirror could drift silently - the plugin and host are one
+    /// binary, so nothing else would notice until a handler matched the wrong
+    /// event.
+    #[test]
+    fn event_tags_mirror_the_native_abi_exactly() {
+        use kiqi_plugin::EventTag as K;
+        use rpi_plugin_sdk::EventTag as N;
+        let pairs: [(K, N); 37] = [
+            (K::ProjectTrust, N::ProjectTrust),
+            (K::ResourcesDiscover, N::ResourcesDiscover),
+            (K::SessionStart, N::SessionStart),
+            (K::SessionInfoChanged, N::SessionInfoChanged),
+            (K::SessionBeforeSwitch, N::SessionBeforeSwitch),
+            (K::SessionBeforeFork, N::SessionBeforeFork),
+            (K::SessionBeforeCompact, N::SessionBeforeCompact),
+            (K::SessionCompact, N::SessionCompact),
+            (K::SessionShutdown, N::SessionShutdown),
+            (K::SessionBeforeTree, N::SessionBeforeTree),
+            (K::SessionTree, N::SessionTree),
+            (K::Context, N::Context),
+            (K::BeforeProviderRequest, N::BeforeProviderRequest),
+            (K::BeforeProviderHeaders, N::BeforeProviderHeaders),
+            (K::AfterProviderResponse, N::AfterProviderResponse),
+            (K::BeforeAgentStart, N::BeforeAgentStart),
+            (K::AgentStart, N::AgentStart),
+            (K::AgentEnd, N::AgentEnd),
+            (K::AgentSettled, N::AgentSettled),
+            (K::TurnStart, N::TurnStart),
+            (K::TurnEnd, N::TurnEnd),
+            (K::MessageStart, N::MessageStart),
+            (K::MessageUpdate, N::MessageUpdate),
+            (K::MessageEnd, N::MessageEnd),
+            (K::ToolExecutionStart, N::ToolExecutionStart),
+            (K::ToolExecutionUpdate, N::ToolExecutionUpdate),
+            (K::ToolExecutionEnd, N::ToolExecutionEnd),
+            (K::ModelSelect, N::ModelSelect),
+            (K::ThinkingLevelSelect, N::ThinkingLevelSelect),
+            (K::ToolCall, N::ToolCall),
+            (K::ToolResult, N::ToolResult),
+            (K::UserBash, N::UserBash),
+            (K::Input, N::Input),
+            (K::BeforeTuiStart, N::BeforeTuiStart),
+            (K::UiPromptStart, N::UiPromptStart),
+            (K::UiPromptEnd, N::UiPromptEnd),
+            (K::EditorChange, N::EditorChange),
+        ];
+        for (ours, theirs) in pairs {
+            assert_eq!(
+                ours.as_u32(),
+                theirs as u32,
+                "{ours:?} drifted from the native ABI"
+            );
+        }
+    }
+
     #[test]
     fn registry_exposes_the_first_party_plugins() {
         let plugins = load_all();
