@@ -390,6 +390,28 @@ pub trait AgentLane: Send + Sync {
     async fn get_active_tools(&self) -> HarnessResult<Vec<String>>;
     async fn set_active_tools(&self, names: Vec<String>) -> HarnessResult<()>;
 
+    /// Replace the provider runtimes this lane routes to.
+    ///
+    /// `models.json` can gain a provider (or move a model under a new provider)
+    /// while rpi is running, and the lane resolves a provider by
+    /// `model.provider` id — so a freshly configured provider has no runtime
+    /// until the rebuilt set is installed. Used by the TUI's `models.json`
+    /// hot-reload so `/provider` edits apply without a restart.
+    ///
+    /// Defaulted (not required) so adding it is not a breaking change for
+    /// out-of-tree lanes; the in-tree lanes override it. An unsupported lane
+    /// reports the error to the caller, which falls back to asking for a
+    /// restart rather than silently dropping the rebuilt runtimes.
+    async fn set_provider_runtimes(
+        &self,
+        providers: Vec<Arc<dyn AiProvider>>,
+    ) -> HarnessResult<()> {
+        let _ = providers;
+        Err(HarnessError::agent(
+            "this lane does not support swapping provider runtimes at runtime",
+        ))
+    }
+
     fn session_view(&self) -> Arc<dyn SessionTree>;
 
     // -- durable-session read/write surface (TS `AgentLane` additions).
@@ -4191,6 +4213,13 @@ impl AgentLane for AgentHarness {
         Ok(())
     }
 
+    async fn set_provider_runtimes(
+        &self,
+        providers: Vec<Arc<dyn AiProvider>>,
+    ) -> HarnessResult<()> {
+        self.set_models(providers).await
+    }
+
     async fn get_thinking_level(&self) -> HarnessResult<ThinkingLevel> {
         let inner = self.inner.lock().unwrap();
         if inner.closed {
@@ -4521,6 +4550,13 @@ impl AgentLane for LaneHandle {
         }
         inner.model = model;
         Ok(())
+    }
+
+    async fn set_provider_runtimes(
+        &self,
+        providers: Vec<Arc<dyn AiProvider>>,
+    ) -> HarnessResult<()> {
+        self.runner().set_models(providers).await
     }
 
     async fn get_thinking_level(&self) -> HarnessResult<ThinkingLevel> {

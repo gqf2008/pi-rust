@@ -1399,7 +1399,7 @@ pub(super) fn remove_provider(input: &str) -> Result<String, String> {
         settings.default_model = None;
         let _ = crate::settings::save_settings(&settings);
     }
-    Ok(format!("Removed provider \"{id}\" — restart rpi to apply."))
+    Ok(format!("Removed provider \"{id}\" — applying now."))
 }
 
 /// Write the completed form into `models.json` as a new provider with one
@@ -1426,7 +1426,7 @@ pub(super) fn save_provider_from_form(form: &ProviderFormState) -> Result<String
         };
         crate::config::save_models_config(&cfg).map_err(|error| error.to_string())?;
         return Ok(format!(
-            "Updated provider \"{id}\" ({} · {models} model(s) kept) — restart rpi to use it.",
+            "Updated provider \"{id}\" ({} · {models} model(s) kept) — applying now.",
             protocol_label(api.as_deref())
         ));
     }
@@ -1456,7 +1456,7 @@ pub(super) fn save_provider_from_form(form: &ProviderFormState) -> Result<String
     cfg.providers.insert(form.id.clone(), provider);
     crate::config::save_models_config(&cfg).map_err(|error| error.to_string())?;
     Ok(format!(
-        "Added provider \"{}\" ({} · {} model) — restart rpi to use it.",
+        "Added provider \"{}\" ({} · {} model) — applying now.",
         form.id, form.api, form.model_id
     ))
 }

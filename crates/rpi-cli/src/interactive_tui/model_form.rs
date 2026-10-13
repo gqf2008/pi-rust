@@ -779,7 +779,7 @@ pub(super) fn save_model_from_form(form: &ModelFormState) -> Result<String, Stri
     let api = provider.api.clone();
     crate::config::save_models_config(&cfg).map_err(|error| error.to_string())?;
     Ok(format!(
-        "{action} model \"{}\" in provider \"{}\" ({} · restart rpi to use it).",
+        "{action} model \"{}\" in provider \"{}\" ({}) — applying now.",
         form.id,
         form.provider_id,
         protocol_label(api.as_deref())
@@ -804,6 +804,6 @@ pub(super) fn remove_model_from_provider(
     }
     crate::config::save_models_config(&cfg).map_err(|error| error.to_string())?;
     Ok(format!(
-        "Removed model \"{model_id}\" from provider \"{provider_id}\" — restart rpi to apply."
+        "Removed model \"{model_id}\" from provider \"{provider_id}\" — applying now."
     ))
 }

@@ -254,7 +254,9 @@ struct CommandContext {
     editor: Arc<Editor>,
     editor_container: Arc<Container>,
     lane: Arc<dyn AgentLane>,
-    model_catalog: Arc<Vec<rpi_ai::Model>>,
+    /// The `/model` catalog. Behind a mutex so a `models.json` hot-reload
+    /// can swap it without restarting.
+    model_catalog: Arc<Mutex<Vec<rpi_ai::Model>>>,
     cwd: std::path::PathBuf,
     /// Loaded resources for /context; refreshed after successful /reload.
     resources: Arc<Mutex<rpi_harness::types::AgentHarnessResources>>,
@@ -678,6 +680,10 @@ enum TuiMessage {
     /// Share the current session (`/share`): `gh gist create` when the gh CLI
     /// is available, otherwise copy the transcript to the clipboard.
     ShareSession,
+    /// `models.json` changed on disk (a `/provider` write): re-resolve the
+    /// provider runtimes + `/model` catalog so the change applies without
+    /// restarting rpi.
+    ReloadModels,
     /// `/reload` — re-run extension + resource discovery into the live harness
     /// (B5d). The command (and a plugin's `runtime_action(Reload)` via the
     /// mailbox) signal the main loop, which awaits
@@ -840,6 +846,15 @@ fn resolve_tui_startup_settings(
 /// [`crate::session::build`]); when `None` (e.g. a non-TUI caller reuses this
 /// fn), it falls back to a blocking, await-final-text path.
 ///
+/// `models.json`'s modification time. Drives the in-session reload that makes
+/// `/provider` writes (and external edits) take effect without a restart.
+fn models_json_mtime() -> Option<std::time::SystemTime> {
+    crate::config::models_path()
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|meta| meta.modified().ok())
+}
+
 /// `model_catalog` is the read-only catalog the `/model` selector displays.
 ///
 /// This implementation mirrors the TypeScript `InteractiveMode` class:
@@ -1261,7 +1276,7 @@ pub async fn interactive_tui(
 
     // Capture the model catalog + cwd for the selector builders + the key loop
     // (the callbacks fire on blocking threads and need owned data).
-    let model_catalog_arc = Arc::new(model_catalog.clone());
+    let model_catalog_arc = Arc::new(Mutex::new(model_catalog.clone()));
 
     // ---- Layout root (built ONCE; mirrors TS fullscreenLayoutRoot) ----
     // root = VStack[ scrollview(basis:0 grow:1 shrink:1 min:1), dock(shrink:1) ]
@@ -1559,8 +1574,17 @@ pub async fn interactive_tui(
             rpi_tui::loader::SPINNER_FRAME_MS,
         ));
         interval.tick().await; // discard immediate
+                               // `models.json` mtime watcher: every `/provider` write lands on disk, and
+                               // reloading here (instead of threading a channel through the form
+                               // callbacks) also picks up edits made outside rpi.
+        let mut models_mtime = models_json_mtime();
         loop {
             interval.tick().await;
+            let now_mtime = models_json_mtime();
+            if now_mtime != models_mtime {
+                models_mtime = now_mtime;
+                let _ = tx_tick.send(TuiMessage::ReloadModels);
+            }
             // Extension status (langfuse ✓ …, …) — cheap revision check, and the
             // only reason an idle session repaints its footer.
             let panels_changed = plugin_panels.sync(tui_tick.as_ref(), &state_tick.ext_status);
@@ -2215,7 +2239,8 @@ pub async fn interactive_tui(
                 // Cycle within the `/scoped-models` set (settings.json) when
                 // configured; otherwise the full catalog, restricted to the
                 // current provider (the lane cannot route another provider).
-                let scope = scoped_catalog(&ctx_for_key.model_catalog, &current);
+                let catalog_guard = ctx_for_key.model_catalog.lock().unwrap();
+                let scope = scoped_catalog(&catalog_guard, &current);
                 let scope = same_provider_catalog(&scope, &current);
                 if let Some(next) = cycle_next_model(&scope, &current) {
                     state_for_key.set_current_model(&next);
@@ -2236,7 +2261,7 @@ pub async fn interactive_tui(
                 rpi_tui::keybindings::keys::MODEL_CYCLE_BACKWARD,
             ) {
                 let current = state_for_key.current_model_id();
-                let scope = scoped_catalog(&ctx_for_key.model_catalog, &current);
+                let scope = scoped_catalog(&ctx_for_key.model_catalog.lock().unwrap(), &current);
                 let scope = same_provider_catalog(&scope, &current);
                 if let Some(prev) = cycle_prev_model(&scope, &current) {
                     state_for_key.set_current_model(&prev);
@@ -2257,7 +2282,7 @@ pub async fn interactive_tui(
                 rpi_tui::keybindings::keys::THINKING_CYCLE,
             ) {
                 let lane = lane_for_key.clone();
-                let catalog = model_catalog_for_key.clone();
+                let catalog = model_catalog_for_key.lock().unwrap().clone();
                 let state = state_for_key.clone();
                 tokio::spawn(async move {
                     let Ok(current_model) = lane.get_model().await else {
@@ -2985,6 +3010,64 @@ pub async fn interactive_tui(
                     &reload_context.tool_context,
                 )
                 .await;
+                tui.request_render(false);
+            }
+            Some(TuiMessage::ReloadModels) => {
+                // `models.json` was written (a `/provider` edit). Re-resolve the
+                // provider runtimes + catalog from the same inputs this launch
+                // used, then install them on the live lane. Without this a newly
+                // added provider had no runtime and a newly added model never
+                // reached `/model` until rpi was restarted.
+                match crate::provider::resolve_for_cwd(
+                    args.provider.as_deref(),
+                    args.model.as_deref(),
+                    args.thinking,
+                    args.api_key.as_deref(),
+                    args.base_url.as_deref(),
+                    &cwd,
+                    project_trusted,
+                ) {
+                    Ok(resolved) => {
+                        let catalog = crate::provider::authenticated_catalog(&resolved);
+                        let install_error = lane
+                            .set_provider_runtimes(resolved.providers.clone())
+                            .await
+                            .err()
+                            .map(|error| error.to_string());
+                        // Keep the user's current model when it still exists;
+                        // only fall back to the resolved default when it is gone
+                        // (e.g. the model they were on was just removed).
+                        let current = state.current_model_id();
+                        let still_present =
+                            catalog.iter().any(|m| m.id.eq_ignore_ascii_case(&current));
+                        if !still_present
+                            && catalog.iter().any(|m| m.id == resolved.model.id)
+                            && lane.set_model(resolved.model.clone()).await.is_ok()
+                        {
+                            state.set_current_model(&resolved.model);
+                        }
+                        let count = catalog.len();
+                        *ctx.model_catalog.lock().unwrap() = catalog;
+                        match install_error {
+                            Some(error) => add_error_message(
+                                &chat_container,
+                                &format!(
+                                    "models.json reloaded, but the providers could not be swapped in ({error}) — restart rpi to apply."
+                                ),
+                            ),
+                            None => add_note_message(
+                                &chat_container,
+                                &format!(
+                                    "models.json reloaded — {count} model(s) available; no restart needed."
+                                ),
+                            ),
+                        }
+                    }
+                    Err(error) => add_error_message(
+                        &chat_container,
+                        &format!("models.json changed but could not be reloaded: {error}"),
+                    ),
+                }
                 tui.request_render(false);
             }
             Some(TuiMessage::ReloadExtensions) => {

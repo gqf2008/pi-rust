@@ -133,7 +133,8 @@ impl SlashCommand for ModelCommand {
             // upstream only switches on an EXACT match; a term that matches
             // nothing falls through to the selector with the query prefilled
             // instead of erroring out (`showModelSelector(searchTerm)`).
-            if let Some(model) = find_model_selector_match(&ctx.model_catalog, term) {
+            if let Some(model) = find_model_selector_match(&ctx.model_catalog.lock().unwrap(), term)
+            {
                 let model_id = model.id.clone();
                 ctx.state.set_current_model(&model);
                 let lane = ctx.lane.clone();
@@ -152,12 +153,13 @@ impl SlashCommand for ModelCommand {
             }
         }
         let current_id = ctx.state.current_model_id();
+        let catalog = ctx.model_catalog.lock().unwrap();
         open_model_selector(
             &ctx.state,
             &ctx.editor_container,
             &ctx.editor,
             &ctx.tui,
-            &ctx.model_catalog,
+            &catalog,
             &ctx.lane,
             &current_id,
             &ctx.chat,
@@ -243,7 +245,7 @@ impl SlashCommand for ThinkingCommand {
             &ctx.editor,
             &ctx.tui,
             &ctx.lane,
-            &ctx.model_catalog,
+            &ctx.model_catalog.lock().unwrap(),
             &current_id,
             &ctx.chat,
         );
@@ -607,7 +609,7 @@ impl SlashCommand for SettingsCommand {
             &ctx.editor,
             &ctx.tui,
             &ctx.lane,
-            &ctx.model_catalog,
+            &ctx.model_catalog.lock().unwrap(),
             &current_id,
             &ctx.chat,
         );
@@ -628,7 +630,7 @@ impl SlashCommand for ScopedModelsCommand {
             &ctx.editor_container,
             &ctx.editor,
             &ctx.tui,
-            &ctx.model_catalog,
+            &ctx.model_catalog.lock().unwrap(),
             &ctx.chat,
         );
     }
