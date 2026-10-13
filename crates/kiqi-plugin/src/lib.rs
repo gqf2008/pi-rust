@@ -372,12 +372,28 @@ pub trait InjectApi: Send + Sync {
 /// The user-facing UI surface.
 ///
 /// `RuntimeActionId::{UiDialog, SetStatus, SetEditorText, UiComponent}`.
+/// The user-facing UI surface.
+///
+/// Payloads are the host's own shapes, named field for field after what the
+/// mailbox handlers actually read - the native packages build these by hand
+/// too, so this is parity rather than a shortcut. Guessing simplified
+/// signatures here would silently drop fields the host needs (a status
+/// without its `key`, a draft without `mode`/`autoSendMs`).
 pub trait UiApi: Send + Sync {
-    /// Ask the user to choose; `options` are `{id, label, description}`
-    /// objects, as the native `dialogs::permission_options` produced.
-    fn dialog(&self, options: &Value) -> Result<Value, PluginError>;
-    fn set_status(&self, status: Option<&str>);
-    fn set_editor_text(&self, text: &str);
+    /// `{op, requestId, ui?, toolCallId?, answer?}`.
+    ///
+    /// `op` drives the dialog lifecycle, `ui` carries the descriptor (the
+    /// option list a permission prompt renders).
+    fn dialog(&self, request: &Value) -> Result<Value, PluginError>;
+
+    /// `{key, value?, panel?}` - the footer status the TUI renders.
+    fn set_status(&self, update: &Value) -> Result<(), PluginError>;
+
+    /// `{text, mode?, autoSendMs?}` - a draft dropped into the prompt editor.
+    fn set_editor_text(&self, edit: &Value) -> Result<(), PluginError>;
+
+    /// Custom UI components. The bridge does not serve this today, so the
+    /// host refuses rather than pretending.
     fn component(&self, name: &str, payload: &Value) -> Result<Value, PluginError>;
 }
 

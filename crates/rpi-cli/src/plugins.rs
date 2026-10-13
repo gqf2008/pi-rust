@@ -314,12 +314,13 @@ impl OwnedCaps {
 pub fn owned_caps(
     host: std::sync::Arc<dyn rpi_extensions::RuntimeActionHost>,
     runtime: Option<tokio::runtime::Handle>,
+    ui: Option<std::sync::Arc<UiCaps>>,
 ) -> OwnedCaps {
     let mut caps = OwnedCaps {
         session: None,
         control: None,
         inject: None,
-        ui: None,
+        ui: ui.map(|ui| ui as std::sync::Arc<dyn kiqi_plugin::UiApi>),
         log: std::sync::Arc::new(StderrLog),
     };
     if let Some(runtime) = runtime {
@@ -329,6 +330,67 @@ pub fn owned_caps(
         caps.inject = Some(shared as std::sync::Arc<dyn kiqi_plugin::InjectApi>);
     }
     caps
+}
+
+/// UI capabilities, served by the interaction mailboxes.
+///
+/// `UiDialog` / `SetStatus` / `SetEditorText` are handled by the bridge's own
+/// registries (`actions.rs`), not by `RuntimeActionHost`, which is exactly why
+/// this adapter exists separately from [`ActionCaps`].
+pub struct UiCaps {
+    dialog: rpi_extensions::UiDialogMailbox,
+    status: rpi_extensions::ExtensionStatusMailbox,
+    editor: rpi_extensions::EditorTextMailbox,
+}
+
+impl UiCaps {
+    pub fn new(
+        dialog: rpi_extensions::UiDialogMailbox,
+        status: rpi_extensions::ExtensionStatusMailbox,
+        editor: rpi_extensions::EditorTextMailbox,
+    ) -> Self {
+        Self {
+            dialog,
+            status,
+            editor,
+        }
+    }
+}
+
+impl kiqi_plugin::UiApi for UiCaps {
+    fn dialog(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+        self.dialog
+            .handle(request.clone())
+            .map_err(kiqi_plugin::PluginError::Failed)
+    }
+
+    fn set_status(&self, update: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+        self.status
+            .handle(update.clone())
+            .map(|_| ())
+            .map_err(kiqi_plugin::PluginError::Failed)
+    }
+
+    fn set_editor_text(&self, edit: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+        self.editor
+            .handle(edit.clone())
+            .map(|_| ())
+            .map_err(kiqi_plugin::PluginError::Failed)
+    }
+
+    fn component(
+        &self,
+        name: &str,
+        _payload: &serde_json::Value,
+    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+        // The bridge refuses this today; so do we, rather than pretending.
+        Err(kiqi_plugin::PluginError::Denied(format!(
+            "UI component `{name}` requires a plugin bridge"
+        )))
+    }
 }
 
 /// Plugin logging goes to stderr for now, prefixed so it is attributable.
@@ -780,6 +842,31 @@ mod tests {
     /// this the mirror could drift silently - the plugin and host are one
     /// binary, so nothing else would notice until a handler matched the wrong
     /// event.
+    #[test]
+    fn ui_capabilities_reach_the_mailboxes_and_refuse_what_the_bridge_refuses() {
+        use kiqi_plugin::{PluginError, UiApi};
+
+        let ui = UiCaps::new(
+            rpi_extensions::UiDialogMailbox::new(),
+            rpi_extensions::ExtensionStatusMailbox::new(),
+            rpi_extensions::EditorTextMailbox::new(),
+        );
+
+        // The host-shaped payloads are accepted as-is.
+        ui.set_status(&serde_json::json!({"key": "kiqi.test", "value": "ok"}))
+            .expect("status reaches the mailbox");
+        ui.set_editor_text(&serde_json::json!({
+            "text": "draft", "mode": "append", "autoSendMs": 2000
+        }))
+        .expect("editor text reaches the mailbox");
+
+        // UiComponent is refused by the bridge, so it must not pretend here.
+        let refused = ui
+            .component("anything", &serde_json::json!({}))
+            .unwrap_err();
+        assert!(matches!(refused, PluginError::Denied(_)), "got {refused:?}");
+    }
+
     #[test]
     fn event_tags_mirror_the_native_abi_exactly() {
         use kiqi_plugin::EventTag as K;

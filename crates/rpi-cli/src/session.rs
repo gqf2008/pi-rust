@@ -288,6 +288,13 @@ pub async fn build(
     // drains it each tick. Reused across `/reload` so a pending transcription
     // survives a plugin swap.
     let editor_text_mailbox = rpi_extensions::EditorTextMailbox::new();
+    // Kept for compiled plugins: their UI capabilities are served by these
+    // mailboxes, which the bridge also clones.
+    let plugin_ui = std::sync::Arc::new(crate::plugins::UiCaps::new(
+        ui_dialog_mailbox.clone(),
+        ext_status_mailbox.clone(),
+        editor_text_mailbox.clone(),
+    ));
     let action_bridge = rpi_extensions::ActionBridge::with_reload_and_ui(
         runtime.clone(),
         host_arc,
@@ -333,6 +340,7 @@ pub async fn build(
         &crate::plugins::owned_caps(
             std::sync::Arc::clone(&plugin_caps_host),
             Some(runtime.clone()),
+            Some(std::sync::Arc::clone(&plugin_ui)),
         ),
         &|name| tool_name_allowed(name, args),
     );
@@ -1478,6 +1486,11 @@ where
         &crate::plugins::owned_caps(
             std::sync::Arc::clone(&host_for_plugins),
             tokio::runtime::Handle::try_current().ok(),
+            // The mailboxes live inside the old bridge and ActionBridge exposes
+            // no accessor yet, so after `/reload` compiled plugins lose their UI
+            // capabilities (everything else still works). Follow-up: give
+            // ActionBridge accessors so reload keeps them.
+            None,
         ),
         &|name| tool_name_allowed(name, &effective_args),
     );
