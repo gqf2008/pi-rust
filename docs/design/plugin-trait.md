@@ -148,3 +148,62 @@ rpi-subagents · rpi-permissions · rpi-goal · rpi-plan-mode · rpi-codegraph �
   理由写在注释里：不能依赖会漂移的 SDK 枚举）返回 0。
 
 正确度量是三者**取并集**：`RuntimeActionId::X` + 裸数字 id + 包装函数名。
+
+## 7. rpi-langfuse 端口规格（唯一待搬项，规格已完备）
+
+实测（4227 行 / 94 个函数 / 14 个事件处理器 / 1 处宿主调用 / 无后台线程）。
+
+### 7.1 唯一宿主调用
+
+`fn set_status(text: &str)` 发的是：
+
+```rust
+let args = json!({ "key": "langfuse", "value": text }).to_string();   // 裸 id 18
+```
+
+**正好就是 `UiApi::set_status` 的形状**（`{key, value}`），所以：
+
+```rust
+pub(crate) trait StatusHost {
+    fn set_status(&self, text: &str);
+}
+struct AbiHost;                        // 保留 `RUNTIME_ACTION_SET_STATUS` = 18 的原调用
+pub(crate) struct CapsHost<'a>(pub &'a kiqi_plugin::HostCaps<'a>);
+// CapsHost: caps.ui.ok_or(..)?.set_status(&json!({"key":"langfuse","value":text}))
+```
+
+`set_status` 的调用点在 5 处（1559 / 1561 / 1584 / 2093 / 3256），都在 flush 路径深处，
+所以 `StatusHost` 要沿调用链穿到那里——与 `rpi-goal` 的 `GoalHost` 同一手法。
+
+### 7.2 14 个处理器
+
+**只有 4 个真的读载荷**：`on_before_agent_start` · `on_before_provider_request` ·
+`on_session_compact` · `on_session_tree`。其余 10 个只看 tag。
+
+改造是机械的：
+
+```rust
+// 原生
+extern "C" fn on_x(event: StablePluginEvent, _: *mut c_void) -> i32
+let data_str = event.data_text().unwrap_or_default();
+let data: Value = serde_json::from_str(&data_str).unwrap_or(Value::Null);
+
+// 编译期
+pub(crate) fn on_x(event: &kiqi_plugin::Event, host: &dyn StatusHost) -> i32
+let data: Value = event.payload.clone();     // 本来就是 JSON
+```
+
+**关键点**：langfuse 自己就是 `data_text()` → `from_str` → `data.get(..)`，
+所以"载荷走 JSON"的设计与它天然吻合——当初若给每种载荷做类型化访问器，这一步反而更重。
+
+### 7.3 结构性障碍（唯一真正费工的地方）
+
+**13 个处理器写在 `rpi_plugin_sdk::event_handler! { ... }` 宏块里**。编译期路径要把它们
+变成普通函数（去掉宏），dispatch 由 `Plugin::on_event` 按 `event.tag` 做 14 路 match。
+
+这一步要手工做，且要留出编译修错的余量——批量替换会改坏定义行（plan-mode 的教训）。
+
+### 7.4 验收
+
+caps 级：一次 `SessionStart` 后状态被重置；一次 `before_agent_start` 后 trace 状态建立；
+**且 14 个 tag 的 dispatch 一一对应**（断言每个 tag 都落到预期处理器，而不是 `_ => {}` 静默吞掉）。
