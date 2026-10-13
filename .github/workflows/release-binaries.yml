@@ -83,6 +83,54 @@ jobs:
         if: matrix.target == 'x86_64-apple-darwin'
         run: target/${{ matrix.target }}/release/ki --version
 
+      - name: Sign and notarize (macOS)
+        if: contains(matrix.target, 'apple-darwin')
+        shell: bash
+        env:
+          CERT_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CERT_P12}" || -z "${APPLE_ID}" || -z "${APPLE_APP_PASSWORD}" ]]; then
+            echo "Apple signing secrets are not configured for this repository." >&2
+            exit 1
+          fi
+          bin="target/${{ matrix.target }}/release/ki"
+          keychain="${RUNNER_TEMP}/ki-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          identity="Developer ID Application: qingfeng gao (${APPLE_TEAM_ID})"
+
+          printf '%s' "${CERT_P12}" | base64 -D > "${RUNNER_TEMP}/cert.p12"
+          security create-keychain -p "${keychain_password}" "${keychain}"
+          security set-keychain-settings -lut 3600 "${keychain}"
+          security unlock-keychain -p "${keychain_password}" "${keychain}"
+          security import "${RUNNER_TEMP}/cert.p12" -k "${keychain}" -P "${CERT_PASSWORD}" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "${keychain_password}" "${keychain}" >/dev/null
+          security list-keychains -d user -s "${keychain}" $(security list-keychains -d user | tr -d '"')
+
+          codesign --force --timestamp --options runtime --keychain "${keychain}" \
+            --sign "${identity}" "${bin}"
+          codesign --verify --strict --verbose=2 "${bin}"
+
+          # notarytool only accepts an archive. A bare Mach-O cannot carry a
+          # stapled ticket, so the submit is what matters: Gatekeeper then
+          # validates the signed binary against Apple's notary service online.
+          ditto -c -k --keepParent "${bin}" "${RUNNER_TEMP}/notarize.zip"
+          xcrun notarytool submit "${RUNNER_TEMP}/notarize.zip" \
+            --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" \
+            --password "${APPLE_APP_PASSWORD}" --wait
+          xcrun stapler staple "${bin}" \
+            || echo "note: stapler does not apply to a bare executable"
+          xcrun stapler validate "${bin}" || true
+
+          rm -f "${RUNNER_TEMP}/cert.p12" "${RUNNER_TEMP}/notarize.zip"
+          security delete-keychain "${keychain}" || true
+
       - name: Stage artifact
         id: stage
         shell: bash
