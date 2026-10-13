@@ -172,7 +172,7 @@ impl SlashCommand for ProviderCommand {
         "/provider"
     }
     fn description(&self) -> &'static str {
-        "Add, remove, or set the default provider"
+        "Add/remove providers, manage their models, or set the default provider"
     }
     fn execute(&self, ctx: &CommandContext, args: &str) {
         let term = args.trim();

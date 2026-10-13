@@ -777,14 +777,15 @@ pub(super) fn begin_provider_form(
     editor: &Arc<Editor>,
     tui: &Arc<TuiAltScreen>,
 ) {
-    *state.provider_form.lock().unwrap() = Some(ProviderFormState::default());
+    *state.provider_form.lock().unwrap() =
+        Some(ProviderForm::Provider(ProviderFormState::default()));
     show_provider_form_step(state, editor_container, editor, tui);
 }
 
 /// Render the current form step in the editor slot. Choice-style steps (the
 /// protocol step) render a select list; every other step renders a titled,
 /// bordered single-line input.
-fn show_provider_form_step(
+pub(super) fn show_provider_form_step(
     state: &Arc<TuiState>,
     editor_container: &Arc<Container>,
     editor: &Arc<Editor>,
@@ -796,10 +797,17 @@ fn show_provider_form_step(
     *state.active_provider_input.lock().unwrap() = None;
     *state.active_provider_select.lock().unwrap() = None;
 
-    if form.step == ProviderFormStep::Api {
-        show_provider_api_selector(state, editor_container, editor, tui);
-    } else {
-        show_provider_text_input(state, editor_container, editor, tui, &form);
+    match form {
+        ProviderForm::Provider(form) => {
+            if form.step == ProviderFormStep::Api {
+                show_provider_api_selector(state, editor_container, editor, tui);
+            } else {
+                show_provider_text_input(state, editor_container, editor, tui, &form);
+            }
+        }
+        ProviderForm::Model(form) => {
+            show_model_form_step(state, editor_container, editor, tui, &form)
+        }
     }
 }
 
@@ -878,12 +886,13 @@ fn show_provider_api_selector(
     let editor_sel = editor.clone();
     let tui_sel = tui.clone();
     list.on_select(Arc::new(move |item| {
-        let Some(mut form) = state_sel.provider_form.lock().unwrap().take() else {
+        let Some(ProviderForm::Provider(mut form)) = state_sel.provider_form.lock().unwrap().take()
+        else {
             return;
         };
         form.api = item.value.clone();
         form.step = ProviderFormStep::BaseUrl;
-        *state_sel.provider_form.lock().unwrap() = Some(form);
+        *state_sel.provider_form.lock().unwrap() = Some(ProviderForm::Provider(form));
         show_provider_form_step(&state_sel, &ec_sel, &editor_sel, &tui_sel);
     }));
 
@@ -898,7 +907,7 @@ fn show_provider_api_selector(
 }
 
 /// Build the bordered frame shared by every provider-form step.
-fn provider_form_frame(
+pub(super) fn provider_form_frame(
     title: &str,
     question: &str,
     body: Arc<dyn Component>,
@@ -964,7 +973,7 @@ fn handle_provider_form_input(
     tui: &Arc<TuiAltScreen>,
     text: &str,
 ) {
-    let Some(mut form) = state.provider_form.lock().unwrap().take() else {
+    let Some(ProviderForm::Provider(mut form)) = state.provider_form.lock().unwrap().take() else {
         return;
     };
     let text = text.trim();
@@ -982,7 +991,7 @@ fn handle_provider_form_input(
                     &state.chat_container,
                     &format!("Provider \"{text}\" already exists. Choose another id."),
                 );
-                *state.provider_form.lock().unwrap() = Some(form);
+                *state.provider_form.lock().unwrap() = Some(ProviderForm::Provider(form));
                 show_provider_form_step(state, editor_container, editor, tui);
                 return;
             }
@@ -993,7 +1002,7 @@ fn handle_provider_form_input(
             // The protocol step is rendered as a select list, so a text
             // submission can only arrive here via a bug; re-show the selector
             // rather than panicking.
-            *state.provider_form.lock().unwrap() = Some(form);
+            *state.provider_form.lock().unwrap() = Some(ProviderForm::Provider(form));
             show_provider_form_step(state, editor_container, editor, tui);
             return;
         }
@@ -1003,7 +1012,7 @@ fn handle_provider_form_input(
                     &state.chat_container,
                     &format!("Invalid URL \"{text}\". It must start with http:// or https://."),
                 );
-                *state.provider_form.lock().unwrap() = Some(form);
+                *state.provider_form.lock().unwrap() = Some(ProviderForm::Provider(form));
                 show_provider_form_step(state, editor_container, editor, tui);
                 return;
             }
@@ -1028,12 +1037,12 @@ fn handle_provider_form_input(
             return;
         }
     }
-    *state.provider_form.lock().unwrap() = Some(form);
+    *state.provider_form.lock().unwrap() = Some(ProviderForm::Provider(form));
     show_provider_form_step(state, editor_container, editor, tui);
 }
 
 /// Restore the chat editor and clear the form state (done or cancelled).
-fn finish_provider_form(
+pub(super) fn finish_provider_form(
     state: &Arc<TuiState>,
     editor_container: &Arc<Container>,
     editor: &Arc<Editor>,
@@ -1052,7 +1061,7 @@ fn finish_provider_form(
     tui.request_render(false);
 }
 
-fn cancel_provider_form(
+pub(super) fn cancel_provider_form(
     state: &Arc<TuiState>,
     editor_container: &Arc<Container>,
     editor: &Arc<Editor>,
@@ -1134,7 +1143,7 @@ pub(super) fn save_provider_from_form(form: &ProviderFormState) -> Result<String
 }
 
 /// Human-friendly label for a provider id.
-fn provider_display_name(id: &str) -> String {
+pub(super) fn provider_display_name(id: &str) -> String {
     match id.to_ascii_lowercase().as_str() {
         "anthropic" => "Anthropic".to_string(),
         "openai" => "OpenAI".to_string(),

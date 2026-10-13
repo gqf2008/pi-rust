@@ -35,6 +35,8 @@ mod commands;
 use commands::*;
 mod settings;
 use settings::*;
+mod model_form;
+use model_form::*;
 mod sessions;
 use sessions::*;
 mod run;

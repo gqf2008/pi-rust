@@ -509,6 +509,10 @@ pub(super) fn open_theme_selector(
 const ADD_PROVIDER_VALUE: &str = "__add_provider__";
 /// Sentinel value for the "Remove provider" row in the `/provider` picker.
 const REMOVE_PROVIDER_VALUE: &str = "__remove_provider__";
+/// Sentinel values for the model-management rows in the `/provider` picker.
+const ADD_MODEL_VALUE: &str = "__add_model__";
+const EDIT_MODEL_VALUE: &str = "__edit_model__";
+const REMOVE_MODEL_VALUE: &str = "__remove_model__";
 
 /// Open the `/provider` selector: pick a provider and persist it as the saved
 /// default (takes effect on the next launch — provider identity, auth, and the
@@ -540,6 +544,21 @@ pub(super) fn open_provider_selector(
             .with_description("Delete a models.json provider")
             .with_search_text("remove delete provider"),
     );
+    items.push(
+        SelectItem::new(ADD_MODEL_VALUE, "＋ Add model to a provider…")
+            .with_description("Append a model to a models.json provider")
+            .with_search_text("add model provider models.json"),
+    );
+    items.push(
+        SelectItem::new(EDIT_MODEL_VALUE, "✎ Edit model…")
+            .with_description("Edit a model of a models.json provider")
+            .with_search_text("edit model provider models.json"),
+    );
+    items.push(
+        SelectItem::new(REMOVE_MODEL_VALUE, "− Remove model…")
+            .with_description("Delete a model from a models.json provider")
+            .with_search_text("remove delete model provider"),
+    );
     let list = Arc::new(SelectList::new(items, 10));
 
     let state_sel = state.clone();
@@ -556,6 +575,21 @@ pub(super) fn open_provider_selector(
         if item.value == REMOVE_PROVIDER_VALUE {
             close_selector(&state_sel, &ec_sel, &editor_sel, &tui_sel);
             open_provider_remove_selector(&state_sel, &ec_sel, &editor_sel, &tui_sel);
+            return;
+        }
+        if item.value == ADD_MODEL_VALUE {
+            close_selector(&state_sel, &ec_sel, &editor_sel, &tui_sel);
+            begin_add_model_form(&state_sel, &ec_sel, &editor_sel, &tui_sel);
+            return;
+        }
+        if item.value == EDIT_MODEL_VALUE {
+            close_selector(&state_sel, &ec_sel, &editor_sel, &tui_sel);
+            begin_edit_model_form(&state_sel, &ec_sel, &editor_sel, &tui_sel);
+            return;
+        }
+        if item.value == REMOVE_MODEL_VALUE {
+            close_selector(&state_sel, &ec_sel, &editor_sel, &tui_sel);
+            begin_remove_model_form(&state_sel, &ec_sel, &editor_sel, &tui_sel);
             return;
         }
         match set_default_provider(&item.value) {

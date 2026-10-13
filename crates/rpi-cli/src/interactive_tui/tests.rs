@@ -2942,3 +2942,147 @@ fn ask_user_bridge_answers_and_cancels_by_request_id() {
         }))
         .is_err());
 }
+
+// ===========================================================================
+// Model CRUD (`/provider` → model actions)
+// ===========================================================================
+
+fn write_models_json(json: &str) {
+    std::fs::write(crate::config::models_path().unwrap(), json).unwrap();
+}
+
+#[test]
+fn model_form_adds_a_model_and_rejects_duplicates() {
+    with_isolated_config_dir(|| {
+        write_models_json(
+            r#"{"providers":{"myprov":{"baseUrl":"https://a.example.com/v1","apiKey":"k","api":"openai-completions","models":[{"id":"m1","name":"One"}]}}}"#,
+        );
+        let form = ModelFormState {
+            mode: ModelFormMode::Add,
+            step: ModelFormStep::Confirm,
+            provider_id: "myprov".into(),
+            provider_label: "myprov".into(),
+            id: "m2".into(),
+            name: "Two".into(),
+            context_window: "128000".into(),
+            max_tokens: "8192".into(),
+            reasoning: true,
+            images: true,
+            ..Default::default()
+        };
+        let note = save_model_from_form(&form).unwrap();
+        assert!(note.contains("m2") && note.contains("Added"), "{note}");
+
+        let cfg = crate::config::load_models_config().unwrap();
+        let models = &cfg.providers["myprov"].models;
+        assert_eq!(models.len(), 2);
+        let m2 = models.iter().find(|m| m.id == "m2").unwrap();
+        assert_eq!(m2.name.as_deref(), Some("Two"));
+        assert_eq!(m2.context_window, Some(128000));
+        assert_eq!(m2.max_tokens, Some(8192));
+        assert_eq!(m2.reasoning, Some(true));
+        assert_eq!(
+            m2.input.as_deref(),
+            Some(&["text".to_string(), "image".to_string()][..])
+        );
+
+        // The comment says "restart to use it", so the note must carry the id.
+        assert!(note.contains("myprov"), "{note}");
+        // Duplicate id under the same provider is refused.
+        assert!(save_model_from_form(&form).is_err());
+    });
+}
+
+#[test]
+fn model_form_edit_preserves_unmanaged_fields() {
+    with_isolated_config_dir(|| {
+        write_models_json(
+            r#"{"providers":{"myprov":{"baseUrl":"https://a.example.com/v1","apiKey":"k","api":"openai-completions","headers":{"x-provider":"1"},"models":[{"id":"m1","name":"One","baseUrl":"https://alt.example.com","headers":{"x-model":"y"},"compat":{"foo":1}}]}}}"#,
+        );
+        let form = ModelFormState {
+            mode: ModelFormMode::Edit,
+            step: ModelFormStep::Confirm,
+            provider_id: "myprov".into(),
+            provider_label: "myprov".into(),
+            original_id: Some("m1".into()),
+            id: "m1-renamed".into(),
+            name: String::new(),
+            context_window: String::new(),
+            max_tokens: "4096".into(),
+            reasoning: true,
+            images: false,
+            ..Default::default()
+        };
+        save_model_from_form(&form).unwrap();
+
+        let cfg = crate::config::load_models_config().unwrap();
+        let models = &cfg.providers["myprov"].models;
+        assert_eq!(models.len(), 1, "edit must not append");
+        let m = &models[0];
+        assert_eq!(m.id, "m1-renamed");
+        assert_eq!(m.name, None, "empty name clears it");
+        assert_eq!(m.context_window, None);
+        assert_eq!(m.max_tokens, Some(4096));
+        assert_eq!(m.reasoning, Some(true));
+        assert_eq!(m.input.as_deref(), Some(&["text".to_string()][..]));
+        // Fields this form does not manage survive an edit.
+        assert_eq!(m.base_url.as_deref(), Some("https://alt.example.com"));
+        assert_eq!(m.headers.as_ref().unwrap()["x-model"], "y");
+        assert_eq!(m.compat, Some(serde_json::json!({"foo": 1})));
+    });
+}
+
+#[test]
+fn model_count_fields_reject_junk() {
+    assert_eq!(parse_optional_count("", "ctx").unwrap(), None);
+    assert_eq!(parse_optional_count("128000", "ctx").unwrap(), Some(128000));
+    assert!(parse_optional_count("0", "ctx").is_err());
+    assert!(parse_optional_count("-5", "ctx").is_err());
+    assert!(parse_optional_count("abc", "ctx").is_err());
+}
+
+#[test]
+fn editable_provider_items_are_models_json_only_and_sorted() {
+    with_isolated_config_dir(|| {
+        write_models_json(
+            r#"{"providers":{"bbb":{"api":"openai-responses","models":[{"id":"x"}]},"aaa":{"api":"anthropic-messages","models":[]}}}"#,
+        );
+        let items = editable_provider_items();
+        let ids: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
+        assert_eq!(ids, vec!["aaa", "bbb"], "built-ins must not appear");
+        assert!(items[0]
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("Anthropic Messages"));
+        assert!(items[1]
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("OpenAI Responses"));
+    });
+}
+
+#[test]
+fn remove_model_from_provider_targets_one_model_only() {
+    with_isolated_config_dir(|| {
+        write_models_json(
+            r#"{"providers":{"myprov":{"api":"openai-completions","models":[{"id":"m1"},{"id":"m2"}]},"other":{"api":"openai-completions","models":[{"id":"m1"}]}}}"#,
+        );
+        let note = remove_model_from_provider("myprov", "m1").unwrap();
+        assert!(note.contains("m1"), "{note}");
+
+        let cfg = crate::config::load_models_config().unwrap();
+        let remaining: Vec<&str> = cfg.providers["myprov"]
+            .models
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(remaining, vec!["m2"]);
+        // A same-named model under another provider is untouched.
+        assert_eq!(cfg.providers["other"].models.len(), 1);
+
+        assert!(remove_model_from_provider("myprov", "nope").is_err());
+        assert!(remove_model_from_provider("nope", "m1").is_err());
+    });
+}
