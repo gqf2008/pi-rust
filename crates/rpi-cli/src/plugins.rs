@@ -78,30 +78,39 @@ impl ActionCaps {
 impl kiqi_plugin::SessionRead for ActionCaps {
     fn active_tools(&self) -> Vec<String> {
         let host = self.host.clone();
-        self.drive("get_active_tools", async move { host.get_active_tools(serde_json::json!({})).await })
-            .ok()
-            .and_then(|value| {
-                value.get("tools")?.as_array().map(|tools| {
-                    tools.iter().filter_map(|t| t.as_str().map(str::to_string)).collect()
-                })
+        self.drive("get_active_tools", async move {
+            host.get_active_tools(serde_json::json!({})).await
+        })
+        .ok()
+        .and_then(|value| {
+            value.get("tools")?.as_array().map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect()
             })
-            .unwrap_or_default()
+        })
+        .unwrap_or_default()
     }
 
     fn system_prompt(&self) -> String {
         let host = self.host.clone();
-        self.drive("get_system_prompt", async move { host.get_system_prompt(serde_json::json!({})).await })
-            .ok()
-            .and_then(|value| value.get("prompt")?.as_str().map(str::to_string))
-            .unwrap_or_default()
+        self.drive("get_system_prompt", async move {
+            host.get_system_prompt(serde_json::json!({})).await
+        })
+        .ok()
+        .and_then(|value| value.get("prompt")?.as_str().map(str::to_string))
+        .unwrap_or_default()
     }
 
     fn thinking_level(&self) -> String {
         let host = self.host.clone();
-        self.drive("get_thinking_level", async move { host.get_thinking_level(serde_json::json!({})).await })
-            .ok()
-            .and_then(|value| value.get("level")?.as_str().map(str::to_string))
-            .unwrap_or_default()
+        self.drive("get_thinking_level", async move {
+            host.get_thinking_level(serde_json::json!({})).await
+        })
+        .ok()
+        .and_then(|value| value.get("level")?.as_str().map(str::to_string))
+        .unwrap_or_default()
     }
 
     fn cli_flag(&self, name: &str) -> Option<String> {
@@ -114,8 +123,10 @@ impl kiqi_plugin::SessionRead for ActionCaps {
 
     fn session_branch(&self) -> serde_json::Value {
         let host = self.host.clone();
-        self.drive("get_session_branch", async move { host.get_session_branch(serde_json::json!({})).await })
-            .unwrap_or(serde_json::Value::Null)
+        self.drive("get_session_branch", async move {
+            host.get_session_branch(serde_json::json!({})).await
+        })
+        .unwrap_or(serde_json::Value::Null)
     }
 }
 
@@ -200,6 +211,209 @@ pub fn load_all() -> Vec<Registered> {
     plugins
 }
 
+/// Capabilities owned by the host, so they can be handed to a plugin per call.
+///
+/// [`HostCaps`] borrows its trait objects, which is right at the call site but
+/// not when the capabilities have to live inside a tool adapter. The owned
+/// form exists only to produce the borrowed one.
+#[derive(Clone)]
+pub struct OwnedCaps {
+    pub session: Option<std::sync::Arc<dyn kiqi_plugin::SessionRead>>,
+    pub control: Option<std::sync::Arc<dyn kiqi_plugin::SessionControl>>,
+    pub inject: Option<std::sync::Arc<dyn kiqi_plugin::InjectApi>>,
+    pub ui: Option<std::sync::Arc<dyn kiqi_plugin::UiApi>>,
+    pub log: std::sync::Arc<dyn kiqi_plugin::Log>,
+}
+
+impl OwnedCaps {
+    pub fn caps(&self) -> HostCaps<'_> {
+        HostCaps {
+            session: self.session.as_deref(),
+            control: self.control.as_deref(),
+            inject: self.inject.as_deref(),
+            ui: self.ui.as_deref(),
+            log: self.log.as_ref(),
+        }
+    }
+}
+
+/// Plugin logging goes to stderr for now, prefixed so it is attributable.
+pub struct StderrLog;
+
+impl kiqi_plugin::Log for StderrLog {
+    fn log(&self, level: kiqi_plugin::LogLevel, message: &str) {
+        eprintln!("[plugin/{level:?}] {message}");
+    }
+}
+
+/// A plugin tool exposed as a harness tool.
+///
+/// The counterpart of `PluginToolAdapter` for compiled-in plugins: same
+/// `AgentTool` surface, but the call is a plain Rust method - no `PluginApi`,
+/// no handle, no `free_string`, no keepalive.
+pub struct CompiledToolAdapter {
+    host: std::sync::Arc<PluginHost>,
+    name: String,
+    label: String,
+    schema: rpi_ai::types::Tool,
+    caps: OwnedCaps,
+}
+
+impl CompiledToolAdapter {
+    /// `None` when the plugin's parameter schema will not parse; the caller
+    /// diagnoses and skips rather than losing the whole tool list.
+    pub fn new(
+        host: std::sync::Arc<PluginHost>,
+        spec: &kiqi_plugin::ToolSpec,
+        caps: OwnedCaps,
+    ) -> Option<Self> {
+        let parameters =
+            serde_json::from_value::<rpi_ai::types::Schema>(spec.parameters.clone()).ok()?;
+        let label = format!("{}:{}", host.id(), spec.name);
+        Some(Self {
+            host,
+            name: spec.name.clone(),
+            label,
+            schema: rpi_ai::types::Tool {
+                name: spec.name.clone(),
+                description: spec.description.clone(),
+                parameters,
+                constrained_sampling: None,
+            },
+            caps,
+        })
+    }
+}
+
+/// Turns a plugin's partial output into the harness's update callback.
+struct UpdateSink {
+    on_update: std::sync::Arc<dyn Fn(rpi_agent::types::ToolResultPartial) + Send + Sync>,
+}
+
+impl kiqi_plugin::ProgressSink for UpdateSink {
+    fn progress(&self, progress: kiqi_plugin::Progress) {
+        let text = match progress {
+            kiqi_plugin::Progress::Text(text) => text,
+            kiqi_plugin::Progress::Json(value) => value.to_string(),
+        };
+        (self.on_update)(rpi_agent::types::AgentToolResult {
+            content: vec![rpi_agent::types::TextContentOrImage::Text(
+                rpi_ai::types::TextContent {
+                    kind: Default::default(),
+                    text,
+                    text_signature: None,
+                },
+            )],
+            ..Default::default()
+        });
+    }
+}
+
+#[async_trait::async_trait]
+impl rpi_agent::agent_tool::AgentTool for CompiledToolAdapter {
+    fn schema(&self) -> &rpi_ai::types::Tool {
+        &self.schema
+    }
+
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        params: serde_json::Value,
+        _signal: tokio_util::sync::CancellationToken,
+        on_update: std::sync::Arc<dyn Fn(rpi_agent::types::ToolResultPartial) + Send + Sync>,
+    ) -> Result<rpi_agent::types::AgentToolResult, rpi_agent::error::AgentError> {
+        let sink = UpdateSink { on_update };
+        let caps = self.caps.caps();
+        let outcome = self
+            .host
+            .call_tool(&self.name, &params, &caps, &sink)
+            .map_err(|error| rpi_agent::error::AgentError::tool(error.to_string()))?;
+
+        let content = outcome
+            .blocks
+            .iter()
+            .map(|block| match block {
+                kiqi_plugin::Block::Text(text) => {
+                    rpi_agent::types::TextContentOrImage::Text(rpi_ai::types::TextContent {
+                        kind: Default::default(),
+                        text: text.clone(),
+                        text_signature: None,
+                    })
+                }
+                kiqi_plugin::Block::Json(value) => {
+                    rpi_agent::types::TextContentOrImage::Text(rpi_ai::types::TextContent {
+                        kind: Default::default(),
+                        text: value.to_string(),
+                        text_signature: None,
+                    })
+                }
+            })
+            .collect();
+
+        // `is_error` becomes a tool-level error so the model sees a failed call
+        // instead of a crash, matching how the native adapter reports failures.
+        if outcome.is_error {
+            return Err(rpi_agent::error::AgentError::tool(
+                outcome
+                    .blocks
+                    .iter()
+                    .map(|block| match block {
+                        kiqi_plugin::Block::Text(text) => text.clone(),
+                        kiqi_plugin::Block::Json(value) => value.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
+        }
+
+        Ok(rpi_agent::types::AgentToolResult {
+            content,
+            details: outcome.details,
+            ..Default::default()
+        })
+    }
+}
+
+/// Merge compiled-in plugin tools into the tool list.
+///
+/// Same contract as the extension side: an explicit `--tools`/`--exclude-tools`
+/// decision applies, and a compiled plugin tool overrides a same-named built-in
+/// exactly like a native one does, so the model cannot tell the two apart.
+pub fn merge_compiled_plugin_tools(
+    tools: &mut Vec<rpi_harness::types::HarnessTool>,
+    hosts: &[std::sync::Arc<PluginHost>],
+    caps: &OwnedCaps,
+    allowed: &dyn Fn(&str) -> bool,
+) {
+    for host in hosts {
+        for spec in host.plugin().tools() {
+            if !allowed(&spec.name) {
+                continue;
+            }
+            let Some(adapter) =
+                CompiledToolAdapter::new(std::sync::Arc::clone(host), &spec, caps.clone())
+            else {
+                eprintln!(
+                    "plugin `{}`: tool `{}` has an unparseable parameter schema; skipped",
+                    host.id(),
+                    spec.name
+                );
+                continue;
+            };
+            let name = spec.name.clone();
+            let harness_tool = rpi_harness::types::HarnessTool::new(std::sync::Arc::new(adapter));
+            match tools.iter_mut().find(|t| t.tool.schema().name == name) {
+                Some(slot) => *slot = harness_tool,
+                None => tools.push(harness_tool),
+            }
+        }
+    }
+}
+
 /// The provider-facing schemas for every compiled-in plugin tool.
 ///
 /// This is half of the wiring: it makes plugin tools visible to the model. The
@@ -266,7 +480,11 @@ impl PluginHost {
     }
 
     /// A panicking plugin observes nothing rather than aborting the loop.
-    pub fn on_event(&self, event: &kiqi_plugin::Event, caps: &HostCaps<'_>) -> kiqi_plugin::EventAction {
+    pub fn on_event(
+        &self,
+        event: &kiqi_plugin::Event,
+        caps: &HostCaps<'_>,
+    ) -> kiqi_plugin::EventAction {
         self.guard("on-event", || self.plugin.on_event(event, caps))
             .unwrap_or(kiqi_plugin::EventAction::Continue)
     }
@@ -302,6 +520,18 @@ impl PluginHost {
     }
 }
 
+/// The process-wide plugin instances.
+///
+/// Created once: a plugin owns state (rpi-todo's task list lives in its
+/// instance), so reloading it per tool-list build would silently reset that
+/// state.
+pub fn compiled_plugin_hosts() -> Vec<std::sync::Arc<PluginHost>> {
+    static HOSTS: std::sync::OnceLock<Vec<std::sync::Arc<PluginHost>>> = std::sync::OnceLock::new();
+    HOSTS
+        .get_or_init(|| load_hosts().into_iter().map(std::sync::Arc::new).collect())
+        .clone()
+}
+
 /// Wrap every registered plugin with its isolation boundary.
 pub fn load_hosts() -> Vec<PluginHost> {
     load_all()
@@ -318,6 +548,64 @@ mod tests {
     struct Silent;
     impl Log for Silent {
         fn log(&self, _level: LogLevel, _message: &str) {}
+    }
+
+    /// The whole path: registry -> harness tool list -> adapter -> plugin call
+    /// -> result. This is the one that proves a compiled-in plugin is usable,
+    /// not merely loadable.
+    #[tokio::test]
+    async fn a_compiled_plugin_tool_runs_from_the_harness_tool_list() {
+        use rpi_agent::agent_tool::AgentTool;
+
+        let hosts = compiled_plugin_hosts();
+        let caps = OwnedCaps {
+            session: None,
+            control: None,
+            inject: None,
+            ui: None,
+            log: std::sync::Arc::new(StderrLog),
+        };
+        let mut tools: Vec<rpi_harness::types::HarnessTool> = Vec::new();
+        merge_compiled_plugin_tools(&mut tools, &hosts, &caps, &|_| true);
+
+        let tool = tools
+            .iter()
+            .find(|t| t.tool.schema().name == "todo")
+            .expect("rpi-todo's tool reached the harness list");
+
+        let result = tool
+            .tool
+            .execute(
+                "call-1",
+                serde_json::json!({"action": "add", "text": "from the harness"}),
+                tokio_util::sync::CancellationToken::new(),
+                std::sync::Arc::new(|_| {}),
+            )
+            .await
+            .expect("the plugin tool executed");
+
+        let text = result
+            .content
+            .iter()
+            .map(|block| match block {
+                rpi_agent::types::TextContentOrImage::Text(t) => t.text.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(text.contains("from the harness"), "got {text}");
+        // Order-independent on purpose: the plugin instance is process-wide
+        // (its state is the point), so an earlier test may have added items.
+        let added = result.details["todos"]
+            .as_array()
+            .expect("details carries the task list")
+            .iter()
+            .any(|todo| todo["text"] == "from the harness");
+        assert!(
+            added,
+            "the added task is in the details: {}",
+            result.details
+        );
     }
 
     #[test]
@@ -362,7 +650,11 @@ mod tests {
     }
 
     impl FakeHost {
-        fn record(&self, action: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
+        fn record(
+            &self,
+            action: &str,
+            args: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
             self.seen.lock().unwrap().push((action.to_string(), args));
             Ok(serde_json::json!({}))
         }
@@ -370,28 +662,81 @@ mod tests {
 
     #[async_trait::async_trait]
     impl rpi_extensions::RuntimeActionHost for FakeHost {
-        async fn send_message(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("send_message", args) }
-        async fn send_user_message(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("send_user_message", args) }
-        async fn append_entry(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("append_entry", args) }
-        async fn set_session_name(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("set_session_name", args) }
-        async fn get_active_tools(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+        async fn send_message(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
+            self.record("send_message", args)
+        }
+        async fn send_user_message(
+            &self,
+            args: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            self.record("send_user_message", args)
+        }
+        async fn append_entry(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
+            self.record("append_entry", args)
+        }
+        async fn set_session_name(
+            &self,
+            args: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            self.record("set_session_name", args)
+        }
+        async fn get_active_tools(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
             Ok(serde_json::json!({ "tools": ["todo", "bash"] }))
         }
-        async fn set_active_tools(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("set_active_tools", args) }
-        async fn set_model(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("set_model", args) }
-        async fn get_thinking_level(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+        async fn set_active_tools(
+            &self,
+            args: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            self.record("set_active_tools", args)
+        }
+        async fn set_model(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
+            self.record("set_model", args)
+        }
+        async fn get_thinking_level(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
             Ok(serde_json::json!({ "level": "medium" }))
         }
-        async fn set_thinking_level(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("set_thinking_level", args) }
-        async fn compact(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("compact", args) }
-        async fn get_system_prompt(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+        async fn set_thinking_level(
+            &self,
+            args: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            self.record("set_thinking_level", args)
+        }
+        async fn compact(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
+            self.record("compact", args)
+        }
+        async fn get_system_prompt(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
             Ok(serde_json::json!({ "prompt": "you are kiqi" }))
         }
-        async fn new_session(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("new_session", args) }
-        async fn fork(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("fork", args) }
-        async fn navigate_tree(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("navigate_tree", args) }
-        async fn switch_session(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("switch_session", args) }
-        async fn reload(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("reload", args) }
+        async fn new_session(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
+            self.record("new_session", args)
+        }
+        async fn fork(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
+            self.record("fork", args)
+        }
+        async fn navigate_tree(
+            &self,
+            args: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            self.record("navigate_tree", args)
+        }
+        async fn switch_session(
+            &self,
+            args: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            self.record("switch_session", args)
+        }
+        async fn reload(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
+            self.record("reload", args)
+        }
         async fn get_cli_flag(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
             let value = match args.get("name").and_then(|n| n.as_str()) {
                 Some("verbose") => serde_json::json!("2"),
@@ -399,7 +744,10 @@ mod tests {
             };
             Ok(serde_json::json!({ "value": value }))
         }
-        async fn get_session_branch(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+        async fn get_session_branch(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
             // The shape rpi-todo walks: entries[].message.{role,toolName,details}
             Ok(serde_json::json!({ "entries": [ { "message": {
                 "role": "toolResult", "toolName": "todo",
@@ -431,7 +779,10 @@ mod tests {
         };
 
         // The adapter really crosses the spawn/park seam.
-        assert_eq!(caps_host.active_tools(), vec!["todo".to_string(), "bash".to_string()]);
+        assert_eq!(
+            caps_host.active_tools(),
+            vec!["todo".to_string(), "bash".to_string()]
+        );
         assert_eq!(caps_host.thinking_level(), "medium");
         assert_eq!(caps_host.system_prompt(), "you are kiqi");
         assert_eq!(caps_host.cli_flag("verbose").as_deref(), Some("2"));
@@ -447,7 +798,9 @@ mod tests {
         caps_host.switch_session("sess-1").unwrap();
         caps_host.reload().unwrap();
         caps_host.send_user_message("hi").unwrap();
-        caps_host.append_entry(&serde_json::json!({"kind": "note"})).unwrap();
+        caps_host
+            .append_entry(&serde_json::json!({"kind": "note"}))
+            .unwrap();
         let seen = fake.seen.lock().unwrap().clone();
         let sent = |action: &str| {
             seen.iter()
@@ -455,20 +808,37 @@ mod tests {
                 .map(|(_, args)| args.clone())
                 .unwrap_or_else(|| panic!("`{action}` was never dispatched"))
         };
-        assert_eq!(sent("set_model"), serde_json::json!({"model": "deepseek-flash"}));
-        assert_eq!(sent("set_active_tools"), serde_json::json!({"tools": ["todo"]}));
-        assert_eq!(sent("navigate_tree"), serde_json::json!({"targetId": "abc"}));
+        assert_eq!(
+            sent("set_model"),
+            serde_json::json!({"model": "deepseek-flash"})
+        );
+        assert_eq!(
+            sent("set_active_tools"),
+            serde_json::json!({"tools": ["todo"]})
+        );
+        assert_eq!(
+            sent("navigate_tree"),
+            serde_json::json!({"targetId": "abc"})
+        );
         assert_eq!(sent("switch_session"), serde_json::json!({"id": "sess-1"}));
         assert_eq!(sent("reload"), serde_json::json!({}));
         assert_eq!(sent("send_user_message"), serde_json::json!({"text": "hi"}));
-        assert_eq!(sent("append_entry"), serde_json::json!({"data": {"kind": "note"}}));
+        assert_eq!(
+            sent("append_entry"),
+            serde_json::json!({"data": {"kind": "note"}})
+        );
 
         // And a plugin restoring through caps gets the branch the host served,
         // not a stub: this is the rpi-todo restore path end to end.
         let host = PluginHost::new("rpi-todo", rpi_todo::kiqi::factory());
         host.on_event(&kiqi_plugin::Event::SessionStart, &caps);
         let listed = host
-            .call_tool("todo", &serde_json::json!({"action": "list"}), &caps, &NoProgress)
+            .call_tool(
+                "todo",
+                &serde_json::json!({"action": "list"}),
+                &caps,
+                &NoProgress,
+            )
             .unwrap();
         let text = match &listed.blocks[0] {
             kiqi_plugin::Block::Text(text) => text.clone(),
@@ -522,7 +892,12 @@ mod tests {
         let other = load_hosts();
         let todo = other.iter().find(|h| h.id() == "rpi-todo").unwrap();
         assert!(todo
-            .call_tool("todo", &serde_json::json!({"action": "list"}), &caps, &NoProgress)
+            .call_tool(
+                "todo",
+                &serde_json::json!({"action": "list"}),
+                &caps,
+                &NoProgress
+            )
             .is_ok());
     }
 
@@ -546,7 +921,18 @@ mod tests {
         // The state rides the details channel, which is how it survives
         // fork/switch once the host persists it with the tool result.
         assert_eq!(added.details["action"], "add");
-        assert_eq!(added.details["todos"][0]["text"], "wire the registry");
+        // Order-independent: the plugin instance (and therefore its list) is
+        // process-wide, so tests do not start from an empty list.
+        let stored = added.details["todos"]
+            .as_array()
+            .expect("details carries the task list")
+            .iter()
+            .any(|todo| todo["text"] == "wire the registry");
+        assert!(
+            stored,
+            "the added task is in the details: {}",
+            added.details
+        );
 
         // Unknown tools are a plugin error, not a panic or a crash.
         let err = todo

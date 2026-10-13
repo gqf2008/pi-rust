@@ -31,7 +31,11 @@ impl TodoPlugin {
             return;
         };
         let mut restored = Default::default();
-        if let Some(entries) = session.session_branch().get("entries").and_then(Value::as_array) {
+        if let Some(entries) = session
+            .session_branch()
+            .get("entries")
+            .and_then(Value::as_array)
+        {
             for entry in entries {
                 let Some(message) = entry.get("message") else {
                     continue;
@@ -124,7 +128,10 @@ impl Plugin for TodoPlugin {
             return Err(PluginError::UnknownTool(name.to_string()));
         }
         let _ = state_json(&state().lock().unwrap_or_else(|p| p.into_inner()));
-        Ok(crate::render(&state().lock().unwrap_or_else(|p| p.into_inner()), true))
+        Ok(crate::render(
+            &state().lock().unwrap_or_else(|p| p.into_inner()),
+            true,
+        ))
     }
 }
 

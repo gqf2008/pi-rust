@@ -324,6 +324,18 @@ pub async fn build(
         report_deferred_renderers(&extension_session);
     }
     merge_extension_tools(&mut tools, &extension_session, args, &tool_context);
+    crate::plugins::merge_compiled_plugin_tools(
+        &mut tools,
+        &crate::plugins::compiled_plugin_hosts(),
+        &crate::plugins::OwnedCaps {
+            session: None,
+            control: None,
+            inject: None,
+            ui: None,
+            log: std::sync::Arc::new(crate::plugins::StderrLog),
+        },
+        &|name| tool_name_allowed(name, args),
+    );
     let active = filter_active_tool_names(active_tool_names(&tools, args), args);
 
     // ---- Session storage ----
@@ -1458,6 +1470,18 @@ where
         &extension_session,
         &effective_args,
         &ctx.tool_context,
+    );
+    crate::plugins::merge_compiled_plugin_tools(
+        &mut tools,
+        &crate::plugins::compiled_plugin_hosts(),
+        &crate::plugins::OwnedCaps {
+            session: None,
+            control: None,
+            inject: None,
+            ui: None,
+            log: std::sync::Arc::new(crate::plugins::StderrLog),
+        },
+        &|name| tool_name_allowed(name, &effective_args),
     );
     let mut active = active_tool_names(&tools, &effective_args);
     active = filter_active_tool_names(active, &effective_args);

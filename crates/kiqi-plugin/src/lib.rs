@@ -170,7 +170,10 @@ pub enum Event {
     },
     Error,
     /// Forward compatibility hatch, as in the native event ABI.
-    Other { kind: String, payload: Value },
+    Other {
+        kind: String,
+        payload: Value,
+    },
 }
 
 /// What a plugin decided to do about an event.
@@ -341,7 +344,9 @@ pub trait Plugin: Send + Sync + 'static {
         _arguments: &str,
         _caps: &HostCaps<'_>,
     ) -> Result<String, PluginError> {
-        Err(PluginError::Failed("this plugin declares no commands".into()))
+        Err(PluginError::Failed(
+            "this plugin declares no commands".into(),
+        ))
     }
 
     /// Gate points this plugin wants to intervene at (e.g. `before-tool-call`).
