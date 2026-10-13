@@ -338,7 +338,13 @@ pub trait SessionControl: Send + Sync {
 pub trait InjectApi: Send + Sync {
     fn send_message(&self, message: &Value) -> Result<(), PluginError>;
     fn send_user_message(&self, text: &str) -> Result<(), PluginError>;
-    fn append_entry(&self, entry: &Value) -> Result<(), PluginError>;
+    /// Append a message entry to the transcript (no run). The host takes
+    /// `{"message": <AgentMessage>}`.
+    fn append_message(&self, message: &Value) -> Result<(), PluginError>;
+
+    /// Append a custom entry. The host takes
+    /// `{"customType": "...", "data": <json>}`.
+    fn append_custom_entry(&self, custom_type: &str, data: &Value) -> Result<(), PluginError>;
 }
 
 /// The user-facing UI surface.

@@ -200,8 +200,24 @@ impl kiqi_plugin::InjectApi for ActionCaps {
         self.run("send_user_message", serde_json::json!({ "text": text }))
     }
 
-    fn append_entry(&self, entry: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
-        self.run("append_entry", serde_json::json!({ "data": entry }))
+    /// The host's `append_entry` dispatches on `message` vs `customType`
+    /// (`extensions_actions.rs`), so these two send exactly those shapes. An
+    /// earlier version sent `{"data": ...}`, which matches neither branch, and
+    /// a test that asserted that same wrong shape still passed - which is why
+    /// these expectations cite the host rather than the sender.
+    fn append_message(&self, message: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("append_entry", serde_json::json!({ "message": message }))
+    }
+
+    fn append_custom_entry(
+        &self,
+        custom_type: &str,
+        data: &serde_json::Value,
+    ) -> Result<(), kiqi_plugin::PluginError> {
+        self.run(
+            "append_entry",
+            serde_json::json!({ "customType": custom_type, "data": data }),
+        )
     }
 }
 
@@ -968,7 +984,10 @@ mod tests {
         caps_host.reload().unwrap();
         caps_host.send_user_message("hi").unwrap();
         caps_host
-            .append_entry(&serde_json::json!({"kind": "note"}))
+            .append_message(&serde_json::json!({"role": "assistant", "content": []}))
+            .unwrap();
+        caps_host
+            .append_custom_entry("kiqi.note", &serde_json::json!({"kind": "note"}))
             .unwrap();
         let seen = fake.seen.lock().unwrap().clone();
         let sent = |action: &str| {
@@ -992,10 +1011,23 @@ mod tests {
         assert_eq!(sent("switch_session"), serde_json::json!({"id": "sess-1"}));
         assert_eq!(sent("reload"), serde_json::json!({}));
         assert_eq!(sent("send_user_message"), serde_json::json!({"text": "hi"}));
-        assert_eq!(
-            sent("append_entry"),
-            serde_json::json!({"data": {"kind": "note"}})
-        );
+        // Exactly the two shapes the host dispatches on
+        // (`extensions_actions.rs`: `message` vs `customType` + `data`).
+        // Nothing else is accepted, so a wrong shape fails only at runtime -
+        // which is how the first version of this adapter shipped `{"data":..}`.
+        let appends: Vec<_> = seen
+            .iter()
+            .filter(|(a, _)| a == "append_entry")
+            .map(|(_, args)| args.clone())
+            .collect();
+        assert_eq!(appends.len(), 2, "both append shapes were dispatched");
+        assert!(appends.contains(&serde_json::json!({
+            "message": {"role": "assistant", "content": []}
+        })));
+        assert!(appends.contains(&serde_json::json!({
+            "customType": "kiqi.note",
+            "data": {"kind": "note"}
+        })));
 
         // And a plugin restoring through caps gets the branch the host served,
         // not a stub: this is the rpi-todo restore path end to end.
