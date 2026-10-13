@@ -119,6 +119,28 @@ pub struct CommandSpec {
     pub description: String,
 }
 
+/// A CLI flag the plugin claims.
+///
+/// Registration is a **declaration**, not a callable: the host records that the
+/// flag belongs to this plugin, and the plugin reads its value through
+/// [`SessionRead::cli_flag`]. The same is true of [`ShortcutSpec`], whose key
+/// arrives as an `Input` event.
+#[derive(Debug, Clone)]
+pub struct FlagSpec {
+    pub name: String,
+    pub description: String,
+}
+
+/// A keyboard shortcut the plugin claims (e.g. `f8`).
+///
+/// Declaring it routes the key to this plugin as an [`EventTag::Input`] event;
+/// there is no separate callback.
+#[derive(Debug, Clone)]
+pub struct ShortcutSpec {
+    pub key: String,
+    pub description: String,
+}
+
 /// A plugin failure.
 ///
 /// Distinct from [`ToolOutcome::error`]: this is "the plugin could not do its
@@ -448,6 +470,26 @@ pub trait Plugin: Send + Sync + 'static {
         Err(PluginError::Failed(
             "this plugin declares no commands".into(),
         ))
+    }
+
+    /// CLI flags this plugin claims.
+    fn flags(&self) -> Vec<FlagSpec> {
+        Vec::new()
+    }
+
+    /// Keyboard shortcuts this plugin claims; the key then arrives as an
+    /// [`EventTag::Input`] event.
+    fn shortcuts(&self) -> Vec<ShortcutSpec> {
+        Vec::new()
+    }
+
+    /// Rewrite the system prompt for the coming run, or `None` to leave it.
+    ///
+    /// The native slot is `register_before_agent_start`, which carries an `out`
+    /// pointer for exactly this - unlike the fire-and-forget `BeforeAgentStart`
+    /// event, which can only observe.
+    fn before_agent_start(&self, _prompt: &Value, _caps: &HostCaps<'_>) -> Option<String> {
+        None
     }
 
     /// Gate points this plugin wants to intervene at (e.g. `before-tool-call`).
