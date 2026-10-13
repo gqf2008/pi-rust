@@ -251,6 +251,11 @@ pub fn load_all() -> Vec<Registered> {
         id: "rpi-goal",
         plugin: rpi_goal::kiqi::factory(),
     });
+    #[cfg(feature = "plugin-rpi-plan-mode")]
+    plugins.push(Registered {
+        id: "rpi-plan-mode",
+        plugin: rpi_plan_mode::kiqi::factory(),
+    });
     #[cfg(feature = "plugin-rpi-subagents")]
     plugins.push(Registered {
         id: "rpi-subagents",
@@ -704,6 +709,7 @@ mod tests {
             "rpi-subagents",
             "rpi-permissions",
             "rpi-goal",
+            "rpi-plan-mode",
         ] {
             assert!(
                 ids.contains(&expected),
@@ -736,6 +742,8 @@ mod tests {
             "delegate_task",
             "permissions",
             "goal",
+            "plan_mode_complete",
+            "plan_mode_start",
         ] {
             assert!(
                 tools.iter().any(|t| t == expected),
@@ -1072,6 +1080,50 @@ mod tests {
             injected,
             "starting a goal injected its notice through InjectApi; saw {:?}",
             fake.seen.lock().unwrap()
+        );
+
+        // rpi-plan-mode needs SessionControl: entering plan mode swaps the tool
+        // set. Asserted on the host side - what it was asked to do.
+        let plan_host = PluginHost::new("rpi-plan-mode", rpi_plan_mode::kiqi::factory());
+        // The package keeps its state process-wide (as rpi-todo does), so a
+        // previous test may have left plan mode active; entering it again
+        // would short-circuit and swap nothing.
+        let _ = plan_host.run_command("plan", "exit", &caps);
+        plan_host.run_command("plan", "start", &caps).unwrap();
+        let swapped = fake.seen.lock().unwrap().iter().any(|(action, args)| {
+            action == "set_active_tools"
+                && args
+                    .get("tools")
+                    .and_then(|t| t.as_array())
+                    .map(|tools| !tools.is_empty())
+                    .unwrap_or(false)
+        });
+        assert!(
+            swapped,
+            "plan mode swapped the active tool set through SessionControl; host saw {:?}",
+            fake.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(a, _)| a.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // Without that capability it must refuse rather than half-enter. Exit
+        // first with the capabilities granted, otherwise it short-circuits on
+        // "already active" and never reaches the capability check at all.
+        plan_host.run_command("plan", "exit", &caps).unwrap();
+        let stripped = HostCaps {
+            session: None,
+            control: None,
+            inject: None,
+            ui: None,
+            log: &silent,
+        };
+        let refused = plan_host.run_command("plan", "start", &stripped).unwrap();
+        assert!(
+            refused.contains("Unable"),
+            "without SessionControl plan mode cannot start: {refused}"
         );
 
         // And a plugin restoring through caps gets the branch the host served,

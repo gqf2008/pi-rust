@@ -3,11 +3,82 @@
     "title": "wire goal",
     "status": "active",
     "notes": "",
-    "started_at": 1791901001955,
-    "updated_at": 1791901001955,
+    "started_at": 1791902444993,
+    "updated_at": 1791902444993,
     "turns_used": 0,
     "max_turns": null,
     "deadline_ms": null
   },
-  "archived": []
+  "archived": [
+    {
+      "title": "wire goal",
+      "status": "active",
+      "notes": "",
+      "started_at": 1791901001955,
+      "updated_at": 1791901001955,
+      "turns_used": 0,
+      "max_turns": null,
+      "deadline_ms": null
+    },
+    {
+      "title": "wire goal",
+      "status": "active",
+      "notes": "",
+      "started_at": 1791901245197,
+      "updated_at": 1791901245197,
+      "turns_used": 0,
+      "max_turns": null,
+      "deadline_ms": null
+    },
+    {
+      "title": "wire goal",
+      "status": "active",
+      "notes": "",
+      "started_at": 1791902352610,
+      "updated_at": 1791902352610,
+      "turns_used": 0,
+      "max_turns": null,
+      "deadline_ms": null
+    },
+    {
+      "title": "wire goal",
+      "status": "active",
+      "notes": "",
+      "started_at": 1791902373051,
+      "updated_at": 1791902373051,
+      "turns_used": 0,
+      "max_turns": null,
+      "deadline_ms": null
+    },
+    {
+      "title": "wire goal",
+      "status": "active",
+      "notes": "",
+      "started_at": 1791902391845,
+      "updated_at": 1791902391845,
+      "turns_used": 0,
+      "max_turns": null,
+      "deadline_ms": null
+    },
+    {
+      "title": "wire goal",
+      "status": "active",
+      "notes": "",
+      "started_at": 1791902411573,
+      "updated_at": 1791902411573,
+      "turns_used": 0,
+      "max_turns": null,
+      "deadline_ms": null
+    },
+    {
+      "title": "wire goal",
+      "status": "active",
+      "notes": "",
+      "started_at": 1791902430067,
+      "updated_at": 1791902430067,
+      "turns_used": 0,
+      "max_turns": null,
+      "deadline_ms": null
+    }
+  ]
 }

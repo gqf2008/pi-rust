@@ -1,0 +1,21 @@
+[package]
+publish = false
+name = "rpi-plan-mode"
+version = "0.1.5"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "CodeX-like plan mode for the rpi Rust agent"
+readme = "README.md"
+keywords = ["rpi", "plan", "planning", "plugin"]
+categories = ["development-tools"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kiqi-plugin = { path = "../../crates/kiqi-plugin" }
+rpi-plugin-sdk = { path = "../../crates/rpi-plugin-sdk" }
+serde_json = { workspace = true }

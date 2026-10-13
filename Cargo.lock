@@ -2295,6 +2295,7 @@ dependencies = [
  "rpi-harness",
  "rpi-lens",
  "rpi-permissions",
+ "rpi-plan-mode",
  "rpi-plugin-sdk",
  "rpi-subagents",
  "rpi-telemetry",
@@ -2382,6 +2383,15 @@ dependencies = [
 [[package]]
 name = "rpi-permissions"
 version = "0.1.4"
+dependencies = [
+ "kiqi-plugin",
+ "rpi-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
+name = "rpi-plan-mode"
+version = "0.1.5"
 dependencies = [
  "kiqi-plugin",
  "rpi-plugin-sdk",
