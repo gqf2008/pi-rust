@@ -84,7 +84,12 @@
    → 编译期模式下"更新插件 = 重编 `ki` 二进制"，对常驻服务是实打实的坏处。
 2. **驱动子进程**：插件需要起并管理外部进程。
    → 进程内模型不禁止（已移植的 `rpi-codegraph` 就在起 `codegraph`），但**与长连叠加**时归属原生。
-3. **宿主 vtable 散射进签名**：把 `runtime_action` / `free_string` 裸函数指针存进一个 context 结构
+3. **需要在调用之外行动**：插件要起后台线程 / 定时器，在两次调用之间主动推送
+   （`rpi-run-stats` 就是一个 1 秒 tick 的线程，注释写明"即使没有流式事件也保持等待时间与
+   TPM 窗口新鲜"）。
+   → `HostCaps` 是**每次调用借来**的，后台线程拿不到它；原生 ABI 能这么干，是因为它给的是
+   全局 `Runtime`（函数指针 `Copy + Send`）。这是两种模型的真实差异，不是实现疏漏。
+4. **宿主 vtable 散射进签名**：把 `runtime_action` / `free_string` 裸函数指针存进一个 context 结构
    并到处传参（`rpi-im-message` 的 `StartupContext` 即如此）。
    → 穿 `HostCaps` 要改的签名面比 goal + plan-mode 加起来还宽，收益只是少一个 dylib。
 
@@ -93,7 +98,9 @@
 | 插件 | 归属 | 依据 |
 |---|---|---|
 | `rpi-todo` `rpi-lens` `rpi-webfetch` `rpi-websearch` `rpi-subagents` `rpi-permissions` `rpi-goal` `rpi-plan-mode` `rpi-codegraph` | **编译期**（已移植，见 §6） | 纯进程内，宿主契约窄（0~5 处） |
-| `rpi-run-stats` `rpi-ask-user` `rpi-langfuse` | 编译期（待办） | 纯进程内 |
+| `rpi-ask-user` | 编译期（已移植） | 纯进程内 |
+| `rpi-langfuse` | 编译期（待办） | 纯进程内（14 个事件，无后台线程） |
+| `rpi-run-stats` | **原生** | 1 秒定时线程主动推送（判据 3） |
 | `rpi-im-message` | **原生** | 飞书 WebSocket 长连 + 专用服务 runtime + 驱动 `rpi print` 子进程 + `StartupContext` 散射（判据 1+2+3 全中） |
 | `rpi-voice` | **原生** | 录音设备流长连（判据 1） |
 | `rpi-mcp-adapter` | **原生** | 管理外部 MCP 子进程的 stdio 生命周期（判据 2） |
@@ -125,7 +132,7 @@
 
 ```
 rpi-todo · rpi-lens · rpi-webfetch · rpi-websearch ·
-rpi-subagents · rpi-permissions · rpi-goal · rpi-plan-mode · rpi-codegraph
+rpi-subagents · rpi-permissions · rpi-goal · rpi-plan-mode · rpi-codegraph · rpi-ask-user
 ```
 
 `rpi-goal` 与 `rpi-plan-mode` 的宿主访问在**工具路径**上，因此用窄 trait 双适配器
