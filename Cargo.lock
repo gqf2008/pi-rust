@@ -2293,7 +2293,9 @@ dependencies = [
  "rpi-extensions",
  "rpi-harness",
  "rpi-lens",
+ "rpi-permissions",
  "rpi-plugin-sdk",
+ "rpi-subagents",
  "rpi-telemetry",
  "rpi-todo",
  "rpi-tools",
@@ -2367,12 +2369,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpi-permissions"
+version = "0.1.4"
+dependencies = [
+ "kiqi-plugin",
+ "rpi-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "rpi-plugin-sdk"
 version = "0.4.0"
 dependencies = [
  "libc",
  "serde_json",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rpi-subagents"
+version = "0.4.0"
+dependencies = [
+ "kiqi-plugin",
+ "rpi-plugin-sdk",
+ "serde_json",
 ]
 
 [[package]]

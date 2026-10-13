@@ -1,0 +1,21 @@
+[package]
+publish = false
+name = "rpi-subagents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Bounded delegation envelope tool for rpi Rust agents"
+readme = "README.md"
+keywords = ["rpi", "subagents", "delegation", "plugin"]
+categories = ["development-tools"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kiqi-plugin = { path = "../../crates/kiqi-plugin" }
+rpi-plugin-sdk = { path = "../../crates/rpi-plugin-sdk" }
+serde_json = { workspace = true }

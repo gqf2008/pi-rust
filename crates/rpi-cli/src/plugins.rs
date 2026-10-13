@@ -230,6 +230,16 @@ pub fn load_all() -> Vec<Registered> {
         id: "rpi-webfetch",
         plugin: rpi_webfetch::kiqi::factory(),
     });
+    #[cfg(feature = "plugin-rpi-subagents")]
+    plugins.push(Registered {
+        id: "rpi-subagents",
+        plugin: rpi_subagents::kiqi::factory(),
+    });
+    #[cfg(feature = "plugin-rpi-permissions")]
+    plugins.push(Registered {
+        id: "rpi-permissions",
+        plugin: rpi_permissions::kiqi::factory(),
+    });
     #[cfg(feature = "plugin-rpi-websearch")]
     plugins.push(Registered {
         id: "rpi-websearch",
@@ -665,7 +675,14 @@ mod tests {
     fn every_compiled_plugin_exposes_its_tools_and_schemas() {
         let hosts = load_hosts();
         let ids: Vec<&str> = hosts.iter().map(|h| h.id()).collect();
-        for expected in ["rpi-todo", "rpi-lens", "rpi-webfetch", "rpi-websearch"] {
+        for expected in [
+            "rpi-todo",
+            "rpi-lens",
+            "rpi-webfetch",
+            "rpi-websearch",
+            "rpi-subagents",
+            "rpi-permissions",
+        ] {
             assert!(
                 ids.contains(&expected),
                 "{expected} is compiled in; got {ids:?}"
@@ -689,7 +706,14 @@ mod tests {
             .into_iter()
             .map(|t| t.name)
             .collect();
-        for expected in ["todo", "code_lens", "webfetch", "websearch"] {
+        for expected in [
+            "todo",
+            "code_lens",
+            "webfetch",
+            "websearch",
+            "delegate_task",
+            "permissions",
+        ] {
             assert!(
                 tools.iter().any(|t| t == expected),
                 "{expected} missing from {tools:?}"
