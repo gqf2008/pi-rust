@@ -994,6 +994,19 @@ pub async fn interactive_tui(
     )
     .await;
 
+    // A launch with nothing configured deliberately opens the TUI so /provider
+    // (or /login) can be used to fix it; say so up front instead of waiting for
+    // the first prompt to fail.
+    if lane_model
+        .as_ref()
+        .is_some_and(crate::provider::is_unconfigured)
+    {
+        add_note_message(
+            &chat_container,
+            "No provider configured yet. Run /provider to add one (or /login), then restart rpi.",
+        );
+    }
+
     // A --continue/--resume/--session launch opens on an existing JSONL
     // session — render its prior user/assistant transcript so the user sees
     // where they left off (tool executions are skipped: their live display

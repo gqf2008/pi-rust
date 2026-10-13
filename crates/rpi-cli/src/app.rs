@@ -239,6 +239,14 @@ async fn run_inner() -> i32 {
     };
 
     // ---- provider + model resolution ----
+    // The interactive TUI is where `/provider` and `/login` live, so a missing
+    // credential must not abort startup before the user can configure one:
+    // interactive runs start with an "unconfigured" placeholder instead. Print
+    // and RPC modes still fail fast — there is no UI there to fix anything.
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let interactively_configured = stdin_is_tty && stdout_is_tty;
+
     let project_trusted = crate::session::resolve_project_trust(&parsed, &cwd);
     let resolved = match resolve_for_cwd(
         parsed.provider.as_deref(),
@@ -250,6 +258,15 @@ async fn run_inner() -> i32 {
         project_trusted,
     ) {
         Ok(r) => r,
+        Err(e) if matches!(e, ResolveError::NoApiKey { .. }) && interactively_configured => {
+            eprintln!("warning: {e}");
+            eprintln!(
+                "Starting rpi without a model — run /provider (or /login) to add one, then restart."
+            );
+            crate::provider::unconfigured_resolved(
+                crate::settings::load_settings().ok().and_then(|s| s.theme),
+            )
+        }
         Err(e) => {
             print_resolve_error(&e);
             return match e {
@@ -341,8 +358,8 @@ async fn run_inner() -> i32 {
     let (initial, extra) = build_initial_message(&parsed, stdin_text.as_deref(), file_text_opt);
 
     // ---- mode dispatch (TS resolveAppMode → runPrintMode / InteractiveMode / runRpcMode) ----
-    let stdin_is_tty = std::io::stdin().is_terminal();
-    let stdout_is_tty = std::io::stdout().is_terminal();
+    // (`stdin_is_tty` / `stdout_is_tty` were computed before provider resolution
+    // above, which needs them to decide the no-credentials fallback.)
     let mode = resolve_mode(&parsed, stdin_is_tty, stdout_is_tty);
 
     // TS downgrades interactive → print when piped stdin is present.

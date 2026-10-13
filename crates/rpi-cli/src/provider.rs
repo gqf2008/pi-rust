@@ -233,6 +233,97 @@ pub const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 pub const NO_API_KEY_HINT: &str =
     "models.json apiKey, OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN env, --api-key, or `rpi auth login`";
 
+/// Provider/model identity used when the interactive TUI starts with nothing
+/// configured. Opening the TUI instead of exiting lets the user run `/provider`
+/// (or `/login`) and configure a provider from inside rpi — the startup gate
+/// only made sense before the TUI could configure itself.
+pub const UNCONFIGURED_PROVIDER_ID: &str = "unconfigured";
+pub const UNCONFIGURED_MODEL_ID: &str = "unconfigured";
+
+/// A provider that serves no models and answers every request with the
+/// "nothing configured yet" guidance. Only ever installed for the
+/// no-credentials interactive startup; it must never be reached with a real
+/// model, and it never touches the network.
+#[derive(Debug)]
+struct UnconfiguredProvider;
+
+#[async_trait::async_trait]
+impl Provider for UnconfiguredProvider {
+    fn id(&self) -> &str {
+        UNCONFIGURED_PROVIDER_ID
+    }
+
+    fn models(&self) -> &[Model] {
+        &[]
+    }
+
+    async fn stream_simple(
+        &self,
+        model: &Model,
+        _ctx: &Context,
+        _opts: &SimpleStreamOptions,
+    ) -> AssistantMessageEventStream {
+        use rpi_ai::event_stream::create_assistant_message_event_stream;
+        use rpi_ai::{AssistantMessage, AssistantMessageEvent, ErrorReason, StopReason};
+
+        let (mut producer, stream) = create_assistant_message_event_stream();
+        let message = AssistantMessage::terminal(
+            model.api.clone(),
+            UNCONFIGURED_PROVIDER_ID,
+            model.id.clone(),
+            StopReason::Error,
+            format!(
+                "No provider is configured yet, so there is nothing to send this to.\n\n\
+                 Use /provider to add one from inside rpi (or /login for an API-key/OAuth \
+                 login), then restart rpi.\n\n{}",
+                crate::auth_guidance::provider_login_help()
+            ),
+            now_millis(),
+        );
+        producer.push(AssistantMessageEvent::Error {
+            reason: ErrorReason::Error,
+            error: message,
+        });
+        stream
+    }
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// The [`ResolvedModel`] handed to the harness when the interactive TUI is
+/// opened with no usable provider. Any send attempt is answered by
+/// [`UnconfiguredProvider`] with the configuration guidance, so the TUI can be
+/// used to fix the very thing that used to abort startup.
+pub fn unconfigured_resolved(theme: Option<String>) -> ResolvedModel {
+    let mut model = Model::new(
+        UNCONFIGURED_MODEL_ID,
+        "No model configured",
+        rpi_ai::Api::AnthropicMessages,
+        UNCONFIGURED_PROVIDER_ID,
+        "http://unconfigured.invalid",
+    );
+    model.context_window = 0;
+    model.max_tokens = 0;
+    ResolvedModel {
+        provider: Arc::new(UnconfiguredProvider),
+        model,
+        thinking_level: ThinkingLevel::Off,
+        has_provider_key: false,
+        theme,
+        providers: vec![Arc::new(UnconfiguredProvider)],
+    }
+}
+
+/// Whether this resolved model is the "nothing configured" placeholder.
+pub fn is_unconfigured(model: &Model) -> bool {
+    model.id == UNCONFIGURED_MODEL_ID && model.provider == UNCONFIGURED_PROVIDER_ID
+}
+
 /// A resolution error. The TS resolver returns `{ error, warning }`; v1 folds
 /// both into a single enum since the CLI treats them the same (print + non-zero
 /// exit) except `NoApiKey`, which prints guidance then exits.
@@ -3329,5 +3420,61 @@ mod tests {
         let catalog = available_catalog(&r);
         assert_eq!(catalog.len(), r.provider.models().len());
         assert!(catalog.iter().any(|m| m.id == DEFAULT_MODEL_ID));
+    }
+
+    #[test]
+    fn unconfigured_resolved_is_a_usable_placeholder() {
+        let resolved = unconfigured_resolved(Some("dark".into()));
+        assert_eq!(resolved.model.id, UNCONFIGURED_MODEL_ID);
+        assert_eq!(resolved.model.provider, UNCONFIGURED_PROVIDER_ID);
+        assert!(is_unconfigured(&resolved.model));
+        assert_eq!(resolved.theme.as_deref(), Some("dark"));
+        // No models means the /model selector has nothing to offer, and the
+        // placeholder never collides with a real provider's catalog.
+        assert!(authenticated_catalog(&resolved).is_empty());
+        assert!(resolved.providers.iter().all(|p| p.models().is_empty()));
+        assert_eq!(resolved.provider.id(), UNCONFIGURED_PROVIDER_ID);
+    }
+
+    #[test]
+    fn is_unconfigured_rejects_real_models() {
+        let real = Model::new(
+            "claude-opus-5",
+            "Opus",
+            rpi_ai::Api::AnthropicMessages,
+            "anthropic",
+            "https://api.anthropic.com",
+        );
+        assert!(!is_unconfigured(&real));
+        // An id match with a different provider is not the placeholder.
+        let lookalike = Model::new(
+            UNCONFIGURED_MODEL_ID,
+            "x",
+            rpi_ai::Api::AnthropicMessages,
+            "anthropic",
+            "https://api.anthropic.com",
+        );
+        assert!(!is_unconfigured(&lookalike));
+    }
+
+    #[tokio::test]
+    async fn unconfigured_provider_answers_with_configuration_guidance() {
+        use rpi_ai::Context;
+        let resolved = unconfigured_resolved(None);
+        let opts = SimpleStreamOptions::default();
+        let mut stream = resolved
+            .provider
+            .stream_simple(&resolved.model, &Context::default(), &opts)
+            .await;
+        let mut saw_error = None;
+        while let Some(event) = stream.next().await {
+            if let rpi_ai::AssistantMessageEvent::Error { error, .. } = event {
+                saw_error = Some(error.error_message.clone().unwrap_or_default());
+                break;
+            }
+        }
+        let message = saw_error.expect("placeholder must yield an Error event");
+        assert!(message.contains("/provider"), "{message}");
+        assert!(message.contains("No provider is configured"), "{message}");
     }
 }
