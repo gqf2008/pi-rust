@@ -53,6 +53,7 @@ pub mod model_registry;
 pub mod modes;
 pub mod packages;
 pub mod provider;
+pub mod plugins;
 pub mod provider_config;
 pub mod remote;
 pub mod resource_dirs;

@@ -1,0 +1,17 @@
+[package]
+publish = false
+name = "rpi-todo"
+version = "0.2.2"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Session task lists with progress states for the kiqi agent"
+readme = "README.md"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kiqi-plugin = { path = "../../crates/kiqi-plugin" }
+rpi-plugin-sdk = { path = "../../crates/rpi-plugin-sdk" }
+serde_json = { workspace = true }

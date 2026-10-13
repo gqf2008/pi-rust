@@ -2283,6 +2283,7 @@ dependencies = [
  "futures",
  "globset",
  "indexmap 2.14.2",
+ "kiqi-plugin",
  "nix",
  "png",
  "reqwest",
@@ -2293,6 +2294,7 @@ dependencies = [
  "rpi-harness",
  "rpi-plugin-sdk",
  "rpi-telemetry",
+ "rpi-todo",
  "rpi-tools",
  "rpi-tui",
  "schemars",
@@ -2368,6 +2370,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "rpi-todo"
+version = "0.2.2"
+dependencies = [
+ "kiqi-plugin",
+ "rpi-plugin-sdk",
+ "serde_json",
 ]
 
 [[package]]
