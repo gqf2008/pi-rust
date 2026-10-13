@@ -3191,3 +3191,44 @@ fn secret_masking_never_prints_the_key() {
     );
     assert!(!masked.contains("efgh"), "{masked}");
 }
+
+#[test]
+fn names_matching_the_id_are_echoed_but_not_persisted() {
+    with_isolated_config_dir(|| {
+        write_models_json(
+            r#"{"providers":{"p1":{"api":"openai-completions","baseUrl":"https://a.example.com/v1","apiKey":"k","models":[{"id":"m1"}]}}}"#,
+        );
+        // Editing with the effective name (== id) must not write a redundant
+        // `name`, but the form still echoes it.
+        let provider_form = ProviderFormState {
+            mode: ProviderFormMode::Edit,
+            id: "p1".into(),
+            original_id: Some("p1".into()),
+            name: "p1".into(),
+            api: "openai-completions".into(),
+            base_url: "https://a.example.com/v1".into(),
+            api_key: "k".into(),
+            ..Default::default()
+        };
+        save_provider_from_form(&provider_form).unwrap();
+        assert_eq!(
+            crate::config::load_models_config().unwrap().providers["p1"].name,
+            None
+        );
+
+        let model_form = ModelFormState {
+            mode: ModelFormMode::Edit,
+            step: ModelFormStep::Confirm,
+            provider_id: "p1".into(),
+            original_id: Some("m1".into()),
+            id: "m1".into(),
+            name: "m1".into(),
+            ..Default::default()
+        };
+        save_model_from_form(&model_form).unwrap();
+        assert_eq!(
+            crate::config::load_models_config().unwrap().providers["p1"].models[0].name,
+            None
+        );
+    });
+}

@@ -22,12 +22,17 @@ pub(super) fn editable_provider_items() -> Vec<SelectItem> {
         .map(|(id, provider)| {
             let label = provider_display_name(id);
             let protocol = protocol_label(provider.api.as_deref());
+            let endpoint = provider
+                .base_url
+                .as_deref()
+                .filter(|url| !url.is_empty())
+                .unwrap_or("(no base URL)");
             SelectItem::new(id, &label)
                 .with_description(&format!(
-                    "{} model(s) · {protocol} · models.json",
+                    "{} model(s) · {protocol} · {endpoint}",
                     provider.models.len()
                 ))
-                .with_search_text(&format!("{label} {id} {protocol}"))
+                .with_search_text(&format!("{label} {id} {protocol} {endpoint}"))
         })
         .collect();
     items.sort_by(|a, b| {
@@ -381,7 +386,9 @@ fn show_model_pick_select(
             if let Some(def) = load_model_def(&provider_id, &item.value) {
                 form.original_id = Some(def.id.clone());
                 form.id = def.id.clone();
-                form.name = def.name.clone().unwrap_or_default();
+                // Echo the effective display name (`None` renders as the id in
+                // /model), otherwise the field looks unloaded on edit.
+                form.name = def.name.clone().unwrap_or_else(|| def.id.clone());
                 form.context_window = def
                     .context_window
                     .map(|v| v.to_string())
@@ -709,7 +716,7 @@ pub(super) fn save_model_from_form(form: &ModelFormState) -> Result<String, Stri
             form.provider_id
         ));
     };
-    let name = (!form.name.is_empty()).then(|| form.name.clone());
+    let name = (!form.name.is_empty() && form.name != form.id).then(|| form.name.clone());
     let context_window = parse_optional_count(&form.context_window, "Context window")?;
     let max_tokens = parse_optional_count(&form.max_tokens, "Max output")?;
     let input = Some(if form.images {

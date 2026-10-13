@@ -911,14 +911,24 @@ fn show_provider_api_selector(
         "anthropic-messages",
         "openai-responses",
     ];
-    let items = vec![
+    // On edit the row that matches the stored protocol is both pre-selected and
+    // labelled, so the "current value" is unmistakable (not just a highlight).
+    let items: Vec<SelectItem> = vec![
         SelectItem::new("openai-completions", "OpenAI Completions")
             .with_description("OpenAI Chat Completions 兼容接口"),
         SelectItem::new("anthropic-messages", "Anthropic Messages")
             .with_description("Anthropic Messages 兼容接口"),
         SelectItem::new("openai-responses", "OpenAI Responses")
             .with_description("OpenAI Responses 接口"),
-    ];
+    ]
+    .into_iter()
+    .map(|mut item| {
+        if current_api == Some(item.value.as_str()) {
+            item.label = format!("{} (current)", item.label);
+        }
+        item
+    })
+    .collect();
     let list = Arc::new(SelectList::new(items, 3));
     if let Some(api) = current_api {
         let index = PROTOCOLS.iter().position(|p| *p == api).unwrap_or(0);
@@ -1022,7 +1032,10 @@ fn show_provider_pick_for_edit(
             if let Some(provider) = current {
                 form.original_id = Some(item.value.clone());
                 form.id = item.value.clone();
-                form.name = provider.name.clone().unwrap_or_default();
+                // Echo the *effective* display name: an unset `name` renders as
+                // the id everywhere else, so a blank field here looked like the
+                // value had not been loaded at all.
+                form.name = provider.name.clone().unwrap_or_else(|| item.value.clone());
                 // A missing `api` means the Anthropic-compatible default runtime;
                 // prefill it explicitly so the protocol step highlights it.
                 form.api = provider
@@ -1403,7 +1416,9 @@ pub(super) fn save_provider_from_form(form: &ProviderFormState) -> Result<String
             let Some(provider) = cfg.providers.get_mut(&id) else {
                 return Err(format!("Provider \"{id}\" is no longer in models.json."));
             };
-            provider.name = (!form.name.is_empty()).then(|| form.name.clone());
+            // A name equal to the id is the implicit default, so store nothing
+            // rather than a redundant duplicate of the key.
+            provider.name = (!form.name.is_empty() && form.name != id).then(|| form.name.clone());
             provider.base_url = Some(form.base_url.clone());
             provider.api_key = Some(form.api_key.clone());
             provider.api = Some(form.api.clone());
