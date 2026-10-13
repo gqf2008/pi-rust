@@ -1,0 +1,23 @@
+[package]
+publish = false
+name = "rpi-webfetch"
+version = "0.1.4"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Bounded public web fetch tool for the rpi Rust agent"
+readme = "README.md"
+keywords = ["rpi", "web", "fetch", "plugin"]
+categories = ["command-line-utilities"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kiqi-plugin = { path = "../../crates/kiqi-plugin" }
+rpi-plugin-sdk = { path = "../../crates/rpi-plugin-sdk" }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+url = { workspace = true }

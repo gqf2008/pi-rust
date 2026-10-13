@@ -10,6 +10,9 @@ members = [
     "crates/rpi-tui",
     "crates/kiqi-plugin",
     "plugins/rpi-todo",
+    "plugins/rpi-lens",
+    "plugins/rpi-webfetch",
+    "plugins/rpi-websearch",
     "crates/rpi-plugin-sdk",
     "crates/rpi-extensions",
     "examples/minimal",
@@ -35,6 +38,8 @@ version = "0.4.0"
 authors = ["BigFish <bigfish1913@gmail.com>"]
 
 [workspace.dependencies]
+wait-timeout = "0.2"
+url = "2"
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "process", "sync", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
