@@ -1,5 +1,11 @@
 # ki — a Rust-native coding-agent runtime
 
+> **This is a fork.** The project is developed as `kiqi` here; the command is
+> `ki`, config lives in `~/.ki`, environment variables use the `KI_` prefix and
+> releases are cut from this repository only (the crates are **not** published
+> to crates.io, and `ki update` installs from this repo's GitHub Releases).
+> Upstream (`bigfish1913/pi-rust`) is tracked only as a source of cherry-picks.
+
 [![crates.io](https://img.shields.io/crates/v/rpi-cli.svg)](https://crates.io/crates/rpi-cli)
 [![downloads](https://img.shields.io/crates/d/rpi-cli.svg)](https://crates.io/crates/rpi-cli)
 [![docs.rs](https://docs.rs/rpi-cli/badge.svg)](https://docs.rs/rpi-cli)
