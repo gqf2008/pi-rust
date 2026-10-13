@@ -1,0 +1,99 @@
+/// kiqi plugin ABI — wasm component model (WASI Preview 2 / WIT).
+///
+/// A plugin is a wasm component exporting `tools` + `lifecycle` and optionally
+/// importing `host`. Nothing else is reachable: no filesystem, no network, no
+/// processes, unless a capability is added to this file and the host grants it.
+/// That is the whole point of moving off the cdylib C ABI.
+///
+/// Versioning: the package version is the ABI version. The host accepts a
+/// closed range and rejects anything outside it at load time.
+package kiqi:plugin@0.1.0;
+
+/// Host capabilities a plugin may import. Import only what you need; the host
+/// still decides what each import is permitted to do at runtime.
+interface host {
+    /// Structured logging. The host prefixes every line with the plugin id.
+    log: func(level: log-level, message: string);
+
+    /// Identity of the run the plugin is loaded into.
+    session-info: func() -> session-info;
+
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    record session-info {
+        session-id: string,
+        run-id: string,
+        cwd: string,
+    }
+}
+
+/// What a plugin contributes to the runtime.
+interface tools {
+    /// Tools this plugin provides. Called once, after `lifecycle.init`.
+    list-tools: func() -> list<tool-spec>;
+
+    /// Invoke a tool. `arguments` is the JSON object the model produced.
+    ///
+    /// Returns the tool result as text (the host may wrap it). Errors are typed
+    /// so the runtime can tell "the model asked wrong" from "we are broken".
+    call-tool: func(name: string, arguments: string) -> result<string, plugin-error>;
+
+    record tool-spec {
+        name: string,
+        description: string,
+        /// JSON Schema for the parameters, serialized. Kept as a string so the
+        /// ABI does not have to model every JSON Schema construct.
+        parameters-schema: string,
+    }
+
+    variant plugin-error {
+        /// No tool with this name was declared by `list-tools`.
+        unknown-tool(string),
+        /// The arguments did not match `parameters-schema`.
+        invalid-arguments(string),
+        /// The plugin wanted a capability the host refused.
+        denied(string),
+        /// Anything else.
+        failed(string),
+    }
+}
+
+/// Lifecycle and event hooks. All hooks are optional for the plugin to
+/// implement; the host calls the ones the component exports.
+interface lifecycle {
+    /// Called once, when the plugin is instantiated and before `list-tools`.
+    init: func();
+
+    /// Called on shutdown. Best effort; the host does not wait forever.
+    shutdown: func();
+
+    /// Runtime events. Kinds the plugin does not know arrive as `other`.
+    on-event: func(event: event);
+
+    variant event {
+        session-start,
+        session-shutdown,
+        turn-start,
+        turn-end,
+        tool-call(tool-call),
+        /// Forward compatibility: never break a plugin on a new event kind.
+        other(kind: string, payload: string),
+    }
+
+    record tool-call {
+        tool: string,
+        arguments: string,
+    }
+}
+
+world plugin {
+    import host;
+    export tools;
+    export lifecycle;
+}
