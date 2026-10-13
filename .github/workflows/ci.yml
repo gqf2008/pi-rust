@@ -119,3 +119,31 @@ jobs:
 
       - name: Publish crates in dependency order
         run: .git/rpi-release-helper publish "${{ steps.release.outputs.version }}"
+
+  # Compile the workspace on Windows. Nothing else did: the release matrix is
+  # the only place that built for Windows, so a Windows-only compile error
+  # surfaced there and blocked the release (v0.4.0 failed with `cannot find
+  # function windows_paths_equal` - a function I gated with #[cfg(test)] while
+  # clearing a dead-code warning that was really a platform artifact; macOS
+  # stayed green throughout).
+  #
+  # Runs on a real Windows runner rather than cross-checking, because native
+  # dependencies (ring) build C sources and need a Windows toolchain.
+  windows-check:
+    name: Windows check
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-check
+
+      - name: Check the workspace compiles on Windows
+        run: cargo check --workspace --all-targets
