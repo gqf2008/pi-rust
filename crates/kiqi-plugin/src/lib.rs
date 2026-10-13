@@ -57,6 +57,14 @@ pub enum Block {
 pub struct ToolOutcome {
     pub blocks: Vec<Block>,
     pub is_error: bool,
+    /// Structured payload the host persists with the tool result and hands
+    /// back in [`Event::ToolResult`].
+    ///
+    /// This is not decoration: `rpi-todo` keeps its whole task list here, so
+    /// the state rides the session branch and survives fork/switch. Without a
+    /// details channel a plugin has to invent its own side file and loses the
+    /// branch-scoped semantics.
+    pub details: Value,
 }
 
 impl ToolOutcome {
@@ -65,6 +73,7 @@ impl ToolOutcome {
         Self {
             blocks: vec![Block::Text(text.into())],
             is_error: false,
+            details: Value::Null,
         }
     }
 
@@ -74,6 +83,7 @@ impl ToolOutcome {
         Self {
             blocks: vec![Block::Text(text.into())],
             is_error: true,
+            details: Value::Null,
         }
     }
 }
@@ -100,6 +110,13 @@ pub struct NoProgress;
 
 impl ProgressSink for NoProgress {
     fn progress(&self, _progress: Progress) {}
+}
+
+/// A slash command the plugin contributes (e.g. `/todos`).
+#[derive(Debug, Clone)]
+pub struct CommandSpec {
+    pub name: String,
+    pub description: String,
 }
 
 /// A plugin failure.
@@ -138,10 +155,19 @@ impl std::error::Error for PluginError {}
 #[derive(Debug, Clone)]
 pub enum Event {
     SessionStart,
+    /// The session tree changed (fork / navigate / switch). `rpi-todo` restores
+    /// its branch-scoped state here, so it cannot be folded into `SessionStart`.
+    SessionTree,
     SessionShutdown,
     Message,
     ToolCall,
-    ToolResult,
+    /// A tool finished. Carries what a plugin needs to re-derive its state:
+    /// which tool, the result, and the `details` that tool returned.
+    ToolResult {
+        tool: String,
+        result: Value,
+        details: Value,
+    },
     Error,
     /// Forward compatibility hatch, as in the native event ABI.
     Other { kind: String, payload: Value },
@@ -301,6 +327,21 @@ pub trait Plugin: Send + Sync + 'static {
         _sink: &dyn ProgressSink,
     ) -> Result<ToolOutcome, PluginError> {
         Err(PluginError::Failed("this plugin declares no tools".into()))
+    }
+
+    /// Slash commands this plugin contributes.
+    fn commands(&self) -> Vec<CommandSpec> {
+        Vec::new()
+    }
+
+    /// Run one of [`Plugin::commands`]. The returned text is shown to the user.
+    fn run_command(
+        &self,
+        _name: &str,
+        _arguments: &str,
+        _caps: &HostCaps<'_>,
+    ) -> Result<String, PluginError> {
+        Err(PluginError::Failed("this plugin declares no commands".into()))
     }
 
     /// Gate points this plugin wants to intervene at (e.g. `before-tool-call`).
