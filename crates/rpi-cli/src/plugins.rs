@@ -6,6 +6,91 @@
 
 use kiqi_plugin::{HostCaps, Plugin};
 
+/// Host capabilities backed by the real runtime-action host.
+///
+/// This is the sync/async seam: the host's actions are `async`, the plugin
+/// boundary is sync, and the native trampoline already solved that by spawning
+/// on the bridge runtime's `Handle` and parking on a std channel ("works from
+/// ANY thread - no ambient runtime needed"). The adapter reuses exactly that
+/// mechanism instead of inventing a second one.
+pub struct ActionCaps {
+    host: std::sync::Arc<dyn rpi_extensions::RuntimeActionHost>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl ActionCaps {
+    pub fn new(
+        host: std::sync::Arc<dyn rpi_extensions::RuntimeActionHost>,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
+        Self { host, runtime }
+    }
+
+    fn drive(
+        &self,
+        action: &str,
+        future: impl std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'static,
+    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.runtime.spawn(async move {
+            let _ = tx.send(future.await);
+        });
+        match rx.recv() {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(kiqi_plugin::PluginError::Failed(error)),
+            Err(_) => Err(kiqi_plugin::PluginError::Failed(format!(
+                "the host dropped `{action}` without answering"
+            ))),
+        }
+    }
+}
+
+/// `SessionRead` reads return whatever the host action returned; the plugin
+/// gets the documented field rather than a raw blob.
+impl kiqi_plugin::SessionRead for ActionCaps {
+    fn active_tools(&self) -> Vec<String> {
+        let host = self.host.clone();
+        self.drive("get_active_tools", async move { host.get_active_tools(serde_json::json!({})).await })
+            .ok()
+            .and_then(|value| {
+                value.get("tools")?.as_array().map(|tools| {
+                    tools.iter().filter_map(|t| t.as_str().map(str::to_string)).collect()
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    fn system_prompt(&self) -> String {
+        let host = self.host.clone();
+        self.drive("get_system_prompt", async move { host.get_system_prompt(serde_json::json!({})).await })
+            .ok()
+            .and_then(|value| value.get("prompt")?.as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    fn thinking_level(&self) -> String {
+        let host = self.host.clone();
+        self.drive("get_thinking_level", async move { host.get_thinking_level(serde_json::json!({})).await })
+            .ok()
+            .and_then(|value| value.get("level")?.as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    fn cli_flag(&self, name: &str) -> Option<String> {
+        let host = self.host.clone();
+        let args = serde_json::json!({ "name": name });
+        self.drive("get_cli_flag", async move { host.get_cli_flag(args).await })
+            .ok()
+            .and_then(|value| value.get("value")?.as_str().map(str::to_string))
+    }
+
+    fn session_branch(&self) -> serde_json::Value {
+        let host = self.host.clone();
+        self.drive("get_session_branch", async move { host.get_session_branch(serde_json::json!({})).await })
+            .unwrap_or(serde_json::Value::Null)
+    }
+}
+
 /// A plugin the host registered at build time.
 pub struct Registered {
     pub id: &'static str,
@@ -106,7 +191,7 @@ pub fn load_hosts() -> Vec<PluginHost> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiqi_plugin::{HostCaps, Log, LogLevel, NoProgress};
+    use kiqi_plugin::{HostCaps, Log, LogLevel, NoProgress, SessionRead};
 
     struct Silent;
     impl Log for Silent {
@@ -128,6 +213,92 @@ mod tests {
 
         assert_eq!(todo.plugin.commands()[0].name, "todos");
         assert!(todo.plugin.probe_points().is_empty());
+    }
+
+    /// A host that answers the two actions this test needs and refuses the
+    /// rest, so the adapter is exercised over the real spawn/park seam.
+    struct FakeHost;
+
+    #[async_trait::async_trait]
+    impl rpi_extensions::RuntimeActionHost for FakeHost {
+        async fn send_message(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn send_user_message(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn append_entry(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn set_session_name(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn get_active_tools(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({ "tools": ["todo", "bash"] }))
+        }
+        async fn set_active_tools(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn set_model(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn get_thinking_level(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({ "level": "medium" }))
+        }
+        async fn set_thinking_level(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn compact(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn get_system_prompt(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({ "prompt": "you are kiqi" }))
+        }
+        async fn new_session(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn fork(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn navigate_tree(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn switch_session(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn reload(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn get_cli_flag(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
+            let value = match args.get("name").and_then(|n| n.as_str()) {
+                Some("verbose") => serde_json::json!("2"),
+                _ => serde_json::Value::Null,
+            };
+            Ok(serde_json::json!({ "value": value }))
+        }
+        async fn get_session_branch(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            // The shape rpi-todo walks: entries[].message.{role,toolName,details}
+            Ok(serde_json::json!({ "entries": [ { "message": {
+                "role": "toolResult", "toolName": "todo",
+                "details": { "todos": [{"id":1,"text":"from the branch","done":false}], "nextId": 2 }
+            } } ] }))
+        }
+    }
+
+    fn refused() -> Result<serde_json::Value, String> {
+        Err("not implemented in this test host".to_string())
+    }
+
+    #[test]
+    fn capabilities_reach_the_real_host_and_a_plugin_sees_real_data() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let caps_host = ActionCaps::new(std::sync::Arc::new(FakeHost), runtime.handle().clone());
+        let silent = Silent;
+        let caps = HostCaps {
+            session: Some(&caps_host),
+            control: None,
+            inject: None,
+            ui: None,
+            log: &silent,
+        };
+
+        // The adapter really crosses the spawn/park seam.
+        assert_eq!(caps_host.active_tools(), vec!["todo".to_string(), "bash".to_string()]);
+        assert_eq!(caps_host.thinking_level(), "medium");
+        assert_eq!(caps_host.system_prompt(), "you are kiqi");
+        assert_eq!(caps_host.cli_flag("verbose").as_deref(), Some("2"));
+        assert_eq!(caps_host.cli_flag("missing"), None);
+
+        // And a plugin restoring through caps gets the branch the host served,
+        // not a stub: this is the rpi-todo restore path end to end.
+        let host = PluginHost::new("rpi-todo", rpi_todo::kiqi::factory());
+        host.on_event(&kiqi_plugin::Event::SessionStart, &caps);
+        let listed = host
+            .call_tool("todo", &serde_json::json!({"action": "list"}), &caps, &NoProgress)
+            .unwrap();
+        let text = match &listed.blocks[0] {
+            kiqi_plugin::Block::Text(text) => text.clone(),
+            other => panic!("unexpected block {other:?}"),
+        };
+        assert!(text.contains("from the branch"), "got {text}");
     }
 
     struct Panicky;
