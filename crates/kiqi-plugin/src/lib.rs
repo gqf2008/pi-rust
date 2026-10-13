@@ -177,7 +177,7 @@ pub enum Event {
 ///
 /// The native ABI returned an `i32` with `CONTINUE` / `CLAIMED`; this is the
 /// same two outcomes with the magic numbers replaced by a type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EventAction {
     /// Observed; pass the event on to the next plugin and to normal handling.
     Continue,
@@ -188,7 +188,7 @@ pub enum EventAction {
 }
 
 /// A permission gate's verdict.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
     /// No opinion; let the action proceed.
     Continue,
