@@ -9,7 +9,7 @@
 放进自己的进程——编辑器插件、CI 任务、一个内部工具——就只能去调用它的 CLI，然后解析 stdout。
 这条路能走，但很脆：输出格式是给人看的、错误处理靠字符串匹配、也没法订阅中间事件。
 
-所以 rpi 的出发点是**先做库，CLI 只是第一个使用者**。这个决定一路推导出了后面所有的设计。
+所以 ki 的出发点是**先做库，CLI 只是第一个使用者**。这个决定一路推导出了后面所有的设计。
 
 ## 一、分层：让依赖方向不可逆
 
@@ -121,7 +121,7 @@ agent 跑一轮可能要几分钟。如果只在回合结束时持久化，那�
 如果重启时把这些当成"已发生的历史"，就会**重复执行工具**（对一个会写文件、发请求的工具
 是灾难）。
 
-所以 rpi 记的是**帧级进度**（`LaneRecord::AssistantFrame`），并且严格区分两类东西：
+所以 ki 记的是**帧级进度**（`LaneRecord::AssistantFrame`），并且严格区分两类东西：
 
 - **进度不是历史。** 流式帧写入 record stream，但**永远不进**模型看到的那个分支。
   重启时把已提交的前缀重放成一个"被打断的消息"。
@@ -173,8 +173,8 @@ SDK 里写死了五条规则，违反任意一条都是 UB：
   教训是"本地测试过了"不等于"仓库是绿的"，CI 必须真的跑。
 - **基准测试自己会骗人**：头一版我在计时窗口里每 10 ms 起一个 `tasklist` 采样内存，
   把两个工具都拖慢了约 100 ms，正好抹平了真实差距；第二版更离谱——隔离用的
-  `PI_CODING_AGENT_DIR` 只对原生 pi 生效，rpi 用的是 `RPI_CODING_AGENT_DIR`，
-  结果 rpi 一直在加载我本机的 25 个插件 DLL，"冷启动"被高估了近 10 倍。
+  `PI_CODING_AGENT_DIR` 只对原生 pi 生效，ki 用的是 `KI_CODING_AGENT_DIR`，
+  结果 ki 一直在加载我本机的 25 个插件 DLL，"冷启动"被高估了近 10 倍。
   测量代码也需要被审查。
 
 还没做的：预编译二进制的 Homebrew/Scoop 分发、Gemini/Bedrock 适配器，
@@ -183,10 +183,10 @@ SDK 里写死了五条规则，违反任意一条都是 UB：
 
 ## 项目
 
-rpi 是 Rust 原生、library-first 的 coding-agent runtime，MIT 许可，九个 crate 同版本发布。
+ki 是 Rust 原生、library-first 的 coding-agent runtime，MIT 许可，九个 crate 同版本发布。
 
 - GitHub：https://github.com/bigfish1913/pi-rust
-- 官网 / 文档：https://rpi.laofu.online/
+- 官网 / 文档：https://ki.laofu.online/
 - 架构文档：https://github.com/bigfish1913/pi-rust/blob/main/docs/architecture/overview.md
 - 自己搭 agent 的项目结构建议：
   https://github.com/bigfish1913/pi-rust/blob/main/docs/agent/project-structure.md

@@ -1,6 +1,6 @@
-# 从 Cargo workspace 到多平台发布：rpi 的版本流水线
+# 从 Cargo workspace 到多平台发布：ki 的版本流水线
 
-> 一个 Rust Agent 项目的发布不只是打 tag。rpi 把 workspace 版本、依赖锁定、嵌入文档、跨平台二进制、校验和、crates.io、安装渠道和官网串成可恢复的流水线。
+> 一个 Rust Agent 项目的发布不只是打 tag。ki 把 workspace 版本、依赖锁定、嵌入文档、跨平台二进制、校验和、crates.io、安装渠道和官网串成可恢复的流水线。
 
 ## 发布流程
 
@@ -56,7 +56,7 @@ bash scripts/release.sh 0.3.5 --only crates,site
 
 # A Release Is a Pipeline, Not a Tag
 
-For a Rust workspace, releasing a CLI touches more than `Cargo.toml`. rpi updates the shared crate version, refreshes the lockfile and embedded docs, validates the release crates, creates a tag, waits for CI artifacts, updates package metadata, publishes crates, and deploys the website.
+For a Rust workspace, releasing a CLI touches more than `Cargo.toml`. ki updates the shared crate version, refreshes the lockfile and embedded docs, validates the release crates, creates a tag, waits for CI artifacts, updates package metadata, publishes crates, and deploys the website.
 
 The pipeline lives in `scripts/release.sh`. It has dry-run mode and restart points, which helps when CI is slow or a later credential is unavailable:
 

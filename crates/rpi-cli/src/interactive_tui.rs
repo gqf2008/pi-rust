@@ -1837,7 +1837,7 @@ pub async fn interactive_tui(
                 continue;
             };
             let key = rpi_tui::terminal::normalize_key_event(key);
-            // Diagnostic trace (off unless RPI_DEBUG_KEYS is set): records what
+            // Diagnostic trace (off unless KI_DEBUG_KEYS is set): records what
             // actually arrived before any routing decision, so a client that
             // sends LF for Enter is visible as `Char('j') mods=CONTROL`.
             crate::key_trace::key(&key, "");

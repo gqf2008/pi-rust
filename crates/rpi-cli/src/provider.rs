@@ -3166,7 +3166,7 @@ mod tests {
     "gateway": {
       "baseUrl": "https://gw.example.com",
       "api": "anthropic-messages",
-      "apiKey": "$RPI_TEST_GATEWAY_KEY",
+      "apiKey": "$KI_TEST_GATEWAY_KEY",
       "models": [
         { "id": "custom-claude", "contextWindow": 200000, "maxTokens": 8192 }
       ]

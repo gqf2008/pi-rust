@@ -366,7 +366,7 @@ pub(super) fn format_resume_command(
     if session_id.is_empty() {
         return None;
     }
-    let mut args = vec![crate::APP_NAME.to_string()];
+    let mut args = vec![crate::COMMAND_NAME.to_string()];
     if let Some(dir) = session_dir {
         let default = crate::session::default_session_dir(cwd);
         if dir != default.as_path() {

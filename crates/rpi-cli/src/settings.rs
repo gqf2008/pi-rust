@@ -699,7 +699,7 @@ mod tests {
     use super::*;
     use crate::config::test_support::env_lock;
 
-    /// Point `RPI_CODING_AGENT_DIR` at a fresh temp dir for this test.
+    /// Point `KI_CODING_AGENT_DIR` at a fresh temp dir for this test.
     struct TempConfig {
         _guard: std::sync::MutexGuard<'static, ()>,
         _tmp: tempfile::TempDir,

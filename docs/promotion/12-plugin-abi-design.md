@@ -1,6 +1,6 @@
-# 跨动态库的 Rust 插件 ABI：rpi 如何控制边界风险
+# 跨动态库的 Rust 插件 ABI：ki 如何控制边界风险
 
-> 插件系统最难的不是加载一个动态库，而是定义跨编译器、跨 crate 版本仍然可理解的内存边界。rpi 将稳定的 C ABI 放在 `rpi-plugin-sdk`，把宿主加载和异步桥接放在 `rpi-extensions`。
+> 插件系统最难的不是加载一个动态库，而是定义跨编译器、跨 crate 版本仍然可理解的内存边界。ki 将稳定的 C ABI 放在 `rpi-plugin-sdk`，把宿主加载和异步桥接放在 `rpi-extensions`。
 
 ## 宿主与插件
 
@@ -56,7 +56,7 @@ sequenceDiagram
 
 # A Plugin ABI Has to Define Ownership, Not Just an Entry Point
 
-Loading a dynamic library is the easy part. The difficult questions concern memory ownership, compiler differences, version mismatches, and panics. rpi puts the C-compatible contract in `rpi-plugin-sdk` and loading logic in `rpi-extensions`.
+Loading a dynamic library is the easy part. The difficult questions concern memory ownership, compiler differences, version mismatches, and panics. ki puts the C-compatible contract in `rpi-plugin-sdk` and loading logic in `rpi-extensions`.
 
 The boundary uses `#[repr(C)]`, explicit function pointers, version negotiation, and release functions. Rust types with hidden layout or destruction behavior should not cross it casually. Strings, errors, callbacks, and shutdown all need ownership rules.
 

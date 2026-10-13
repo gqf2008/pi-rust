@@ -1,12 +1,12 @@
 # 远程 Agent 架构：无头服务与零状态 TUI 客户端
 
-> rpi 不只是一台机器上的终端程序。远程模式把 Agent 状态、模型调用和工具执行留在 server，客户端只负责显示事件和发送输入，适合在服务器上运行长任务。
+> ki 不只是一台机器上的终端程序。远程模式把 Agent 状态、模型调用和工具执行留在 server，客户端只负责显示事件和发送输入，适合在服务器上运行长任务。
 
 ## 数据链路
 
 ```mermaid
 flowchart LR
-    TUI[本地 rpi --connect] -->|TCP + token| Server[远程 rpi --server]
+    TUI[本地 ki --connect] -->|TCP + token| Server[远程 ki --server]
     Server --> Loop[Agent loop]
     Loop --> Model[Provider]
     Loop --> Tools[ExecutionEnv / tools]
@@ -20,13 +20,13 @@ flowchart LR
 
 ```bash
 # 服务器上
-rpi --server --connect-token "$RPI_CONNECT_TOKEN"
+ki --server --connect-token "$KI_CONNECT_TOKEN"
 
 # 客户端
-rpi --connect 10.0.0.8:PORT --connect-token "$RPI_CONNECT_TOKEN"
+ki --connect 10.0.0.8:PORT --connect-token "$KI_CONNECT_TOKEN"
 ```
 
-具体参数请运行 `rpi --help`，因为端口和认证选项会随版本变化。认证 token 应通过安全的 secret 管理，不要写进 shell 历史或仓库。
+具体参数请运行 `ki --help`，因为端口和认证选项会随版本变化。认证 token 应通过安全的 secret 管理，不要写进 shell 历史或仓库。
 
 ## 连接生命周期
 
@@ -56,7 +56,7 @@ sequenceDiagram
 
 In remote mode, the server owns the workspace, credentials, tools, and session. The client renders the conversation and sends input. A disconnected terminal does not take the agent state with it.
 
-The usual shape is `rpi --server` on the machine that has the project and `rpi --connect` on a laptop. The connection carries commands and events; it does not copy the full model context to the client.
+The usual shape is `ki --server` on the machine that has the project and `ki --connect` on a laptop. The connection carries commands and events; it does not copy the full model context to the client.
 
 Treat the connection token as a secret. Use a private network or TLS/VPN where appropriate, rotate tokens, and restrict the server account. Remote mode provides a process split, not a complete security policy.
 

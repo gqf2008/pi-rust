@@ -1,18 +1,18 @@
-# rpi Rust 扩展开发最佳实践
+# ki Rust 扩展开发最佳实践
 
-本文是 rpi 创建 Rust `cdylib` 扩展的模型可读规范。扩展是 Rust 原生动态库，
+本文是 ki 创建 Rust `cdylib` 扩展的模型可读规范。扩展是 Rust 原生动态库，
 通过稳定 C ABI（`rpi-plugin-sdk`）注册工具、事件处理器、资源发现、Provider
-与渲染器，宿主（`rpi` CLI）负责加载与生命周期。创建完整 Agent 项目的默认结构见
+与渲染器，宿主（`ki` CLI）负责加载与生命周期。创建完整 Agent 项目的默认结构见
 `docs` 的 `agent` 主题；本指南聚焦扩展本身的 ABI 与生命周期。
 
 ## 1. 扩展模型总览
 
 | 项目 | Rust 原生扩展 |
 | --- | --- |
-| 安装 | `rpi install crate-name`（crates.io 或 `--path`） |
+| 安装 | `ki install crate-name`（crates.io 或 `--path`） |
 | 入口 | `rpi_plugin_register` C ABI 符号 |
-| 开发反馈 | `rpi dev` watch + 热重载；`rpi dev-local` 隔离调试 |
-| 静态资源 | `resources_discover` 或随项目放入 `.rpi` |
+| 开发反馈 | `ki dev` watch + 热重载；`ki dev-local` 隔离调试 |
+| 静态资源 | `resources_discover` 或随项目放入 `.ki` |
 | 运行环境 | 本机动态库，当前用户权限 |
 | 适用场景 | 本地工具、系统集成、性能敏感或纯 Rust 项目 |
 
@@ -135,7 +135,7 @@ rpi_plugin_sdk::export_plugin!(|api| {
 - 内置工具不走这条路——它们从 harness 直接拿到 `ExecutionToolContext`。
 
 需要"每个会话一份状态"的插件就用 `sessionId` 做键（`rpi-todo` 存
-`.rpi/todos/<sessionId>.json`，一条会话一个文件），取不到时退回项目级并**在
+`.ki/todos/<sessionId>.json`，一条会话一个文件），取不到时退回项目级并**在
 回复里说明**，不要编一个共享的伪会话——那正是它要解决的问题。
 
 ## 5. 事件处理器、资源发现与 Provider
@@ -149,14 +149,14 @@ rpi_plugin_sdk::export_plugin!(|api| {
 - **Agent 循环**：`BeforeAgentStart`、`AgentStart`、`AgentEnd`、`AgentSettled`、
   `TurnStart`、`TurnEnd`、`MessageStart`/`MessageUpdate`/`MessageEnd`、
   `ToolExecutionStart`/`Update`/`End`、`ToolCall`、`ToolResult`、`UserBash`、`Input`。
-- **rpi 特有 / UI**：`BeforeTuiStart`（TUI 初始化前）、`UiPromptStart`/`UiPromptEnd`。
+- **ki 特有 / UI**：`BeforeTuiStart`（TUI 初始化前）、`UiPromptStart`/`UiPromptEnd`。
 
 处理器收到 `StablePluginEvent`，不得释放事件里的字符串（宿主 fan-out 后统一释放）。
 返回 `0` 成功；返回 `EVENT_HANDLER_ABORT` 表示 veto。
 
 ### 生命周期 veto
 
-`BeforeTuiStart` 是带 veto 语义的 rpi 专有钩子：第一个返回 `EVENT_HANDLER_ABORT`
+`BeforeTuiStart` 是带 veto 语义的 ki 专有钩子：第一个返回 `EVENT_HANDLER_ABORT`
 的处理器中止启动，CLI 以退出码 `3` 退出（用于"进入 TUI 前必须先建立外部连接"）。
 `SessionStart`/`SessionShutdown` 的 veto 只是 advisory。分发带超时，慢处理器不会
 无限阻塞主流程。
@@ -227,51 +227,51 @@ extern "C" fn on_before_agent_start(
 7. 插件注册失败返回非零；单个工具执行失败返回结构化错误，不要让整个宿主退出。
 8. README 记录工具 schema、权限边界、持久化文件、网络访问、支持平台和卸载方式。
 
-## 7. 使用 rpi dev 开发
+## 7. 使用 ki dev 开发
 
 在扩展 crate 目录运行：
 
 ```bash
-rpi dev
+ki dev
 ```
 
-rpi 会通过 Cargo metadata 识别当前 `cdylib`，首次编译后把版本化副本放在工作区
-`.rpi/extensions/.dev/`，启动正常 TUI，并监控 `src/`、`build.rs`、package/workspace
+ki 会通过 Cargo metadata 识别当前 `cdylib`，首次编译后把版本化副本放在工作区
+`.ki/extensions/.dev/`，启动正常 TUI，并监控 `src/`、`build.rs`、package/workspace
 `Cargo.toml` 和 `Cargo.lock`。源文件变化后会自动编译并走现有 reload 流程；编译失败
 会保留当前已加载版本。
 
 多扩展 workspace 必须明确选择 package：
 
 ```bash
-rpi dev --package rpi-todo
-rpi dev -P rpi-webfetch
+ki dev --package rpi-todo
+ki dev -P rpi-webfetch
 ```
 
 其他模式：
 
 ```bash
-rpi dev --release
-rpi dev --no-watch
-rpi dev-local
-rpi dev --package rpi-todo -- --model gateway/model
+ki dev --release
+ki dev --no-watch
+ki dev-local
+ki dev --package rpi-todo -- --model gateway/model
 ```
 
-调试单个扩展时使用 `rpi dev-local`（等价于 `rpi dev --local-only`）。它只加载当前
+调试单个扩展时使用 `ki dev-local`（等价于 `ki dev --local-only`）。它只加载当前
 编译的扩展、当前项目目录的 skill/prompt，以及该扩展发现的 skill/prompt；不会扫描
 全局扩展、已安装 Pi 包或其他项目资源，避免同名命令和无关命令干扰调试。内置命令
 （包括 `/reload`）仍然可用。没有 Cargo cdylib 时优雅降级为 skills-only 模式。
 
 TUI 中执行 `/reload` 会强制重新运行 Cargo build，再加载新阶段产物。Windows 上
 已加载 DLL 无法原地覆盖，因此不要手工把 Cargo target DLL 复制到固定文件名；
-`rpi dev` 的版本化 staging 会安全地完成切换，并在会话退出、loader 释放后清理。
+`ki dev` 的版本化 staging 会安全地完成切换，并在会话退出、loader 释放后清理。
 
 ## 8. 资源与配置约定
 
-项目级资源放在 `.rpi/`。同名资源优先级是项目内定义优先
+项目级资源放在 `.ki/`。同名资源优先级是项目内定义优先
 高于 `.pi`，项目高于全局，package 最后：
 
 ```text
-.rpi/
+.ki/
 ├── SYSTEM.md
 ├── APPEND_SYSTEM.md
 ├── settings.json
@@ -286,7 +286,7 @@ TUI 中执行 `/reload` 会强制重新运行 Cargo build，再加载新阶段�
 
 ### 自定义加载路径
 
-项目级 `.rpi/settings.json` 可以声明额外资源路径；无需其他兼容
+项目级 `.ki/settings.json` 可以声明额外资源路径；无需其他兼容
 回退。路径相对于项目根目录，配置路径会排在约定目录前面：
 
 ```json
@@ -299,23 +299,23 @@ TUI 中执行 `/reload` 会强制重新运行 Cargo build，再加载新阶段�
 ```
 
 `skills`、`prompts`、`extensions` 也可分别作为三个路径数组的简写。全局
-`~/.rpi/agent/settings.json` 支持相同的 `skillDirs`、`promptDirs`、`extensionDirs`，
-其中相对路径相对于全局 agent 目录。项目配置优先于全局配置；`.rpi` 资源和设置排在
+`~/.ki/agent/settings.json` 支持相同的 `skillDirs`、`promptDirs`、`extensionDirs`，
+其中相对路径相对于全局 agent 目录。项目配置优先于全局配置；`.ki` 资源和设置排在
 `.pi` 之前。
 
 单次运行可以显式追加路径：
 
 ```bash
-rpi --skill ./extra-skills
-rpi --prompt-template ./extra-prompts
-rpi --extension ./target/debug/my_extension.dll
-rpi --extensions-dir ./target/debug
+ki --skill ./extra-skills
+ki --prompt-template ./extra-prompts
+ki --extension ./target/debug/my_extension.dll
+ki --extensions-dir ./target/debug
 ```
 
 `--skill`、`--prompt-template`、`--extension` 和 `--extensions-dir` 都可以重复使用。
-额外的 Rust 扩展目录也可通过 `RPI_EXTENSIONS_DIR` 配置；Windows 使用分号分隔，
+额外的 Rust 扩展目录也可通过 `KI_EXTENSIONS_DIR` 配置；Windows 使用分号分隔，
 Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI 与排错；团队共享配置
-使用项目 `.rpi/settings.json`。
+使用项目 `.ki/settings.json`。
 
 ## 9. 发布检查清单
 
@@ -323,17 +323,17 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 - `crate-type` 包含 `cdylib`，使用 `export_plugin!` 导出
   `rpi_plugin_register`。
 - 依赖已发布的 `rpi-plugin-sdk` 兼容版本，不链接宿主私有 crate。
-- `rpi dev --no-watch` 能编译、加载并注册预期工具。
-- `rpi install <crate> --force` 的干净安装路径通过。
+- `ki dev --no-watch` 能编译、加载并注册预期工具。
+- `ki install <crate> --force` 的干净安装路径通过。
 - Linux/macOS/Windows 构建由 CI 验证，README 标明支持矩阵。
 
 ## 10. 模型执行规则
 
-模型收到"创建 rpi Rust 插件、扩展工具"任务时：
+模型收到"创建 ki Rust 插件、扩展工具"任务时：
 
 1. 先调用 `docs` 查询 `authoring`（扩展开发）或 `debugging`（调试）。
 2. 阅读当前仓库现有 manifest、SDK 版本和相邻扩展约定，不猜 API。
 3. 优先复制 `examples/plugin-stub` 的最小骨架。
 4. 实现领域逻辑与边界测试，再连接 loader/ABI。
-5. 使用 `rpi dev --no-watch` 与 `rpi install <crate> --force` 做真实 smoke test。
+5. 使用 `ki dev --no-watch` 与 `ki install <crate> --force` 做真实 smoke test。
 6. 不声称未验证的 Pi capability 已完全兼容；明确记录降级行为。

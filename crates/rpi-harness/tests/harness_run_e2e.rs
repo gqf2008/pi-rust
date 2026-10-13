@@ -1055,7 +1055,7 @@ async fn run_budget_stops_a_looping_run_and_records_why() {
     );
 }
 
-/// Upstream parity: with no `RPI_MAX_TURNS_PER_RUN`, a run has **no** turn
+/// Upstream parity: with no `KI_MAX_TURNS_PER_RUN`, a run has **no** turn
 /// ceiling — it ends only because the model stopped asking for tools. This is
 /// the counterpart of the opt-in test above: it fails if anyone re-enables the
 /// guard by default.

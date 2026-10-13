@@ -1,8 +1,8 @@
 //! Env-gated key-event tracing for diagnosing terminal input problems
 //! (remote/mobile clients, "Enter inserted a newline", paste-vs-typed Enter…).
 //!
-//! Enable with `RPI_DEBUG_KEYS=1` (appends to `<temp>/rpi-keys.log`) or
-//! `RPI_DEBUG_KEYS=<path>` to pick the file. Every key the TUI dispatches is
+//! Enable with `KI_DEBUG_KEYS=1` (appends to `<temp>/rpi-keys.log`) or
+//! `KI_DEBUG_KEYS=<path>` to pick the file. Every key the TUI dispatches is
 //! appended as one line — wall clock, key code, modifiers, event kind, plus a
 //! caller-supplied note (the paste-burst decision, for example):
 //!

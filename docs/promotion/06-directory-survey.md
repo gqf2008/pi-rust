@@ -5,7 +5,7 @@ three of the four closed by *popularity* gates. This file is the second pass: it
 looks for lists that are **built for this exact category** — terminal-native
 coding agents and agent harnesses — where the gate is fit rather than star count.
 
-Two things came out of it: **the best-fit list for rpi was missing from the
+Two things came out of it: **the best-fit list for ki was missing from the
 earlier survey entirely**, and one more list is open but not yet reachable.
 
 All rules below were read from the repositories themselves on **2026-09-26**
@@ -14,7 +14,7 @@ site could not be read from this environment, that is stated rather than guessed
 
 ## Verdict matrix
 
-| List | Size | rpi eligible now? | The gate |
+| List | Size | ki eligible now? | The gate |
 | --- | --- | --- | --- |
 | [awesome-cli-coding-agents](#1-bradagiawesome-cli-coding-agents) | 1,282★ | **Yes** | fit + format only; entry goes near the bottom (sorted by stars) |
 | [awesome-harness-engineering](#2-ai-boostawesome-harness-engineering) | 4,527★ | **Yes** | must answer a *harness* problem, with an opinionated 1–2 sentence note |
@@ -22,7 +22,7 @@ site could not be read from this environment, that is stated rather than guessed
 | [AlternativeTo](#4-alternativeto--libhunt-unverified) | — | Unknown | Cloudflare-blocked from here — needs a browser |
 | [LibHunt / lib.rs](#4-alternativeto--libhunt-unverified) | — | lib.rs partial | lib.rs auto-indexes crates.io; LibHunt needs a browser |
 
-Two entries are ready to submit below. Neither list has rpi in it as of the
+Two entries are ready to submit below. Neither list has ki in it as of the
 measurement date — re-check before opening a PR, because both accept
 contributions continuously (the top list merged 25 entries from its PR queue on
 2026-09-22).
@@ -33,14 +33,14 @@ contributions continuously (the top list merged 25 entries from its PR queue on
 
 **This is the list the earlier survey should have found.** It is a curated
 directory of *terminal-native* coding agents and the harnesses around them —
-which is rpi's category, not a general "awesome AI" bucket.
+which is ki's category, not a general "awesome AI" bucket.
 
 - Repo: <https://github.com/bradAGI/awesome-cli-coding-agents>
 - 1,282★, created 2026-02-07, last push 2026-09-22 (active, no licence file)
 - Sections: `## Terminal-native coding agents` → `### Open Source` / `### Closed Source`,
   then `## Harnesses & orchestration` → session managers / orchestrators /
   agent infrastructure
-- rpi is **not** listed.
+- ki is **not** listed.
 
 ### Rules, quoted from its `## Contributing` section
 
@@ -59,21 +59,21 @@ which is rpi's category, not a general "awesome AI" bucket.
 > Entries are sorted by GitHub stars within each section. Place your entry in the
 > correct position.
 
-rpi satisfies all three inclusion requirements. The star count must be refreshed
+ki satisfies all three inclusion requirements. The star count must be refreshed
 at submission time — the list refreshes badges on a schedule and sorts by stars,
 so a stale number lands the entry in the wrong slot.
 
 ### Entry, ready for the `### Open Source` section
 
 ```markdown
-- **[rpi](https://github.com/bigfish1913/pi-rust)** `⭐ <refresh at submit time>` — Library-first Rust coding agent: nine composable crates (`rpi-agent`, `rpi-tools`, `rpi-harness`, `rpi-tui`, …) so the agent loop can be embedded in your own program, plus a ready-to-run `rpi` terminal CLI. Crash-resumable JSONL sessions that self-heal a duplicated-seq log, a stable `#[repr(C)]` plugin ABI for tools and providers, and a provider-agnostic `StreamFn` boundary that makes the loop testable with no network. MIT.
+- **[ki](https://github.com/bigfish1913/pi-rust)** `⭐ <refresh at submit time>` — Library-first Rust coding agent: nine composable crates (`rpi-agent`, `rpi-tools`, `rpi-harness`, `rpi-tui`, …) so the agent loop can be embedded in your own program, plus a ready-to-run `ki` terminal CLI. Crash-resumable JSONL sessions that self-heal a duplicated-seq log, a stable `#[repr(C)]` plugin ABI for tools and providers, and a provider-agnostic `StreamFn` boundary that makes the loop testable with no network. MIT.
 ```
 
 Placement: bottom of `### Open Source` (32★ is the lowest band in that section).
 
 **No `AGENTS.md` in this repo**, unlike `awesome-cli-apps` (see
 `05-awesome-list-survey.md`), so there is no stated prohibition on agent-authored
-PRs. Open it from a human account anyway: the PR body should say what rpi is in
+PRs. Open it from a human account anyway: the PR body should say what ki is in
 one line and note that it is placed by star order.
 
 ---
@@ -81,7 +81,7 @@ one line and note that it is placed by star order.
 ## 2. ai-boost/awesome-harness-engineering
 
 A curated list of resources for building reliable **agent harnesses** —
-context delivery, tool design, permissions, memory and state, verification. rpi
+context delivery, tool design, permissions, memory and state, verification. ki
 is a harness with a written-down crash-recovery design, so it fits the
 `## Reference Implementations` area rather than the general agent lists.
 
@@ -90,7 +90,7 @@ is a harness with a written-down crash-recovery design, so it fits the
   `verify_urls.py` link checker
 - Relevant sections: `## Reference Implementations` → `### Demo Harnesses`,
   and `### Memory & State` under Design Primitives
-- rpi is **not** listed.
+- ki is **not** listed.
 
 ### Rules, quoted from `CONTRIBUTING.md`
 
@@ -118,7 +118,7 @@ English, one entry per line, and **no entry without a note**.
 ### Entry, ready for `## Reference Implementations`
 
 ```markdown
-- [rpi](https://github.com/bigfish1913/pi-rust) — A Rust agent harness that treats the session log as the durable tail of an in-memory mutation state, so a crash resumes mid-turn instead of losing it. Its loader also recovers a log corrupted by two concurrent writers — duplicate sequence numbers are dropped, a divergent counter is resynced, orphaned entries are re-chained onto the lane leaf — and republishes the file atomically, which is the rare case of session integrity being documented rather than assumed.
+- [ki](https://github.com/bigfish1913/pi-rust) — A Rust agent harness that treats the session log as the durable tail of an in-memory mutation state, so a crash resumes mid-turn instead of losing it. Its loader also recovers a log corrupted by two concurrent writers — duplicate sequence numbers are dropped, a divergent counter is resynced, orphaned entries are re-chained onto the lane leaf — and republishes the file atomically, which is the rare case of session integrity being documented rather than assumed.
 ```
 
 ---
@@ -127,7 +127,7 @@ English, one entry per line, and **no entry without a note**.
 
 - Repo: <https://github.com/kyrolabs/awesome-agents>
 - 2,841★; has a `CONTRIBUTING.md`
-- rpi is not listed.
+- ki is not listed.
 
 ### Rules, quoted from `CONTRIBUTING.md`
 
@@ -143,7 +143,7 @@ English, one entry per line, and **no entry without a note**.
 > merging it: brand new repo with no history, brand new user, or wrong place in
 > the list.
 
-Verdict: **not eligible yet.** rpi's first commit is 2026-08-12 and it sits at
+Verdict: **not eligible yet.** ki's first commit is 2026-08-12 and it sits at
 32★; this is the same class of gate as Awesome Rust in `05-…md`, and the wording
 ("applied automatically") means a premature PR is auto-closed and costs standing
 rather than just being ignored. Revisit when the star count is in the hundreds.
@@ -162,7 +162,7 @@ What is known without a browser:
   listed there with no submission step. That is coverage we did not have to ask
   for, and it is the one directory channel currently working.
 - **AlternativeTo** is the highest-value unverified channel: it is a
-  *substitution* directory, so rpi's natural position is as an alternative to
+  *substitution* directory, so ki's natural position is as an alternative to
   Claude Code / Codex CLI, which is the same search intent the new
   `compare.html` page targets. It needs one manual check of whether adding an
   entry requires an account, a moderation queue, or a paid tier.
@@ -177,7 +177,7 @@ and only then submit. Do not let an agent guess at a form.
 ## What this changes about the plan
 
 1. **Submit to `awesome-cli-coding-agents` first.** It is the only list whose
-   category is exactly rpi's, whose gate is fit rather than popularity, and whose
+   category is exactly ki's, whose gate is fit rather than popularity, and whose
    rules are unambiguous. One PR, one line, sorted position.
 2. **Then `awesome-harness-engineering`**, with the entry framed around the
    session-integrity problem — that list explicitly excludes product

@@ -5,7 +5,7 @@ This file is the broader survey: five curated lists, each checked against its
 actual written rules rather than its reputation.
 
 The point is to stop guessing. Every one of these lists has a threshold, an age
-requirement, or a policy, and **three of the five are closed to rpi today**. The
+requirement, or a policy, and **three of the five are closed to ki today**. The
 useful output is knowing which, why, and the exact date or number that opens
 them — because a submission that gets auto-closed costs the project's
 reputation and tells us nothing.
@@ -15,11 +15,11 @@ All measurements are from **2026-09-25**, taken with the commands in
 
 ## Verdict matrix
 
-| List | Size | rpi eligible now? | Why not |
+| List | Size | ki eligible now? | Why not |
 | --- | --- | --- | --- |
 | [Awesome Rust](#1-awesome-rust) | — | **No** | needs 50★ or 2000 downloads; has 32★, best crate 1112 |
 | [awesome-cli-apps](#2-awesome-cli-apps) | 20,463★ | **Yes** (32 > 20★) | eligible, but its `AGENTS.md` forbids agent-authored PRs — a human must submit |
-| [awesome-tuis](#3-awesome-tuis) | 20,726★ | **No** | repos must be ≥6 months old; rpi's first commit is 2026-08-12 |
+| [awesome-tuis](#3-awesome-tuis) | 20,726★ | **No** | repos must be ≥6 months old; ki's first commit is 2026-08-12 |
 | [e2b/awesome-ai-agents](#4-e2bawesome-ai-agents) | 30,166★ | **No** | not accepting additions: last 10 PRs all closed, no commit since 2026-08-21 |
 | [This Week in Rust](#5-this-week-in-rust) | — | Not a PR route | see `04-…md`; editors watch r/rust |
 
@@ -85,10 +85,10 @@ That leaves this as the one list where a **human submission works today**. The
 entry, ready to paste into the `### Agents` section (`## Development`):
 
 ```markdown
-- [rpi](https://github.com/bigfish1913/pi-rust) - Rust-native coding-agent runtime and terminal CLI.
+- [ki](https://github.com/bigfish1913/pi-rust) - Rust-native coding-agent runtime and terminal CLI.
 ```
 
-PR title: `Add rpi`. Use their PR template. Their `### Agents` list is ordered by
+PR title: `Add ki`. Use their PR template. Their `### Agents` list is ordered by
 addition, not alphabetically (`actionbook`, `lean-ctx`, `hcom`, `toktrack`,
 `OpenCode`, `Nanocoder`, `faf-cli`, `agentty`), so append.
 
@@ -114,15 +114,15 @@ roughly six weeks old. The earliest eligible date is therefore around
 The fit is otherwise excellent: the `Development` section already lists
 `codex` ("Lightweight coding agent that runs in your terminal"), `crush` ("The
 glamourous AI coding agent") and `opencode` ("AI coding agent, built for the
-terminal"), and rpi's `--help`-driven interactive TUI meets the "interactive or
+terminal"), and ki's `--help`-driven interactive TUI meets the "interactive or
 re-draw" test.
 
 Entry format is `- [name](url) Description` (no dash before the description,
-unlike awesome-cli-apps). Alphabetically rpi belongs between `resterm` and
+unlike awesome-cli-apps). Alphabetically ki belongs between `resterm` and
 `runme` in `Development`:
 
 ```markdown
-- [rpi](https://github.com/bigfish1913/pi-rust) Rust-native coding-agent runtime with an interactive terminal UI
+- [ki](https://github.com/bigfish1913/pi-rust) Rust-native coding-agent runtime with an interactive terminal UI
 ```
 
 Do not submit before **2027-02-12**.
@@ -133,7 +133,7 @@ This list looks like an easy win — 30,166 stars, an AI-agent focus, and its
 README says "Create a pull request or fill in this form". It is not:
 
 - the last **10** closed PRs were **all closed unmerged** (including entries
-  adding coding agents, which is the category rpi would join);
+  adding coding agents, which is the category ki would join);
 - the most recent commit is **2026-08-21**, a docs-link change pointing at
   `docs.e2b.dev`;
 - 1064 open issues.
@@ -175,7 +175,7 @@ Not a submission, and it needs a version publish to take effect, so it is worth
 folding into the next release bump rather than forcing one.
 
 `artificial-intelligence` is a real crates.io category (249 crates) and **none
-of the nine rpi crates use it**, despite all nine carrying sensible `keywords`.
+of the nine ki crates use it**, despite all nine carrying sensible `keywords`.
 Their current categories are `api-bindings`, `asynchronous`,
 `command-line-interface`, `development-tools`,
 `development-tools::ffi` — none of which is the one a person browsing for an AI

@@ -1050,8 +1050,8 @@ fn build_direct_update_plan(
         return Err("current executable is not a direct child of its validated directory".into());
     }
     let token = uuid::Uuid::new_v4().simple().to_string();
-    let replacement_temp = target_dir.join(format!(".rpi-update-{token}.new"));
-    let backup_file = target_dir.join(format!(".rpi-update-{token}.old"));
+    let replacement_temp = target_dir.join(format!(".ki-update-{token}.new"));
+    let backup_file = target_dir.join(format!(".ki-update-{token}.old"));
     if replacement_temp.exists() || backup_file.exists() {
         return Err("self-update replacement path collision".to_string());
     }
@@ -1663,9 +1663,9 @@ fn build_windows_update_plan(
         return Err("current executable is not a direct child of its validated directory".into());
     }
     let token = uuid::Uuid::new_v4().simple().to_string();
-    let replacement_temp = target_dir.join(format!(".rpi-update-{token}.new.exe"));
-    let backup_file = target_dir.join(format!(".rpi-update-{token}.old.exe"));
-    let rollback_displaced_file = target_dir.join(format!(".rpi-update-{token}.rollback-new.exe"));
+    let replacement_temp = target_dir.join(format!(".ki-update-{token}.new.exe"));
+    let backup_file = target_dir.join(format!(".ki-update-{token}.old.exe"));
+    let rollback_displaced_file = target_dir.join(format!(".ki-update-{token}.rollback-new.exe"));
     if replacement_temp.exists() || backup_file.exists() || rollback_displaced_file.exists() {
         return Err("self-update replacement path collision".to_string());
     }
@@ -2455,7 +2455,7 @@ mod tests {
         });
         std::fs::write(
             path,
-            format!("#!/bin/sh\n{failure}printf 'ki {version}\\n'\n"),
+            format!("#!/bin/sh\n{failure}printf 'kiqi {version}\\n'\n"),
         )
         .unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2588,8 +2588,8 @@ mod tests {
     fn direct_update_replaces_the_selected_target_and_rejects_downgrades() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging");
-        let staged = staging.join("bin/ki");
-        let target = temp.path().join("target/rpi-current");
+        let staged = staging.join("bin/kiqi");
+        let target = temp.path().join("target/ki-current");
         fake_unix_rpi(&staged, "9.9.9", None);
         fake_unix_rpi(&target, crate::VERSION, None);
         let expected = std::fs::read(&staged).unwrap();
@@ -2612,9 +2612,9 @@ mod tests {
     fn direct_update_rolls_back_when_post_replace_validation_fails() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging");
-        let staged = staging.join("bin/ki");
-        let target = temp.path().join("target/rpi-current");
-        fake_unix_rpi(&staged, "9.9.9", Some("rpi-current"));
+        let staged = staging.join("bin/kiqi");
+        let target = temp.path().join("target/ki-current");
+        fake_unix_rpi(&staged, "9.9.9", Some("ki-current"));
         fake_unix_rpi(&target, crate::VERSION, None);
         let original = std::fs::read(&target).unwrap();
 
@@ -2661,15 +2661,15 @@ mod tests {
     #[test]
     fn self_update_honors_env_and_early_dispatched_offline_flag() {
         let _guard = crate::config::test_support::env_lock().lock().unwrap();
-        let _restore = RestoreEnv::capture(crate::args::RPI_OFFLINE_ENV);
+        let _restore = RestoreEnv::capture(crate::args::KI_OFFLINE_ENV);
 
-        std::env::set_var(crate::args::RPI_OFFLINE_ENV, "tRuE");
+        std::env::set_var(crate::args::KI_OFFLINE_ENV, "tRuE");
         assert_eq!(super::run_self_update(&[]), 0);
 
-        std::env::set_var(crate::args::RPI_OFFLINE_ENV, "0");
+        std::env::set_var(crate::args::KI_OFFLINE_ENV, "0");
         assert_eq!(super::run_self_update(&["--offline".into()]), 0);
         assert_eq!(
-            std::env::var(crate::args::RPI_OFFLINE_ENV).as_deref(),
+            std::env::var(crate::args::KI_OFFLINE_ENV).as_deref(),
             Ok("1")
         );
     }
@@ -2678,12 +2678,12 @@ mod tests {
     async fn offline_skips_rpi_startup_checks_before_cache_io() {
         let _guard = crate::config::test_support::env_lock().lock().unwrap();
         let _restore_config = RestoreConfigDir(std::env::var_os(crate::config::CONFIG_DIR_ENV));
-        let _restore_offline = RestoreEnv::capture(crate::args::RPI_OFFLINE_ENV);
+        let _restore_offline = RestoreEnv::capture(crate::args::KI_OFFLINE_ENV);
         let _restore_disabled = RestoreEnv::capture("KI_DISABLE_UPDATE_CHECK");
         let temp = real_tempdir();
         let agent = temp.path().join("offline-agent");
         std::env::set_var(crate::config::CONFIG_DIR_ENV, &agent);
-        std::env::set_var(crate::args::RPI_OFFLINE_ENV, "YES");
+        std::env::set_var(crate::args::KI_OFFLINE_ENV, "YES");
         std::env::remove_var("KI_DISABLE_UPDATE_CHECK");
 
         let report = super::check_rpi_startup().await;
@@ -2968,7 +2968,7 @@ mod tests {
     fn windows_update_helper_atomically_replaces_a_valid_target() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging 'semi;& with spaces");
-        let staged = staging.join("bin/ki.exe");
+        let staged = staging.join("bin/kiqi.exe");
         let target = temp.path().join("target 'semi;& with spaces/rpi-copy.exe");
         fake_windows_executable(&staged, b"new-version");
         fake_windows_executable(&target, b"old-version");
@@ -3030,7 +3030,7 @@ mod tests {
     fn windows_update_helper_failure_preserves_the_old_executable() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging with spaces");
-        let staged = staging.join("bin/ki.exe");
+        let staged = staging.join("bin/kiqi.exe");
         let target = temp.path().join("target with spaces/rpi-copy.exe");
         fake_windows_executable(&staged, b"new-version");
         fake_windows_executable(&target, b"old-version");
@@ -3078,7 +3078,7 @@ mod tests {
     fn windows_update_helper_rolls_back_after_post_replace_validation_failure() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging");
-        let staged = staging.join("bin/ki.exe");
+        let staged = staging.join("bin/kiqi.exe");
         let target = temp.path().join("target/rpi-copy.exe");
         fake_windows_executable(&staged, b"new-version");
         fake_windows_executable(&target, b"old-version");
@@ -3134,7 +3134,7 @@ mod tests {
     fn windows_update_plan_rejects_a_non_executable_staged_file() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging");
-        let staged = staging.join("bin/ki.exe");
+        let staged = staging.join("bin/kiqi.exe");
         let target = temp.path().join("target/ki.exe");
         std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
         std::fs::write(&staged, b"not-a-pe").unwrap();
@@ -3157,24 +3157,24 @@ mod tests {
     #[test]
     fn staged_rpi_version_output_is_exact_and_cannot_downgrade() {
         assert_eq!(
-            parse_rpi_version_output(b"ki 1.2.3\r\n").unwrap(),
+            parse_rpi_version_output(b"kiqi 1.2.3\r\n").unwrap(),
             semver::Version::new(1, 2, 3)
         );
         assert_eq!(
-            validate_staged_rpi_version_output(b"ki 1.2.3\n", b"", "1.2.3").unwrap(),
+            validate_staged_rpi_version_output(b"kiqi 1.2.3\n", b"", "1.2.3").unwrap(),
             semver::Version::new(1, 2, 3)
         );
         assert!(
-            validate_staged_rpi_version_output(b"ki 1.2.2\n", b"", "1.2.3")
+            validate_staged_rpi_version_output(b"kiqi 1.2.2\n", b"", "1.2.3")
                 .unwrap_err()
                 .contains("older version")
         );
 
         for output in [
             &b"pi 1.2.3\n"[..],
-            &b"ki v1.2.3\n"[..],
-            &b"ki 1.2.3 extra\n"[..],
-            &b"ki 1.2.3\nsecond line\n"[..],
+            &b"kiqi v1.2.3\n"[..],
+            &b"kiqi 1.2.3 extra\n"[..],
+            &b"kiqi 1.2.3\nsecond line\n"[..],
             &b" ki 1.2.3\n"[..],
         ] {
             assert!(
@@ -3183,7 +3183,7 @@ mod tests {
             );
         }
         assert!(
-            validate_staged_rpi_version_output(b"ki 1.2.3\n", b"warning", "1.2.3")
+            validate_staged_rpi_version_output(b"kiqi 1.2.3\n", b"warning", "1.2.3")
                 .unwrap_err()
                 .contains("stderr")
         );

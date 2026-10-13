@@ -1,6 +1,6 @@
 # Steering 与 Follow-up：Agent 运行中如何安全插入消息
 
-> 用户不应该只能等模型完整结束后才能纠正它。rpi 用两个 FIFO 队列区分“当前运行中的指导”和“本轮结束后的追加请求”，让交互式 Agent 更接近真实工作流。
+> 用户不应该只能等模型完整结束后才能纠正它。ki 用两个 FIFO 队列区分“当前运行中的指导”和“本轮结束后的追加请求”，让交互式 Agent 更接近真实工作流。
 
 ## 两个队列的语义
 
@@ -43,7 +43,7 @@ flowchart LR
     Context --> Events[统一 AgentEvent]
 ```
 
-取消运行时，队列也必须有明确策略：恢复到编辑器、保留等待，或显式丢弃。rpi 的测试覆盖 steering、follow-up 和 abort 路径，入口见 `crates/rpi-agent/tests/steering.rs`、`follow_up.rs`。
+取消运行时，队列也必须有明确策略：恢复到编辑器、保留等待，或显式丢弃。ki 的测试覆盖 steering、follow-up 和 abort 路径，入口见 `crates/rpi-agent/tests/steering.rs`、`follow_up.rs`。
 
 ## 这对实际项目有什么用
 
@@ -55,7 +55,7 @@ flowchart LR
 
 # Steering and Follow-up Queues in a Running Agent
 
-Users often need to correct an agent before the current run ends. rpi has two queues for that case. Steering messages are considered while the loop is working. Follow-up messages are consumed when the current turn would otherwise stop.
+Users often need to correct an agent before the current run ends. ki has two queues for that case. Steering messages are considered while the loop is working. Follow-up messages are consumed when the current turn would otherwise stop.
 
 Both queues are FIFO queues with an explicit drain policy. `OneAtATime` releases the oldest message and keeps the rest. `All` drains the whole queue in order. The loop chooses the drain point, so input is not inserted into a transcript halfway through a model operation.
 

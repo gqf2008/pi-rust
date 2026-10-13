@@ -5,7 +5,7 @@
 //! source checkout or network request. Optional remote fetching remains
 //! available to consumers, with the same versioned-entry parser.
 //!
-//! The remote URL is overridable with `RPI_CHANGELOG_URL` so a fork can point at
+//! The remote URL is overridable with `KI_CHANGELOG_URL` so a fork can point at
 //! its own changelog without a rebuild.
 
 use serde::{Deserialize, Serialize};
@@ -22,11 +22,11 @@ pub struct ChangelogEntry {
     pub content: String,
 }
 
-/// Default remote changelog URL. Overridable via `RPI_CHANGELOG_URL`.
+/// Default remote changelog URL. Overridable via `KI_CHANGELOG_URL`.
 pub const DEFAULT_CHANGELOG_URL: &str =
-    "https://raw.githubusercontent.com/bigfish1913/pi-rust/main/CHANGELOG.md";
+    "https://raw.githubusercontent.com/gqf2008/pi-rust/main/CHANGELOG.md";
 
-/// The remote changelog URL to use, honoring `RPI_CHANGELOG_URL`.
+/// The remote changelog URL to use, honoring `KI_CHANGELOG_URL`.
 pub fn changelog_url() -> String {
     std::env::var("KI_CHANGELOG_URL").unwrap_or_else(|_| DEFAULT_CHANGELOG_URL.to_string())
 }

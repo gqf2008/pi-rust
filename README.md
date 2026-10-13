@@ -1,4 +1,4 @@
-# rpi — a Rust-native coding-agent runtime
+# ki — a Rust-native coding-agent runtime
 
 [![crates.io](https://img.shields.io/crates/v/rpi-cli.svg)](https://crates.io/crates/rpi-cli)
 [![downloads](https://img.shields.io/crates/d/rpi-cli.svg)](https://crates.io/crates/rpi-cli)
@@ -9,18 +9,18 @@
 [![GitHub stars](https://img.shields.io/github/stars/bigfish1913/pi-rust?style=flat)](https://github.com/bigfish1913/pi-rust/stargazers)
 [![Latest release](https://img.shields.io/github/v/release/bigfish1913/pi-rust)](https://github.com/bigfish1913/pi-rust/releases/latest)
 
-`rpi` is a library-first coding-agent runtime written in Rust, plus a terminal
+`ki` is a library-first coding-agent runtime written in Rust, plus a terminal
 agent built on top of it. Nine composable crates span provider adapters, a
 durable crash-resumable agent loop, a terminal UI, and a stable plugin ABI — so
-the same code works as an embedded SDK or as a ready-to-run `rpi` command.
+the same code works as an embedded SDK or as a ready-to-run `ki` command.
 
-Website: <https://rpi.laofu.online/> · Docs: <https://rpi.laofu.online/docs.html>
+Website: <https://ki.laofu.online/> · Docs: <https://ki.laofu.online/docs.html>
 
-![rpi interactive session](docs/images/rpi-interactive.png)
+![ki interactive session](docs/images/rpi-interactive.png)
 
 <sub>Interactive TUI. See [`docs/guides/user-guide.md`](docs/guides/user-guide.md) for the full command surface.</sub>
 
-![rpi SDK demo — an agent loop and a real tool round-trip, offline with the faux provider](docs/images/rpi-sdk-demo.gif)
+![ki SDK demo — an agent loop and a real tool round-trip, offline with the faux provider](docs/images/rpi-sdk-demo.gif)
 
 <sub>The agent loop and a real `write` tool round-trip, recorded with no API key and no network — the same path the tests take. Source of truth is [`demo/sdk.tape`](demo/sdk.tape); regenerate with `task demo`.</sub>
 
@@ -33,7 +33,7 @@ Website: <https://rpi.laofu.online/> · Docs: <https://rpi.laofu.online/docs.htm
 | A tool/provider that extends every session | `rpi-plugin-sdk` | [`examples/plugin-stub`](examples/plugin-stub) |
 
 The three share one implementation. Build your tools once, debug them inside an
-embedded agent, and ship the same code as a `cdylib` plugin that the global `rpi`
+embedded agent, and ship the same code as a `cdylib` plugin that the global `ki`
 loads. See [`docs/agent/project-structure.md`](docs/agent/project-structure.md) for the recommended
 project layout.
 
@@ -55,23 +55,23 @@ On **Windows (x64)**, run in PowerShell 5.1 or later:
 ```
 
 Verifies the published SHA-256 checksum and installs to
-`$env:LOCALAPPDATA\Programs\rpi`. Follow the printed instructions to add it to
-PATH, then run `rpi --version`. Append `-DryRun` to preview, or use
-`-Version 0.3.21` and `-Dir 'C:\Tools\rpi'` to select a version and directory.
+`$env:LOCALAPPDATA\Programs\ki`. Follow the printed instructions to add it to
+PATH, then run `ki --version`. Append `-DryRun` to preview, or use
+`-Version 0.3.21` and `-Dir 'C:\Tools\ki'` to select a version and directory.
 
 **From crates.io** (requires Rust 1.78+):
 
 ```bash
 cargo install rpi-cli
-rpi --version
+ki --version
 ```
 
 **Package managers:**
 
 ```bash
-brew tap bigfish1913/tap && brew install rpi          # macOS (Apple silicon), Linux
+brew tap bigfish1913/tap && brew install ki          # macOS (Apple silicon), Linux
 scoop bucket add bigfish1913 https://github.com/bigfish1913/scoop-bucket
-scoop install rpi                                     # Windows
+scoop install ki                                     # Windows
 ```
 
 The Homebrew formula currently supports Apple silicon on macOS. Intel Macs can
@@ -108,15 +108,15 @@ AgentEnd observed; tool ran against OsExecutionEnv.
 ### The CLI
 
 ```bash
-export ANTHROPIC_API_KEY=...          # or OPENAI_API_KEY, or ~/.rpi/agent/models.json
-rpi                                   # interactive TUI
-rpi -p "summarize the README"         # one-shot
-rpi --mode json -p "list the crates"  # machine-readable event stream
+export ANTHROPIC_API_KEY=...          # or OPENAI_API_KEY, or ~/.ki/agent/models.json
+ki                                   # interactive TUI
+ki -p "summarize the README"         # one-shot
+ki --mode json -p "list the crates"  # machine-readable event stream
 ```
 
-Sessions persist as JSONL and survive a crash mid-run; `rpi` resumes from the
+Sessions persist as JSONL and survive a crash mid-run; `ki` resumes from the
 last committed frame rather than replaying the turn. Custom Anthropic or
-OpenAI-compatible gateways are declared in `~/.rpi/agent/models.json` and
+OpenAI-compatible gateways are declared in `~/.ki/agent/models.json` and
 selected with `--model <provider>/<model>`.
 
 ### The SDK
@@ -174,7 +174,7 @@ Three crates sit outside that chain:
   the ABI. That edge is names-only — nothing is linked or called.
 - `rpi-extensions` is `rpi-plugin-sdk` plus `rpi-ai`/`rpi-agent`, since it hosts
   plugins that run tools.
-- `rpi-cli` depends on all eight of the others, which is how the `rpi` binary
+- `rpi-cli` depends on all eight of the others, which is how the `ki` binary
 gets the TUI, the harness and the plugin loader at once.
 
 | Crate | What it is |
@@ -185,16 +185,16 @@ gets the TUI, the harness and the plugin loader at once.
 | [`rpi-tools`](https://crates.io/crates/rpi-tools) | `read`/`write`/`edit`/`bash` (+ `grep`, `find`, `ls`, `powershell`) and the `ExecutionEnv` seam |
 | [`rpi-harness`](https://crates.io/crates/rpi-harness) | Session tree, JSONL persistence, compaction, crash recovery, the run loop |
 | [`rpi-tui`](https://crates.io/crates/rpi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
-| [`rpi-cli`](https://crates.io/crates/rpi-cli) | The `rpi` binary: TUI, one-shot and JSON modes, config, plugin loading |
+| [`rpi-cli`](https://crates.io/crates/rpi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, plugin loading |
 | [`rpi-plugin-sdk`](https://crates.io/crates/rpi-plugin-sdk) | The stable `#[repr(C)]` ABI contract for plugins. No `rpi-*` deps; only `serde_json`, behind a default `json` feature that can be turned off |
 | [`rpi-extensions`](https://crates.io/crates/rpi-extensions) | Host-side plugin loader and the async-across-ABI tool bridge |
 
 Every crate has its own README and docs.rs page. The `crates/rpi-*`
 directories and the published crate names use the same `rpi-` prefix.
 
-## Why rpi
+## Why ki
 
-Most coding agents are CLIs. `rpi` is a **runtime with a CLI attached**, which
+Most coding agents are CLIs. `ki` is a **runtime with a CLI attached**, which
 changes what you can build with it:
 
 - **Embeddable.** The agent loop is a library. `rpi-agent` + `rpi-ai` is enough
@@ -218,9 +218,9 @@ changes what you can build with it:
 
 Structural differences against other terminal coding agents. Facts about other
 tools are as of 2026-09 and change often — check their documentation; only the
-`rpi` column is maintained here.
+`ki` column is maintained here.
 
-| | rpi | Claude Code | Codex CLI | opencode | aider |
+| | ki | Claude Code | Codex CLI | opencode | aider |
 | --- | --- | --- | --- | --- | --- |
 | Language | Rust | TypeScript | Rust | TypeScript/Go | Python |
 | Source available | ✅ MIT | ❌ | ✅ | ✅ | ✅ |
@@ -230,7 +230,7 @@ tools are as of 2026-09 and change often — check their documentation; only the
 | Provider-agnostic gateways | ✅ | ❌ | ❌ | ✅ | ✅ |
 
 If you want the most polished single-vendor experience, use the vendor's tool.
-`rpi` is for people who want to own the loop.
+`ki` is for people who want to own the loop.
 
 ## Performance
 
@@ -242,13 +242,13 @@ rebuild and re-measure on your own machine.
 | Metric | Value |
 | ------ | ----- |
 | Release binary size | **21.8 MiB** |
-| `rpi --version` wall time | **~17 ms** median |
+| `ki --version` wall time | **~17 ms** median |
 | RSS once the agent is ready | **12.0 MiB** |
 
 `node scripts/bench-vs-pi.mjs --pi <path-to-pi>` — against native Pi on the same
 machine, both offline, each with a fresh isolated config directory:
 
-| Metric | rpi (Rust) | pi (TypeScript) | Difference |
+| Metric | ki (Rust) | pi (TypeScript) | Difference |
 | ------ | ---------: | --------------: | ---------- |
 | `--version` | **17.5 ms** | 169.5 ms | **9.7× faster** |
 | Cold start | **17.7 ms** | 189.5 ms | **10.7× faster** |
@@ -256,12 +256,12 @@ machine, both offline, each with a fresh isolated config directory:
 | Install footprint | **21.8 MiB** (one binary) | ~385 MiB (+ ~91 MiB Node) | **~18–22× smaller** |
 
 **Cold start** is spawn → the agent answering its first command: process creation
-plus full initialisation, excluding teardown and any LLM work. rpi's `--version`
+plus full initialisation, excluding teardown and any LLM work. ki's `--version`
 (17.5 ms) and cold start (17.7 ms) are effectively equal, so startup is process
 creation, not initialisation; Pi is dominated by Node boot.
 
-Isolation caveat: rpi reads `RPI_CODING_AGENT_DIR` / `RPI_OFFLINE`, native Pi reads
-`PI_CODING_AGENT_DIR` / `PI_OFFLINE`. Set the matching pair for each, or rpi
+Isolation caveat: ki reads `KI_CODING_AGENT_DIR` / `KI_OFFLINE`, native Pi reads
+`PI_CODING_AGENT_DIR` / `PI_OFFLINE`. Set the matching pair for each, or ki
 silently loads the machine's global plugins.
 
 Method, raw per-run numbers, and what is *not* measured (LLM latency, tool-loop
@@ -275,17 +275,17 @@ can register tools, providers, slash commands, event handlers, markdown
 renderers and discovered resources.
 
 ```bash
-rpi install rpi-todo                    # build from crates.io and install
-rpi install my-ext --path ../my-ext     # local, for development
-rpi dev                                 # build + watch + live reload
+ki install rpi-todo                    # build from crates.io and install
+ki install my-ext --path ../my-ext     # local, for development
+ki dev                                 # build + watch + live reload
 ```
 
-The host loads project `.rpi/extensions`, then global
-`~/.rpi/agent/extensions`, then any `--extensions-dir`.
+The host loads project `.ki/extensions`, then global
+`~/.ki/agent/extensions`, then any `--extensions-dir`.
 
 Ready-to-install extensions live in the companion
 [`pi-rust/rpi-package`](https://github.com/pi-rust/rpi-package) repository, with
-an [online catalog](https://rpi.laofu.online/packages.html).
+an [online catalog](https://ki.laofu.online/packages.html).
 
 ```rust
 use rpi_plugin_sdk::{export_plugin, StbStringRef};
@@ -307,8 +307,8 @@ rules, which are load-bearing rather than stylistic.
 ## Remote mode
 
 ```bash
-rpi --server                        # headless agent over TCP, prints an auth token
-rpi --connect host:port --token T   # TUI client with zero local agent resources
+ki --server                        # headless agent over TCP, prints an auth token
+ki --connect host:port --token T   # TUI client with zero local agent resources
 ```
 
 The client holds no provider, tools, extensions or session files — all agent
@@ -325,7 +325,7 @@ machine. See [`docs/remote/user-guide.md`](docs/remote/user-guide.md).
 | Platforms | Linux, macOS, Windows (CI runs the suite on Linux) |
 | Binary release targets | Linux (x86_64/aarch64), macOS (Intel/Apple silicon), Windows (x86_64) |
 
-`rpi` is a self-contained Rust coding-agent stack. No Node component is
+`ki` is a self-contained Rust coding-agent stack. No Node component is
 required and none is loaded.
 
 ## Documentation

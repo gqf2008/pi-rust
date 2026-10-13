@@ -433,7 +433,7 @@ async fn token_authentication_is_enforced() {
 }
 
 /// Real end-to-end check: drives the *actual* client against a live
-/// `ki --server`. Opt-in via `RPI_REMOTE_E2E_ADDR` (e.g. `127.0.0.1:9899`) so
+/// `ki --server`. Opt-in via `KI_REMOTE_E2E_ADDR` (e.g. `127.0.0.1:9899`) so
 /// the default test run stays hermetic.
 #[tokio::test]
 async fn real_server_roundtrip_if_configured() {
@@ -448,7 +448,7 @@ async fn real_server_roundtrip_if_configured() {
     client
         .authenticate(&token)
         .await
-        .expect("authentication failed (set RPI_REMOTE_E2E_TOKEN)");
+        .expect("authentication failed (set KI_REMOTE_E2E_TOKEN)");
     let started = client.call("start_session", json!({})).await.unwrap();
     let session_id = started["sessionId"].as_str().unwrap().to_string();
     let subscribed = client

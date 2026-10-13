@@ -11,13 +11,13 @@
 **Title**
 
 ```
-Show HN: rpi – A Rust-native coding-agent runtime that is usable as a library
+Show HN: ki – A Rust-native coding-agent runtime that is usable as a library
 ```
 
 **Body**
 
 ```
-rpi is a coding-agent runtime in Rust. The part I care about is that the agent
+ki is a coding-agent runtime in Rust. The part I care about is that the agent
 loop is a library, not a CLI you shell out to and scrape: rpi-agent + rpi-ai is
 enough to run an agent inside your own process with your own event handling.
 
@@ -46,11 +46,11 @@ JSONL command channel, isolated config, both offline:
   install        21.8 MiB vs  ~385 MiB   (~18x)
 
 An earlier version of this post reported 103 ms and 1.7x; that was my bug. The
-harness set pi's `PI_OFFLINE` / `PI_CODING_AGENT_DIR`, which rpi does not read —
-it uses `RPI_OFFLINE` / `RPI_CODING_AGENT_DIR` — so rpi was silently loading the
-25 plugin DLLs in my real `~/.rpi/agent` while pi ran clean. A second bug then
-under-reported rpi: the cold-start stopwatch started *after* `spawn()`, hiding ~7 ms of
-process creation. With both fixed: rpi's `--version` (17.5 ms) and its usable
+harness set pi's `PI_OFFLINE` / `PI_CODING_AGENT_DIR`, which ki does not read —
+it uses `KI_OFFLINE` / `KI_CODING_AGENT_DIR` — so ki was silently loading the
+25 plugin DLLs in my real `~/.ki/agent` while pi ran clean. A second bug then
+under-reported ki: the cold-start stopwatch started *after* `spawn()`, hiding ~7 ms of
+process creation. With both fixed: ki's `--version` (17.5 ms) and its usable
 agent (17.7 ms) are equal, so its initialisation is negligible; Pi's two numbers
 differ by ~20 ms, its own agent init on top of Node boot. I have not measured
 tool-loop throughput or long-session memory for either tool.
@@ -206,13 +206,13 @@ Repo: https://github.com/bigfish1913/pi-rust (MIT)
 **Title**
 
 ```
-[Showcase] rpi: a Rust coding-agent runtime split into nine composable crates
+[Showcase] ki: a Rust coding-agent runtime split into nine composable crates
 ```
 
 **Body**
 
 ```
-rpi is a coding-agent runtime in Rust, published as nine crates with one-way
+ki is a coding-agent runtime in Rust, published as nine crates with one-way
 dependencies:
 
   rpi-telemetry -> rpi-ai -> rpi-agent -> rpi-tools -> rpi-harness -> rpi-cli
@@ -241,9 +241,9 @@ Design decisions that might be interesting here:
 I also measured startup against the TypeScript original it ports, same machine,
 same JSONL command channel, isolated config, both offline: 9.7x faster to start, 10.7x
 faster to cold start, 7.6x smaller RSS. An earlier run reported 1.7x; that
-was an isolation bug — I set pi's `PI_*` variables but rpi reads `RPI_*`, so rpi
-kept loading the 25 plugin DLLs in my real `~/.rpi/agent` while pi ran clean. A
-second run reported 10 ms because the stopwatch started after `spawn()`; rpi's
+was an isolation bug — I set pi's `PI_*` variables but ki reads `KI_*`, so ki
+kept loading the 25 plugin DLLs in my real `~/.ki/agent` while pi ran clean. A
+second run reported 10 ms because the stopwatch started after `spawn()`; ki's
 real number is 17.7 ms, essentially its process-creation cost.
 
 Honest gaps: the JS/TS extension bridge is opt-in and incomplete, and
@@ -258,7 +258,7 @@ especially welcome.
 **Title**
 
 ```
-rpi: a Rust coding-agent runtime with pluggable providers and fully offline tests
+ki: a Rust coding-agent runtime with pluggable providers and fully offline tests
 ```
 
 **Body**
@@ -302,7 +302,7 @@ https://github.com/bigfish1913/pi-rust (MIT)
 **Title**
 
 ```
-rpi: a Rust-native, library-first coding-agent runtime
+ki: a Rust-native, library-first coding-agent runtime
 ```
 
 **Body** (keep it short; Lobsters rewards substance over marketing)

@@ -3,7 +3,7 @@
 > Both entries below were checked against each project's own current rules on
 > 2026-09-25, because the obvious route for each one **no longer works**.
 > Re-read their docs before submitting — these gate on participation and on
-> popularity thresholds that rpi does not currently meet.
+> popularity thresholds that ki does not currently meet.
 
 ---
 
@@ -66,7 +66,7 @@ A nomination is a short forum post, not an article. Draft:
 > after the run settled; and a truncated tool call never leaves a call without a
 > result — because no provider will accept that conversation.
 >
-> It is MIT licensed and part of the `rpi` family
+> It is MIT licensed and part of the `ki` family
 > (<https://github.com/bigfish1913/pi-rust>), but the crate stands on its own as
 > an embeddable loop.
 

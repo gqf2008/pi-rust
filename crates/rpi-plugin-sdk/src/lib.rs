@@ -1116,7 +1116,7 @@ pub type OAuthRegisterFn = OAuthRequestFn;
 // ---------------------------------------------------------------------------
 
 /// The unified ABI version.
-pub const RPI_PLUGIN_ABI_VERSION_UNIFIED: u32 = 4;
+pub const KI_PLUGIN_ABI_VERSION_UNIFIED: u32 = 4;
 
 /// The unversioned symbol for the unified ABI.
 pub const REGISTER_SYMBOL_UNIFIED: &[u8] = b"rpi_plugin_register\0";
@@ -1339,7 +1339,7 @@ pub unsafe fn register_entrypoint(
     // regardless of future struct growth.
     let abi_version = (*api).abi_version;
     let struct_size = (*api).struct_size;
-    if abi_version != RPI_PLUGIN_ABI_VERSION_UNIFIED {
+    if abi_version != KI_PLUGIN_ABI_VERSION_UNIFIED {
         // Mismatch: refuse to register. The host logs "ABI version mismatch"
         // and skips loading this plugin.
         return 1;
@@ -1375,7 +1375,7 @@ mod tests {
         // Set the version/size fields so the entrypoint gets past the checks
         // and into the body (which panics).
         unsafe {
-            (*api_ptr).abi_version = RPI_PLUGIN_ABI_VERSION_UNIFIED;
+            (*api_ptr).abi_version = KI_PLUGIN_ABI_VERSION_UNIFIED;
             (*api_ptr).struct_size = core::mem::size_of::<PluginApi>() as u32;
         }
         let rc = unsafe {
@@ -1580,7 +1580,7 @@ mod tests {
         // The API struct is a plain old data struct: every fn pointer is
         // non-Drop, the struct has no Drop impl.
         let api = PluginApi {
-            abi_version: RPI_PLUGIN_ABI_VERSION_UNIFIED,
+            abi_version: KI_PLUGIN_ABI_VERSION_UNIFIED,
             struct_size: core::mem::size_of::<PluginApi>() as u32,
             free_string: test_free,
             register_tool: None,
@@ -1695,7 +1695,7 @@ mod tests {
     #[test]
     fn register_entrypoint_version_mismatch_refuses() {
         let api = PluginApi {
-            abi_version: RPI_PLUGIN_ABI_VERSION_UNIFIED,
+            abi_version: KI_PLUGIN_ABI_VERSION_UNIFIED,
             struct_size: core::mem::size_of::<PluginApi>() as u32,
             free_string: test_free,
             register_tool: None,
@@ -1715,11 +1715,11 @@ mod tests {
             register_before_agent_start: None,
             register_oauth_provider: None,
         };
-        assert_eq!(RPI_PLUGIN_ABI_VERSION_UNIFIED, 4);
+        assert_eq!(KI_PLUGIN_ABI_VERSION_UNIFIED, 4);
 
         // A future version is rejected by the pre-dereference check.
         let mut future_api = api;
-        future_api.abi_version = RPI_PLUGIN_ABI_VERSION_UNIFIED + 1;
+        future_api.abi_version = KI_PLUGIN_ABI_VERSION_UNIFIED + 1;
         let rc = unsafe {
             register_entrypoint(&future_api, |_| {
                 panic!("body must not run on version mismatch");

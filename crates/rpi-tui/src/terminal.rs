@@ -25,8 +25,8 @@ const fn mouse_tracking_enabled_by_default() -> bool {
 
 /// The kitty keyboard protocol (`\x1b[>u`) makes macOS IME composition stop
 /// working (no candidate window → CJK input breaks). Disable it on macOS by
-/// default; `RPI_KITTY_KEYBOARD=1` re-enables it for push-to-talk-style
-/// key-release handling, `RPI_KITTY_KEYBOARD=0` forces it off elsewhere.
+/// default; `KI_KITTY_KEYBOARD=1` re-enables it for push-to-talk-style
+/// key-release handling, `KI_KITTY_KEYBOARD=0` forces it off elsewhere.
 fn keyboard_protocol_enabled() -> bool {
     if let Some(value) = std::env::var_os("KI_KITTY_KEYBOARD") {
         return value != "0";

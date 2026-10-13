@@ -11,6 +11,19 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-13
+
+### Changed
+
+- **Fork release.** The project is now `kiqi` and the command is `ki` (was
+  `rpi`): the executable, the startup lockup and window title, the config
+  directory (`~/.ki`, was `~/.rpi`), the project-local directory (`.ki`) and
+  every environment variable (`KI_*`, was `RPI_*`) were renamed. Existing
+  configs keep working after copying `~/.rpi` to `~/.ki`.
+- Crates keep the `rpi-*` names but are no longer published to crates.io
+  (`publish = false`); releases are cut from this fork only.
+
+
 ## [0.3.21] - 2026-10-11
 
 ### Added

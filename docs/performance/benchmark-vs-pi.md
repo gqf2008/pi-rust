@@ -1,9 +1,9 @@
 # Performance vs. native TypeScript `pi`
 
-How `rpi` is benchmarked against the upstream TypeScript coding agent, what the
+How `ki` is benchmarked against the upstream TypeScript coding agent, what the
 numbers are, and — just as important — what is **not** measured.
 
-Last run: **2026-09-30**, `rpi 0.3.6` vs `pi 0.87.1`. 3 warmup runs discarded,
+Last run: **2026-09-30**, `ki 0.3.6` vs `pi 0.87.1`. 3 warmup runs discarded,
 11 measured runs, medians reported.
 
 ## What is measured
@@ -18,7 +18,7 @@ Three things, all from the same harness (`scripts/bench-vs-pi.mjs`):
    and harness/session construction; it excludes process teardown (the child is
    killed right after) and any LLM or tool work. This is **native pi's own
    definition** of startup completion (see its
-   `scripts/profile-coding-agent-node.mjs`), not a metric chosen to flatter rpi.
+   `scripts/profile-coding-agent-node.mjs`), not a metric chosen to flatter ki.
 3. **RSS at ready.** Resident set size of the live process once it has answered
    `get_state`, read in a separate run.
 
@@ -29,16 +29,16 @@ Both tools get identical treatment:
 | Rule | Implementation | Why |
 | --- | --- | --- |
 | Same endpoint | Both answer `get_state` over the same JSONL command channel | Compare "agent usable", not "args parsed" |
-| Cold and isolated | Fresh empty config dir per run: pi via `PI_CODING_AGENT_DIR`, **rpi via `RPI_CODING_AGENT_DIR`** | No existing sessions, extensions, or provider config. The two tools use different variable names — see trap 3 |
-| Offline | pi via `PI_OFFLINE=1`, rpi via `RPI_OFFLINE=1` | Measure runtime cost, not network |
-| Placeholder credential | A dummy `ANTHROPIC_API_KEY` for both | rpi refuses to build a session in an empty dir with no provider credential; offline, it is never sent |
+| Cold and isolated | Fresh empty config dir per run: pi via `PI_CODING_AGENT_DIR`, **ki via `KI_CODING_AGENT_DIR`** | No existing sessions, extensions, or provider config. The two tools use different variable names — see trap 3 |
+| Offline | pi via `PI_OFFLINE=1`, ki via `KI_OFFLINE=1` | Measure runtime cost, not network |
+| Placeholder credential | A dummy `ANTHROPIC_API_KEY` for both | ki refuses to build a session in an empty dir with no provider credential; offline, it is never sent |
 | Neutral cwd | A fresh empty temp directory for both | Neither scans this repository on startup |
 | No sampling in the timing window | RSS is measured in its own phase | See trap 1 |
 | No shell in the path | Resolve npm's `.bin/pi` shim to the JS entrypoint and run under `node` | See trap 2 |
 
-**rpi does not read the `PI_*` variables.** It uses `RPI_OFFLINE` and
-`RPI_CODING_AGENT_DIR`. Setting only `PI_OFFLINE` / `PI_CODING_AGENT_DIR` leaves
-rpi pointed at the real `~/.rpi/agent`, which silently loads the machine's global
+**ki does not read the `PI_*` variables.** It uses `KI_OFFLINE` and
+`KI_CODING_AGENT_DIR`. Setting only `PI_OFFLINE` / `PI_CODING_AGENT_DIR` leaves
+ki pointed at the real `~/.ki/agent`, which silently loads the machine's global
 plugin set and destroys the comparison. This was the single largest source of
 error in an earlier version of this document.
 
@@ -47,7 +47,7 @@ error in an earlier version of this document.
 Environment: Windows 11 (build 26200) / x86_64, rustc 1.97.1 `--release`,
 Node v25.9.0.
 
-| Metric | rpi (Rust, 0.3.6) | pi (TypeScript, 0.87.1) | Difference |
+| Metric | ki (Rust, 0.3.6) | pi (TypeScript, 0.87.1) | Difference |
 | --- | --: | --: | --: |
 | `--version` | **17.5 ms** | 169.5 ms | **9.7× faster** |
 | Cold start | **17.7 ms** | 189.5 ms | **10.7× faster** |
@@ -60,8 +60,8 @@ Node v25.9.0.
 Timing, 11 runs, in milliseconds:
 
 ```text
-rpi  --version  17.8 19.4 17.4 16.9 19.8 16.8 17.5 18.9 17.2 17.0 19.5   median 17.5
-rpi  cold start 18.3 22.2 16.6 17.7 17.9 17.0 17.7 18.6 16.6 17.3 17.5   median 17.7
+ki  --version  17.8 19.4 17.4 16.9 19.8 16.8 17.5 18.9 17.2 17.0 19.5   median 17.5
+ki  cold start 18.3 22.2 16.6 17.7 17.9 17.0 17.7 18.6 16.6 17.3 17.5   median 17.7
 pi   --version 170.7 170.6 171.8 168.7 169.5 168.9 169.2 171.9 166.7 172.0 167.0   median 169.5
 pi   cold start 188.4 190.4 189.0 189.9 189.5 190.8 189.1 189.7 190.5 189.3 187.4   median 189.5
 ```
@@ -69,11 +69,11 @@ pi   cold start 188.4 190.4 189.0 189.9 189.5 190.8 189.1 189.7 190.5 189.3 187.
 Memory at ready, in MiB:
 
 ```text
-rpi  12.0 12.0 12.0
+ki  12.0 12.0 12.0
 pi   91.5 91.3 91.6
 ```
 
-Binary size is `rpi.exe` from a `--release` build (`lto = "thin"`,
+Binary size is `ki.exe` from a `--release` build (`lto = "thin"`,
 `codegen-units = 16`, `strip = "symbols"`): 22,870,528 bytes. Install footprint
 for pi is the size of the `node_modules` tree produced by
 `npm install --prefix .bench @earendil-works/pi-coding-agent` (403,645,836
@@ -83,7 +83,7 @@ bytes), plus the Node binary itself (95,618,048 bytes).
 
 - **pi:** `--version` is 169.5 ms; a fully-initialised agent is 189.5 ms. So
   ~20 ms is pi's own agent initialisation on top of Node boot; the rest is Node.
-- **rpi:** `--version` is 17.5 ms and cold start is 17.7 ms — effectively
+- **ki:** `--version` is 17.5 ms and cold start is 17.7 ms — effectively
   equal. Config, session, harness and the six built-in tools add nothing over
   process creation.
 
@@ -105,19 +105,19 @@ which is why they are documented rather than deleted:
    `cmd.exe` on Windows; running it directly would charge `cmd.exe` startup to
    pi. The harness now resolves the shim to its JS entrypoint and runs `node`
    against it.
-3. **rpi was not actually isolated.** The harness set `PI_OFFLINE` and
-   `PI_CODING_AGENT_DIR`, which native pi honours but rpi does not — rpi reads
-   `RPI_OFFLINE` / `RPI_CODING_AGENT_DIR`. So while pi ran against a fresh empty
-   config dir, rpi read the real `~/.rpi/agent` and loaded the **25 plugin DLLs**
+3. **ki was not actually isolated.** The harness set `PI_OFFLINE` and
+   `PI_CODING_AGENT_DIR`, which native pi honours but ki does not — ki reads
+   `KI_OFFLINE` / `KI_CODING_AGENT_DIR`. So while pi ran against a fresh empty
+   config dir, ki read the real `~/.ki/agent` and loaded the **25 plugin DLLs**
    installed on the test machine. Evidence: the `get_state` reply listed **31
    active tools**; correctly isolated it lists **6 built-ins**. Fixing the
    variables dropped cold start from 101 ms to 10 ms. `runEnvironment()` now sets
-   both tools' variable names, and the placeholder key lets rpi resolve a default
+   both tools' variable names, and the placeholder key lets ki resolve a default
    model in the empty dir.
 4. **The cold-start stopwatch started after `spawn()`.** `measureColdStart` called `spawn()`
    and only then read `performance.now()`, while `measureVersion` timed from
    before `spawnSync`. Node's `spawn()` does a synchronous chunk of process
-   creation — measured at ~7.3 ms for `rpi.exe` on Windows — so the cold-start number
+   creation — measured at ~7.3 ms for `ki.exe` on Windows — so the cold-start number
    excluded it, reporting 10.1 ms where the true spawn→cold-start was 17.7 ms.
    The clock now starts before `spawn()`. This is also the precise definition of
    the metric: **before `spawn()` → the `get_state` response on stdout**,
@@ -141,7 +141,7 @@ compare **ratios**, not the values quoted here.
 ## Reproduce
 
 ```bash
-# rpi
+# ki
 cargo build -p rpi-cli --release
 
 # native pi, into an isolated local prefix
@@ -152,5 +152,5 @@ node scripts/bench-vs-pi.mjs --pi .bench/node_modules/.bin/pi --runs 11 --warmup
   --json .bench/results.json
 ```
 
-Standalone rpi numbers (binary size, `--version` timing) come from
+Standalone ki numbers (binary size, `--version` timing) come from
 `sh scripts/bench.sh`.

@@ -1,4 +1,4 @@
-# Releasing rpi
+# Releasing ki
 
 One command cuts a release and ships it to every channel:
 
@@ -96,7 +96,7 @@ task publish:crates RELEASE_VERSION=0.3.4
 | `wait`, `channels` | `gh` authenticated (reads release assets) |
 | `winget` | `gh` authenticated (forks `winget-pkgs`, opens the PR) |
 | `crates` | `cargo login` (a publish-scoped token) |
-| `site` | SSH to the rpi web host |
+| `site` | SSH to the ki web host |
 
 ## What no command can finish
 

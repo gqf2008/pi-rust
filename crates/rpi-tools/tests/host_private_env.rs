@@ -3,7 +3,7 @@
 //! Two families of variables are in scope, and both are answered by the same
 //! exclusion:
 //!
-//! * `RPI_SESSION_ID` — the host writes it so plugins can name the session they
+//! * `KI_SESSION_ID` — the host writes it so plugins can name the session they
 //!   observe. A bash/powershell child inherits the environment by default, so
 //!   without an exclusion it reaches *everything* the shell runs, including a
 //!   nested `ki`, which would then report an ancestor's session.
@@ -46,7 +46,7 @@ async fn a_host_private_variable_does_not_reach_the_shell() {
 
     let out = env
         .exec(
-            r#"printf 'session=[%s] probe=[%s]\n' "$RPI_SESSION_ID" "$RPI_TOOLS_INHERIT_PROBE""#,
+            r#"printf 'session=[%s] probe=[%s]\n' "$KI_SESSION_ID" "$KI_TOOLS_INHERIT_PROBE""#,
             ShellExecOptions::default(),
         )
         .await
@@ -77,7 +77,7 @@ async fn an_explicit_private_variable_still_reaches_the_shell() {
     per_call.insert("KI_SESSION_ID".to_string(), "01a0f60b-explicit".to_string());
     let out = env
         .exec(
-            r#"printf 'session=[%s]\n' "$RPI_SESSION_ID""#,
+            r#"printf 'session=[%s]\n' "$KI_SESSION_ID""#,
             ShellExecOptions {
                 env: Some(per_call),
                 ..ShellExecOptions::default()

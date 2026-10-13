@@ -1,6 +1,6 @@
 //! P3 — JSONL event journal.
 //!
-//! Opt-in via `RPI_EVENT_LOG=1`. When enabled, every extension **event-handler
+//! Opt-in via `KI_EVENT_LOG=1`. When enabled, every extension **event-handler
 //! invocation** (the observe fan-out in [`dispatch_to_handlers`] and the
 //! veto-aware lifecycle dispatch in
 //! [`dispatch_lifecycle_event`](crate::dispatch_lifecycle_event)) is recorded as
@@ -9,8 +9,8 @@
 //!
 //! Off by default (zero disk writes / zero overhead when disabled — the global
 //! logger resolves to a no-op). One file, append-only:
-//! `$RPI_EVENT_LOG_PATH`, else `<root>/logs/events.jsonl`, where `<root>` is
-//! `$RPI_CODING_AGENT_DIR`'s parent (i.e. `~/.ki`) or `~/.ki`.
+//! `$KI_EVENT_LOG_PATH`, else `<root>/logs/events.jsonl`, where `<root>` is
+//! `$KI_CODING_AGENT_DIR`'s parent (i.e. `~/.ki`) or `~/.ki`.
 //!
 //! [`dispatch_to_handlers`]: crate::translate::dispatch_to_handlers
 
@@ -67,7 +67,7 @@ impl EventLogger {
         }
     }
 
-    /// Resolve the log from the environment (`RPI_EVENT_LOG=1`). Disabled when
+    /// Resolve the log from the environment (`KI_EVENT_LOG=1`). Disabled when
     /// the gate is off or no path can be resolved.
     pub fn from_env() -> Self {
         if std::env::var("KI_EVENT_LOG").ok().as_deref() != Some("1") {
@@ -123,8 +123,8 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Resolve the event-log path (`$RPI_EVENT_LOG_PATH`, else
-/// `<root>/logs/events.jsonl`, where `<root>` is `$RPI_CODING_AGENT_DIR`'s
+/// Resolve the event-log path (`$KI_EVENT_LOG_PATH`, else
+/// `<root>/logs/events.jsonl`, where `<root>` is `$KI_CODING_AGENT_DIR`'s
 /// parent or `~/.ki`). Public so `ki events tail` can find the same file the
 /// logger writes.
 pub fn event_log_path() -> Option<PathBuf> {

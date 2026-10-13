@@ -1,6 +1,6 @@
 # 架构概览
 
-rpi 是 Rust 原生 Agent SDK 与终端应用。当前 workspace 包含九个产品 crate；CLI 组合底层能力，嵌入式应用可按需使用 SDK。
+ki 是 Rust 原生 Agent SDK 与终端应用。当前 workspace 包含九个产品 crate；CLI 组合底层能力，嵌入式应用可按需使用 SDK。
 
 ## 功能分层
 

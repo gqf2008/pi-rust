@@ -522,7 +522,7 @@ mod tests {
         auth_path, test_support::env_lock, upsert_credential, Credential, DEFAULT_PROVIDER_ID,
     };
 
-    /// Scope `RPI_CODING_AGENT_DIR` + the `ANTHROPIC_*` env vars to a temp dir
+    /// Scope `KI_CODING_AGENT_DIR` + the `ANTHROPIC_*` env vars to a temp dir
     /// for the duration of a test. Holds the shared env lock for its whole
     /// lifetime so it can't race with config/provider env-mutating tests.
     struct TempConfig {

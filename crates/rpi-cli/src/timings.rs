@@ -1,7 +1,7 @@
 //! Central timing instrumentation for startup profiling.
 //!
 //! Port of the upstream `packages/coding-agent/src/core/timings.ts`. Enable with
-//! the `RPI_TIMING=1` environment variable; disabled builds pay only a single
+//! the `KI_TIMING=1` environment variable; disabled builds pay only a single
 //! atomic load per call.
 //!
 //! Timings are grouped by namespace (`main` for the primary startup path,
@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-/// True when `RPI_TIMING=1`. Evaluated once.
+/// True when `KI_TIMING=1`. Evaluated once.
 pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -79,7 +79,7 @@ pub fn time(label: impl Into<String>, namespace: TimingNamespace) {
     }
 }
 
-/// Print every accumulated namespace to stderr. No-op unless `RPI_TIMING=1`.
+/// Print every accumulated namespace to stderr. No-op unless `KI_TIMING=1`.
 pub fn print_timings() {
     if !enabled() {
         return;

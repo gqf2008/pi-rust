@@ -1,6 +1,6 @@
 # Provider 抽象：让 Agent 不绑定 Anthropic 或 OpenAI
 
-> rpi 将消息类型、模型能力和流式事件放在 `rpi-ai`，把供应商协议藏在 Provider 实现后面。业务层因此可以在真实网关、OpenAI-compatible 服务和离线 faux provider 之间切换。
+> ki 将消息类型、模型能力和流式事件放在 `rpi-ai`，把供应商协议藏在 Provider 实现后面。业务层因此可以在真实网关、OpenAI-compatible 服务和离线 faux provider 之间切换。
 
 ## 分层关系
 
@@ -80,7 +80,7 @@ Provider 只负责协议适配；队列、工具、持久化属于更上层。�
 
 # Provider Adapters Without Spreading Vendor Code Through the Agent
 
-Provider APIs disagree about messages, tool calls, usage, and streaming. rpi keeps those details in `rpi-ai` and gives the agent a common event model.
+Provider APIs disagree about messages, tool calls, usage, and streaming. ki keeps those details in `rpi-ai` and gives the agent a common event model.
 
 The agent sees a `Context`, a `Model`, and `AssistantMessageEvent`. It does not need to know whether the response came from Anthropic Messages, OpenAI Responses, or an OpenAI-compatible gateway. Each adapter converts its protocol at the boundary.
 

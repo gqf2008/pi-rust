@@ -2,7 +2,7 @@
 
 本文描述当前实现，替代旧的生命周期事件总线设计稿。事件标签和 ABI 定义见 [rpi-plugin-sdk](../../crates/rpi-plugin-sdk/src/lib.rs)，分发实现见 [translate.rs](../../crates/rpi-extensions/src/translate.rs)。
 
-`BeforeTuiStart` 是 rpi 特有的启动事件，在 TUI 初始化前调用。扩展可通过返回值否决启动。`SessionStart` 和 `SessionShutdown` 处理会话启动与关闭。生命周期事件使用无 payload 的 `EventEmpty`，不是旧设计稿中的 Rust 资源注入总线。
+`BeforeTuiStart` 是 ki 特有的启动事件，在 TUI 初始化前调用。扩展可通过返回值否决启动。`SessionStart` 和 `SessionShutdown` 处理会话启动与关闭。生命周期事件使用无 payload 的 `EventEmpty`，不是旧设计稿中的 Rust 资源注入总线。
 
 宿主在 blocking 线程中调用 handler，并在 FFI 边界捕获 panic。分发使用以下超时预算：
 

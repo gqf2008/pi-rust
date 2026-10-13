@@ -1,6 +1,6 @@
 # Agent 工具系统：用 ExecutionEnv 把副作用隔离出来
 
-> Agent 真正危险的部分往往不是生成文本，而是读文件、改文件和执行命令。rpi 用 `AgentTool` 描述工具，用 `ExecutionEnv` 抽象文件系统与 Shell，让同一套工具既能运行在操作系统，也能在内存环境测试。
+> Agent 真正危险的部分往往不是生成文本，而是读文件、改文件和执行命令。ki 用 `AgentTool` 描述工具，用 `ExecutionEnv` 抽象文件系统与 Shell，让同一套工具既能运行在操作系统，也能在内存环境测试。
 
 ## 一次工具调用
 
@@ -68,7 +68,7 @@ async fn write_then_read_in_memory() {
 
 # Agent Tools Need an Execution Boundary
 
-Reading a file is easy to demo. Running model-generated shell commands in a real workspace is where the engineering starts. rpi treats tools as `AgentTool` implementations and puts filesystem and shell access behind `ExecutionEnv`.
+Reading a file is easy to demo. Running model-generated shell commands in a real workspace is where the engineering starts. ki treats tools as `AgentTool` implementations and puts filesystem and shell access behind `ExecutionEnv`.
 
 `OsExecutionEnv` can work with the host system. `InMemoryExecutionEnv` can exercise the same tool without touching a developer’s files. Arguments are checked first, and failures return as tool results instead of crashing the loop.
 

@@ -29,7 +29,7 @@
 //! # in ../rpi-package
 //! cargo build -p rpi-voice --release --features local-stt
 //! ```
-//! The test uses `RPI_VOICE_PTT_KEY` to assert the key name is honored rather
+//! The test uses `KI_VOICE_PTT_KEY` to assert the key name is honored rather
 //! than hard-coding `space`.
 
 use std::path::PathBuf;
@@ -248,7 +248,7 @@ fn voice_registers_a_prompt_transformer_that_respects_the_speech_switch() {
         })
         .unwrap_or(false);
     if !speech_on {
-        eprintln!("RPI_VOICE_AUTO_TTS is not on — exercising only the no-change path");
+        eprintln!("KI_VOICE_AUTO_TTS is not on — exercising only the no-change path");
         let payload = transform(h, "BASE");
         assert_eq!(
             payload,

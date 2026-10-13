@@ -190,7 +190,7 @@ fn pasted_images_accept_multiple_quoted_paths_without_consuming_normal_text() {
 }
 
 #[test]
-#[ignore = "set RPI_STATS_DLL to the monitor DLL"]
+#[ignore = "set KI_STATS_DLL to the monitor DLL"]
 fn monitor_function_key_works_with_a_draft_without_changing_text() {
     use rpi_extensions::{
         dispatch_empty_event, load_session_mixed, NullDiagnostics, RegistrySnapshot,

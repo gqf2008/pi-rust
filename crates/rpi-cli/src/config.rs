@@ -1,10 +1,10 @@
 //! # Layout
 //!
 //! Uses a nested layout: a `~/.ki/agent/` directory (or one pointed at via
-//! `RPI_CODING_AGENT_DIR`) "just works":
+//! `KI_CODING_AGENT_DIR`) "just works":
 //!
 //! ```text
-//! ~/.ki/                 (RPI_CODING_AGENT_DIR env overrides the agent/ dir)
+//! ~/.ki/                 (KI_CODING_AGENT_DIR env overrides the agent/ dir)
 //! └── agent/
 //!     ├── auth.json       # persisted credentials (mode 0o600 on Unix)
 //!     ├── models.json     # user-defined provider/model catalog (hand-edited)
@@ -86,7 +86,7 @@ pub enum ConfigError {
 // Path resolution
 // ---------------------------------------------------------------------------
 
-/// The ki config directory (`~/.ki/agent` by default, `RPI_CODING_AGENT_DIR`
+/// The ki config directory (`~/.ki/agent` by default, `KI_CODING_AGENT_DIR`
 /// override). Creates nothing — purely a path computation. The `agent/` layer
 /// is `join(homedir(), CONFIG_DIR_NAME, "agent")`. The env override points at
 /// the agent dir itself.
@@ -168,7 +168,7 @@ fn read_text_with_fallback(
 
 /// One-time best-effort migration of a pre-nesting flat layout
 /// (`~/.ki/{auth.json,models.json,.setup_done}`) into the
-/// nested `~/.ki/agent/` layout. **No-op when `RPI_CODING_AGENT_DIR` is set**
+/// nested `~/.ki/agent/` layout. **No-op when `KI_CODING_AGENT_DIR` is set**
 /// (never touch an explicit override), when the agent dir already exists, or
 /// when no flat files are present. Idempotent: a partial move resumes. Errors
 /// are swallowed (logged via the returned `Result` only so tests can observe);
@@ -1088,7 +1088,7 @@ impl<T> Pipe for T {}
 #[cfg(test)]
 pub(crate) mod test_support {
     /// A shared workspace lock for tests that touch process-global env vars
-    /// (`RPI_CODING_AGENT_DIR`, `ANTHROPIC_*`). All env-mutating tests across
+    /// (`KI_CODING_AGENT_DIR`, `ANTHROPIC_*`). All env-mutating tests across
     /// the crate (config / provider / auth) share this ONE mutex so they can't
     /// race on the shared environment. Hold the returned guard for the whole
     /// test (store it in a RAII struct).
@@ -1104,7 +1104,7 @@ mod tests {
     use super::*;
     use crate::config::test_support::env_lock;
 
-    /// Point `RPI_CODING_AGENT_DIR` at a fresh temp dir for the duration of the
+    /// Point `KI_CODING_AGENT_DIR` at a fresh temp dir for the duration of the
     /// test (cleaned up on drop). Holds the prior value of the env var to
     /// restore it. Hold the env lock for its whole lifetime.
     struct TempConfig {
@@ -1399,7 +1399,7 @@ mod tests {
         let cfg = ProviderConfig {
             name: None,
             base_url: Some("https://gateway.example.com/v1".into()),
-            api_key: Some("$RPI_FAKE_PROVIDER_API_KEY".into()),
+            api_key: Some("$KI_FAKE_PROVIDER_API_KEY".into()),
             api: Some("openai-completions".into()),
             headers: None,
             auth_header: None,
@@ -1550,7 +1550,7 @@ mod tests {
     #[test]
     fn migrate_legacy_layout_moves_flat_files_into_agent() {
         // Drive the core migration directly against a temp root/agent so the
-        // result is independent of whatever RPI_CODING_AGENT_DIR the parallel
+        // result is independent of whatever KI_CODING_AGENT_DIR the parallel
         // TempConfig tests happen to set.
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
@@ -1588,7 +1588,7 @@ mod tests {
 
     #[test]
     fn migrate_legacy_layout_public_skips_env_override() {
-        // When RPI_CODING_AGENT_DIR is set, the public entry point is a no-op
+        // When KI_CODING_AGENT_DIR is set, the public entry point is a no-op
         // (it must never touch an explicit override). TempConfig sets it.
         let _cfg = TempConfig::new();
         let moved = migrate_legacy_layout().unwrap();
@@ -1636,24 +1636,24 @@ mod tests {
         let prev2 = std::env::var_os("KI_TEST_CFG_KEY2");
         std::env::set_var("KI_TEST_CFG_KEY", "secret-from-env");
         assert_eq!(
-            resolve_config_value("$RPI_TEST_CFG_KEY", None),
+            resolve_config_value("$KI_TEST_CFG_KEY", None),
             Some("secret-from-env".into())
         );
         assert_eq!(
-            resolve_config_value("prefix-${RPI_TEST_CFG_KEY}-suffix", None),
+            resolve_config_value("prefix-${KI_TEST_CFG_KEY}-suffix", None),
             Some("prefix-secret-from-env-suffix".into())
         );
         // Two vars in one template.
         std::env::set_var("KI_TEST_CFG_KEY2", "two");
         assert_eq!(
-            resolve_config_value("a-$RPI_TEST_CFG_KEY-b-$RPI_TEST_CFG_KEY2-c", None),
+            resolve_config_value("a-$KI_TEST_CFG_KEY-b-$KI_TEST_CFG_KEY2-c", None),
             Some("a-secret-from-env-b-two-c".into())
         );
         // Env overlay wins over process env.
         let mut overlay = BTreeMap::new();
         overlay.insert("KI_TEST_CFG_KEY".into(), "overlay-value".into());
         assert_eq!(
-            resolve_config_value("$RPI_TEST_CFG_KEY", Some(&overlay)),
+            resolve_config_value("$KI_TEST_CFG_KEY", Some(&overlay)),
             Some("overlay-value".into())
         );
         restore_env("KI_TEST_CFG_KEY", prev);
@@ -1666,9 +1666,9 @@ mod tests {
         let prev = std::env::var_os("KI_TEST_CFG_ABSENT");
         std::env::remove_var("KI_TEST_CFG_ABSENT");
         // Any referenced unset var ⇒ the whole value is None (pi semantics).
-        assert_eq!(resolve_config_value("$RPI_TEST_CFG_ABSENT", None), None);
+        assert_eq!(resolve_config_value("$KI_TEST_CFG_ABSENT", None), None);
         assert_eq!(
-            resolve_config_value("prefix-$RPI_TEST_CFG_ABSENT-suffix", None),
+            resolve_config_value("prefix-$KI_TEST_CFG_ABSENT-suffix", None),
             None
         );
         restore_env("KI_TEST_CFG_ABSENT", prev);
@@ -1700,8 +1700,8 @@ mod tests {
         let prev = std::env::var_os("KI_TEST_HDR_SET");
         std::env::set_var("KI_TEST_HDR_SET", "set-value");
         let mut h = BTreeMap::new();
-        h.insert("x-set".into(), "$RPI_TEST_HDR_SET".into());
-        h.insert("x-unset".into(), "$RPI_TEST_HDR_UNSET".into());
+        h.insert("x-set".into(), "$KI_TEST_HDR_SET".into());
+        h.insert("x-unset".into(), "$KI_TEST_HDR_UNSET".into());
         h.insert("x-literal".into(), "literal-value".into());
         let resolved = resolve_headers(&h, None);
         assert_eq!(resolved.len(), 2);

@@ -55,7 +55,7 @@ fn take_flag_value(argv: &[String], flag: &str) -> Option<String> {
 }
 
 /// Resolve the `--connect` auth token: the `--token` flag wins, then the
-/// `RPI_SERVER_TOKEN` environment variable (ignoring empty/whitespace values).
+/// `KI_SERVER_TOKEN` environment variable (ignoring empty/whitespace values).
 fn resolve_connect_token(argv: &[String]) -> Option<String> {
     take_flag_value(argv, "--token").or_else(|| {
         std::env::var("KI_SERVER_TOKEN")
@@ -71,7 +71,7 @@ fn resolve_connect_token(argv: &[String]) -> Option<String> {
 /// ([`crate::bin`] / `src/bin/ki.rs`) calls this under a tokio runtime and
 /// `std::process::exit`s with the returned code.
 pub async fn run() -> i32 {
-    // Startup profiling wrapper: RPI_TIMING=1 records namespace timings and
+    // Startup profiling wrapper: KI_TIMING=1 records namespace timings and
     // flushes them to stderr once the run completes, regardless of exit path.
     crate::timings::reset(crate::timings::TimingNamespace::Main);
     let code = run_inner().await;
@@ -97,7 +97,7 @@ async fn run_inner() -> i32 {
         return crate::remote::tui::run(&addr, token.as_deref()).await;
     }
 
-    // Normalize the CLI flag into RPI_OFFLINE so early-dispatch subcommands and
+    // Normalize the CLI flag into KI_OFFLINE so early-dispatch subcommands and
     // the regular parsed path all observe the same process-wide gate.
     crate::args::normalize_offline_mode(&argv);
 
@@ -181,7 +181,7 @@ async fn run_inner() -> i32 {
     };
 
     // ---- Legacy-layout migration (flat ~/.ki → ~/.ki/agent/) ----
-    // Best-effort; never blocks startup. Skipped when RPI_CODING_AGENT_DIR is
+    // Best-effort; never blocks startup. Skipped when KI_CODING_AGENT_DIR is
     // set (an explicit override is its own layout).
     let _ = crate::config::migrate_legacy_layout();
     crate::timings::time("config migrated", crate::timings::TimingNamespace::Main);
@@ -370,7 +370,7 @@ async fn run_inner() -> i32 {
         mode
     };
 
-    // Debug/testing escape hatch: RPI_FORCE_TUI=1 forces interactive mode
+    // Debug/testing escape hatch: KI_FORCE_TUI=1 forces interactive mode
     // (for testing the TUI in non-TTY environments).
     let mode = if std::env::var("KI_FORCE_TUI")
         .map(|v| v == "1")
@@ -384,7 +384,7 @@ async fn run_inner() -> i32 {
     // A plugin that claimed stdio owns this process's stdin/stdout: force the
     // headless Rpc lifecycle (dispatch startup events, then wait for completion)
     // and let the plugin's own protocol server read/write stdio. This is
-    // authoritative — it must win over TTY detection and RPI_FORCE_TUI,
+    // authoritative — it must win over TTY detection and KI_FORCE_TUI,
     // otherwise the host would start a TUI/print run that writes to a stream the
     // plugin owns.
     let mode = if stdio_claimed { RunMode::Rpc } else { mode };
@@ -774,7 +774,7 @@ async fn list_models(search: &str) -> i32 {
 /// NOTE: if stdin is *not* a TTY but no bytes arrive (e.g. `pi < /dev/null`),
 /// this returns `None` (empty), which is what TS does too (`data.trim() || undefined`).
 fn read_piped_stdin() -> Option<String> {
-    // Debug/testing escape hatch: RPI_SKIP_STDIN=1 skips reading piped stdin
+    // Debug/testing escape hatch: KI_SKIP_STDIN=1 skips reading piped stdin
     // (avoids blocking on non-TTY stdin in automated environments).
     if std::env::var("KI_SKIP_STDIN")
         .map(|v| v == "1")
@@ -898,7 +898,7 @@ fn print_resolve_error(e: &ResolveError) {
             eprintln!("error: {e}");
             eprintln!();
             eprintln!(
-                "Check ~/.ki/auth.json / ~/.ki/models.json (set RPI_CODING_AGENT_DIR to relocate)."
+                "Check ~/.ki/auth.json / ~/.ki/models.json (set KI_CODING_AGENT_DIR to relocate)."
             );
         }
         _ => eprintln!("error: {e}"),
@@ -946,7 +946,7 @@ mod tests {
 
     #[test]
     fn connect_token_prefers_the_flag_over_the_env_var() {
-        // The flag wins regardless of any RPI_SERVER_TOKEN in the environment.
+        // The flag wins regardless of any KI_SERVER_TOKEN in the environment.
         let argv = vec!["--token".to_string(), "flag-token".to_string()];
         assert_eq!(resolve_connect_token(&argv).as_deref(), Some("flag-token"));
     }

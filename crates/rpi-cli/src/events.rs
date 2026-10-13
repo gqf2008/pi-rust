@@ -1,6 +1,6 @@
 //! `ki events …` — inspect the extension event journal (P3).
 //!
-//! The journal is written only when `RPI_EVENT_LOG=1` is set (see
+//! The journal is written only when `KI_EVENT_LOG=1` is set (see
 //! [`rpi_extensions::event_log`]). This subcommand reads the same file:
 //!
 //! - `ki events path` — print the resolved log path.
@@ -21,7 +21,7 @@ pub async fn run(args: &[String]) -> i32 {
                 0
             }
             None => {
-                eprintln!("error: could not resolve the event log path (set RPI_EVENT_LOG_PATH)");
+                eprintln!("error: could not resolve the event log path (set KI_EVENT_LOG_PATH)");
                 EXIT_RUNTIME
             }
         },
@@ -44,7 +44,7 @@ fn print_help() {
     println!("  path    Print the event log path (JSONL)");
     println!("  tail    Print the log and follow new entries (Ctrl+C to stop)");
     println!();
-    println!("The journal is written only when RPI_EVENT_LOG=1 is set at run time.");
+    println!("The journal is written only when KI_EVENT_LOG=1 is set at run time.");
 }
 
 /// Follow the event log, printing complete lines as they appear. Never returns
@@ -52,7 +52,7 @@ fn print_help() {
 /// tick rather than emitted split.
 async fn tail() -> i32 {
     let Some(path) = rpi_extensions::event_log_path() else {
-        eprintln!("error: could not resolve the event log path (set RPI_EVENT_LOG_PATH)");
+        eprintln!("error: could not resolve the event log path (set KI_EVENT_LOG_PATH)");
         return EXIT_RUNTIME;
     };
     eprintln!("tailing {} — Ctrl+C to stop", path.display());

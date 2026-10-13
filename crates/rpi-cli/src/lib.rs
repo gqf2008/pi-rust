@@ -85,3 +85,7 @@ pub const VERSION: &str = rpi_plugin_sdk::HOST_VERSION;
 /// identity, so an extension can label its output (a trace name, a tag) without
 /// hardcoding a brand that a rename would silently invalidate.
 pub const APP_NAME: &str = rpi_plugin_sdk::HOST_NAME;
+
+/// The executable name, as typed on the command line (`ki`). Distinct from
+/// [`APP_NAME`], the product/brand name (`kiqi`) used in the lockup and title.
+pub const COMMAND_NAME: &str = "ki";

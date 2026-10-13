@@ -3184,7 +3184,7 @@ impl AgentHarness {
         // loop's only other exit is "the model stopped asking for tools", which
         // nothing bounds — one observed session ran 112 turns / 867s in a single
         // run (`docs/debugging/llm-repetition-forensics.md` §二). Upstream has no such
-        // ceiling either, so this is **off unless** `RPI_MAX_TURNS_PER_RUN=<n>`
+        // ceiling either, so this is **off unless** `KI_MAX_TURNS_PER_RUN=<n>`
         // asks for it; when off the hook stays `None` and the loop is unchanged.
         let run_budget = Arc::new(Mutex::new(crate::run_budget::RunBudget::from_env()));
         let should_stop_after_turn: Option<rpi_agent::ShouldStopAfterTurn> =

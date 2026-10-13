@@ -1772,7 +1772,7 @@ fn merge_extension_tools(
 /// resolution in `createAgentSession`.
 /// Default bash timeout: 120s when the model doesn't pass one (prevents a
 /// forgotten `timeout` from hanging the run forever — the "卡住" report).
-/// `RPI_BASH_TIMEOUT` overrides; a model-supplied timeout always wins.
+/// `KI_BASH_TIMEOUT` overrides; a model-supplied timeout always wins.
 pub fn bash_options() -> rpi_tools::tools::bash::BashToolOptions {
     use rpi_tools::tools::bash::BashToolOptions;
     let default = std::env::var("KI_BASH_TIMEOUT")
@@ -2365,7 +2365,7 @@ async fn open_session_by_id_in_dir(id: &str, cwd: &str, dir: &Path) -> Result<Se
 ///
 /// - `ToolCallContext` — read per plugin **tool** call, which is why a stale
 ///   value there made a plugin's `todo`-style state follow the wrong session.
-/// - `RPI_SESSION_ID` — read per **turn** by the provider hooks, which is the
+/// - `KI_SESSION_ID` — read per **turn** by the provider hooks, which is the
 ///   only channel an observer gets for a pure-chat run. Process-global, which is
 ///   exactly the scope of "the session this process is serving".
 ///
@@ -3756,7 +3756,7 @@ mod tests {
         // 3. Narrowness — these name how the *user* configured the run and are
         //    exactly what a command inside the shell should still see.
         for visible in [
-            crate::args::RPI_OFFLINE_ENV,
+            crate::args::KI_OFFLINE_ENV,
             crate::config::CONFIG_DIR_ENV,
             "PATH",
         ] {

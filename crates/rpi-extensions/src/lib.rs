@@ -286,7 +286,7 @@ impl HostApi {
             ),
         };
         rpi_plugin_sdk::PluginApi {
-            abi_version: rpi_plugin_sdk::RPI_PLUGIN_ABI_VERSION_UNIFIED,
+            abi_version: rpi_plugin_sdk::KI_PLUGIN_ABI_VERSION_UNIFIED,
             struct_size: std::mem::size_of::<rpi_plugin_sdk::PluginApi>() as u32,
             free_string: host_free_string,
             register_tool: Some(trampoline_register_tool),

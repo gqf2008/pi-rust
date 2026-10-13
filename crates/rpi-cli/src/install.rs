@@ -709,7 +709,7 @@ fn adjacent_transaction_path(target: &Path, kind: &str) -> Result<PathBuf, Strin
         .unwrap_or("artifact");
     for _ in 0..8 {
         let candidate = parent.join(format!(
-            ".{leaf}.rpi-{kind}-{}",
+            ".{leaf}.ki-{kind}-{}",
             uuid::Uuid::new_v4().simple()
         ));
         match std::fs::symlink_metadata(&candidate) {
@@ -1460,8 +1460,8 @@ mod tests {
     fn assert_no_native_transaction_files(directory: &Path) {
         for entry in std::fs::read_dir(directory).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-            assert!(!name.contains(".rpi-stage-"), "left staged file: {name}");
-            assert!(!name.contains(".rpi-backup-"), "left backup file: {name}");
+            assert!(!name.contains(".ki-stage-"), "left staged file: {name}");
+            assert!(!name.contains(".ki-backup-"), "left backup file: {name}");
         }
     }
 

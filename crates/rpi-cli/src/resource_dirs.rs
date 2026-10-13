@@ -55,7 +55,7 @@ pub fn project_dirs(cwd: &Path, sub: &str) -> Vec<PathBuf> {
 
 /// Resolve the global resource subdir `<agent_dir>/<sub>` (e.g.
 /// `~/.ki/agent/skills`). Returns `None` if the agent dir can't be resolved
-/// (no home dir + no `RPI_CODING_AGENT_DIR`) — callers then proceed project-only.
+/// (no home dir + no `KI_CODING_AGENT_DIR`) — callers then proceed project-only.
 pub fn global_dir(sub: &str) -> Option<PathBuf> {
     crate::config::agent_dir().ok().map(|d| d.join(sub))
 }

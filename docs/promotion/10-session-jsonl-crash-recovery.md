@@ -1,6 +1,6 @@
-# 会话不是日志：rpi 如何用 JSONL 和帧进度实现崩溃恢复
+# 会话不是日志：ki 如何用 JSONL 和帧进度实现崩溃恢复
 
-> 一次长时间的模型生成可能在工具执行或网络等待时中断。rpi 不等到整轮结束才保存，而是把流式 assistant frame 作为进度记录；恢复时重放已提交帧，保留用户已经付出的工作。
+> 一次长时间的模型生成可能在工具执行或网络等待时中断。ki 不等到整轮结束才保存，而是把流式 assistant frame 作为进度记录；恢复时重放已提交帧，保留用户已经付出的工作。
 
 ## 持久化模型
 
@@ -66,7 +66,7 @@ sequenceDiagram
 
 # Keeping Partial Agent Work After a Crash
 
-A long model response can fail after several minutes. If the program writes only at the end, all partial work disappears. rpi records streamed assistant frames as progress and turns them into a normal message when the run finishes.
+A long model response can fail after several minutes. If the program writes only at the end, all partial work disappears. ki records streamed assistant frames as progress and turns them into a normal message when the run finishes.
 
 Frames are not ordinary conversation entries. Making every delta a transcript entry would grow the session quickly and expose progress records as history. The session stores progress separately and clears it when the final message is committed.
 

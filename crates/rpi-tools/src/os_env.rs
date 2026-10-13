@@ -68,7 +68,7 @@ struct ShellConfig {
 /// must not be handed to a shell it spawns.
 ///
 /// A spawned shell is a child process, so anything inherited reaches whatever
-/// that shell runs — including another `ki`. `RPI_SESSION_ID` names the session
+/// that shell runs — including another `ki`. `KI_SESSION_ID` names the session
 /// *this process* serves, which is meaningless (and actively misleading) in a
 /// descendant: the child would either report the parent's session or, seeing the
 /// variable already present, refuse to publish its own. Both are wrong answers,

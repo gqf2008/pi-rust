@@ -24,7 +24,7 @@
 //! in per process:
 //!
 //! ```text
-//! RPI_MAX_TURNS_PER_RUN=120 ki      # stop a single run after 120 turns
+//! KI_MAX_TURNS_PER_RUN=120 ki      # stop a single run after 120 turns
 //! ```
 //!
 //! Unset, empty, non-numeric or `0` all mean "no ceiling", exactly like native.
@@ -66,7 +66,7 @@ impl BudgetStop {
 /// guard — see [`RunBudget::from_env`]. `0` means unlimited.
 pub const DEFAULT_MAX_TURNS_PER_RUN: u32 = 120;
 
-/// Environment variable that switches the guard on: `RPI_MAX_TURNS_PER_RUN=<n>`
+/// Environment variable that switches the guard on: `KI_MAX_TURNS_PER_RUN=<n>`
 /// (`n > 0`). Anything else — unset, empty, non-numeric, `0` — leaves the run
 /// unbounded, matching upstream.
 pub const MAX_TURNS_ENV: &str = "KI_MAX_TURNS_PER_RUN";
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn default_is_unbounded_like_native_pi() {
         // Upstream's loop has no ceiling, so the default must not invent one:
-        // the guard is opt-in (RPI_MAX_TURNS_PER_RUN).
+        // the guard is opt-in (KI_MAX_TURNS_PER_RUN).
         let mut budget = RunBudget::default();
         assert!(!budget.is_enabled());
         assert_eq!(budget.max_turns(), 0);

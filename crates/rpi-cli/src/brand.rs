@@ -190,7 +190,7 @@ mod tests {
         let rows = plain(true);
 
         // The crab replaces the word "rust" rather than sitting beside it.
-        assert_eq!(rows[4], "   ██ ██ ██   ki · 🦀");
+        assert_eq!(rows[4], "   ██ ██ ██   kiqi · 🦀");
 
         // The crab is wider than the word it replaces, and the layout must
         // account for exactly that much: the separator plus the emoji.
@@ -203,17 +203,17 @@ mod tests {
 
     #[test]
     fn title_flattens_the_lockup_and_keeps_status_last() {
-        assert_eq!(window_title_from(true, ""), "▃ ▅ ▂ ki · 🦀");
-        assert_eq!(window_title_from(true, "⟳"), "▃ ▅ ▂ ki · 🦀 ⟳");
-        assert_eq!(window_title_from(true, "↻"), "▃ ▅ ▂ ki · 🦀 ↻");
+        assert_eq!(window_title_from(true, ""), "▃ ▅ ▂ kiqi · 🦀");
+        assert_eq!(window_title_from(true, "⟳"), "▃ ▅ ▂ kiqi · 🦀 ⟳");
+        assert_eq!(window_title_from(true, "↻"), "▃ ▅ ▂ kiqi · 🦀 ↻");
     }
 
     #[test]
     fn title_shares_the_lockup_opt_out() {
         // Disabling the crab must not leave a dangling separator in the title
         // either — the lockup and the tab title must never disagree.
-        assert_eq!(window_title_from(false, ""), "▃ ▅ ▂ ki");
-        assert_eq!(window_title_from(false, "⟳"), "▃ ▅ ▂ ki ⟳");
+        assert_eq!(window_title_from(false, ""), "▃ ▅ ▂ kiqi");
+        assert_eq!(window_title_from(false, "⟳"), "▃ ▅ ▂ kiqi ⟳");
         assert!(!window_title_from(false, "").contains(CRAB));
     }
 

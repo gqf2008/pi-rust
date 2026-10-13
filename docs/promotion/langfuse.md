@@ -1,6 +1,6 @@
 # 🔍 rpi-langfuse：让 AI Agent 运行透明可见
 
-> **一句话介绍**：安装即生效的 Langfuse 可观测性扩展，自动追踪 rpi Agent 的全链路执行，从 prompt 到 response，从 tool call 到 token 消耗，一目了然。
+> **一句话介绍**：安装即生效的 Langfuse 可观测性扩展，自动追踪 ki Agent 的全链路执行，从 prompt 到 response，从 tool call 到 token 消耗，一目了然。
 
 ---
 
@@ -27,7 +27,7 @@
 │          │                                                          │
 │          ▼                                                          │
 │   ┌──────────────────────────────────────────────────────────┐     │
-│   │                    rpi Agent Runtime                      │     │
+│   │                    ki Agent Runtime                      │     │
 │   │                                                          │     │
 │   │  ┌────────────────────────────────────────────────────┐ │     │
 │   │  │         Provider Hooks (rpi-extensions)            │ │     │
@@ -249,7 +249,7 @@ export LANGFUSE_SECRET_KEY="sk-lf-xxx"
 **项目级配置**（优先级高于全局）：
 
 ```json
-// .rpi/langfuse.json
+// .ki/langfuse.json
 {
   "baseUrl": "https://langfuse.laofu.online",
   "publicKey": "pk-lf-xxx",
@@ -260,7 +260,7 @@ export LANGFUSE_SECRET_KEY="sk-lf-xxx"
 **全局配置**：
 
 ```json
-// ~/.rpi/agent/langfuse.json
+// ~/.ki/agent/langfuse.json
 {
   "baseUrl": "https://cloud.langfuse.com",
   "publicKeyEnv": "LANGFUSE_PUBLIC_KEY",
@@ -271,7 +271,7 @@ export LANGFUSE_SECRET_KEY="sk-lf-xxx"
 #### 方式三：自定义配置路径
 
 ```bash
-export RPI_LANGFUSE_CONFIG="/absolute/path/to/langfuse.json"
+export KI_LANGFUSE_CONFIG="/absolute/path/to/langfuse.json"
 ```
 
 ### 配置加载源码
@@ -338,10 +338,10 @@ fn load_config() -> LangfuseConfig {
 ### Step 1：安装扩展
 
 ```bash
-rpi install rpi-langfuse
+ki install rpi-langfuse
 ```
 
-这会自动下载并编译 `rpi-langfuse` crate，生成 `rpi_langfuse.dll`（Windows）或 `librpi_langfuse.so`（Linux/macOS），放置到 `~/.rpi/agent/extensions/`。
+这会自动下载并编译 `rpi-langfuse` crate，生成 `rpi_langfuse.dll`（Windows）或 `librpi_langfuse.so`（Linux/macOS），放置到 `~/.ki/agent/extensions/`。
 
 ### Step 2：配置 Langfuse
 
@@ -355,7 +355,7 @@ export LANGFUSE_SECRET_KEY="sk-lf-xxx"
 **自托管配置**：
 
 ```json
-// ~/.rpi/agent/langfuse.json
+// ~/.ki/agent/langfuse.json
 {
   "baseUrl": "https://langfuse.yourcompany.com",
   "publicKey": "pk-lf-xxx",
@@ -366,7 +366,7 @@ export LANGFUSE_SECRET_KEY="sk-lf-xxx"
 ### Step 3：开始使用
 
 ```bash
-rpi -p "帮我写一个 Rust HTTP server"
+ki -p "帮我写一个 Rust HTTP server"
 ```
 
 打开 Langfuse Dashboard，你会看到完整的 trace 已经自动上报 🎉
@@ -519,8 +519,8 @@ cargo build --package rpi-langfuse --release
 | 📋 审查报告          | [REVIEW.md](https://github.com/pi-rust/rpi-package/blob/main/packages/rpi-langfuse/REVIEW.md)                       |
 | 🔍 Langfuse 官网     | [langfuse.com](https://langfuse.com)                                                                                |
 | 📚 Langfuse API 文档 | [langfuse.com/docs](https://langfuse.com/docs)                                                                      |
-| 🏠 rpi 官网          | [rpi.laofu.online](https://rpi.laofu.online)                                                                        |
-| 💻 rpi GitHub        | [bigfish1913/pi-rust](https://github.com/bigfish1913/pi-rust)                                                       |
+| 🏠 ki 官网          | [ki.laofu.online](https://ki.laofu.online)                                                                        |
+| 💻 ki GitHub        | [bigfish1913/pi-rust](https://github.com/bigfish1913/pi-rust)                                                       |
 
 ---
 
@@ -537,10 +537,10 @@ rpi-langfuse 是一个**生产级**的 Langfuse 集成扩展，具备以下特�
 **立即体验**：
 
 ```bash
-rpi install rpi-langfuse
+ki install rpi-langfuse
 export LANGFUSE_PUBLIC_KEY="pk-lf-xxx"
 export LANGFUSE_SECRET_KEY="sk-lf-xxx"
-rpi -p "Hello, observable agent!"
+ki -p "Hello, observable agent!"
 ```
 
 ---

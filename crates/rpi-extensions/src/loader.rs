@@ -15,7 +15,7 @@ use std::sync::Arc;
 use libloading::Library;
 use thiserror::Error;
 
-use rpi_plugin_sdk::{RpiPluginRegisterUnified, RPI_PLUGIN_ABI_VERSION_UNIFIED};
+use rpi_plugin_sdk::{RpiPluginRegisterUnified, KI_PLUGIN_ABI_VERSION_UNIFIED};
 
 use crate::registry::{ExtensionRegistry, RegistrySnapshot};
 use crate::{
@@ -63,7 +63,7 @@ pub struct LoadedPlugin {
     pub library: Library,
     /// Where it was loaded from (for diagnostics).
     pub path: PathBuf,
-    /// ABI version (always [`RPI_PLUGIN_ABI_VERSION_UNIFIED`] for plugins
+    /// ABI version (always [`KI_PLUGIN_ABI_VERSION_UNIFIED`] for plugins
     /// loaded by this version of the loader).
     pub abi_version: u32,
     /// The registry snapshot built from this plugin's registrations. The host
@@ -140,7 +140,7 @@ pub fn load_one(
         path: path.clone(),
         error: e.to_string(),
     })?;
-    let abi_version = RPI_PLUGIN_ABI_VERSION_UNIFIED;
+    let abi_version = KI_PLUGIN_ABI_VERSION_UNIFIED;
 
     // Plugin display name (file stem) — stamped onto every registration the
     // plugin makes so host diagnostics (e.g. lifecycle veto messages) can name
@@ -647,7 +647,7 @@ mod tests {
             ),
         );
         let loaded = load_one(&unified.path, Arc::clone(&diag), None).expect("load unified plugin");
-        assert_eq!(loaded.abi_version, RPI_PLUGIN_ABI_VERSION_UNIFIED);
+        assert_eq!(loaded.abi_version, KI_PLUGIN_ABI_VERSION_UNIFIED);
         drop(loaded);
         drop(unified);
     }
