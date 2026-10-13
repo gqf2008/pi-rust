@@ -63,7 +63,19 @@ impl ActionCaps {
         self.runtime.spawn(async move {
             let _ = tx.send(future.await);
         });
-        match rx.recv() {
+        // The native trampoline can park the calling thread because it runs on
+        // a *foreign* plugin thread. This adapter is called from the agent
+        // loop, i.e. on a runtime worker: parking it outright would deadlock
+        // when that worker is the only one available to run the spawned task.
+        // `block_in_place` hands the worker's other tasks to a replacement
+        // thread first, which is the same tool the provider-stream bridge uses.
+        // Requires the multi-thread flavor (the binary sets it).
+        let answer = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| rx.recv())
+        } else {
+            rx.recv()
+        };
+        match answer {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(error)) => Err(kiqi_plugin::PluginError::Failed(error)),
             Err(_) => Err(kiqi_plugin::PluginError::Failed(format!(
@@ -235,6 +247,32 @@ impl OwnedCaps {
             log: self.log.as_ref(),
         }
     }
+}
+
+/// Capabilities for a compiled plugin, backed by the real action host.
+///
+/// `runtime` is `None` when the caller has no tokio handle; the plugin then
+/// gets logging only, rather than a capability that would fail at call time.
+/// `ui` stays `None` on purpose: `SetStatus`/`SetEditorText`/`UiComponent` are
+/// served by the bridge's registries, not by the action host.
+pub fn owned_caps(
+    host: std::sync::Arc<dyn rpi_extensions::RuntimeActionHost>,
+    runtime: Option<tokio::runtime::Handle>,
+) -> OwnedCaps {
+    let mut caps = OwnedCaps {
+        session: None,
+        control: None,
+        inject: None,
+        ui: None,
+        log: std::sync::Arc::new(StderrLog),
+    };
+    if let Some(runtime) = runtime {
+        let shared = std::sync::Arc::new(ActionCaps::new(host, runtime));
+        caps.session = Some(shared.clone() as std::sync::Arc<dyn kiqi_plugin::SessionRead>);
+        caps.control = Some(shared.clone() as std::sync::Arc<dyn kiqi_plugin::SessionControl>);
+        caps.inject = Some(shared as std::sync::Arc<dyn kiqi_plugin::InjectApi>);
+    }
+    caps
 }
 
 /// Plugin logging goes to stderr for now, prefixed so it is attributable.
@@ -845,6 +883,20 @@ mod tests {
             other => panic!("unexpected block {other:?}"),
         };
         assert!(text.contains("from the branch"), "got {text}");
+    }
+
+    /// One worker thread on purpose: parking it without `block_in_place` would
+    /// leave nobody to run the spawned action, so this test hands forever if
+    /// the deadlock fix regresses.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn capabilities_do_not_deadlock_when_called_from_the_agent_loop() {
+        let fake = std::sync::Arc::new(FakeHost::default());
+        let caps = ActionCaps::new(fake, tokio::runtime::Handle::current());
+        assert_eq!(
+            caps.active_tools(),
+            vec!["todo".to_string(), "bash".to_string()]
+        );
+        assert_eq!(caps.thinking_level(), "medium");
     }
 
     struct Panicky;

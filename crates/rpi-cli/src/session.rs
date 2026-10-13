@@ -260,6 +260,9 @@ pub async fn build(
         tool_context.clone(),
     );
     let host_arc: Arc<dyn rpi_extensions::RuntimeActionHost> = Arc::new(action_host);
+    // Kept for the compiled-plugin capability adapter: `host_arc` itself is
+    // moved into the action bridge below.
+    let plugin_caps_host = Arc::clone(&host_arc);
     // `runtime` is reused below (B5c: `PluggableProvider` needs a captured
     // `Handle` to `spawn_blocking` the sync `ProviderRequestFn`), so clone here.
     //
@@ -327,13 +330,10 @@ pub async fn build(
     crate::plugins::merge_compiled_plugin_tools(
         &mut tools,
         &crate::plugins::compiled_plugin_hosts(),
-        &crate::plugins::OwnedCaps {
-            session: None,
-            control: None,
-            inject: None,
-            ui: None,
-            log: std::sync::Arc::new(crate::plugins::StderrLog),
-        },
+        &crate::plugins::owned_caps(
+            std::sync::Arc::clone(&plugin_caps_host),
+            Some(runtime.clone()),
+        ),
         &|name| tool_name_allowed(name, args),
     );
     let active = filter_active_tool_names(active_tool_names(&tools, args), args);
@@ -1211,6 +1211,7 @@ where
             Arc::new(action_host)
         }
     };
+    let host_for_plugins = Arc::clone(&host);
 
     let reload_cb = rpi_extensions::reload_callback_from_mailbox(ctx.mailbox.clone());
     let fresh_bridge = rpi_extensions::ActionBridge::with_reload_and_ui(
@@ -1474,13 +1475,10 @@ where
     crate::plugins::merge_compiled_plugin_tools(
         &mut tools,
         &crate::plugins::compiled_plugin_hosts(),
-        &crate::plugins::OwnedCaps {
-            session: None,
-            control: None,
-            inject: None,
-            ui: None,
-            log: std::sync::Arc::new(crate::plugins::StderrLog),
-        },
+        &crate::plugins::owned_caps(
+            std::sync::Arc::clone(&host_for_plugins),
+            tokio::runtime::Handle::try_current().ok(),
+        ),
         &|name| tool_name_allowed(name, &effective_args),
     );
     let mut active = active_tool_names(&tools, &effective_args);
