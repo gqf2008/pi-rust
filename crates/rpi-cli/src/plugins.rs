@@ -200,6 +200,37 @@ pub fn load_all() -> Vec<Registered> {
     plugins
 }
 
+/// The provider-facing schemas for every compiled-in plugin tool.
+///
+/// This is half of the wiring: it makes plugin tools visible to the model. The
+/// other half - routing an actual call back into [`PluginHost::call_tool`] -
+/// lives in the tool-execution dispatch.
+pub fn compiled_tool_schemas(hosts: &[PluginHost]) -> Vec<rpi_ai::types::Tool> {
+    let mut tools = Vec::new();
+    for host in hosts {
+        for spec in host.plugin().tools() {
+            match serde_json::from_value::<rpi_ai::types::Schema>(spec.parameters.clone()) {
+                Ok(parameters) => tools.push(rpi_ai::types::Tool {
+                    name: spec.name,
+                    description: spec.description,
+                    parameters,
+                    constrained_sampling: None,
+                }),
+                Err(error) => {
+                    // Skipped rather than poisoning the whole list, but never
+                    // silently: the plugin and tool name are named.
+                    eprintln!(
+                        "plugin `{}`: tool `{}` has an unparseable parameter schema ({error}); skipped",
+                        host.id(),
+                        spec.name
+                    );
+                }
+            }
+        }
+    }
+    tools
+}
+
 /// A plugin plus the isolation the host owes it.
 ///
 /// A plugin is ordinary in-process code, so "isolate the failure" here means
@@ -287,6 +318,23 @@ mod tests {
     struct Silent;
     impl Log for Silent {
         fn log(&self, _level: LogLevel, _message: &str) {}
+    }
+
+    #[test]
+    fn compiled_plugin_tools_reach_the_provider_facing_tool_list() {
+        let hosts = load_hosts();
+        let tools = compiled_tool_schemas(&hosts);
+        let todo = tools
+            .iter()
+            .find(|tool| tool.name == "todo")
+            .expect("rpi-todo's tool is in the model-visible list");
+        assert!(!todo.description.is_empty());
+        // The schema survived the Value -> Schema conversion intact.
+        let rendered = serde_json::to_value(&todo.parameters).unwrap();
+        let properties = rendered["properties"]
+            .as_object()
+            .expect("parameters is an object schema");
+        assert!(properties.contains_key("action"));
     }
 
     #[test]
