@@ -509,6 +509,8 @@ pub(super) fn open_theme_selector(
 const ADD_PROVIDER_VALUE: &str = "__add_provider__";
 /// Sentinel value for the "Remove provider" row in the `/provider` picker.
 const REMOVE_PROVIDER_VALUE: &str = "__remove_provider__";
+/// Sentinel values for the provider-management rows in the `/provider` picker.
+const EDIT_PROVIDER_VALUE: &str = "__edit_provider__";
 /// Sentinel values for the model-management rows in the `/provider` picker.
 const ADD_MODEL_VALUE: &str = "__add_model__";
 const EDIT_MODEL_VALUE: &str = "__edit_model__";
@@ -538,6 +540,11 @@ pub(super) fn open_provider_selector(
         SelectItem::new(ADD_PROVIDER_VALUE, "＋ Add new provider")
             .with_description("Interactive form → writes ~/.rpi/agent/models.json")
             .with_search_text("add new provider"),
+    );
+    items.push(
+        SelectItem::new(EDIT_PROVIDER_VALUE, "✎ Edit provider…")
+            .with_description("Change a models.json provider's protocol / base URL / key")
+            .with_search_text("edit provider models.json protocol base url key"),
     );
     items.push(
         SelectItem::new(REMOVE_PROVIDER_VALUE, "− Remove provider")
@@ -575,6 +582,11 @@ pub(super) fn open_provider_selector(
         if item.value == REMOVE_PROVIDER_VALUE {
             close_selector(&state_sel, &ec_sel, &editor_sel, &tui_sel);
             open_provider_remove_selector(&state_sel, &ec_sel, &editor_sel, &tui_sel);
+            return;
+        }
+        if item.value == EDIT_PROVIDER_VALUE {
+            close_selector(&state_sel, &ec_sel, &editor_sel, &tui_sel);
+            begin_edit_provider_form(&state_sel, &ec_sel, &editor_sel, &tui_sel);
             return;
         }
         if item.value == ADD_MODEL_VALUE {

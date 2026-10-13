@@ -1917,6 +1917,7 @@ fn provider_form_saves_provider_to_models_json() {
             api_key: "$OPENROUTER_API_KEY".into(),
             model_id: "claude-sonnet".into(),
             model_name: "Claude Sonnet".into(),
+            ..Default::default()
         };
         let note = save_provider_from_form(&form).unwrap();
         assert!(note.contains("openrouter"), "{note}");
@@ -1958,6 +1959,7 @@ fn remove_provider_deletes_from_models_json() {
             api_key: "$OPENROUTER_API_KEY".into(),
             model_id: "claude-sonnet".into(),
             model_name: String::new(),
+            ..Default::default()
         };
         save_provider_from_form(&form).unwrap();
         assert!(provider_id_exists("openrouter"));
@@ -3085,4 +3087,107 @@ fn remove_model_from_provider_targets_one_model_only() {
         assert!(remove_model_from_provider("myprov", "nope").is_err());
         assert!(remove_model_from_provider("nope", "m1").is_err());
     });
+}
+
+#[test]
+fn provider_edit_updates_only_owned_fields() {
+    with_isolated_config_dir(|| {
+        write_models_json(
+            r#"{"providers":{"Kimi":{"name":"K","baseUrl":"https://old.example.com","apiKey":"sk-old","api":"anthropic-messages","headers":{"x-a":"1"},"authHeader":true,"models":[{"id":"k1"},{"id":"k2"}]}}}"#,
+        );
+        let form = ProviderFormState {
+            mode: ProviderFormMode::Edit,
+            step: ProviderFormStep::Confirm,
+            id: "Kimi".into(),
+            original_id: Some("Kimi".into()),
+            name: "Kimi CN".into(),
+            api: "openai-completions".into(),
+            base_url: "https://new.example.com/v1".into(),
+            api_key: "$KIMI_API_KEY".into(),
+            ..Default::default()
+        };
+        let note = save_provider_from_form(&form).unwrap();
+        assert!(
+            note.contains("Kimi") && note.contains("OpenAI Completions"),
+            "{note}"
+        );
+        assert!(note.contains("2 model(s) kept"), "{note}");
+
+        let cfg = crate::config::load_models_config().unwrap();
+        let provider = cfg.providers.get("Kimi").expect("provider kept");
+        assert_eq!(provider.name.as_deref(), Some("Kimi CN"));
+        assert_eq!(provider.api.as_deref(), Some("openai-completions"));
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://new.example.com/v1")
+        );
+        assert_eq!(provider.api_key.as_deref(), Some("$KIMI_API_KEY"));
+        // Untouched fields survive the edit.
+        assert_eq!(provider.auth_header, Some(true));
+        assert_eq!(provider.headers.as_ref().unwrap()["x-a"], "1");
+        assert_eq!(provider.models.len(), 2);
+
+        // Editing a provider that is not in models.json is an error.
+        let gone = ProviderFormState {
+            mode: ProviderFormMode::Edit,
+            id: "nope".into(),
+            original_id: Some("nope".into()),
+            ..Default::default()
+        };
+        assert!(save_provider_from_form(&gone).is_err());
+    });
+}
+
+#[test]
+fn base_url_prompt_follows_the_selected_protocol() {
+    // Regression: picking Anthropic Messages used to leave the OpenAI-flavoured
+    // "endpoints usually end in /v1" hint on the next step, which read as if the
+    // protocol selection had been ignored.
+    let anthropic = base_url_question("anthropic-messages");
+    assert!(anthropic.contains("Anthropic Messages"), "{anthropic}");
+    assert!(!anthropic.contains("OpenAI"), "{anthropic}");
+    assert!(base_url_question("openai-completions").contains("Chat Completions"));
+    assert!(base_url_question("openai-responses").contains("Responses"));
+    // An unset api means the Anthropic-compatible default runtime.
+    assert!(base_url_question("").contains("Anthropic Messages"));
+
+    assert_eq!(
+        base_url_placeholder("anthropic-messages"),
+        "https://api.anthropic.com"
+    );
+    assert_eq!(
+        base_url_placeholder("openai-completions"),
+        "https://api.example.com/v1"
+    );
+}
+
+#[test]
+fn provider_form_titles_are_mode_aware() {
+    let add = ProviderFormState::default();
+    assert_eq!(provider_step_prompt(&add).0, "Add provider · step 1/6");
+
+    let edit = ProviderFormState {
+        mode: ProviderFormMode::Edit,
+        step: ProviderFormStep::Name,
+        name: "OpenRouter".into(),
+        ..Default::default()
+    };
+    assert_eq!(provider_step_prompt(&edit).0, "Edit provider · name");
+    assert_eq!(provider_step_initial(&edit), "OpenRouter");
+    // `Add` never prefills, so the plain id step stays empty.
+    assert!(provider_step_initial(&add).is_empty());
+}
+
+#[test]
+fn secret_masking_never_prints_the_key() {
+    assert_eq!(mask_secret(""), "(none)");
+    assert_eq!(mask_secret("$KIMI_API_KEY"), "$KIMI_API_KEY");
+    assert_eq!(mask_secret("!op read secret"), "!op read secret");
+    assert_eq!(mask_secret("short"), "*****");
+    let masked = mask_secret("sk-abcdefghijklmnop");
+    assert!(
+        masked.starts_with("sk-a") && masked.ends_with("mnop"),
+        "{masked}"
+    );
+    assert!(!masked.contains("efgh"), "{masked}");
 }

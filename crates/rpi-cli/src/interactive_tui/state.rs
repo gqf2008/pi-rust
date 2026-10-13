@@ -14,8 +14,9 @@ pub(super) enum RunStatus {
     Aborting,
 }
 
-/// Steps of the interactive "Add provider" form (`/provider` → Add). Each step
-/// is answered through the editor (submitted with Enter).
+/// Steps of the interactive provider form (`/provider` → Add new provider, or
+/// Edit provider). Each text step is answered through the editor (submitted
+/// with Enter); `Api` is a select list.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(super) enum ProviderFormStep {
     #[default]
@@ -25,13 +26,33 @@ pub(super) enum ProviderFormStep {
     ApiKey,
     ModelId,
     ModelName,
+    /// `Edit` only: pick which `models.json` provider to change.
+    PickProvider,
+    /// `Edit` only: optional display name.
+    Name,
+    /// `Edit` only: final review before writing.
+    Confirm,
 }
 
-/// In-progress state for the interactive "Add provider" form.
+/// Which provider flow a [`ProviderFormState`] is running.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) enum ProviderFormMode {
+    #[default]
+    Add,
+    Edit,
+}
+
+/// In-progress state for the interactive provider form.
 #[derive(Clone, Debug, Default)]
 pub(super) struct ProviderFormState {
+    pub(super) mode: ProviderFormMode,
     pub(super) step: ProviderFormStep,
     pub(super) id: String,
+    /// `Edit`: the id of the provider being changed. Provider ids are the
+    /// `models.json` map keys, so renaming is a remove+add, never an edit.
+    pub(super) original_id: Option<String>,
+    /// `Edit`: optional display name.
+    pub(super) name: String,
     pub(super) api: String,
     pub(super) base_url: String,
     pub(super) api_key: String,

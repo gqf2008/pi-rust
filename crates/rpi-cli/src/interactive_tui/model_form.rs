@@ -41,7 +41,7 @@ pub(super) fn editable_provider_items() -> Vec<SelectItem> {
 /// The protocol an editable provider speaks, for titles/summaries. `None`
 /// (missing `api`) means the default Anthropic-compatible runtime, matching
 /// [`crate::config::provider_is_anthropic_compatible`].
-fn protocol_label(api: Option<&str>) -> &'static str {
+pub(super) fn protocol_label(api: Option<&str>) -> &'static str {
     match api {
         Some("openai-completions") => "OpenAI Completions",
         Some("openai-responses") => "OpenAI Responses",
@@ -239,7 +239,7 @@ pub(super) fn show_model_form_step(
 
 /// Build the bordered frame + select list shared by every choice-style step,
 /// wiring `on_select` and routing Esc to the form cancel path.
-fn show_model_select(
+pub(super) fn show_form_select(
     state: &Arc<TuiState>,
     editor_container: &Arc<Container>,
     editor: &Arc<Editor>,
@@ -292,7 +292,7 @@ fn show_model_provider_select(
     let ec_sel = editor_container.clone();
     let editor_sel = editor.clone();
     let tui_sel = tui.clone();
-    show_model_select(
+    show_form_select(
         state,
         editor_container,
         editor,
@@ -354,7 +354,7 @@ fn show_model_pick_select(
     let ec_sel = editor_container.clone();
     let editor_sel = editor.clone();
     let tui_sel = tui.clone();
-    show_model_select(
+    show_form_select(
         state,
         editor_container,
         editor,
@@ -503,7 +503,7 @@ fn show_model_bool_select(
     let ec_sel = editor_container.clone();
     let editor_sel = editor.clone();
     let tui_sel = tui.clone();
-    show_model_select(
+    show_form_select(
         state,
         editor_container,
         editor,

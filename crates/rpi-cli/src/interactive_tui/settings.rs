@@ -782,6 +782,32 @@ pub(super) fn begin_provider_form(
     show_provider_form_step(state, editor_container, editor, tui);
 }
 
+/// `/provider` → "✎ Edit provider…": pick an existing `models.json` provider,
+/// prefill the form from it, review, then write the changed fields back.
+/// `models` / `headers` / `authHeader` are left untouched.
+pub(super) fn begin_edit_provider_form(
+    state: &Arc<TuiState>,
+    editor_container: &Arc<Container>,
+    editor: &Arc<Editor>,
+    tui: &Arc<TuiAltScreen>,
+) {
+    if editable_provider_items().is_empty() {
+        add_note_message(
+            &state.chat_container,
+            "No editable providers. Only providers declared in ~/.rpi/agent/models.json can be edited — add one first.",
+        );
+        tui.request_render(false);
+        return;
+    }
+    let form = ProviderFormState {
+        mode: ProviderFormMode::Edit,
+        step: ProviderFormStep::PickProvider,
+        ..Default::default()
+    };
+    *state.provider_form.lock().unwrap() = Some(ProviderForm::Provider(form));
+    show_provider_form_step(state, editor_container, editor, tui);
+}
+
 /// Render the current form step in the editor slot. Choice-style steps (the
 /// protocol step) render a select list; every other step renders a titled,
 /// bordered single-line input.
@@ -798,13 +824,27 @@ pub(super) fn show_provider_form_step(
     *state.active_provider_select.lock().unwrap() = None;
 
     match form {
-        ProviderForm::Provider(form) => {
-            if form.step == ProviderFormStep::Api {
-                show_provider_api_selector(state, editor_container, editor, tui);
-            } else {
-                show_provider_text_input(state, editor_container, editor, tui, &form);
+        ProviderForm::Provider(form) => match form.step {
+            ProviderFormStep::Api => {
+                // `Edit` pre-selects the provider's current protocol so the
+                // highlighted row is the value already in models.json.
+                let current = (form.mode == ProviderFormMode::Edit).then(|| form.api.clone());
+                show_provider_api_selector(
+                    state,
+                    editor_container,
+                    editor,
+                    tui,
+                    current.as_deref(),
+                );
             }
-        }
+            ProviderFormStep::PickProvider => {
+                show_provider_pick_for_edit(state, editor_container, editor, tui)
+            }
+            ProviderFormStep::Confirm => {
+                show_provider_edit_confirm(state, editor_container, editor, tui, &form)
+            }
+            _ => show_provider_text_input(state, editor_container, editor, tui, &form),
+        },
         ProviderForm::Model(form) => {
             show_model_form_step(state, editor_container, editor, tui, &form)
         }
@@ -819,17 +859,22 @@ fn show_provider_text_input(
     tui: &Arc<TuiAltScreen>,
     form: &ProviderFormState,
 ) {
-    let (step_label, question, placeholder) = provider_step_prompt(&form.step);
+    let (title, question, placeholder) = provider_step_prompt(form);
 
     let input = Arc::new(Input::with_placeholder(placeholder));
+    // `Edit` prefills every field with the current value so Enter alone keeps it.
+    let initial = provider_step_initial(form);
+    if !initial.is_empty() {
+        input.set_value(&initial);
+    }
     input.set_focused(true);
 
-    let frame = provider_form_frame(
-        step_label,
-        question,
-        input.clone(),
-        "Enter next · Esc cancels (empty Enter also cancels)",
-    );
+    let hint = if form.mode == ProviderFormMode::Edit {
+        "Enter next · Esc cancels"
+    } else {
+        "Enter next · Esc cancels (empty Enter also cancels)"
+    };
+    let frame = provider_form_frame(&title, question, input.clone(), hint);
     editor_container.clear();
     editor_container.add_child(frame);
     *state.active_provider_input.lock().unwrap() = Some(input.clone());
@@ -859,7 +904,13 @@ fn show_provider_api_selector(
     editor_container: &Arc<Container>,
     editor: &Arc<Editor>,
     tui: &Arc<TuiAltScreen>,
+    current_api: Option<&str>,
 ) {
+    const PROTOCOLS: [&str; 3] = [
+        "openai-completions",
+        "anthropic-messages",
+        "openai-responses",
+    ];
     let items = vec![
         SelectItem::new("openai-completions", "OpenAI Completions")
             .with_description("OpenAI Chat Completions 兼容接口"),
@@ -869,9 +920,18 @@ fn show_provider_api_selector(
             .with_description("OpenAI Responses 接口"),
     ];
     let list = Arc::new(SelectList::new(items, 3));
+    if let Some(api) = current_api {
+        let index = PROTOCOLS.iter().position(|p| *p == api).unwrap_or(0);
+        list.set_selected_index(index);
+    }
 
+    let title = if current_api.is_some() {
+        "Edit provider · protocol"
+    } else {
+        "Add provider · step 2/6"
+    };
     let frame = provider_form_frame(
-        "Add provider · step 2/6",
+        title,
         "Protocol — choose one with ↑/↓ and Enter",
         list.clone(),
         "Enter selects · Esc cancels",
@@ -927,40 +987,246 @@ pub(super) fn provider_form_frame(
     frame
 }
 
+/// `Edit provider` step 1: pick which `models.json` provider to change, then
+/// prefill the form from its current values.
+fn show_provider_pick_for_edit(
+    state: &Arc<TuiState>,
+    editor_container: &Arc<Container>,
+    editor: &Arc<Editor>,
+    tui: &Arc<TuiAltScreen>,
+) {
+    let items = editable_provider_items();
+    let state_sel = state.clone();
+    let ec_sel = editor_container.clone();
+    let editor_sel = editor.clone();
+    let tui_sel = tui.clone();
+    show_form_select(
+        state,
+        editor_container,
+        editor,
+        tui,
+        "Edit provider · pick provider",
+        "Which provider do you want to change?",
+        "Enter selects · Esc cancels",
+        items,
+        0,
+        Arc::new(move |item| {
+            let Some(ProviderForm::Provider(mut form)) =
+                state_sel.provider_form.lock().unwrap().take()
+            else {
+                return;
+            };
+            let current = crate::config::load_models_config()
+                .ok()
+                .and_then(|cfg| cfg.providers.get(&item.value).cloned());
+            if let Some(provider) = current {
+                form.original_id = Some(item.value.clone());
+                form.id = item.value.clone();
+                form.name = provider.name.clone().unwrap_or_default();
+                // A missing `api` means the Anthropic-compatible default runtime;
+                // prefill it explicitly so the protocol step highlights it.
+                form.api = provider
+                    .api
+                    .clone()
+                    .unwrap_or_else(|| "anthropic-messages".to_string());
+                form.base_url = provider.base_url.clone().unwrap_or_default();
+                form.api_key = provider.api_key.clone().unwrap_or_default();
+            }
+            form.step = ProviderFormStep::Name;
+            *state_sel.provider_form.lock().unwrap() = Some(ProviderForm::Provider(form));
+            show_provider_form_step(&state_sel, &ec_sel, &editor_sel, &tui_sel);
+        }),
+    );
+}
+
+/// `Edit provider` final step: re-show exactly what will be written, then write
+/// it (the "echo" the protocol-selection complaint asked for).
+fn show_provider_edit_confirm(
+    state: &Arc<TuiState>,
+    editor_container: &Arc<Container>,
+    editor: &Arc<Editor>,
+    tui: &Arc<TuiAltScreen>,
+    form: &ProviderFormState,
+) {
+    let id = form.original_id.as_deref().unwrap_or(&form.id);
+    let lines = vec![
+        format!("provider     : {id}"),
+        format!(
+            "display name : {}",
+            if form.name.is_empty() {
+                "(keeps id)".to_string()
+            } else {
+                form.name.clone()
+            }
+        ),
+        format!("protocol     : {}", protocol_label(Some(form.api.as_str()))),
+        format!("base URL     : {}", form.base_url),
+        format!("api key      : {}", mask_secret(&form.api_key)),
+        format!("models       : {} kept as-is", provider_model_count(id)),
+        "file         : ~/.rpi/agent/models.json".to_string(),
+    ];
+
+    let items = vec![
+        SelectItem::new("save", "✓ Save to models.json")
+            .with_description("写入 ~/.rpi/agent/models.json"),
+        SelectItem::new("cancel", "✗ Cancel").with_description("不写入，丢弃本次修改"),
+    ];
+    let list = Arc::new(SelectList::new(items, 5));
+
+    let body = Arc::new(Container::new());
+    for line in lines {
+        body.add_child(Arc::new(Text::new(line, 1, 0)));
+    }
+    body.add_child(Arc::new(Spacer::new(1)));
+    body.add_child(list.clone());
+
+    let frame = provider_form_frame(
+        "Edit provider · confirm",
+        "Review — this is exactly what will be written:",
+        body,
+        "↑/↓ choose · Enter confirms · Esc cancels",
+    );
+    editor_container.clear();
+    editor_container.add_child(frame);
+    *state.active_provider_select.lock().unwrap() = Some(list.clone());
+    tui.set_focus(Some(list.clone()));
+
+    let state_sel = state.clone();
+    let ec_sel = editor_container.clone();
+    let editor_sel = editor.clone();
+    let tui_sel = tui.clone();
+    list.on_select(Arc::new(move |item| {
+        if item.value == "save" {
+            let Some(ProviderForm::Provider(form)) = state_sel.provider_form.lock().unwrap().take()
+            else {
+                return;
+            };
+            match save_provider_from_form(&form) {
+                Ok(note) => add_note_message(&state_sel.chat_container, &note),
+                Err(error) => add_error_message(&state_sel.chat_container, &error),
+            }
+            finish_provider_form(&state_sel, &ec_sel, &editor_sel, &tui_sel);
+        } else {
+            cancel_provider_form(&state_sel, &ec_sel, &editor_sel, &tui_sel);
+        }
+    }));
+
+    let state_cancel = state.clone();
+    let ec_cancel = editor_container.clone();
+    let editor_cancel = editor.clone();
+    let tui_cancel = tui.clone();
+    list.on_cancel(Arc::new(move || {
+        cancel_provider_form(&state_cancel, &ec_cancel, &editor_cancel, &tui_cancel);
+    }));
+    tui.request_render(false);
+}
+
+/// How many models a provider currently declares.
+fn provider_model_count(id: &str) -> usize {
+    crate::config::load_models_config()
+        .ok()
+        .and_then(|cfg| cfg.providers.get(id).map(|p| p.models.len()))
+        .unwrap_or(0)
+}
+
+/// Show a credential without printing it: env/command references are shown as
+/// written, short values are starred, longer ones keep a head/tail hint.
+pub(super) fn mask_secret(raw: &str) -> String {
+    if raw.is_empty() {
+        return "(none)".to_string();
+    }
+    if raw.starts_with('$') || raw.starts_with('!') {
+        return raw.to_string();
+    }
+    let count = raw.chars().count();
+    if count <= 8 {
+        return "*".repeat(count.max(1));
+    }
+    let head: String = raw.chars().take(4).collect();
+    let tail: String = raw.chars().skip(count - 4).collect();
+    format!("{head}…{tail}")
+}
+
 /// Prompt metadata for one form step: a heading, a question, and the input
-/// placeholder.
-fn provider_step_prompt(step: &ProviderFormStep) -> (&'static str, &'static str, &'static str) {
-    match step {
+/// placeholder. The heading is mode-aware so an edit never claims to be an add.
+pub(super) fn provider_step_prompt(
+    form: &ProviderFormState,
+) -> (String, &'static str, &'static str) {
+    let (label, question, placeholder): (&str, &'static str, &'static str) = match form.step {
         ProviderFormStep::Id => (
-            "Add provider · step 1/6",
+            "step 1/6",
             "Provider id — a short unique name, e.g. openrouter.",
             "openrouter",
         ),
-        ProviderFormStep::Api => (
-            "Add provider · step 2/6",
-            "Protocol — choose one below.",
-            "",
-        ),
+        ProviderFormStep::Api => ("step 2/6", "Protocol — choose one below.", ""),
         ProviderFormStep::BaseUrl => (
-            "Add provider · step 3/6",
-            "Base URL — OpenAI-compatible endpoints usually end in /v1.",
-            "https://api.example.com/v1",
+            "step 3/6",
+            base_url_question(&form.api),
+            base_url_placeholder(&form.api),
         ),
         ProviderFormStep::ApiKey => (
-            "Add provider · step 4/6",
+            "step 4/6",
             "API key — a literal sk-… or an env reference like $SOME_API_KEY.",
             "$SOME_API_KEY",
         ),
-        ProviderFormStep::ModelId => (
-            "Add provider · step 5/6",
-            "Model id — at least one.",
-            "my-model",
-        ),
+        ProviderFormStep::ModelId => ("step 5/6", "Model id — at least one.", "my-model"),
         ProviderFormStep::ModelName => (
-            "Add provider · step 6/6",
+            "step 6/6",
             "Model name — optional, empty keeps the id.",
             "My Model",
         ),
+        ProviderFormStep::Name => (
+            "name",
+            "Display name — optional, empty keeps the id.",
+            "OpenRouter",
+        ),
+        // Select-list steps: these never render a text input.
+        ProviderFormStep::PickProvider | ProviderFormStep::Confirm => ("", "", ""),
+    };
+    let title = if form.mode == ProviderFormMode::Edit {
+        format!("Edit provider · {label}")
+    } else {
+        format!("Add provider · {label}")
+    };
+    (title, question, placeholder)
+}
+
+/// The value a text step should start with: `Edit` prefills the current value,
+/// `Add` starts empty.
+pub(super) fn provider_step_initial(form: &ProviderFormState) -> String {
+    if form.mode != ProviderFormMode::Edit {
+        return String::new();
+    }
+    match form.step {
+        ProviderFormStep::Name => form.name.clone(),
+        ProviderFormStep::BaseUrl => form.base_url.clone(),
+        ProviderFormStep::ApiKey => form.api_key.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Base-URL help text that matches the protocol chosen on the previous step.
+/// The old static "OpenAI-compatible endpoints usually end in /v1" showed up
+/// even after picking Anthropic Messages, which read as if the protocol
+/// selection had been ignored.
+pub(super) fn base_url_question(api: &str) -> &'static str {
+    match api {
+        "openai-completions" => {
+            "Base URL — the OpenAI Chat Completions endpoint, usually ending in /v1."
+        }
+        "openai-responses" => {
+            "Base URL — the OpenAI Responses endpoint, usually ending in /v1."
+        }
+        _ => {
+            "Base URL — the Anthropic Messages endpoint, e.g. https://api.anthropic.com or https://api.deepseek.com/anthropic."
+        }
+    }
+}
+
+pub(super) fn base_url_placeholder(api: &str) -> &'static str {
+    match api {
+        "openai-completions" | "openai-responses" => "https://api.example.com/v1",
+        _ => "https://api.anthropic.com",
     }
 }
 
@@ -978,8 +1244,10 @@ fn handle_provider_form_input(
     };
     let text = text.trim();
 
-    // Empty submission cancels the form at any step.
-    if text.is_empty() {
+    // For "Add new provider" an empty submission cancels the form at any step
+    // (the original contract). "Edit provider" prefills every field, so empty
+    // is a legitimate value there (e.g. clearing the optional display name).
+    if text.is_empty() && form.mode == ProviderFormMode::Add {
         cancel_provider_form(state, editor_container, editor, tui);
         return;
     }
@@ -1021,7 +1289,21 @@ fn handle_provider_form_input(
         }
         ProviderFormStep::ApiKey => {
             form.api_key = text.to_string();
-            form.step = ProviderFormStep::ModelId;
+            form.step = match form.mode {
+                ProviderFormMode::Edit => ProviderFormStep::Confirm,
+                ProviderFormMode::Add => ProviderFormStep::ModelId,
+            };
+        }
+        ProviderFormStep::Name => {
+            form.name = text.to_string();
+            form.step = ProviderFormStep::Api;
+        }
+        ProviderFormStep::PickProvider | ProviderFormStep::Confirm => {
+            // Select-list steps: a text submission can only arrive here via a
+            // bug; re-show the step rather than panicking.
+            *state.provider_form.lock().unwrap() = Some(ProviderForm::Provider(form));
+            show_provider_form_step(state, editor_container, editor, tui);
+            return;
         }
         ProviderFormStep::ModelId => {
             form.model_id = text.to_string();
@@ -1109,8 +1391,30 @@ pub(super) fn remove_provider(input: &str) -> Result<String, String> {
 
 /// Write the completed form into `models.json` as a new provider with one
 /// model.
+/// Write the completed provider form into `models.json`. `Add` inserts a new
+/// provider carrying one model; `Edit` rewrites only the fields this form owns
+/// (name / api / baseUrl / apiKey), leaving `models`, `headers`, and
+/// `authHeader` exactly as they were.
 pub(super) fn save_provider_from_form(form: &ProviderFormState) -> Result<String, String> {
     let mut cfg = crate::config::load_models_config().map_err(|error| error.to_string())?;
+    if form.mode == ProviderFormMode::Edit {
+        let id = form.original_id.clone().unwrap_or_else(|| form.id.clone());
+        let (api, models) = {
+            let Some(provider) = cfg.providers.get_mut(&id) else {
+                return Err(format!("Provider \"{id}\" is no longer in models.json."));
+            };
+            provider.name = (!form.name.is_empty()).then(|| form.name.clone());
+            provider.base_url = Some(form.base_url.clone());
+            provider.api_key = Some(form.api_key.clone());
+            provider.api = Some(form.api.clone());
+            (provider.api.clone(), provider.models.len())
+        };
+        crate::config::save_models_config(&cfg).map_err(|error| error.to_string())?;
+        return Ok(format!(
+            "Updated provider \"{id}\" ({} · {models} model(s) kept) — restart rpi to use it.",
+            protocol_label(api.as_deref())
+        ));
+    }
     let provider = crate::config::ProviderConfig {
         name: None,
         base_url: Some(form.base_url.clone()),
