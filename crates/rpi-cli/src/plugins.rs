@@ -261,6 +261,11 @@ pub fn load_all() -> Vec<Registered> {
         id: "rpi-codegraph",
         plugin: rpi_codegraph::kiqi::factory(),
     });
+    #[cfg(feature = "plugin-rpi-ask-user")]
+    plugins.push(Registered {
+        id: "rpi-ask-user",
+        plugin: rpi_ask_user::kiqi::factory(),
+    });
     #[cfg(feature = "plugin-rpi-subagents")]
     plugins.push(Registered {
         id: "rpi-subagents",
@@ -778,6 +783,7 @@ mod tests {
             "rpi-goal",
             "rpi-plan-mode",
             "rpi-codegraph",
+            "rpi-ask-user",
         ] {
             assert!(
                 ids.contains(&expected),
@@ -813,6 +819,7 @@ mod tests {
             "plan_mode_complete",
             "plan_mode_start",
             "codegraph_search",
+            "ask_user",
         ] {
             assert!(
                 tools.iter().any(|t| t == expected),
@@ -1174,6 +1181,22 @@ mod tests {
             injected,
             "starting a goal injected its notice through InjectApi; saw {:?}",
             fake.seen.lock().unwrap()
+        );
+
+        // rpi-ask-user needs UiApi: without a granted UI it must fail rather
+        // than fabricate an answer for the model.
+        let ask_host = PluginHost::new("rpi-ask-user", rpi_ask_user::kiqi::factory());
+        let refused = ask_host
+            .call_tool(
+                "ask_user",
+                &serde_json::json!({"question": "proceed?"}),
+                &caps,
+                &NoProgress,
+            )
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("UI"),
+            "without UiApi ask_user refuses instead of answering for the user: {refused}"
         );
 
         // rpi-plan-mode needs SessionControl: entering plan mode swaps the tool

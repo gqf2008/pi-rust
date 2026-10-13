@@ -3,8 +3,8 @@
     "title": "wire goal",
     "status": "active",
     "notes": "",
-    "started_at": 1791904541782,
-    "updated_at": 1791904541782,
+    "started_at": 1791905586326,
+    "updated_at": 1791905586326,
     "turns_used": 0,
     "max_turns": null,
     "deadline_ms": null
@@ -126,6 +126,36 @@
       "notes": "",
       "started_at": 1791904522286,
       "updated_at": 1791904522286,
+      "turns_used": 0,
+      "max_turns": null,
+      "deadline_ms": null
+    },
+    {
+      "title": "wire goal",
+      "status": "active",
+      "notes": "",
+      "started_at": 1791904541782,
+      "updated_at": 1791904541782,
+      "turns_used": 0,
+      "max_turns": null,
+      "deadline_ms": null
+    },
+    {
+      "title": "wire goal",
+      "status": "active",
+      "notes": "",
+      "started_at": 1791905553531,
+      "updated_at": 1791905553531,
+      "turns_used": 0,
+      "max_turns": null,
+      "deadline_ms": null
+    },
+    {
+      "title": "wire goal",
+      "status": "active",
+      "notes": "",
+      "started_at": 1791905569914,
+      "updated_at": 1791905569914,
       "turns_used": 0,
       "max_turns": null,
       "deadline_ms": null

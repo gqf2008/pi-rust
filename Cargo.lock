@@ -2271,6 +2271,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpi-ask-user"
+version = "0.1.5"
+dependencies = [
+ "kiqi-plugin",
+ "rpi-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "rpi-cli"
 version = "0.4.0"
 dependencies = [
@@ -2290,6 +2299,7 @@ dependencies = [
  "rpassword",
  "rpi-agent",
  "rpi-ai",
+ "rpi-ask-user",
  "rpi-codegraph",
  "rpi-extensions",
  "rpi-goal",
