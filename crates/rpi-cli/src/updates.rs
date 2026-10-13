@@ -399,7 +399,7 @@ fn normalize_windows_path(path: PathBuf) -> PathBuf {
     path
 }
 
-#[cfg(test)]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_paths_equal(left: &Path, right: &Path) -> bool {
     let left = normalize_windows_path(left.to_path_buf());
     let right = normalize_windows_path(right.to_path_buf());
