@@ -26,6 +26,34 @@ impl ActionCaps {
         Self { host, runtime }
     }
 
+    /// Dispatch a mutating action, discarding its success payload.
+    fn run(
+        &self,
+        action: &'static str,
+        args: serde_json::Value,
+    ) -> Result<(), kiqi_plugin::PluginError> {
+        let host = self.host.clone();
+        let call = move |args: serde_json::Value| async move {
+            match action {
+                "set_session_name" => host.set_session_name(args).await,
+                "set_active_tools" => host.set_active_tools(args).await,
+                "set_model" => host.set_model(args).await,
+                "set_thinking_level" => host.set_thinking_level(args).await,
+                "compact" => host.compact(args).await,
+                "new_session" => host.new_session(args).await,
+                "fork" => host.fork(args).await,
+                "navigate_tree" => host.navigate_tree(args).await,
+                "switch_session" => host.switch_session(args).await,
+                "reload" => host.reload(args).await,
+                "send_message" => host.send_message(args).await,
+                "send_user_message" => host.send_user_message(args).await,
+                "append_entry" => host.append_entry(args).await,
+                other => Err(format!("unknown action `{other}`")),
+            }
+        };
+        self.drive(action, call(args)).map(|_| ())
+    }
+
     fn drive(
         &self,
         action: &str,
@@ -88,6 +116,69 @@ impl kiqi_plugin::SessionRead for ActionCaps {
         let host = self.host.clone();
         self.drive("get_session_branch", async move { host.get_session_branch(serde_json::json!({})).await })
             .unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// `SessionControl` and `InjectApi`. The mutation actions answer with a
+/// success blob the plugin does not need, so they collapse to `Result<(), _>`.
+///
+/// `UiApi` is deliberately **not** implemented here: `SetStatus` /
+/// `SetEditorText` / `UiComponent` are served by the bridge's own registries,
+/// not by `RuntimeActionHost`, so that adapter needs the bridge rather than
+/// this host handle.
+impl kiqi_plugin::SessionControl for ActionCaps {
+    fn set_session_name(&self, name: &str) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("set_session_name", serde_json::json!({ "name": name }))
+    }
+
+    fn set_active_tools(&self, tools: &[String]) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("set_active_tools", serde_json::json!({ "tools": tools }))
+    }
+
+    fn set_model(&self, model: &str) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("set_model", serde_json::json!({ "model": model }))
+    }
+
+    fn set_thinking_level(&self, level: &str) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("set_thinking_level", serde_json::json!({ "level": level }))
+    }
+
+    fn compact(&self) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("compact", serde_json::json!({}))
+    }
+
+    fn new_session(&self) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("new_session", serde_json::json!({}))
+    }
+
+    fn fork(&self) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("fork", serde_json::json!({}))
+    }
+
+    fn navigate_tree(&self, target: &str) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("navigate_tree", serde_json::json!({ "targetId": target }))
+    }
+
+    fn switch_session(&self, id: &str) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("switch_session", serde_json::json!({ "id": id }))
+    }
+
+    fn reload(&self) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("reload", serde_json::json!({}))
+    }
+}
+
+impl kiqi_plugin::InjectApi for ActionCaps {
+    fn send_message(&self, message: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("send_message", serde_json::json!({ "message": message }))
+    }
+
+    fn send_user_message(&self, text: &str) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("send_user_message", serde_json::json!({ "text": text }))
+    }
+
+    fn append_entry(&self, entry: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+        self.run("append_entry", serde_json::json!({ "data": entry }))
     }
 }
 
@@ -217,32 +308,42 @@ mod tests {
 
     /// A host that answers the two actions this test needs and refuses the
     /// rest, so the adapter is exercised over the real spawn/park seam.
-    struct FakeHost;
+    #[derive(Default)]
+    struct FakeHost {
+        seen: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    impl FakeHost {
+        fn record(&self, action: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
+            self.seen.lock().unwrap().push((action.to_string(), args));
+            Ok(serde_json::json!({}))
+        }
+    }
 
     #[async_trait::async_trait]
     impl rpi_extensions::RuntimeActionHost for FakeHost {
-        async fn send_message(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
-        async fn send_user_message(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
-        async fn append_entry(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
-        async fn set_session_name(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn send_message(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("send_message", args) }
+        async fn send_user_message(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("send_user_message", args) }
+        async fn append_entry(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("append_entry", args) }
+        async fn set_session_name(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("set_session_name", args) }
         async fn get_active_tools(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
             Ok(serde_json::json!({ "tools": ["todo", "bash"] }))
         }
-        async fn set_active_tools(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
-        async fn set_model(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn set_active_tools(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("set_active_tools", args) }
+        async fn set_model(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("set_model", args) }
         async fn get_thinking_level(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
             Ok(serde_json::json!({ "level": "medium" }))
         }
-        async fn set_thinking_level(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
-        async fn compact(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn set_thinking_level(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("set_thinking_level", args) }
+        async fn compact(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("compact", args) }
         async fn get_system_prompt(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
             Ok(serde_json::json!({ "prompt": "you are kiqi" }))
         }
-        async fn new_session(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
-        async fn fork(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
-        async fn navigate_tree(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
-        async fn switch_session(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
-        async fn reload(&self, _: serde_json::Value) -> Result<serde_json::Value, String> { refused() }
+        async fn new_session(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("new_session", args) }
+        async fn fork(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("fork", args) }
+        async fn navigate_tree(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("navigate_tree", args) }
+        async fn switch_session(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("switch_session", args) }
+        async fn reload(&self, args: serde_json::Value) -> Result<serde_json::Value, String> { self.record("reload", args) }
         async fn get_cli_flag(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
             let value = match args.get("name").and_then(|n| n.as_str()) {
                 Some("verbose") => serde_json::json!("2"),
@@ -270,7 +371,8 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let caps_host = ActionCaps::new(std::sync::Arc::new(FakeHost), runtime.handle().clone());
+        let fake = std::sync::Arc::new(FakeHost::default());
+        let caps_host = ActionCaps::new(fake.clone(), runtime.handle().clone());
         let silent = Silent;
         let caps = HostCaps {
             session: Some(&caps_host),
@@ -286,6 +388,32 @@ mod tests {
         assert_eq!(caps_host.system_prompt(), "you are kiqi");
         assert_eq!(caps_host.cli_flag("verbose").as_deref(), Some("2"));
         assert_eq!(caps_host.cli_flag("missing"), None);
+
+        // The mutating capabilities must hand the host the documented args,
+        // not a re-shaped blob. `kiqi_plugin::SessionControl` / `InjectApi` are
+        // in scope for these calls.
+        use kiqi_plugin::{InjectApi, SessionControl};
+        caps_host.set_model("deepseek-flash").unwrap();
+        caps_host.set_active_tools(&["todo".to_string()]).unwrap();
+        caps_host.navigate_tree("abc").unwrap();
+        caps_host.switch_session("sess-1").unwrap();
+        caps_host.reload().unwrap();
+        caps_host.send_user_message("hi").unwrap();
+        caps_host.append_entry(&serde_json::json!({"kind": "note"})).unwrap();
+        let seen = fake.seen.lock().unwrap().clone();
+        let sent = |action: &str| {
+            seen.iter()
+                .find(|(a, _)| a == action)
+                .map(|(_, args)| args.clone())
+                .unwrap_or_else(|| panic!("`{action}` was never dispatched"))
+        };
+        assert_eq!(sent("set_model"), serde_json::json!({"model": "deepseek-flash"}));
+        assert_eq!(sent("set_active_tools"), serde_json::json!({"tools": ["todo"]}));
+        assert_eq!(sent("navigate_tree"), serde_json::json!({"targetId": "abc"}));
+        assert_eq!(sent("switch_session"), serde_json::json!({"id": "sess-1"}));
+        assert_eq!(sent("reload"), serde_json::json!({}));
+        assert_eq!(sent("send_user_message"), serde_json::json!({"text": "hi"}));
+        assert_eq!(sent("append_entry"), serde_json::json!({"data": {"kind": "note"}}));
 
         // And a plugin restoring through caps gets the branch the host served,
         // not a stub: this is the rpi-todo restore path end to end.
