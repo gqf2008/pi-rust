@@ -27,6 +27,7 @@ rpi-webfetch = { path = "../../plugins/rpi-webfetch", optional = true }
 rpi-websearch = { path = "../../plugins/rpi-websearch", optional = true }
 rpi-subagents = { path = "../../plugins/rpi-subagents", optional = true }
 rpi-permissions = { path = "../../plugins/rpi-permissions", optional = true }
+rpi-goal = { path = "../../plugins/rpi-goal", optional = true }
 rpi-telemetry = { workspace = true }
 rpi-ai = { workspace = true, features = ["providers"] }
 rpi-agent = { workspace = true }
@@ -96,7 +97,7 @@ pkg-fmt = "tgz"
 pkg-fmt = "zip"
 
 [features]
-default = ["clipboard", "plugin-rpi-todo", "plugin-rpi-lens", "plugin-rpi-webfetch", "plugin-rpi-websearch", "plugin-rpi-subagents", "plugin-rpi-permissions"]
+default = ["clipboard", "plugin-rpi-todo", "plugin-rpi-lens", "plugin-rpi-webfetch", "plugin-rpi-websearch", "plugin-rpi-subagents", "plugin-rpi-permissions", "plugin-rpi-goal"]
 # Enables real clipboard support for `/copy` and image paste (best-effort).
 clipboard = ["dep:arboard"]
 # First-party plugins are compiled in. The cdylib channel keeps serving `ki dev`.
@@ -106,6 +107,7 @@ plugin-rpi-webfetch = ["dep:rpi-webfetch"]
 plugin-rpi-websearch = ["dep:rpi-websearch"]
 plugin-rpi-subagents = ["dep:rpi-subagents"]
 plugin-rpi-permissions = ["dep:rpi-permissions"]
+plugin-rpi-goal = ["dep:rpi-goal"]
 
 [dev-dependencies]
 

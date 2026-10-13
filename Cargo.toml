@@ -10,6 +10,7 @@ members = [
     "crates/rpi-tui",
     "crates/kiqi-plugin",
     "plugins/rpi-todo",
+    "plugins/rpi-goal",
     "plugins/rpi-subagents",
     "plugins/rpi-permissions",
     "plugins/rpi-lens",

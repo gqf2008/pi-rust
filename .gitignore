@@ -20,6 +20,7 @@ target/*
 # Static frontend deployment bundle
 .deploy/
 .codegraph
+.ki/*
 .rpi/*
 !.rpi/skills/
 .rpi/skills/*

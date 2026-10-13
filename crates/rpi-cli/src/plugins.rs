@@ -246,6 +246,11 @@ pub fn load_all() -> Vec<Registered> {
         id: "rpi-webfetch",
         plugin: rpi_webfetch::kiqi::factory(),
     });
+    #[cfg(feature = "plugin-rpi-goal")]
+    plugins.push(Registered {
+        id: "rpi-goal",
+        plugin: rpi_goal::kiqi::factory(),
+    });
     #[cfg(feature = "plugin-rpi-subagents")]
     plugins.push(Registered {
         id: "rpi-subagents",
@@ -698,6 +703,7 @@ mod tests {
             "rpi-websearch",
             "rpi-subagents",
             "rpi-permissions",
+            "rpi-goal",
         ] {
             assert!(
                 ids.contains(&expected),
@@ -729,6 +735,7 @@ mod tests {
             "websearch",
             "delegate_task",
             "permissions",
+            "goal",
         ] {
             assert!(
                 tools.iter().any(|t| t == expected),
@@ -955,10 +962,13 @@ mod tests {
         let fake = std::sync::Arc::new(FakeHost::default());
         let caps_host = ActionCaps::new(fake.clone(), runtime.handle().clone());
         let silent = Silent;
+        // `inject` is granted deliberately: rpi-goal cannot advance without it,
+        // which is the capability gate doing its job (with `inject: None` the
+        // goal start below still succeeds but injects nothing).
         let caps = HostCaps {
             session: Some(&caps_host),
-            control: None,
-            inject: None,
+            control: Some(&caps_host),
+            inject: Some(&caps_host),
             ui: None,
             log: &silent,
         };
@@ -1028,6 +1038,41 @@ mod tests {
             "customType": "kiqi.note",
             "data": {"kind": "note"}
         })));
+
+        // rpi-goal is the other kind of plugin: its host access sits on the TOOL
+        // path (starting a goal injects the notice), so this proves a plugin
+        // really reaches the host through InjectApi rather than only being
+        // loadable. The assertion is on the host side - what it was handed.
+        let goal_host = PluginHost::new("rpi-goal", rpi_goal::kiqi::factory());
+        let started = goal_host
+            .call_tool(
+                "goal",
+                &serde_json::json!({"action": "start", "title": "wire goal"}),
+                &caps,
+                &NoProgress,
+            )
+            .expect("goal start runs");
+        assert!(!started.is_error, "goal start succeeded: {started:?}");
+        let injected = fake
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(action, _)| action == "append_entry")
+            .filter_map(|(_, args)| args.get("message").cloned())
+            .any(|message| {
+                message
+                    .get("data")
+                    .and_then(|d| d.get("customType"))
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.contains("goal"))
+                    .unwrap_or(false)
+            });
+        assert!(
+            injected,
+            "starting a goal injected its notice through InjectApi; saw {:?}",
+            fake.seen.lock().unwrap()
+        );
 
         // And a plugin restoring through caps gets the branch the host served,
         // not a stub: this is the rpi-todo restore path end to end.

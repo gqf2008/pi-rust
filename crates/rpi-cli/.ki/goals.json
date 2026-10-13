@@ -1,0 +1,13 @@
+{
+  "active": {
+    "title": "wire goal",
+    "status": "active",
+    "notes": "",
+    "started_at": 1791901001955,
+    "updated_at": 1791901001955,
+    "turns_used": 0,
+    "max_turns": null,
+    "deadline_ms": null
+  },
+  "archived": []
+}

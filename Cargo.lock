@@ -2291,6 +2291,7 @@ dependencies = [
  "rpi-agent",
  "rpi-ai",
  "rpi-extensions",
+ "rpi-goal",
  "rpi-harness",
  "rpi-lens",
  "rpi-permissions",
@@ -2333,6 +2334,16 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "rpi-goal"
+version = "0.1.6"
+dependencies = [
+ "kiqi-plugin",
+ "rpi-plugin-sdk",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
