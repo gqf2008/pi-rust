@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod kiqi;
+
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -9,7 +11,7 @@ use crate::kit::optional_string;
 use serde_json::Value;
 use wait_timeout::ChildExt;
 
-fn code_lens(params: &Value) -> Result<String, String> {
+pub(crate) fn code_lens(params: &Value) -> Result<String, String> {
     let check = optional_string(params, "check", "diff");
     let (program, args): (&str, &[&str]) = match check.as_str() {
         "diff" => ("git", &["diff", "--check"]),

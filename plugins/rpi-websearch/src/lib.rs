@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod kiqi;
+
 use rpi_plugin_sdk::handles::ToolHandles;
 use rpi_plugin_sdk::{
     FreeStringFn, StableToolSchema, StbString, StbStringRef, StepHandle, StepResult, ToolPartialCb,
@@ -15,7 +17,7 @@ struct Drive {
     params: Value,
     done: bool,
 }
-fn search(p: &Value) -> Result<String, String> {
+pub(crate) fn search(p: &Value) -> Result<String, String> {
     let query = p
         .get("query")
         .and_then(Value::as_str)

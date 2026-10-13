@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod kiqi;
+
 use rpi_plugin_sdk::handles::ToolHandles;
 use rpi_plugin_sdk::{
     FreeStringFn, StableToolSchema, StbString, StbStringRef, StepHandle, StepResult, ToolPartialCb,
@@ -66,7 +68,7 @@ fn blocked_ip(ip: IpAddr) -> bool {
         }
     }
 }
-fn fetch(p: &Value) -> Result<String, String> {
+pub(crate) fn fetch(p: &Value) -> Result<String, String> {
     let url = validate(
         p.get("url")
             .and_then(Value::as_str)

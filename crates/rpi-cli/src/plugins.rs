@@ -220,6 +220,21 @@ pub fn load_all() -> Vec<Registered> {
         id: "rpi-todo",
         plugin: rpi_todo::kiqi::factory(),
     });
+    #[cfg(feature = "plugin-rpi-lens")]
+    plugins.push(Registered {
+        id: "rpi-lens",
+        plugin: rpi_lens::kiqi::factory(),
+    });
+    #[cfg(feature = "plugin-rpi-webfetch")]
+    plugins.push(Registered {
+        id: "rpi-webfetch",
+        plugin: rpi_webfetch::kiqi::factory(),
+    });
+    #[cfg(feature = "plugin-rpi-websearch")]
+    plugins.push(Registered {
+        id: "rpi-websearch",
+        plugin: rpi_websearch::kiqi::factory(),
+    });
     plugins
 }
 
@@ -644,6 +659,42 @@ mod tests {
             "the added task is in the details: {}",
             result.details
         );
+    }
+
+    #[test]
+    fn every_compiled_plugin_exposes_its_tools_and_schemas() {
+        let hosts = load_hosts();
+        let ids: Vec<&str> = hosts.iter().map(|h| h.id()).collect();
+        for expected in ["rpi-todo", "rpi-lens", "rpi-webfetch", "rpi-websearch"] {
+            assert!(
+                ids.contains(&expected),
+                "{expected} is compiled in; got {ids:?}"
+            );
+        }
+        // Every declared tool must survive the Value -> Schema conversion;
+        // a plugin that cannot be exposed is a bug, not a warning.
+        for host in &hosts {
+            for spec in host.plugin().tools() {
+                let schema =
+                    serde_json::from_value::<rpi_ai::types::Schema>(spec.parameters.clone());
+                assert!(
+                    schema.is_ok(),
+                    "{}::{} has a bad schema",
+                    host.id(),
+                    spec.name
+                );
+            }
+        }
+        let tools: Vec<String> = compiled_tool_schemas(&hosts)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        for expected in ["todo", "code_lens", "webfetch", "websearch"] {
+            assert!(
+                tools.iter().any(|t| t == expected),
+                "{expected} missing from {tools:?}"
+            );
+        }
     }
 
     #[test]
