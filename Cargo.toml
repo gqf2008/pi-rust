@@ -8,6 +8,7 @@ members = [
     "crates/rpi-harness",
     "crates/rpi-cli",
     "crates/rpi-tui",
+    "crates/kiqi-plugin",
     "crates/rpi-plugin-sdk",
     "crates/rpi-extensions",
     "examples/minimal",

@@ -1,6 +1,14 @@
 # 插件 ABI：从 cdylib 到 wasm 组件
 
-状态：**草案（P1 契约）** · 目标版本 `kiqi:plugin@0.1.0`
+状态：**已推迟（deferred）** · 目标版本 `kiqi:plugin@0.1.0`
+
+> **本方案不再作为第一方插件的契约。** 实测 `rpi-package` 的 18 个包后改为
+> 「Rust `trait Plugin` + cargo feature 全编译接入」，见
+> [plugin-trait.md](plugin-trait.md)：16/18 需要分步/部分输出、14/18 会起子进程，
+> 前者在 WIT 里别扭，后者让沙箱价值归零。
+>
+> 本文与 `plugins/kiqi-plugin.wit` **保留为 wasm 层（不受信第三方插件）的设计存档**：
+> 将来 `WasmPlugin` 适配器仍要实现同一个 `trait Plugin`。
 
 ## 1. 为什么换
 
