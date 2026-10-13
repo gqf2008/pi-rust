@@ -107,10 +107,21 @@ impl Plugin for TodoPlugin {
 
     fn on_event(&self, event: &Event, caps: &HostCaps<'_>) -> EventAction {
         match event {
-            Event::SessionStart | Event::SessionTree => self.restore(caps),
-            Event::ToolResult { tool, details, .. } if tool == TOOL => {
-                if let Some(next) = parse_todos(details) {
-                    *state().lock().unwrap_or_else(|p| p.into_inner()) = next;
+            _ if matches!(
+                event.tag,
+                kiqi_plugin::EventTag::SessionStart | kiqi_plugin::EventTag::SessionTree
+            ) =>
+            {
+                self.restore(caps);
+            }
+            _ if event.tag == kiqi_plugin::EventTag::ToolResult => {
+                let Some(result) = event.tool_result() else {
+                    return EventAction::Continue;
+                };
+                if result.tool == TOOL {
+                    if let Some(next) = parse_todos(result.details()) {
+                        *state().lock().unwrap_or_else(|p| p.into_inner()) = next;
+                    }
                 }
             }
             _ => {}

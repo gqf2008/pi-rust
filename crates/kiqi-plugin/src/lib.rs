@@ -209,30 +209,66 @@ impl EventTag {
 
 /// One runtime event delivered to plugins.
 ///
-/// Mirrors the host's event tags. Kinds the host adds later arrive as
-/// [`Event::Other`] so an old plugin never fails on a new event.
+/// A tag plus a JSON payload. The payload travels as JSON because the native
+/// ABI already ships it that way - this is parity, not a shortcut - and typed
+/// accessors exist for the tags whose shape matters.
 #[derive(Debug, Clone)]
-pub enum Event {
-    SessionStart,
-    /// The session tree changed (fork / navigate / switch). `rpi-todo` restores
-    /// its branch-scoped state here, so it cannot be folded into `SessionStart`.
-    SessionTree,
-    SessionShutdown,
-    Message,
-    ToolCall,
-    /// A tool finished. Carries what a plugin needs to re-derive its state:
-    /// which tool, the result, and the `details` that tool returned.
-    ToolResult {
-        tool: String,
-        result: Value,
-        details: Value,
-    },
-    Error,
-    /// Forward compatibility hatch, as in the native event ABI.
-    Other {
-        kind: String,
-        payload: Value,
-    },
+pub struct Event {
+    pub tag: EventTag,
+    pub payload: Value,
+}
+
+impl Event {
+    pub fn new(tag: EventTag, payload: Value) -> Self {
+        Self { tag, payload }
+    }
+
+    /// The payload of a `ToolResult` event, matching the native
+    /// `EventToolResult` fields (`tool_call_id` / `tool_name` / `result` /
+    /// `is_error`), where `result` is a JSON *string* that is parsed here.
+    pub fn tool_result(&self) -> Option<ToolResult> {
+        if self.tag != EventTag::ToolResult {
+            return None;
+        }
+        let get = |key: &str| self.payload.get(key);
+        let text = |key: &str| get(key).and_then(Value::as_str).map(str::to_string);
+        let raw = get("result").or_else(|| get("resultJson"))?;
+        let result = match raw {
+            Value::String(encoded) => serde_json::from_str(encoded).unwrap_or(Value::Null),
+            other => other.clone(),
+        };
+        Some(ToolResult {
+            tool_call_id: text("toolCallId")
+                .or_else(|| text("tool_call_id"))
+                .unwrap_or_default(),
+            tool: text("toolName")
+                .or_else(|| text("tool_name"))
+                .unwrap_or_default(),
+            is_error: get("isError")
+                .or_else(|| get("is_error"))
+                .map(|v| v == &Value::Bool(true) || v.as_u64() == Some(1))
+                .unwrap_or(false),
+            result,
+        })
+    }
+}
+
+/// A parsed `ToolResult` event payload.
+#[derive(Debug, Clone)]
+pub struct ToolResult {
+    pub tool_call_id: String,
+    pub tool: String,
+    /// The tool result object (`{"content": [...], "details": {...}}`).
+    pub result: Value,
+    pub is_error: bool,
+}
+
+impl ToolResult {
+    /// The `details` the tool returned - how a plugin carries state that must
+    /// survive fork/switch (rpi-todo keeps its whole task list here).
+    pub fn details(&self) -> &Value {
+        self.result.get("details").unwrap_or(&Value::Null)
+    }
 }
 
 /// What a plugin decided to do about an event.

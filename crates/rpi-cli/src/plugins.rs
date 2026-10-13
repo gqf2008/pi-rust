@@ -1000,7 +1000,10 @@ mod tests {
         // And a plugin restoring through caps gets the branch the host served,
         // not a stub: this is the rpi-todo restore path end to end.
         let host = PluginHost::new("rpi-todo", rpi_todo::kiqi::factory());
-        host.on_event(&kiqi_plugin::Event::SessionStart, &caps);
+        host.on_event(
+            &kiqi_plugin::Event::new(kiqi_plugin::EventTag::SessionStart, serde_json::Value::Null),
+            &caps,
+        );
         let listed = host
             .call_tool(
                 "todo",
@@ -1067,7 +1070,13 @@ mod tests {
             "got {error}"
         );
         assert_eq!(
-            host.on_event(&kiqi_plugin::Event::SessionStart, &caps),
+            host.on_event(
+                &kiqi_plugin::Event::new(
+                    kiqi_plugin::EventTag::SessionStart,
+                    serde_json::Value::Null
+                ),
+                &caps
+            ),
             kiqi_plugin::EventAction::Continue
         );
 
