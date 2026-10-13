@@ -146,6 +146,7 @@ async fn run_inner() -> i32 {
                 .await;
         }
         Some("events") => return crate::events::run(&argv[1..]).await,
+        Some("configure") => return crate::configure::run(&argv[1..]).await,
         Some("update") => return crate::updates::run_self_update(&argv[1..]),
         Some("install") => return crate::install::run(&argv[1..]),
         Some("uninstall") => return crate::install::uninstall(&argv[1..]),
@@ -239,10 +240,10 @@ async fn run_inner() -> i32 {
     };
 
     // ---- provider + model resolution ----
-    // The interactive TUI is where `/provider` and `/login` live, so a missing
-    // credential must not abort startup before the user can configure one:
-    // interactive runs start with an "unconfigured" placeholder instead. Print
-    // and RPC modes still fail fast — there is no UI there to fix anything.
+    // The interactive TUI is where `/login` lives, so a missing credential must
+    // not abort startup before the user can configure one: interactive runs
+    // start with an "unconfigured" placeholder instead. Print and RPC modes
+    // still fail fast — there is no UI there to fix anything.
     let stdin_is_tty = std::io::stdin().is_terminal();
     let stdout_is_tty = std::io::stdout().is_terminal();
     let interactively_configured = stdin_is_tty && stdout_is_tty;
@@ -261,7 +262,7 @@ async fn run_inner() -> i32 {
         Err(e) if matches!(e, ResolveError::NoApiKey { .. }) && interactively_configured => {
             eprintln!("warning: {e}");
             eprintln!(
-                "Starting rpi without a model — run /provider (or /login) to add one, then restart."
+                "Starting rpi without a model — run `rpi configure` (or `rpi auth login`) to add one, then restart."
             );
             crate::provider::unconfigured_resolved(
                 crate::settings::load_settings().ok().and_then(|s| s.theme),

@@ -234,9 +234,9 @@ pub const NO_API_KEY_HINT: &str =
     "models.json apiKey, OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN env, --api-key, or `rpi auth login`";
 
 /// Provider/model identity used when the interactive TUI starts with nothing
-/// configured. Opening the TUI instead of exiting lets the user run `/provider`
-/// (or `/login`) and configure a provider from inside rpi — the startup gate
-/// only made sense before the TUI could configure itself.
+/// configured. Opening the TUI instead of exiting lets the user run
+/// `rpi configure` in another terminal (or `/login`) — the startup gate only
+/// made sense before the configuration could be reached at all.
 pub const UNCONFIGURED_PROVIDER_ID: &str = "unconfigured";
 pub const UNCONFIGURED_MODEL_ID: &str = "unconfigured";
 
@@ -274,8 +274,8 @@ impl Provider for UnconfiguredProvider {
             StopReason::Error,
             format!(
                 "No provider is configured yet, so there is nothing to send this to.\n\n\
-                 Use /provider to add one from inside rpi (or /login for an API-key/OAuth \
-                 login), then restart rpi.\n\n{}",
+                 Run `rpi configure` in another terminal to add a provider (or \
+                 `rpi auth login` for an API-key/OAuth credential), then restart rpi.\n\n{}",
                 crate::auth_guidance::provider_login_help()
             ),
             now_millis(),
@@ -3474,7 +3474,7 @@ mod tests {
             }
         }
         let message = saw_error.expect("placeholder must yield an Error event");
-        assert!(message.contains("/provider"), "{message}");
+        assert!(message.contains("rpi configure"), "{message}");
         assert!(message.contains("No provider is configured"), "{message}");
     }
 }

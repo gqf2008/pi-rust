@@ -35,8 +35,6 @@ mod commands;
 use commands::*;
 mod settings;
 use settings::*;
-mod model_form;
-use model_form::*;
 mod sessions;
 use sessions::*;
 mod run;
@@ -1009,16 +1007,16 @@ pub async fn interactive_tui(
     )
     .await;
 
-    // A launch with nothing configured deliberately opens the TUI so /provider
-    // (or /login) can be used to fix it; say so up front instead of waiting for
-    // the first prompt to fail.
+    // A launch with nothing configured deliberately opens the TUI so the user
+    // can fix it; say so up front instead of waiting for the first prompt to
+    // fail.
     if lane_model
         .as_ref()
         .is_some_and(crate::provider::is_unconfigured)
     {
         add_note_message(
             &chat_container,
-            "No provider configured yet. Run /provider to add one (or /login), then restart rpi.",
+            "No provider configured yet. Run `rpi configure` in another terminal to add one (or `rpi auth login`), then restart rpi.",
         );
     }
 
@@ -1209,9 +1207,6 @@ pub async fn interactive_tui(
         editor: editor.clone(),
         last_assistant_text: std::sync::Mutex::new(String::new()),
         active_selector: std::sync::Mutex::new(None),
-        provider_form: std::sync::Mutex::new(None),
-        active_provider_input: std::sync::Mutex::new(None),
-        active_provider_select: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
@@ -1824,16 +1819,6 @@ pub async fn interactive_tui(
                         "paste event ({} bytes, bracketed paste supported)",
                         text.len()
                     ));
-                    // A provider-form text step owns the input slot: paste into
-                    // its single-line input instead of the chat editor.
-                    if state_for_key.provider_form.lock().unwrap().is_some() {
-                        let active = state_for_key.active_provider_input.lock().unwrap().clone();
-                        if let Some(input) = active {
-                            input.handle_paste(&text);
-                            tui_for_key.request_render_reusing_scroll_content();
-                            continue;
-                        }
-                    }
                     if let Some(images) = images_from_pasted_paths(&text) {
                         for image in images {
                             state_for_key.queue_image(image);
@@ -1914,24 +1899,6 @@ pub async fn interactive_tui(
                     .expect("selector_open guaranteed Some")
                     .0;
                 selector.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-                tui_for_key.request_render_reusing_scroll_content();
-                continue;
-            }
-
-            // The interactive "Add provider" form owns the input slot while it
-            // collects a field: route every key to its single-line input (Esc
-            // and Enter are handled by the Input's own callbacks). Clone the
-            // input OUTSIDE `if let` so the `active_provider_input` mutex guard
-            // drops before `handle_key` — the submit path re-enters that mutex
-            // to swap in the next step's input and would deadlock on it.
-            if state_for_key.provider_form.lock().unwrap().is_some() {
-                let active_input = state_for_key.active_provider_input.lock().unwrap().clone();
-                let active_select = state_for_key.active_provider_select.lock().unwrap().clone();
-                if let Some(input) = active_input {
-                    input.handle_key(key);
-                } else if let Some(select) = active_select {
-                    select.handle_key(key);
-                }
                 tui_for_key.request_render_reusing_scroll_content();
                 continue;
             }

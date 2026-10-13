@@ -14,112 +14,6 @@ pub(super) enum RunStatus {
     Aborting,
 }
 
-/// Steps of the interactive provider form (`/provider` → Add new provider, or
-/// Edit provider). Each text step is answered through the editor (submitted
-/// with Enter); `Api` is a select list.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(super) enum ProviderFormStep {
-    #[default]
-    Id,
-    Api,
-    BaseUrl,
-    ApiKey,
-    ModelId,
-    ModelName,
-    /// `Edit` only: pick which `models.json` provider to change.
-    PickProvider,
-    /// `Edit` only: optional display name.
-    Name,
-    /// `Edit` only: final review before writing.
-    Confirm,
-}
-
-/// Which provider flow a [`ProviderFormState`] is running.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(super) enum ProviderFormMode {
-    #[default]
-    Add,
-    Edit,
-}
-
-/// In-progress state for the interactive provider form.
-#[derive(Clone, Debug, Default)]
-pub(super) struct ProviderFormState {
-    pub(super) mode: ProviderFormMode,
-    pub(super) step: ProviderFormStep,
-    pub(super) id: String,
-    /// `Edit`: the id of the provider being changed. Provider ids are the
-    /// `models.json` map keys, so renaming is a remove+add, never an edit.
-    pub(super) original_id: Option<String>,
-    /// `Edit`: optional display name.
-    pub(super) name: String,
-    pub(super) api: String,
-    pub(super) base_url: String,
-    pub(super) api_key: String,
-    pub(super) model_id: String,
-    pub(super) model_name: String,
-}
-
-/// The interactive provider/model management form currently occupying the
-/// input slot. `/provider` → "Add new provider" ([`Self::Provider`]) and the
-/// model add/edit flows ([`Self::Model`]) share the same single-slot machinery
-/// (`active_provider_input` / `active_provider_select`).
-#[derive(Clone, Debug)]
-pub(super) enum ProviderForm {
-    /// Collecting a brand-new provider.
-    Provider(ProviderFormState),
-    /// Collecting one model add/edit under an existing `models.json` provider.
-    Model(ModelFormState),
-}
-
-/// Which model-management flow a [`ModelFormState`] is running.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(super) enum ModelFormMode {
-    #[default]
-    Add,
-    Edit,
-    Remove,
-}
-
-/// Steps of the model add/edit form. `Provider`/`PickModel`/`Reasoning`/
-/// `Images`/`Confirm` render select lists; `Id`/`Name`/`ContextWindow`/
-/// `MaxTokens` render single-line inputs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(super) enum ModelFormStep {
-    #[default]
-    Provider,
-    /// Edit only: choose which of the provider's models to edit.
-    PickModel,
-    Id,
-    Name,
-    ContextWindow,
-    MaxTokens,
-    Reasoning,
-    Images,
-    /// Re-show the assembled definition (the "echo") before writing it.
-    Confirm,
-}
-
-/// In-progress state for the model add/edit form.
-#[derive(Clone, Debug, Default)]
-pub(super) struct ModelFormState {
-    pub(super) mode: ModelFormMode,
-    pub(super) step: ModelFormStep,
-    /// The `models.json` provider the model belongs to.
-    pub(super) provider_id: String,
-    /// Display label of that provider (form titles / summary).
-    pub(super) provider_label: String,
-    /// `Edit`: the original model id, so the right entry is replaced even when
-    /// the id itself is being changed.
-    pub(super) original_id: Option<String>,
-    pub(super) id: String,
-    pub(super) name: String,
-    pub(super) context_window: String,
-    pub(super) max_tokens: String,
-    pub(super) reasoning: bool,
-    pub(super) images: bool,
-}
-
 /// Which selector overlay (if any) is currently swapped into the editor slot.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SelectorKind {
@@ -307,20 +201,6 @@ pub(super) struct TuiState {
     /// a selector is open; the key loop routes to it first and restores the
     /// editor on done/cancel.
     pub(super) active_selector: std::sync::Mutex<Option<(SelectorView, SelectorKind)>>,
-    /// In-progress interactive provider/model form (`/provider` → Add new
-    /// provider, or the model add/edit flows). `Some` while the form is
-    /// collecting fields; each step shows its own single-line input (see
-    /// [`Self::active_provider_input`]) or select list
-    /// ([`Self::active_provider_select`]) instead of reusing the chat editor.
-    pub(super) provider_form: std::sync::Mutex<Option<ProviderForm>>,
-    /// The single-line input currently occupying the input slot for the active
-    /// provider form step. `Some` while the form is collecting a field; the key
-    /// loop routes keys to it and Enter/Esc drive the form.
-    pub(super) active_provider_input: std::sync::Mutex<Option<Arc<Input>>>,
-    /// The select-list currently occupying the input slot for a choice-style
-    /// provider form step (the protocol step). Mutually exclusive with
-    /// [`Self::active_provider_input`].
-    pub(super) active_provider_select: std::sync::Mutex<Option<Arc<SelectList>>>,
     /// Extension-provided editor currently occupying the input slot.
     pub(super) active_extension_editor: std::sync::Mutex<Option<Arc<Editor>>>,
     /// Single-line input currently occupying the input slot for an extension.

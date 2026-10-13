@@ -179,7 +179,6 @@ pub(super) fn add_help_message(container: &Arc<Container>) {
         ("/version, /v", "Show version information"),
         ("/changelog", "Show recent release changes"),
         ("/model, /m", "Choose a model (live switch)"),
-        ("/provider", "Add/remove providers and manage their models"),
         ("/thinking, /think", "Set reasoning depth (selector)"),
         ("/tools", "Toggle built-in tools on/off"),
         ("/images", "Toggle inline image rendering"),

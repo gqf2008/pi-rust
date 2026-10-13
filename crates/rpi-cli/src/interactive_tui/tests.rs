@@ -453,9 +453,6 @@ fn test_tui_state() -> Arc<TuiState> {
         editor: Arc::new(Editor::simple()),
         last_assistant_text: std::sync::Mutex::new(String::new()),
         active_selector: std::sync::Mutex::new(None),
-        provider_form: std::sync::Mutex::new(None),
-        active_provider_input: std::sync::Mutex::new(None),
-        active_provider_select: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
@@ -1425,7 +1422,6 @@ fn test_slash_command_dispatch() {
     resolves_to("/hotkeys", "/hotkeys");
     resolves_to("/model", "/model");
     resolves_to("/m", "/model"); // alias
-    resolves_to("/provider", "/provider");
     resolves_to("/theme", "/theme");
     resolves_to("/session", "/session");
     resolves_to("/resume", "/session"); // alias
@@ -1467,7 +1463,6 @@ fn test_registry_visible_entries_cover_dispatch() {
         "/version",
         "/changelog",
         "/model",
-        "/provider",
         "/session",
         "/theme",
         "/compact",
@@ -1525,9 +1520,6 @@ fn test_agent_event_mapping_creates_assistant_and_tool() {
         editor: Arc::new(Editor::simple()),
         last_assistant_text: std::sync::Mutex::new(String::new()),
         active_selector: std::sync::Mutex::new(None),
-        provider_form: std::sync::Mutex::new(None),
-        active_provider_input: std::sync::Mutex::new(None),
-        active_provider_select: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
@@ -1872,168 +1864,6 @@ fn model_selector_match_accepts_bare_and_qualified_ids() {
 }
 
 #[test]
-fn provider_input_canonicalization_exact_then_case_insensitive_unique() {
-    use rpi_ai::{Api, Model};
-
-    let anthropic = Model::new(
-        "claude-sonnet-5",
-        "Claude Sonnet 5",
-        Api::AnthropicMessages,
-        "anthropic",
-        "https://api.anthropic.com",
-    );
-    let gateway = Model::new(
-        "gpt-5.6-sol",
-        "GPT 5.6 Sol",
-        Api::OpenaiCompletions,
-        "MyGateway",
-        "https://gateway.example.com",
-    );
-    let catalog = [anthropic, gateway];
-
-    assert_eq!(
-        canonicalize_provider_input("anthropic", &catalog).unwrap(),
-        "anthropic"
-    );
-    assert_eq!(
-        canonicalize_provider_input("ANTHROPIC", &catalog).unwrap(),
-        "anthropic"
-    );
-    assert_eq!(
-        canonicalize_provider_input("mygateway", &catalog).unwrap(),
-        "MyGateway"
-    );
-    assert!(canonicalize_provider_input("nope", &catalog).is_err());
-}
-
-#[test]
-fn provider_form_saves_provider_to_models_json() {
-    with_isolated_config_dir(|| {
-        let form = ProviderFormState {
-            step: ProviderFormStep::ModelName,
-            id: "openrouter".into(),
-            api: "openai-completions".into(),
-            base_url: "https://openrouter.ai/api/v1".into(),
-            api_key: "$OPENROUTER_API_KEY".into(),
-            model_id: "claude-sonnet".into(),
-            model_name: "Claude Sonnet".into(),
-            ..Default::default()
-        };
-        let note = save_provider_from_form(&form).unwrap();
-        assert!(note.contains("openrouter"), "{note}");
-
-        let cfg = crate::config::load_models_config().unwrap();
-        let provider = cfg.providers.get("openrouter").expect("provider written");
-        assert_eq!(provider.api.as_deref(), Some("openai-completions"));
-        assert_eq!(
-            provider.base_url.as_deref(),
-            Some("https://openrouter.ai/api/v1")
-        );
-        assert_eq!(provider.api_key.as_deref(), Some("$OPENROUTER_API_KEY"));
-        assert_eq!(provider.models.len(), 1);
-        assert_eq!(provider.models[0].id, "claude-sonnet");
-        assert_eq!(provider.models[0].name.as_deref(), Some("Claude Sonnet"));
-
-        // The duplicate-id guard sees the provider we just wrote.
-        assert!(provider_id_exists("openrouter"));
-        assert!(!provider_id_exists("nope"));
-    });
-}
-
-#[test]
-fn provider_url_validation_requires_http_scheme() {
-    assert!(is_valid_provider_url("https://api.example.com/v1"));
-    assert!(is_valid_provider_url("http://localhost:8080"));
-    assert!(!is_valid_provider_url("api.example.com/v1"));
-    assert!(!is_valid_provider_url(""));
-}
-
-#[test]
-fn remove_provider_deletes_from_models_json() {
-    with_isolated_config_dir(|| {
-        let form = ProviderFormState {
-            step: ProviderFormStep::ModelName,
-            id: "openrouter".into(),
-            api: "openai-completions".into(),
-            base_url: "https://openrouter.ai/api/v1".into(),
-            api_key: "$OPENROUTER_API_KEY".into(),
-            model_id: "claude-sonnet".into(),
-            model_name: String::new(),
-            ..Default::default()
-        };
-        save_provider_from_form(&form).unwrap();
-        assert!(provider_id_exists("openrouter"));
-
-        let note = remove_provider("openrouter").unwrap();
-        assert!(note.contains("openrouter"), "{note}");
-        assert!(!provider_id_exists("openrouter"));
-
-        // Built-ins / unknown ids cannot be removed.
-        assert!(remove_provider("anthropic").is_err());
-        assert!(remove_provider("nope").is_err());
-    });
-}
-
-/// Isolate the config dir (and serialize against other env-touching tests)
-/// while `body` runs, then restore the previous value.
-fn with_isolated_config_dir<T>(body: impl FnOnce() -> T) -> T {
-    let _guard = crate::config::test_support::env_lock().lock().unwrap();
-    let prev = std::env::var_os(crate::config::CONFIG_DIR_ENV);
-    let tmp = tempfile::tempdir().unwrap();
-    std::env::set_var(crate::config::CONFIG_DIR_ENV, tmp.path());
-    let result = body();
-    match prev {
-        Some(value) => std::env::set_var(crate::config::CONFIG_DIR_ENV, value),
-        None => std::env::remove_var(crate::config::CONFIG_DIR_ENV),
-    }
-    result
-}
-
-#[test]
-fn provider_selector_items_cover_builtin_providers() {
-    with_isolated_config_dir(|| {
-        let items = provider_selector_items();
-        let ids: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
-        assert!(
-            ids.contains(&"anthropic"),
-            "built-in anthropic provider missing: {ids:?}"
-        );
-        assert!(
-            ids.contains(&"openai"),
-            "built-in openai provider missing: {ids:?}"
-        );
-        // Every row advertises its model count, origin, and key status, so a
-        // built-in catalog entry can't be mistaken for a configured one.
-        assert!(items.iter().all(|item| {
-            item.description
-                .as_deref()
-                .is_some_and(|d| d.contains("model(s)") && d.contains("内置") && d.contains("key"))
-        }));
-    });
-}
-
-#[test]
-fn set_default_provider_persists_provider_and_a_matching_model() {
-    with_isolated_config_dir(|| {
-        let note = set_default_provider("openai").unwrap();
-        assert!(
-            note.contains("openai"),
-            "note should name the provider: {note}"
-        );
-
-        let settings = crate::settings::load_settings().unwrap();
-        assert_eq!(settings.default_provider.as_deref(), Some("openai"));
-        assert!(
-            settings.default_model.is_some(),
-            "a matching default model must be saved so the choice resolves on restart"
-        );
-
-        // Unknown provider → error, and nothing is persisted.
-        assert!(set_default_provider("does-not-exist").is_err());
-    });
-}
-
-#[test]
 fn assistant_error_text_keeps_terminal_provider_diagnostic_visible() {
     use rpi_ai::types::{AssistantMessage, AssistantRole, StopReason, Usage};
 
@@ -2168,9 +1998,6 @@ fn test_autocomplete_slash_suggestions_render() {
         editor: Arc::new(Editor::simple()),
         last_assistant_text: std::sync::Mutex::new(String::new()),
         active_selector: std::sync::Mutex::new(None),
-        provider_form: std::sync::Mutex::new(None),
-        active_provider_input: std::sync::Mutex::new(None),
-        active_provider_select: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
@@ -2259,9 +2086,6 @@ fn test_select_list_swap_restores_editor() {
         editor: Arc::new(Editor::simple()),
         last_assistant_text: std::sync::Mutex::new(String::new()),
         active_selector: std::sync::Mutex::new(None),
-        provider_form: std::sync::Mutex::new(None),
-        active_provider_input: std::sync::Mutex::new(None),
-        active_provider_select: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
@@ -2353,9 +2177,6 @@ fn test_message_history_browse_restores_draft() {
         editor: Arc::new(Editor::simple()),
         last_assistant_text: std::sync::Mutex::new(String::new()),
         active_selector: std::sync::Mutex::new(None),
-        provider_form: std::sync::Mutex::new(None),
-        active_provider_input: std::sync::Mutex::new(None),
-        active_provider_select: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
@@ -2450,9 +2271,6 @@ fn test_accept_top_suggestion_replaces_prefix() {
         editor: Arc::new(Editor::simple()),
         last_assistant_text: std::sync::Mutex::new(String::new()),
         active_selector: std::sync::Mutex::new(None),
-        provider_form: std::sync::Mutex::new(None),
-        active_provider_input: std::sync::Mutex::new(None),
-        active_provider_select: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
@@ -2533,9 +2351,6 @@ fn autocomplete_test_state(max_visible: usize) -> Arc<TuiState> {
         editor: Arc::new(Editor::simple()),
         last_assistant_text: std::sync::Mutex::new(String::new()),
         active_selector: std::sync::Mutex::new(None),
-        provider_form: std::sync::Mutex::new(None),
-        active_provider_input: std::sync::Mutex::new(None),
-        active_provider_select: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
@@ -2948,287 +2763,3 @@ fn ask_user_bridge_answers_and_cancels_by_request_id() {
 // ===========================================================================
 // Model CRUD (`/provider` → model actions)
 // ===========================================================================
-
-fn write_models_json(json: &str) {
-    std::fs::write(crate::config::models_path().unwrap(), json).unwrap();
-}
-
-#[test]
-fn model_form_adds_a_model_and_rejects_duplicates() {
-    with_isolated_config_dir(|| {
-        write_models_json(
-            r#"{"providers":{"myprov":{"baseUrl":"https://a.example.com/v1","apiKey":"k","api":"openai-completions","models":[{"id":"m1","name":"One"}]}}}"#,
-        );
-        let form = ModelFormState {
-            mode: ModelFormMode::Add,
-            step: ModelFormStep::Confirm,
-            provider_id: "myprov".into(),
-            provider_label: "myprov".into(),
-            id: "m2".into(),
-            name: "Two".into(),
-            context_window: "128000".into(),
-            max_tokens: "8192".into(),
-            reasoning: true,
-            images: true,
-            ..Default::default()
-        };
-        let note = save_model_from_form(&form).unwrap();
-        assert!(note.contains("m2") && note.contains("Added"), "{note}");
-
-        let cfg = crate::config::load_models_config().unwrap();
-        let models = &cfg.providers["myprov"].models;
-        assert_eq!(models.len(), 2);
-        let m2 = models.iter().find(|m| m.id == "m2").unwrap();
-        assert_eq!(m2.name.as_deref(), Some("Two"));
-        assert_eq!(m2.context_window, Some(128000));
-        assert_eq!(m2.max_tokens, Some(8192));
-        assert_eq!(m2.reasoning, Some(true));
-        assert_eq!(
-            m2.input.as_deref(),
-            Some(&["text".to_string(), "image".to_string()][..])
-        );
-
-        // The comment says "restart to use it", so the note must carry the id.
-        assert!(note.contains("myprov"), "{note}");
-        // Duplicate id under the same provider is refused.
-        assert!(save_model_from_form(&form).is_err());
-    });
-}
-
-#[test]
-fn model_form_edit_preserves_unmanaged_fields() {
-    with_isolated_config_dir(|| {
-        write_models_json(
-            r#"{"providers":{"myprov":{"baseUrl":"https://a.example.com/v1","apiKey":"k","api":"openai-completions","headers":{"x-provider":"1"},"models":[{"id":"m1","name":"One","baseUrl":"https://alt.example.com","headers":{"x-model":"y"},"compat":{"foo":1}}]}}}"#,
-        );
-        let form = ModelFormState {
-            mode: ModelFormMode::Edit,
-            step: ModelFormStep::Confirm,
-            provider_id: "myprov".into(),
-            provider_label: "myprov".into(),
-            original_id: Some("m1".into()),
-            id: "m1-renamed".into(),
-            name: String::new(),
-            context_window: String::new(),
-            max_tokens: "4096".into(),
-            reasoning: true,
-            images: false,
-            ..Default::default()
-        };
-        save_model_from_form(&form).unwrap();
-
-        let cfg = crate::config::load_models_config().unwrap();
-        let models = &cfg.providers["myprov"].models;
-        assert_eq!(models.len(), 1, "edit must not append");
-        let m = &models[0];
-        assert_eq!(m.id, "m1-renamed");
-        assert_eq!(m.name, None, "empty name clears it");
-        assert_eq!(m.context_window, None);
-        assert_eq!(m.max_tokens, Some(4096));
-        assert_eq!(m.reasoning, Some(true));
-        assert_eq!(m.input.as_deref(), Some(&["text".to_string()][..]));
-        // Fields this form does not manage survive an edit.
-        assert_eq!(m.base_url.as_deref(), Some("https://alt.example.com"));
-        assert_eq!(m.headers.as_ref().unwrap()["x-model"], "y");
-        assert_eq!(m.compat, Some(serde_json::json!({"foo": 1})));
-    });
-}
-
-#[test]
-fn model_count_fields_reject_junk() {
-    assert_eq!(parse_optional_count("", "ctx").unwrap(), None);
-    assert_eq!(parse_optional_count("128000", "ctx").unwrap(), Some(128000));
-    assert!(parse_optional_count("0", "ctx").is_err());
-    assert!(parse_optional_count("-5", "ctx").is_err());
-    assert!(parse_optional_count("abc", "ctx").is_err());
-}
-
-#[test]
-fn editable_provider_items_are_models_json_only_and_sorted() {
-    with_isolated_config_dir(|| {
-        write_models_json(
-            r#"{"providers":{"bbb":{"api":"openai-responses","models":[{"id":"x"}]},"aaa":{"api":"anthropic-messages","models":[]}}}"#,
-        );
-        let items = editable_provider_items();
-        let ids: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
-        assert_eq!(ids, vec!["aaa", "bbb"], "built-ins must not appear");
-        assert!(items[0]
-            .description
-            .as_deref()
-            .unwrap()
-            .contains("Anthropic Messages"));
-        assert!(items[1]
-            .description
-            .as_deref()
-            .unwrap()
-            .contains("OpenAI Responses"));
-    });
-}
-
-#[test]
-fn remove_model_from_provider_targets_one_model_only() {
-    with_isolated_config_dir(|| {
-        write_models_json(
-            r#"{"providers":{"myprov":{"api":"openai-completions","models":[{"id":"m1"},{"id":"m2"}]},"other":{"api":"openai-completions","models":[{"id":"m1"}]}}}"#,
-        );
-        let note = remove_model_from_provider("myprov", "m1").unwrap();
-        assert!(note.contains("m1"), "{note}");
-
-        let cfg = crate::config::load_models_config().unwrap();
-        let remaining: Vec<&str> = cfg.providers["myprov"]
-            .models
-            .iter()
-            .map(|m| m.id.as_str())
-            .collect();
-        assert_eq!(remaining, vec!["m2"]);
-        // A same-named model under another provider is untouched.
-        assert_eq!(cfg.providers["other"].models.len(), 1);
-
-        assert!(remove_model_from_provider("myprov", "nope").is_err());
-        assert!(remove_model_from_provider("nope", "m1").is_err());
-    });
-}
-
-#[test]
-fn provider_edit_updates_only_owned_fields() {
-    with_isolated_config_dir(|| {
-        write_models_json(
-            r#"{"providers":{"Kimi":{"name":"K","baseUrl":"https://old.example.com","apiKey":"sk-old","api":"anthropic-messages","headers":{"x-a":"1"},"authHeader":true,"models":[{"id":"k1"},{"id":"k2"}]}}}"#,
-        );
-        let form = ProviderFormState {
-            mode: ProviderFormMode::Edit,
-            step: ProviderFormStep::Confirm,
-            id: "Kimi".into(),
-            original_id: Some("Kimi".into()),
-            name: "Kimi CN".into(),
-            api: "openai-completions".into(),
-            base_url: "https://new.example.com/v1".into(),
-            api_key: "$KIMI_API_KEY".into(),
-            ..Default::default()
-        };
-        let note = save_provider_from_form(&form).unwrap();
-        assert!(
-            note.contains("Kimi") && note.contains("OpenAI Completions"),
-            "{note}"
-        );
-        assert!(note.contains("2 model(s) kept"), "{note}");
-
-        let cfg = crate::config::load_models_config().unwrap();
-        let provider = cfg.providers.get("Kimi").expect("provider kept");
-        assert_eq!(provider.name.as_deref(), Some("Kimi CN"));
-        assert_eq!(provider.api.as_deref(), Some("openai-completions"));
-        assert_eq!(
-            provider.base_url.as_deref(),
-            Some("https://new.example.com/v1")
-        );
-        assert_eq!(provider.api_key.as_deref(), Some("$KIMI_API_KEY"));
-        // Untouched fields survive the edit.
-        assert_eq!(provider.auth_header, Some(true));
-        assert_eq!(provider.headers.as_ref().unwrap()["x-a"], "1");
-        assert_eq!(provider.models.len(), 2);
-
-        // Editing a provider that is not in models.json is an error.
-        let gone = ProviderFormState {
-            mode: ProviderFormMode::Edit,
-            id: "nope".into(),
-            original_id: Some("nope".into()),
-            ..Default::default()
-        };
-        assert!(save_provider_from_form(&gone).is_err());
-    });
-}
-
-#[test]
-fn base_url_prompt_follows_the_selected_protocol() {
-    // Regression: picking Anthropic Messages used to leave the OpenAI-flavoured
-    // "endpoints usually end in /v1" hint on the next step, which read as if the
-    // protocol selection had been ignored.
-    let anthropic = base_url_question("anthropic-messages");
-    assert!(anthropic.contains("Anthropic Messages"), "{anthropic}");
-    assert!(!anthropic.contains("OpenAI"), "{anthropic}");
-    assert!(base_url_question("openai-completions").contains("Chat Completions"));
-    assert!(base_url_question("openai-responses").contains("Responses"));
-    // An unset api means the Anthropic-compatible default runtime.
-    assert!(base_url_question("").contains("Anthropic Messages"));
-
-    assert_eq!(
-        base_url_placeholder("anthropic-messages"),
-        "https://api.anthropic.com"
-    );
-    assert_eq!(
-        base_url_placeholder("openai-completions"),
-        "https://api.example.com/v1"
-    );
-}
-
-#[test]
-fn provider_form_titles_are_mode_aware() {
-    let add = ProviderFormState::default();
-    assert_eq!(provider_step_prompt(&add).0, "Add provider · step 1/6");
-
-    let edit = ProviderFormState {
-        mode: ProviderFormMode::Edit,
-        step: ProviderFormStep::Name,
-        name: "OpenRouter".into(),
-        ..Default::default()
-    };
-    assert_eq!(provider_step_prompt(&edit).0, "Edit provider · name");
-    assert_eq!(provider_step_initial(&edit), "OpenRouter");
-    // `Add` never prefills, so the plain id step stays empty.
-    assert!(provider_step_initial(&add).is_empty());
-}
-
-#[test]
-fn secret_masking_never_prints_the_key() {
-    assert_eq!(mask_secret(""), "(none)");
-    assert_eq!(mask_secret("$KIMI_API_KEY"), "$KIMI_API_KEY");
-    assert_eq!(mask_secret("!op read secret"), "!op read secret");
-    assert_eq!(mask_secret("short"), "*****");
-    let masked = mask_secret("sk-abcdefghijklmnop");
-    assert!(
-        masked.starts_with("sk-a") && masked.ends_with("mnop"),
-        "{masked}"
-    );
-    assert!(!masked.contains("efgh"), "{masked}");
-}
-
-#[test]
-fn names_matching_the_id_are_echoed_but_not_persisted() {
-    with_isolated_config_dir(|| {
-        write_models_json(
-            r#"{"providers":{"p1":{"api":"openai-completions","baseUrl":"https://a.example.com/v1","apiKey":"k","models":[{"id":"m1"}]}}}"#,
-        );
-        // Editing with the effective name (== id) must not write a redundant
-        // `name`, but the form still echoes it.
-        let provider_form = ProviderFormState {
-            mode: ProviderFormMode::Edit,
-            id: "p1".into(),
-            original_id: Some("p1".into()),
-            name: "p1".into(),
-            api: "openai-completions".into(),
-            base_url: "https://a.example.com/v1".into(),
-            api_key: "k".into(),
-            ..Default::default()
-        };
-        save_provider_from_form(&provider_form).unwrap();
-        assert_eq!(
-            crate::config::load_models_config().unwrap().providers["p1"].name,
-            None
-        );
-
-        let model_form = ModelFormState {
-            mode: ModelFormMode::Edit,
-            step: ModelFormStep::Confirm,
-            provider_id: "p1".into(),
-            original_id: Some("m1".into()),
-            id: "m1".into(),
-            name: "m1".into(),
-            ..Default::default()
-        };
-        save_model_from_form(&model_form).unwrap();
-        assert_eq!(
-            crate::config::load_models_config().unwrap().providers["p1"].models[0].name,
-            None
-        );
-    });
-}

@@ -648,6 +648,8 @@ pub fn print_help() {
   update                       Update the rpi CLI from crates.io
   auth login|check|logout        Manage persisted credentials in ~/.rpi/auth.json
                                 (see `rpi auth --help`)
+  configure [list]               Add, edit, or remove providers and models in
+                                ~/.rpi/agent/models.json (see `rpi configure --help`)
   events path|tail               Inspect the extension event journal (needs
                                 RPI_EVENT_LOG=1; see `rpi events --help`)
   install <crate>                Build and install a Rust cdylib extension
