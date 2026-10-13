@@ -28,7 +28,7 @@ pub const DEFAULT_CHANGELOG_URL: &str =
 
 /// The remote changelog URL to use, honoring `RPI_CHANGELOG_URL`.
 pub fn changelog_url() -> String {
-    std::env::var("RPI_CHANGELOG_URL").unwrap_or_else(|_| DEFAULT_CHANGELOG_URL.to_string())
+    std::env::var("KI_CHANGELOG_URL").unwrap_or_else(|_| DEFAULT_CHANGELOG_URL.to_string())
 }
 
 /// Parse a semver-ish heading like `## 1.2.3` / `# 1.2.3` / `## v1.2.3`.
@@ -121,8 +121,8 @@ pub fn latest_release(entries: &[ChangelogEntry], current_version: &str) -> Vec<
         .collect()
 }
 
-/// Migrate only legacy markers that name a release in rpi's bundled history.
-/// A foreign version (for example Pi 0.85.1) must not suppress rpi updates.
+/// Migrate only legacy markers that name a release in ki's bundled history.
+/// A foreign version (for example Pi 0.85.1) must not suppress ki updates.
 pub fn rpi_baseline<'a>(
     entries: &[ChangelogEntry],
     dedicated: Option<&'a str>,
@@ -157,7 +157,7 @@ pub fn startup_changelog(
     startup_changelog_for_profile(entries, last_version, current_version, has_messages, false)
 }
 
-/// Existing profiles without an rpi baseline see the current release once;
+/// Existing profiles without an ki baseline see the current release once;
 /// genuinely fresh installs record a baseline without replaying old history.
 pub fn startup_changelog_for_profile(
     entries: &[ChangelogEntry],
@@ -217,7 +217,7 @@ pub async fn fetch_changelog(allow_network: bool) -> Result<Option<String>, Stri
     }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent(format!("rpi/{}", crate::VERSION))
+        .user_agent(format!("ki/{}", crate::VERSION))
         .build()
         .map_err(|e| e.to_string())?;
     let response = client

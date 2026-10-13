@@ -109,7 +109,7 @@ pub(super) fn add_update_notices(
         add_update_panel(&group, "Update Failed", &body, colors.error);
     }
 
-    if let Some(notice) = report.notices.iter().find(|notice| notice.name == "rpi") {
+    if let Some(notice) = report.notices.iter().find(|notice| notice.name == "ki") {
         let body = format!(
             "{} {}{}",
             colors
@@ -356,7 +356,7 @@ pub(super) fn collect_transcript_lines(chat_container: &Arc<Container>) -> Vec<S
 
 /// Build the shell command that resumes `session_id` in this project, or
 /// `None` when there is nothing to resume. Mirrors upstream's
-/// `formatResumeCommand`: `rpi --session <id>`, prefixing
+/// `formatResumeCommand`: `ki --session <id>`, prefixing
 /// `--session-dir <dir>` only when a non-default directory was requested.
 pub(super) fn format_resume_command(
     session_id: &str,
@@ -494,9 +494,8 @@ pub(super) fn show_context_panel(
     }
 
     if skills.is_empty() {
-        lines.push(
-            "  Skills: (none discovered — create .rpi/skills/ or ~/.rpi/agent/skills/)".into(),
-        );
+        lines
+            .push("  Skills: (none discovered — create .ki/skills/ or ~/.ki/agent/skills/)".into());
     } else {
         lines.push(format!("  Skills ({}):", skills.len()));
         for s in skills {
@@ -512,7 +511,7 @@ pub(super) fn show_context_panel(
 
     if templates.is_empty() {
         lines.push(
-            "  Prompt templates: (none — create .rpi/prompts/ or ~/.rpi/agent/prompts/)".into(),
+            "  Prompt templates: (none — create .ki/prompts/ or ~/.ki/agent/prompts/)".into(),
         );
     } else {
         lines.push(format!("  Prompt templates ({}):", templates.len()));

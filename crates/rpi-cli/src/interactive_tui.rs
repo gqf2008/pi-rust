@@ -678,9 +678,9 @@ enum TuiMessage {
     /// Share the current session (`/share`): `gh gist create` when the gh CLI
     /// is available, otherwise copy the transcript to the clipboard.
     ShareSession,
-    /// `models.json` changed on disk (a `rpi configure` write): re-resolve the
+    /// `models.json` changed on disk (a `ki configure` write): re-resolve the
     /// provider runtimes + `/model` catalog so the change applies without
-    /// restarting rpi.
+    /// restarting ki.
     ReloadModels,
     /// `/reload` — re-run extension + resource discovery into the live harness
     /// (B5d). The command (and a plugin's `runtime_action(Reload)` via the
@@ -845,7 +845,7 @@ fn resolve_tui_startup_settings(
 /// fn), it falls back to a blocking, await-final-text path.
 ///
 /// `models.json`'s modification time. Drives the in-session reload that makes
-/// `rpi configure` writes (and external edits) take effect without a restart.
+/// `ki configure` writes (and external edits) take effect without a restart.
 fn models_json_mtime() -> Option<std::time::SystemTime> {
     crate::config::models_path()
         .ok()
@@ -893,7 +893,7 @@ pub async fn interactive_tui(
     let show_images = tui_settings.show_images;
     let cache_miss_notices = tui_settings.cache_miss_notices;
     let quiet_startup = tui_settings.quiet_startup;
-    // rpi only checks its own update channel.
+    // ki only checks its own update channel.
     // Session display preferences (durable, latest-wins) override the
     // settings-file defaults. These are per-session facts stored as custom
     // entries (see `rpi_harness::session::values`), so resuming a session with
@@ -986,7 +986,7 @@ pub async fn interactive_tui(
         None
     };
 
-    // First-launch gate: if `~/.rpi/.setup_done` is absent, show the welcome
+    // First-launch gate: if `~/.ki/.setup_done` is absent, show the welcome
     // banner once, then write the sentinel. The banner covers the theme hint;
     // the theme stays pickable via `/theme`. See `extras.rs`.
     // Capture this before first-time setup writes its sentinel.
@@ -1016,7 +1016,7 @@ pub async fn interactive_tui(
     {
         add_note_message(
             &chat_container,
-            "No provider configured yet. Run `rpi configure` in another terminal to add one (or `rpi auth login`), then restart rpi.",
+            "No provider configured yet. Run `ki configure` in another terminal to add one (or `ki auth login`), then restart ki.",
         );
     }
 
@@ -1491,7 +1491,7 @@ pub async fn interactive_tui(
 
     // Consume local self-update results even when network checks are disabled.
     // Keep package discovery separate so package managers and Git remotes
-    // cannot delay an rpi update notice or a prior helper failure.
+    // cannot delay an ki update notice or a prior helper failure.
     let mut update_check_handles = Vec::new();
     let rpi_chat = chat_container.clone();
     let rpi_tui = tui.clone();
@@ -1503,7 +1503,7 @@ pub async fn interactive_tui(
         rpi_tui.request_render(false);
     }));
 
-    // Only the rpi self-update check runs.
+    // Only the ki self-update check runs.
 
     // ---- Streaming drain task ----
     let drain_handle = if let Some(rx) = event_rx {
@@ -1569,9 +1569,9 @@ pub async fn interactive_tui(
             rpi_tui::loader::SPINNER_FRAME_MS,
         ));
         interval.tick().await; // discard immediate
-                               // `models.json` mtime watcher: every `rpi configure` write lands on disk, and
+                               // `models.json` mtime watcher: every `ki configure` write lands on disk, and
                                // reloading here (instead of threading a channel through the form
-                               // callbacks) also picks up edits made outside rpi.
+                               // callbacks) also picks up edits made outside ki.
         let mut models_mtime = models_json_mtime();
         loop {
             interval.tick().await;
@@ -1664,7 +1664,7 @@ pub async fn interactive_tui(
         let mut windows_paste_run = WindowsPasteRun::default();
         if crate::key_trace::enabled() {
             crate::key_trace::note(&format!(
-                "--- rpi TUI key trace start pid={} TERM={} raw_mode={} ---",
+                "--- ki TUI key trace start pid={} TERM={} raw_mode={} ---",
                 std::process::id(),
                 std::env::var("TERM").unwrap_or_else(|_| "(unset)".to_string()),
                 crossterm::terminal::is_raw_mode_enabled().unwrap_or(false),
@@ -2646,7 +2646,7 @@ pub async fn interactive_tui(
     )
     .await
     {
-        tracing::warn!("[rpi] extension vetoed SessionStart (advisory): {reason}");
+        tracing::warn!("[ki] extension vetoed SessionStart (advisory): {reason}");
     }
 
     // ---- Initial prompts (run before reading from the channel) ----
@@ -2980,11 +2980,11 @@ pub async fn interactive_tui(
                 tui.request_render(false);
             }
             Some(TuiMessage::ReloadModels) => {
-                // `models.json` was written (a `rpi configure` edit). Re-resolve the
+                // `models.json` was written (a `ki configure` edit). Re-resolve the
                 // provider runtimes + catalog from the same inputs this launch
                 // used, then install them on the live lane. Without this a newly
                 // added provider had no runtime and a newly added model never
-                // reached `/model` until rpi was restarted.
+                // reached `/model` until ki was restarted.
                 match crate::provider::resolve_for_cwd(
                     args.provider.as_deref(),
                     args.model.as_deref(),
@@ -3019,7 +3019,7 @@ pub async fn interactive_tui(
                             Some(error) => add_error_message(
                                 &chat_container,
                                 &format!(
-                                    "models.json reloaded, but the providers could not be swapped in ({error}) — restart rpi to apply."
+                                    "models.json reloaded, but the providers could not be swapped in ({error}) — restart ki to apply."
                                 ),
                             ),
                             None => add_note_message(

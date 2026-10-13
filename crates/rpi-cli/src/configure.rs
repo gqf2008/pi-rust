@@ -1,10 +1,10 @@
-//! `rpi configure` — interactive provider/model configuration for
-//! `~/.rpi/agent/models.json`.
+//! `ki configure` — interactive provider/model configuration for
+//! `~/.ki/agent/models.json`.
 //!
 //! The CLI counterpart of provider management: a plain stdin/stdout wizard that
 //! works over SSH, in a piped shell, and on Windows terminals where a full TUI
 //! is awkward. Prompts go to stderr so stdout stays parseable (see
-//! `rpi configure list --json`); the persistence lives in
+//! `ki configure list --json`); the persistence lives in
 //! [`crate::provider_config`].
 
 use std::io::{self, IsTerminal, Write};
@@ -18,7 +18,7 @@ const EXIT_ERROR: i32 = 2;
 /// menu exits on it instead of spinning on a prompt that can never be answered.
 const INPUT_CLOSED: &str = "input closed";
 
-/// `rpi configure [sub]` entry. `args` is the slice *after* `configure`.
+/// `ki configure [sub]` entry. `args` is the slice *after* `configure`.
 pub async fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str).unwrap_or("") {
         "" => run_menu(),
@@ -39,19 +39,19 @@ pub async fn run(args: &[String]) -> i32 {
 fn print_help() {
     println!(
         "\
-rpi configure — edit ~/.rpi/agent/models.json
+ki configure — edit ~/.ki/agent/models.json
 
 USAGE:
-    rpi configure               Interactive menu (list, add/edit/remove providers and models)
-    rpi configure list [--json] Print the configured providers and models
+    ki configure               Interactive menu (list, add/edit/remove providers and models)
+    ki configure list [--json] Print the configured providers and models
 
 Every prompt is a menu: pick with arrow keys (or j/k, or the number) and press
 Enter; only ids, names, and custom URLs/keys are typed. In a pipe — a script or
 CI — the menus degrade to numbered prompts, so answers can be piped in.
 
-Every change is written to ~/.rpi/agent/models.json. A running rpi picks the
+Every change is written to ~/.ki/agent/models.json. A running ki picks the
 change up automatically (it watches the file); other processes see it on the
-next launch. `rpi auth login` manages the credential store (auth.json) instead."
+next launch. `ki auth login` manages the credential store (auth.json) instead."
     );
 }
 
@@ -100,7 +100,7 @@ fn run_list(args: &[String]) -> i32 {
     }
 
     if cfg.providers.is_empty() {
-        println!("No providers in models.json yet — run `rpi configure` to add one.");
+        println!("No providers in models.json yet — run `ki configure` to add one.");
         return 0;
     }
     println!(

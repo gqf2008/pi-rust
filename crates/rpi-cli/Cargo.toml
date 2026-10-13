@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "rpi-cli"
 edition.workspace = true
 rust-version.workspace = true
@@ -98,5 +99,5 @@ clipboard = ["dep:arboard"]
 path = "src/lib.rs"
 
 [[bin]]
-name = "rpi"
-path = "src/bin/rpi.rs"
+name = "ki"
+path = "src/bin/ki.rs"

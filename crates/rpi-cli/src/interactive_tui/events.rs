@@ -106,7 +106,7 @@ pub(super) async fn restore_queued_messages_to_editor(
 
 /// `app.message.dequeue`: restore the queued messages and report the count, like
 /// upstream's `handleDequeue` (`Restored N queued message(s)` / `No queued
-/// messages to restore`). The status is a dim transcript note (rpi's analog of
+/// messages to restore`). The status is a dim transcript note (ki's analog of
 /// native `showStatus`).
 pub(super) async fn handle_dequeue(
     lane: Arc<dyn AgentLane>,

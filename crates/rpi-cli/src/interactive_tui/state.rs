@@ -222,7 +222,7 @@ pub(super) struct TuiState {
     /// only way to apply a preset at runtime.
     pub(super) theme_manager: Arc<ThemeManager>,
     /// The alt-screen handle, held so `set_status` can reflect run state in the
-    /// terminal window title ("rpi — working" / "rpi"). `None` in unit tests
+    /// terminal window title ("ki — working" / "ki"). `None` in unit tests
     /// that never call `set_status` with a title.
     pub(super) tui: Option<Arc<TuiAltScreen>>,
     /// The model id currently shown in the footer + used as the Ctrl+P

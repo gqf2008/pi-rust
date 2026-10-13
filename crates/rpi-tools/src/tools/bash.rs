@@ -75,7 +75,7 @@ pub struct BashToolOptions {
     pub command_prefix: Option<String>,
     /// Fallback timeout in seconds applied when the model doesn't pass one.
     /// pi has no default, but a model that forgets `timeout` can hang the run
-    /// forever (reported as "卡住") — rpi injects this at the harness build
+    /// forever (reported as "卡住") — ki injects this at the harness build
     /// site. A model-supplied timeout still wins.
     pub default_timeout: Option<f64>,
     /// Optional async hook that can adjust command, cwd, and environment.

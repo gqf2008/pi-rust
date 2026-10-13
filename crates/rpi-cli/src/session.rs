@@ -6,8 +6,8 @@
 //! v1 scope cuts vs the TS SDK (tracked in `docs/m6-cli-open-questions.md`):
 //! - **Skill / prompt-template / context-file discovery IS wired**
 //!   (`--no-skills`/`-ns`, `--no-prompt-templates`/`-np`, `--no-context-files`/
-//!   `-nc` each suppress one channel; project `.rpi/<sub>` + legacy
-//!   `.rpi/<sub>` + global
+//!   `-nc` each suppress one channel; project `.ki/<sub>` + legacy
+//!   `.ki/<sub>` + global
 //!   `agent_dir()<sub>` discovery with project-wins dedupe via
 //!   [`crate::resource_dirs`]; SYSTEM.md/APPEND_SYSTEM.md project-wins
 //!   precedence). **Extension `resources_discover` (B5b) feeds the SAME loaders:
@@ -91,7 +91,7 @@ pub fn default_system_prompt(cwd: &str, prior_reasoning_replayed: bool) -> Strin
     };
 
     format!(
-        "You are an expert coding assistant operating inside rpi, a coding agent harness. \
+        "You are an expert coding assistant operating inside kiqi, a coding agent harness. \
 You help users by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
@@ -99,7 +99,7 @@ Available tools:
 - bash  — Execute Bash commands using Bash/POSIX syntax, including on Windows
 - edit  — Find/replace edits to existing files
 - write — Create or overwrite files
-- docs  — Look up rpi usage, extension, package, and compatibility documentation
+- docs  — Look up ki usage, extension, package, and compatibility documentation
 
 Guidelines:
 - Reply in the SAME language the user is writing in. Detect the language of the user's
@@ -119,7 +119,7 @@ Guidelines:
   a bug, not progress.
 - Read only what you need. If a file or search result was already shown earlier in this
   conversation, use it instead of fetching it again.
-- When unsure about rpi commands, extensions, Pi package compatibility, or .rpi configuration, consult the project documentation before guessing
+- When unsure about ki commands, extensions, Pi package compatibility, or .ki configuration, consult the project documentation before guessing
 
 Current working directory: {cwd}"
     )
@@ -184,9 +184,9 @@ pub fn select_session(args: &Args, cwd: &Path) -> SessionSelection {
     }
 }
 
-/// The default session directory is `<cwd>/.rpi/sessions`.
+/// The default session directory is `<cwd>/.ki/sessions`.
 pub fn default_session_dir(cwd: &Path) -> PathBuf {
-    cwd.join(".rpi").join("sessions")
+    cwd.join(".ki").join("sessions")
 }
 
 /// Build the `AgentHarness` from the resolved model + parsed args + cwd.
@@ -352,7 +352,7 @@ pub async fn build(
     // ---- System prompt base (precedence: --system-prompt > SYSTEM.md > default) ----
     // Mirrors pi `discoverSystemPromptFile` (`resource-loader.ts:1022-1034`):
     // an explicit `--system-prompt` flag wins; otherwise a discovered
-    // `<cwd>/.rpi/SYSTEM.md` wins, then
+    // `<cwd>/.ki/SYSTEM.md` wins, then
     // `<agent_dir>/SYSTEM.md`.
     // (global); otherwise the built-in default. **Project-wins** — the same
     // direction as skills/prompts precedence.
@@ -405,16 +405,16 @@ pub async fn build(
     // global→ancestor(cwd→root), deepest-last (pi parity).
     //
     // **Trust gate (v1 divergence):** pi gates project config discovery on
-    // `isProjectTrusted()` (global resources are unconditional). rpi v1 has no
+    // `isProjectTrusted()` (global resources are unconditional). ki v1 has no
     // trust prompt — project resources are discovered unconditionally (a copied
-    // `.rpi/` dir drops in and works). Full trust gating is deferred.
+    // `.ki/` dir drops in and works). Full trust gating is deferred.
     let agent_dir = crate::config::agent_dir().ok();
 
     // ---- B5b: extension resources_discover ----
     // If any plugin registered a `resources_discover` handler, fan the event out
     // (reason "startup") and collect skill/prompt/theme paths. These plugin-
     // contributed paths merge WITH the static Part-A dirs (project
-    // `.rpi/skills` +
+    // `.ki/skills` +
     // `agent_dir/skills`, etc.) and the loaders re-run over the union — the
     // coherence point: a plugin's discovered skills land through the SAME loaders
     // as static skills. Static dirs load FIRST so project skills keep winning name
@@ -639,7 +639,7 @@ pub async fn build(
     // default when its key is absent.
     let saved_settings = crate::settings::load_settings().unwrap_or_default();
 
-    // `httpProxy` applies to rpi's own HTTP clients. Setting the environment is how
+    // `httpProxy` applies to ki's own HTTP clients. Setting the environment is how
     // they are configured (`pi-ai/src/http.rs`), and upstream does the same thing
     // with this key — an explicit environment variable still wins, so a shell-level
     // proxy override is not silently replaced by the setting.
@@ -981,7 +981,7 @@ pub struct ReloadContext {
     /// A detached mailbox makes `ask_user` fail with "requires an interactive
     /// UI" (headless contract).
     pub ui_dialog: rpi_extensions::UiDialogMailbox,
-    /// Active `rpi dev` extension builder. `/reload` rebuilds it before
+    /// Active `ki dev` extension builder. `/reload` rebuilds it before
     /// swapping plugin sessions; its watcher signals `mailbox` after a
     /// successful background build.
     pub dev_extension: Option<Arc<crate::dev_extension::DevExtension>>,
@@ -1112,7 +1112,7 @@ async fn reload_extension_resources_inner<F>(
 where
     F: FnOnce() + Send,
 {
-    // Resolve the arguments once for this reload. `rpi dev` may append its
+    // Resolve the arguments once for this reload. `ki dev` may append its
     // freshly staged extension directory; every subsequent loader and policy
     // decision must observe that same effective set rather than falling back
     // to the pre-dev snapshot held in `ctx.args`.
@@ -1699,7 +1699,7 @@ pub(crate) fn resolve_project_trust(args: &Args, cwd: &Path) -> bool {
 
 /// Resolve the extension dirs to scan and load the cdylib plugins, returning
 /// the loaded session guard (keeps the `Library` handles alive for the harness
-/// lifetime). Scan order: configured project paths, project `.rpi/extensions`,
+/// lifetime). Scan order: configured project paths, project `.ki/extensions`,
 /// configured/global conventional paths, then any
 /// `--extensions-dir` flags (scanned after the defaults — `args.rs`).
 /// Diagnostics are a no-op sink for now; load skips/ABI mismatches surface via
@@ -1775,7 +1775,7 @@ fn merge_extension_tools(
 /// `RPI_BASH_TIMEOUT` overrides; a model-supplied timeout always wins.
 pub fn bash_options() -> rpi_tools::tools::bash::BashToolOptions {
     use rpi_tools::tools::bash::BashToolOptions;
-    let default = std::env::var("RPI_BASH_TIMEOUT")
+    let default = std::env::var("KI_BASH_TIMEOUT")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(120.0);
@@ -1796,7 +1796,7 @@ fn build_tools(ctx: &ExecutionToolContext, args: &Args) -> Vec<HarnessTool> {
     if args.no_tools {
         return Vec::new();
     }
-    // Keep the coding tools aligned with Pi and expose rpi's read-only docs
+    // Keep the coding tools aligned with Pi and expose ki's read-only docs
     // lookup as a default assistant capability.
     //
     // Replay policy (native `ToolDeclaration.replay`): only tools that are
@@ -2370,7 +2370,7 @@ async fn open_session_by_id_in_dir(id: &str, cwd: &str, dir: &Path) -> Result<Se
 ///   exactly the scope of "the session this process is serving".
 ///
 /// The write overwrites unconditionally, deliberately. An inherited value is not
-/// an override: `rpi` spawning `rpi` would otherwise hand the child the parent's
+/// an override: `ki` spawning `ki` would otherwise hand the child the parent's
 /// session id, and the child — which is *serving its own* session — would report
 /// it forever. (Children no longer inherit the variable at all; see
 /// `rpi_tools::HOST_PRIVATE_ENV`. This overwrite is the second line of defence,
@@ -2468,7 +2468,7 @@ static SESSION_LOCKS: OnceLock<Mutex<Vec<std::fs::File>>> = OnceLock::new();
 
 /// Claim the exclusive lock for a session log.
 ///
-/// Two rpi processes appending to one JSONL diverge their `sequence` counters
+/// Two ki processes appending to one JSONL diverge their `sequence` counters
 /// (duplicate / gapped seqs) and corrupt it. The lock is an OS advisory lock on
 /// `<path>.lock`: the second process gets a clear "already open" error instead
 /// of corrupting the log, and the OS releases it automatically when the holder
@@ -2491,7 +2491,7 @@ fn claim_session_lock(session_path: &str) -> Result<(), String> {
         .map_err(|e| format!("open session lock {}: {e}", lock_path.display()))?;
     if fs2::FileExt::try_lock_exclusive(&file).is_err() {
         return Err(format!(
-            "session {session_path} is already open in another rpi process"
+            "session {session_path} is already open in another ki process"
         ));
     }
     SESSION_LOCKS
@@ -2654,7 +2654,7 @@ mod tests {
 
     #[test]
     fn loaded_context_paths_track_precedence_and_reload() {
-        const CHILD: &str = "RPI_CONTEXT_PATHS_REGRESSION_CHILD";
+        const CHILD: &str = "KI_CONTEXT_PATHS_REGRESSION_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let dir = tempfile::tempdir().unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -2682,7 +2682,7 @@ mod tests {
             .block_on(async {
                 let agent = crate::config::agent_dir().unwrap();
                 let cwd = agent.join("project");
-                let project_config = cwd.join(".rpi");
+                let project_config = cwd.join(".ki");
                 std::fs::create_dir_all(&project_config).unwrap();
                 for (path, content) in [
                     (agent.join("SYSTEM.md"), "GLOBAL_BASE"),
@@ -2924,14 +2924,14 @@ mod tests {
             "{\"kind\":\"header\",\"version\":4,\"id\":\"abc\",\"createdAt\":1,\"cwd\":\"x\"}\n",
             "{\"kind\":\"fact\",\"seq\":1,\"fact\":\"name\",\"name\":\"fix resume picker\"}\n",
             "{\"kind\":\"record\",\"type\":\"operation_started\",\"id\":\"r1\"}\n",
-            "{\"kind\":\"entry\",\"lane\":\"main\",\"type\":\"message\",\"id\":\"e1\",\"message\":{\"kind\":\"user\",\"role\":\"user\",\"content\":\"read the rpi -r picker\"}}\n",
+            "{\"kind\":\"entry\",\"lane\":\"main\",\"type\":\"message\",\"id\":\"e1\",\"message\":{\"kind\":\"user\",\"role\":\"user\",\"content\":\"read the ki -r picker\"}}\n",
             "{\"kind\":\"entry\",\"lane\":\"main\",\"type\":\"message\",\"id\":\"e2\",\"message\":{\"kind\":\"assistant\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"second\"}]}}\n",
         );
         std::fs::write(&path, body).unwrap();
         let summary = summarize_session_file(&path);
         assert!(!summary.empty);
         assert_eq!(summary.name.as_deref(), Some("fix resume picker"));
-        assert_eq!(summary.preview.as_deref(), Some("read the rpi -r picker"));
+        assert_eq!(summary.preview.as_deref(), Some("read the ki -r picker"));
         std::fs::remove_file(&path).ok();
     }
 
@@ -3184,9 +3184,9 @@ mod tests {
         let agent = tmp.path().join("agent");
         let cwd = tmp.path().join("project");
         std::fs::create_dir_all(&agent).unwrap();
-        std::fs::create_dir_all(cwd.join(".rpi")).unwrap();
+        std::fs::create_dir_all(cwd.join(".ki")).unwrap();
         std::fs::write(agent.join("settings.json"), "{}").unwrap();
-        std::fs::write(cwd.join(".rpi/settings.json"), "{ malformed").unwrap();
+        std::fs::write(cwd.join(".ki/settings.json"), "{ malformed").unwrap();
         std::env::set_var(crate::config::CONFIG_DIR_ENV, &agent);
         let args = Args::default();
 
@@ -3681,7 +3681,7 @@ mod tests {
         let cwd = Path::new("/proj");
         match select_session(&args, cwd) {
             SessionSelection::New { dir, .. } => {
-                assert_eq!(dir, Path::new("/proj/.rpi/sessions"));
+                assert_eq!(dir, Path::new("/proj/.ki/sessions"));
             }
             other => panic!("expected New, got {other:?}"),
         }
@@ -3691,10 +3691,10 @@ mod tests {
     fn default_session_dir_only_uses_rpi() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
-        std::fs::create_dir_all(cwd.join(".rpi/sessions")).unwrap();
-        assert_eq!(default_session_dir(cwd), cwd.join(".rpi/sessions"));
-        std::fs::create_dir_all(cwd.join(".rpi/sessions")).unwrap();
-        assert_eq!(default_session_dir(cwd), cwd.join(".rpi/sessions"));
+        std::fs::create_dir_all(cwd.join(".ki/sessions")).unwrap();
+        assert_eq!(default_session_dir(cwd), cwd.join(".ki/sessions"));
+        std::fs::create_dir_all(cwd.join(".ki/sessions")).unwrap();
+        assert_eq!(default_session_dir(cwd), cwd.join(".ki/sessions"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3727,7 +3727,7 @@ mod tests {
     #[test]
     fn host_private_env_matches_the_declared_contract() {
         // 1. The wire values. Pinned literally on purpose: see the doc comment.
-        assert_eq!(rpi_plugin_sdk::SESSION_ID_ENV, "RPI_SESSION_ID");
+        assert_eq!(rpi_plugin_sdk::SESSION_ID_ENV, "KI_SESSION_ID");
         assert_eq!(
             rpi_plugin_sdk::SUBAGENT_PARENT_ENV,
             [

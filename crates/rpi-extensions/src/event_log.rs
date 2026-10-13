@@ -10,7 +10,7 @@
 //! Off by default (zero disk writes / zero overhead when disabled — the global
 //! logger resolves to a no-op). One file, append-only:
 //! `$RPI_EVENT_LOG_PATH`, else `<root>/logs/events.jsonl`, where `<root>` is
-//! `$RPI_CODING_AGENT_DIR`'s parent (i.e. `~/.rpi`) or `~/.rpi`.
+//! `$RPI_CODING_AGENT_DIR`'s parent (i.e. `~/.ki`) or `~/.ki`.
 //!
 //! [`dispatch_to_handlers`]: crate::translate::dispatch_to_handlers
 
@@ -70,7 +70,7 @@ impl EventLogger {
     /// Resolve the log from the environment (`RPI_EVENT_LOG=1`). Disabled when
     /// the gate is off or no path can be resolved.
     pub fn from_env() -> Self {
-        if std::env::var("RPI_EVENT_LOG").ok().as_deref() != Some("1") {
+        if std::env::var("KI_EVENT_LOG").ok().as_deref() != Some("1") {
             return Self::disabled();
         }
         match log_path() {
@@ -125,19 +125,19 @@ fn now_ms() -> u64 {
 
 /// Resolve the event-log path (`$RPI_EVENT_LOG_PATH`, else
 /// `<root>/logs/events.jsonl`, where `<root>` is `$RPI_CODING_AGENT_DIR`'s
-/// parent or `~/.rpi`). Public so `rpi events tail` can find the same file the
+/// parent or `~/.ki`). Public so `ki events tail` can find the same file the
 /// logger writes.
 pub fn event_log_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("RPI_EVENT_LOG_PATH") {
+    if let Some(path) = std::env::var_os("KI_EVENT_LOG_PATH") {
         return Some(PathBuf::from(path));
     }
-    let root = if let Some(agent) = std::env::var_os("RPI_CODING_AGENT_DIR") {
-        // The override is the *agent* dir (`~/.rpi/agent`); logs live in the
-        // parent (`~/.rpi/logs`). A parentless override falls back to itself.
+    let root = if let Some(agent) = std::env::var_os("KI_CODING_AGENT_DIR") {
+        // The override is the *agent* dir (`~/.ki/agent`); logs live in the
+        // parent (`~/.ki/logs`). A parentless override falls back to itself.
         let agent = PathBuf::from(agent);
         agent.parent().map(PathBuf::from).unwrap_or(agent)
     } else {
-        dirs::home_dir()?.join(".rpi")
+        dirs::home_dir()?.join(".ki")
     };
     Some(root.join("logs").join("events.jsonl"))
 }

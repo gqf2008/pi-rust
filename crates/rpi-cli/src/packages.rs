@@ -1,7 +1,7 @@
 //! Project-local Rust extension packages.
 //!
 //! A package is a built cdylib plus optional `skills`, `prompts`, and `themes`
-//! directories under `.rpi/packages/<name>`. The registry is deliberately
+//! directories under `.ki/packages/<name>`. The registry is deliberately
 //! separate from the global native package registry.
 
 use std::path::{Path, PathBuf};
@@ -133,7 +133,7 @@ fn link(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let root = project_root.join(".rpi/packages").join(&package_name);
+    let root = project_root.join(".ki/packages").join(&package_name);
     let ext = root.join("extensions");
     if let Err(e) = std::fs::create_dir_all(&ext) {
         eprintln!("error: could not create {}: {e}", ext.display());
@@ -185,7 +185,7 @@ fn link(args: &[String]) -> i32 {
         eprintln!("error: {e}");
         return 1;
     }
-    println!("linked project package `{package_name}`; run `rpi` in this directory to load it");
+    println!("linked project package `{package_name}`; run `ki` in this directory to load it");
     0
 }
 
@@ -287,7 +287,7 @@ fn update(args: &[String]) -> i32 {
         }
     }
 
-    // Global extensions installed by `rpi install` are also packages. This is
+    // Global extensions installed by `ki install` are also packages. This is
     // the path used by crates.io extensions such as rpi-im-message; delegate to
     // the existing transactional installer so artifact and registry updates
     // remain atomic and version resolution stays in one place.
@@ -339,7 +339,7 @@ fn update_global_package(name: &str, args: &[String]) -> bool {
     let executable = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("error: could not resolve rpi executable: {error}");
+            eprintln!("error: could not resolve ki executable: {error}");
             return false;
         }
     };
@@ -355,7 +355,7 @@ fn update_global_package(name: &str, args: &[String]) -> bool {
             false
         }
         Err(error) => {
-            eprintln!("error: could not run rpi install for `{name}`: {error}");
+            eprintln!("error: could not run ki install for `{name}`: {error}");
             false
         }
     }
@@ -388,7 +388,7 @@ fn unlink(args: &[String]) -> i32 {
         eprintln!("error: project package `{name}` is not installed");
         return 1;
     }
-    let dir = cwd.join(".rpi/packages").join(name);
+    let dir = cwd.join(".ki/packages").join(name);
     if let Err(e) = std::fs::remove_dir_all(&dir) {
         eprintln!("error: could not remove package: {e}");
         return 1;
@@ -552,7 +552,7 @@ fn value(args: &[String], i: usize, flag: &str) -> Option<String> {
     }
 }
 fn read_registry(cwd: &Path) -> Result<PackageRegistry, String> {
-    let path = cwd.join(".rpi").join(REGISTRY);
+    let path = cwd.join(".ki").join(REGISTRY);
     match std::fs::read_to_string(path) {
         Ok(s) => {
             serde_json::from_str(&s).map_err(|e| format!("invalid project package registry: {e}"))
@@ -562,7 +562,7 @@ fn read_registry(cwd: &Path) -> Result<PackageRegistry, String> {
     }
 }
 fn write_registry(cwd: &Path, r: &PackageRegistry) -> Result<(), String> {
-    let dir = cwd.join(".rpi");
+    let dir = cwd.join(".ki");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(REGISTRY);
     let tmp = dir.join(".packages.json.tmp");
@@ -575,7 +575,7 @@ pub fn project_package_dirs(cwd: &Path, kind: &str) -> Vec<PathBuf> {
         Ok(registry) => registry
             .packages
             .into_iter()
-            .map(|p| cwd.join(".rpi/packages").join(p.name).join(kind))
+            .map(|p| cwd.join(".ki/packages").join(p.name).join(kind))
             .collect(),
         Err(error) => {
             eprintln!("warning: could not load project package registry: {error}");
@@ -584,13 +584,13 @@ pub fn project_package_dirs(cwd: &Path, kind: &str) -> Vec<PathBuf> {
     }
 }
 pub fn print_help() {
-    println!("Usage: rpi package <command>\n\nCommands:\n  link [name] [--path <dir>] [--package <name>] [--force]  Build and link a project-local Rust extension\n  list                                                   List project packages\n  update [name] [--debug] [--locked]                    Update project and global installed packages\n  unlink <name>                                          Remove a project package");
+    println!("Usage: ki package <command>\n\nCommands:\n  link [name] [--path <dir>] [--package <name>] [--force]  Build and link a project-local Rust extension\n  list                                                   List project packages\n  update [name] [--debug] [--locked]                    Update project and global installed packages\n  unlink <name>                                          Remove a project package");
 }
 fn print_link_help() {
-    println!("Usage: rpi package link [name] [options]\n\nOptions:\n  --path <dir>       Extension source directory (default: current directory)\n  --package, -P <n>  Select a Cargo cdylib package\n  --debug            Build debug artifacts instead of release\n  --locked           Pass --locked to Cargo\n  --force, -f        Replace an existing package");
+    println!("Usage: ki package link [name] [options]\n\nOptions:\n  --path <dir>       Extension source directory (default: current directory)\n  --package, -P <n>  Select a Cargo cdylib package\n  --debug            Build debug artifacts instead of release\n  --locked           Pass --locked to Cargo\n  --force, -f        Replace an existing package");
 }
 fn print_update_help() {
-    println!("Usage: rpi package update [name] [options]\n\nOptions:\n  --debug            Build debug artifacts instead of release\n  --locked           Pass --locked to Cargo\n  --help, -h         Show this help\n\nWithout a name, all project and global installed packages are updated.");
+    println!("Usage: ki package update [name] [options]\n\nOptions:\n  --debug            Build debug artifacts instead of release\n  --locked           Pass --locked to Cargo\n  --help, -h         Show this help\n\nWithout a name, all project and global installed packages are updated.");
 }
 
 #[cfg(test)]

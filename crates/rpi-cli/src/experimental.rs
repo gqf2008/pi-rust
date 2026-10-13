@@ -8,7 +8,7 @@
 pub fn enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("RPI_EXPERIMENTAL")
+        std::env::var("KI_EXPERIMENTAL")
             .map(|v| v == "1")
             .unwrap_or(false)
     })
@@ -20,7 +20,7 @@ mod tests {
 
     #[test]
     fn gate_matches_env() {
-        let expected = std::env::var("RPI_EXPERIMENTAL")
+        let expected = std::env::var("KI_EXPERIMENTAL")
             .map(|v| v == "1")
             .unwrap_or(false);
         assert_eq!(enabled(), expected);

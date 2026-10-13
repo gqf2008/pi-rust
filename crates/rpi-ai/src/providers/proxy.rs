@@ -13,7 +13,7 @@
 //! # Architecture
 //!
 //! ```text
-//! Client (rpi) → Proxy Server → LLM Provider (Anthropic/OpenAI)
+//! Client (ki) → Proxy Server → LLM Provider (Anthropic/OpenAI)
 //!      ↑              ↑
 //!   No API key    Manages auth
 //! ```

@@ -31,7 +31,7 @@ pub enum LlamaCommand {
 /// Parse llama subcommand from args
 pub fn parse_llama_command(args: &[String]) -> Result<LlamaCommand, String> {
     if args.is_empty() {
-        return Err("Usage: rpi llama <start|stop|list|status|download> [options]".to_string());
+        return Err("Usage: ki llama <start|stop|list|status|download> [options]".to_string());
     }
 
     let subcommand = &args[0];
@@ -149,7 +149,7 @@ fn parse_status_command(args: &[String]) -> Result<LlamaCommand, String> {
 
 fn parse_download_command(args: &[String]) -> Result<LlamaCommand, String> {
     if args.is_empty() {
-        return Err("Usage: rpi llama download <model> [--output <path>]".to_string());
+        return Err("Usage: ki llama download <model> [--output <path>]".to_string());
     }
 
     let model = args[0].clone();

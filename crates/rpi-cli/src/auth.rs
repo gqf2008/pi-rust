@@ -1,16 +1,16 @@
-//! `rpi auth` subcommand — persistent credential management. Mirrors the
+//! `ki auth` subcommand — persistent credential management. Mirrors the
 //! Rust-relevant slice of the TS `packages/coding-agent/src/cli/auth-command.ts`
 //! + `main.ts:runAuthCommand` + `core/auth-check.ts`.
 //!
 //! v1 ships three actions:
 //!
-//! - `rpi auth login`  — legacy API-key prompt (no echo, via `rpassword`) for
-//!   the default provider and persist it to `~/.rpi/auth.json`.
+//! - `ki auth login`  — legacy API-key prompt (no echo, via `rpassword`) for
+//!   the default provider and persist it to `~/.ki/auth.json`.
 //!   Mirrors the upstream `/login` TUI's `type:"secret"` prompt + `modify`.
-//! - `rpi auth check`  — local-only probe of `auth.json` + the `ANTHROPIC_*`
+//! - `ki auth check`  — local-only probe of `auth.json` + the `ANTHROPIC_*`
 //!   env vars; reports `ready`/`not_ready` (no network call — the upstream
 //!   `--no-refresh` equivalent). `--json` emits a structured result.
-//! - `rpi auth logout` — drop the selected provider entry from `auth.json`
+//! - `ki auth logout` — drop the selected provider entry from `auth.json`
 //!   (env vars are left untouched).
 //!
 //! # Not ported (deferred — see the initial port notes (retired))
@@ -31,7 +31,7 @@ const EXIT_NOT_READY: i32 = 1;
 /// Exit code for an operational error (IO failure, bad args).
 const EXIT_ERROR: i32 = 2;
 
-/// `rpi auth <sub> [args]` entry. `args` is the slice *after* `auth` (i.e. the
+/// `ki auth <sub> [args]` entry. `args` is the slice *after* `auth` (i.e. the
 /// subcommand + its flags). Returns the process exit code. Async to match the
 /// `app::run` shape, though v1 does no async work here.
 pub async fn run(args: &[String]) -> i32 {
@@ -63,7 +63,7 @@ pub async fn run_with_extensions(
     }
 }
 
-/// `rpi auth login [--provider <id>]` — prompt for a key and persist it.
+/// `ki auth login [--provider <id>]` — prompt for a key and persist it.
 async fn run_login(
     args: &[String],
     snapshot: Option<&Arc<rpi_extensions::RegistrySnapshot>>,
@@ -107,11 +107,11 @@ async fn run_login(
         }
     };
     println!("Credentials saved to {}", path.display());
-    println!("Run `rpi auth check` to verify.");
+    println!("Run `ki auth check` to verify.");
     0
 }
 
-/// `rpi auth check [--provider <id>] [--json]` — local readiness probe.
+/// `ki auth check [--provider <id>] [--json]` — local readiness probe.
 async fn run_check(args: &[String]) -> i32 {
     let provider = parse_provider(args).unwrap_or(DEFAULT_PROVIDER_ID);
     let want_json = args.iter().any(|a| a == "--json");
@@ -133,7 +133,7 @@ async fn run_check(args: &[String]) -> i32 {
         eprintln!();
         eprintln!(
             "Set up credentials with one of:\n  \
-             - `rpi auth login`\n  \
+             - `ki auth login`\n  \
              - export ANTHROPIC_API_KEY=<key>\n  \
              - export ANTHROPIC_AUTH_TOKEN=<bearer>\n  \
              - pass --api-key <key>"
@@ -146,7 +146,7 @@ async fn run_check(args: &[String]) -> i32 {
     }
 }
 
-/// `rpi auth logout [--provider <id>]` — drop the stored credential.
+/// `ki auth logout [--provider <id>]` — drop the stored credential.
 async fn run_refresh(
     args: &[String],
     snapshot: Option<&Arc<rpi_extensions::RegistrySnapshot>>,
@@ -382,9 +382,9 @@ impl CredentialSource {
     }
     fn as_display(&self) -> Option<&'static str> {
         match self {
-            CredentialSource::StoredApiKey => Some("key in ~/.rpi/auth.json"),
-            CredentialSource::StoredOauth => Some("OAuth token in ~/.rpi/auth.json"),
-            CredentialSource::ModelsJson => Some("apiKey in ~/.rpi/agent/models.json"),
+            CredentialSource::StoredApiKey => Some("key in ~/.ki/auth.json"),
+            CredentialSource::StoredOauth => Some("OAuth token in ~/.ki/auth.json"),
+            CredentialSource::ModelsJson => Some("apiKey in ~/.ki/agent/models.json"),
             CredentialSource::EnvApiKey => Some("ANTHROPIC_API_KEY env var"),
             CredentialSource::EnvAuthTToken => Some("ANTHROPIC_AUTH_TOKEN env var"),
             CredentialSource::EnvOpenAiApiKey => Some("OPENAI_API_KEY env var"),
@@ -474,7 +474,7 @@ fn detect_credential(provider: &str) -> CredentialSource {
     CredentialSource::CliFlagUnset
 }
 
-/// `rpi auth --help`. Mirrors the TS auth-command usage but scoped to v1.
+/// `ki auth --help`. Mirrors the TS auth-command usage but scoped to v1.
 fn print_auth_help() {
     println!(
         "Usage: {name} auth <subcommand> [options]
@@ -502,7 +502,7 @@ Notes:
   otherwise it is a provider-neutral API-key compatibility prompt. The host
   only handles standard interaction and credential responses for OAuth.
   `refresh` and `logout` use extension actions. API-key providers may still
-  use ~/.rpi/agent/models.json or environment variables.
+  use ~/.ki/agent/models.json or environment variables.
 ",
         name = crate::APP_NAME
     );

@@ -211,7 +211,7 @@ impl ProviderHooks for ExtensionProviderHooks {
 /// different views of the same turn.
 ///
 /// `systemPrompt` is read from `ctx`, which means the **post-transform** prompt
-/// when the observer event is dispatched: rpi emits that event from
+/// when the observer event is dispatched: ki emits that event from
 /// `before_request`, and `ProviderHooks::transform_context` runs first (the same
 /// order pi uses in `assistant.ts` — transform, then request). So an observer
 /// sees the prompt the provider is about to be given. pi's own
@@ -692,7 +692,7 @@ mod tests {
 
     /// The `BeforeAgentStart` observer sees the **post-transform** prompt.
     ///
-    /// rpi emits that event from `before_request`, and `transform_context` runs
+    /// ki emits that event from `before_request`, and `transform_context` runs
     /// first (the order `agent_harness::build_stream_fn` uses, mirroring pi's
     /// `assistant.ts`). So an observer is told what the provider is about to be
     /// given, not what it would have been given. This is a deliberate contract

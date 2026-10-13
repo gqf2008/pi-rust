@@ -6,11 +6,11 @@
 //! * `RPI_SESSION_ID` — the host writes it so plugins can name the session they
 //!   observe. A bash/powershell child inherits the environment by default, so
 //!   without an exclusion it reaches *everything* the shell runs, including a
-//!   nested `rpi`, which would then report an ancestor's session.
+//!   nested `ki`, which would then report an ancestor's session.
 //! * `LANGFUSE_PI_PARENT_*` — an extension publishes these so a *launcher* can
-//!   attach a nested `rpi` to the turn that spawned it (the extension looks at
+//!   attach a nested `ki` to the turn that spawned it (the extension looks at
 //!   `LANGFUSE_PI_PARENT_TRACE_ID` to decide it is a subagent). Inherited by a
-//!   plain shell they are a false positive: a nested `rpi` adopts its
+//!   plain shell they are a false positive: a nested `ki` adopts its
 //!   ancestor's trace instead of opening its own.
 //!
 //! These run against a real shell, because the property under test is about the
@@ -38,11 +38,11 @@ async fn a_host_private_variable_does_not_reach_the_shell() {
         return;
     };
 
-    std::env::set_var("RPI_SESSION_ID", "01a0f60b-parent-session");
+    std::env::set_var("KI_SESSION_ID", "01a0f60b-parent-session");
 
     // A variable the host does NOT mark private still inherits, so this is a
     // targeted exclusion rather than "the shell sees no environment".
-    std::env::set_var("RPI_TOOLS_INHERIT_PROBE", "visible");
+    std::env::set_var("KI_TOOLS_INHERIT_PROBE", "visible");
 
     let out = env
         .exec(
@@ -58,8 +58,8 @@ async fn a_host_private_variable_does_not_reach_the_shell() {
         "the host-private variable must not inherit while ordinary ones do"
     );
 
-    std::env::remove_var("RPI_TOOLS_INHERIT_PROBE");
-    std::env::remove_var("RPI_SESSION_ID");
+    std::env::remove_var("KI_TOOLS_INHERIT_PROBE");
+    std::env::remove_var("KI_SESSION_ID");
 }
 
 #[tokio::test]
@@ -71,13 +71,10 @@ async fn an_explicit_private_variable_still_reaches_the_shell() {
     // The exclusion is about *inheriting*, not about forbidding the name: a
     // caller that deliberately passes a value (a test fixture, a wrapper script)
     // must still be able to. Per-call env is applied after the inherit loop.
-    std::env::set_var("RPI_SESSION_ID", "01a0f60b-parent-session");
+    std::env::set_var("KI_SESSION_ID", "01a0f60b-parent-session");
 
     let mut per_call = std::collections::HashMap::new();
-    per_call.insert(
-        "RPI_SESSION_ID".to_string(),
-        "01a0f60b-explicit".to_string(),
-    );
+    per_call.insert("KI_SESSION_ID".to_string(), "01a0f60b-explicit".to_string());
     let out = env
         .exec(
             r#"printf 'session=[%s]\n' "$RPI_SESSION_ID""#,
@@ -91,7 +88,7 @@ async fn an_explicit_private_variable_still_reaches_the_shell() {
 
     assert_eq!(out.stdout.trim(), "session=[01a0f60b-explicit]");
 
-    std::env::remove_var("RPI_SESSION_ID");
+    std::env::remove_var("KI_SESSION_ID");
 }
 
 #[test]
@@ -106,12 +103,12 @@ fn the_private_list_covers_what_the_contract_declares() {
     {
         assert!(
             is_host_private_env(name),
-            "`{name}` tells a nested rpi about its ancestor; it must not inherit"
+            "`{name}` tells a nested ki about its ancestor; it must not inherit"
         );
     }
 
     // Narrow: the user's own configuration must still reach the shell.
-    assert!(!is_host_private_env("RPI_OFFLINE"));
+    assert!(!is_host_private_env("KI_OFFLINE"));
     assert!(!is_host_private_env("PATH"));
 }
 

@@ -28,7 +28,7 @@ const MAX_SELF_UPDATE_STATUS_MESSAGE_CHARS: usize = 2 * 1024;
 /// from source, so the window is generous; a helper that outlives it is stuck,
 /// not slow.
 const STALE_SELF_UPDATE_STATUS_TTL_MS: i64 = 60 * 60 * 1000;
-/// How long a completed update keeps its status record. `rpi update` prints
+/// How long a completed update keeps its status record. `ki update` prints
 /// that path, so the file has to outlive the command that named it by long
 /// enough to actually be read; after that it is just clutter.
 const COMPLETED_SELF_UPDATE_STATUS_TTL_MS: i64 = 24 * 60 * 60 * 1000;
@@ -76,7 +76,7 @@ struct UpdateCache {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct UpdateCacheFreshness {
-    rpi: i64,
+    ki: i64,
     #[serde(default)]
     native_packages: BTreeMap<String, i64>,
 }
@@ -116,13 +116,13 @@ enum RegistryLookup {
     TransientFailure,
 }
 
-/// Best-effort startup check for the rpi release and installed Rust extensions.
+/// Best-effort startup check for the ki release and installed Rust extensions.
 pub async fn check_startup(cwd: &Path) -> UpdateReport {
     let _ = cwd;
     check_rpi_startup().await
 }
 
-/// Check the rpi release and every installed Rust cdylib extension.
+/// Check the ki release and every installed Rust cdylib extension.
 ///
 /// Native-only: the npm/Git package halves of the old scope went away with the
 /// Pi compatibility layer, so this never shells out to a package manager.
@@ -134,7 +134,7 @@ pub async fn check_rpi_startup() -> UpdateReport {
 }
 
 fn update_checks_disabled() -> bool {
-    crate::args::offline_env_enabled() || std::env::var_os("RPI_DISABLE_UPDATE_CHECK").is_some()
+    crate::args::offline_env_enabled() || std::env::var_os("KI_DISABLE_UPDATE_CHECK").is_some()
 }
 
 /// Report the outcome of a self-update that ran in a previous process.
@@ -152,7 +152,7 @@ fn report_without_remote_checks() -> UpdateReport {
 fn startup_http_client() -> Option<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(REQUEST_TIMEOUT_MS))
-        .user_agent(format!("rpi/{}", crate::VERSION))
+        .user_agent(format!("ki/{}", crate::VERSION))
         .build()
         .ok()
 }
@@ -166,7 +166,7 @@ async fn check_startup_with_client(client: Option<reqwest::Client>) -> UpdateRep
     let cache_path = agent_dir.join(CACHE_FILE);
     let previous_cache = read_cache(&cache_path);
 
-    // Installed Rust extensions come from `rpi install`'s registry, so this
+    // Installed Rust extensions come from `ki install`'s registry, so this
     // path stays independent of any Pi package resource discovery.
     let native_checks = crate::install::installed_native_packages()
         .into_iter()
@@ -241,8 +241,8 @@ where
 }
 
 fn rpi_cache_checked_at(cache: &UpdateCache) -> i64 {
-    if cache.freshness.rpi > 0 {
-        cache.freshness.rpi
+    if cache.freshness.ki > 0 {
+        cache.freshness.ki
     } else {
         cache.checked_at
     }
@@ -322,7 +322,7 @@ fn merge_and_write_cache(
     }
     if let Some((latest, latest_checked_at)) = rpi_update {
         cache.rpi_latest = latest;
-        cache.freshness.rpi = latest_checked_at;
+        cache.freshness.ki = latest_checked_at;
     }
     cache.native_packages = native_packages.0;
     cache.freshness.native_packages = native_packages.1;
@@ -349,10 +349,10 @@ fn report_from_cache(cache: &UpdateCache) -> UpdateReport {
     if let Some(latest) = cache.rpi_latest.as_deref() {
         if is_newer(crate::VERSION, latest) {
             notices.push(UpdateNotice {
-                name: "rpi".into(),
+                name: "ki".into(),
                 current: crate::VERSION.into(),
                 latest: latest.into(),
-                command: "rpi update".into(),
+                command: "ki update".into(),
             });
         }
     }
@@ -368,7 +368,7 @@ fn report_from_cache(cache: &UpdateCache) -> UpdateReport {
                 name: package.name.clone(),
                 current: package.version,
                 latest: latest.clone(),
-                command: format!("rpi install {} --force", package.name),
+                command: format!("ki install {} --force", package.name),
             });
         }
     }
@@ -478,7 +478,7 @@ enum SelfUpdateArgs {
     Usage,
 }
 
-/// Parse `rpi update`'s own arguments after the global `--offline` flag has been
+/// Parse `ki update`'s own arguments after the global `--offline` flag has been
 /// stripped.
 fn parse_self_update_args(args: &[String]) -> SelfUpdateArgs {
     let mut force = false;
@@ -494,10 +494,10 @@ fn parse_self_update_args(args: &[String]) -> SelfUpdateArgs {
 
 fn print_self_update_help() {
     println!(
-        "Usage: rpi update [--force] [--offline]\n\n\
-         Update the rpi CLI from crates.io.\n\n\
+        "Usage: ki update [--force] [--offline]\n\n\
+         Update the ki CLI from crates.io.\n\n\
          Options:\n  \
-         --force    reinstall even when this rpi is already the latest release\n  \
+         --force    reinstall even when this ki is already the latest release\n  \
          --offline  do not touch the network; report the last known answer only"
     );
 }
@@ -535,7 +535,7 @@ async fn lookup_latest_rpi() -> Option<(String, bool)> {
     latest.map(|latest| (latest, verified))
 }
 
-/// `rpi update` is synchronous — the `cargo install` it guards blocks the same
+/// `ki update` is synchronous — the `cargo install` it guards blocks the same
 /// way — so the one registry request it makes runs on its own thread and
 /// current-thread runtime. That also keeps it safe to call from inside a Tokio
 /// runtime, which is where the CLI enters it.
@@ -557,7 +557,7 @@ fn lookup_latest_rpi_blocking() -> Option<(String, bool)> {
 /// The newest version already staged in a `pending-*` directory.
 ///
 /// A staged update is a fully validated binary waiting for the running process
-/// to exit. Re-running `rpi update` while one is queued must not start a second
+/// to exit. Re-running `ki update` while one is queued must not start a second
 /// compile, so the staged version joins the up-to-date comparison.
 fn staged_pending_version(update_root: &Path) -> Option<semver::Version> {
     let entries = std::fs::read_dir(update_root).ok()?;
@@ -583,7 +583,7 @@ fn staged_pending_version(update_root: &Path) -> Option<semver::Version> {
             &staging.join("bin").join(staged_rpi_file_name()),
             update_root,
             crate::VERSION,
-            "staged rpi",
+            "staged ki",
         ) else {
             continue;
         };
@@ -596,7 +596,7 @@ fn staged_pending_version(update_root: &Path) -> Option<semver::Version> {
 
 fn staged_rpi_file_name() -> &'static str {
     if cfg!(windows) {
-        "rpi.exe"
+        "ki.exe"
     } else {
         crate::APP_NAME
     }
@@ -605,9 +605,9 @@ fn staged_rpi_file_name() -> &'static str {
 /// Reclaim debris and surface a previous run's failure, without a network
 /// round trip.
 ///
-/// `rpi update` is the command that creates `self-update` records and staging
+/// `ki update` is the command that creates `self-update` records and staging
 /// directories, so it is also the right place to clean them up: leaving it to
-/// the startup check means a machine that only ever runs `rpi chat` keeps the
+/// the startup check means a machine that only ever runs `ki chat` keeps the
 /// debris from every interrupted update until the next start.
 fn reclaim_self_update_artifacts() {
     let Ok(agent_dir) = crate::config::agent_dir() else {
@@ -618,7 +618,7 @@ fn reclaim_self_update_artifacts() {
     }
 }
 
-/// Update the installed rpi CLI through its documented crates.io install path.
+/// Update the installed ki CLI through its documented crates.io install path.
 /// Windows stages first because a running executable cannot replace itself;
 /// other platforms retain Cargo's direct replacement behavior.
 pub fn run_self_update(args: &[String]) -> i32 {
@@ -631,7 +631,7 @@ pub fn run_self_update(args: &[String]) -> i32 {
         }
         SelfUpdateArgs::Run { force } => force,
         SelfUpdateArgs::Usage => {
-            eprintln!("error: `rpi update` accepts only `--force` and `--offline`");
+            eprintln!("error: `ki update` accepts only `--force` and `--offline`");
             return 2;
         }
     };
@@ -642,24 +642,24 @@ pub fn run_self_update(args: &[String]) -> i32 {
         // so it may be stale — say so rather than assert a version.
         match known_latest_rpi(None, cached_latest_rpi().as_deref()) {
             Some((latest, true)) if is_newer(crate::VERSION, &latest) => println!(
-                "rpi {} -> {} is available (offline: last known, not verified)\n\
-                 Run `rpi update` without --offline to install it.",
+                "ki {} -> {} is available (offline: last known, not verified)\n\
+                 Run `ki update` without --offline to install it.",
                 crate::VERSION,
                 latest
             ),
             Some(_) => println!(
-                "rpi is up to date with the last known release ({})\n\
+                "ki is up to date with the last known release ({})\n\
                  Offline mode is enabled; the registry was not contacted.",
                 crate::VERSION
             ),
             None => println!(
-                "rpi update skipped: offline mode is enabled and no cached release is known"
+                "ki update skipped: offline mode is enabled and no cached release is known"
             ),
         }
         return 0;
     }
 
-    // Without this gate `rpi update` at the newest release still runs a full
+    // Without this gate `ki update` at the newest release still runs a full
     // `cargo install` and schedules a binary replacement for the version that
     // is already installed — which is exactly what makes a working update look
     // broken. `--force` keeps an explicit reinstall available.
@@ -677,7 +677,7 @@ pub fn run_self_update(args: &[String]) -> i32 {
             None => {
                 println!(
                     "could not reach crates.io to check the latest release\n\
-                     Run `rpi update --force` to install the newest version anyway."
+                     Run `ki update --force` to install the newest version anyway."
                 );
                 return 1;
             }
@@ -694,19 +694,19 @@ pub fn run_self_update(args: &[String]) -> i32 {
         if !is_newer(crate::VERSION, &target) {
             if staged_wins.is_some() {
                 println!(
-                    "rpi {target} is already staged; quit this rpi and it will be applied\n\
-                     Run `rpi update --force` to stage it again."
+                    "ki {target} is already staged; quit this ki and it will be applied\n\
+                     Run `ki update --force` to stage it again."
                 );
             } else if verified {
                 println!(
-                    "rpi is up to date ({} is the latest release)\n\
-                     Run `rpi update --force` to reinstall anyway.",
+                    "ki is up to date ({} is the latest release)\n\
+                     Run `ki update --force` to reinstall anyway.",
                     crate::VERSION
                 );
             } else {
                 println!(
-                    "rpi is up to date ({}; last known release {latest}, unverified)\n\
-                     Run `rpi update --force` to reinstall anyway.",
+                    "ki is up to date ({}; last known release {latest}, unverified)\n\
+                     Run `ki update --force` to reinstall anyway.",
                     crate::VERSION
                 );
             }
@@ -744,7 +744,7 @@ fn cached_latest_rpi() -> Option<String> {
 
 /// A self-update just changed the binary on disk, so the cached release is the
 /// version being replaced. Dropping it stops the next startup (and the next
-/// `rpi update`) from announcing an update that is already installed; the
+/// `ki update`) from announcing an update that is already installed; the
 /// following registry check refills it.
 fn clear_cached_latest_rpi() {
     let Ok(agent_dir) = crate::config::agent_dir() else {
@@ -758,7 +758,7 @@ fn clear_cached_latest_rpi() {
         return;
     };
     cache.rpi_latest = None;
-    cache.freshness.rpi = 0;
+    cache.freshness.ki = 0;
     let _ = write_cache(&path, &cache);
 }
 
@@ -986,7 +986,7 @@ fn run_direct_self_update() -> i32 {
     let current_exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("error: could not resolve the current rpi executable: {error}");
+            eprintln!("error: could not resolve the current ki executable: {error}");
             return 1;
         }
     };
@@ -999,7 +999,7 @@ fn run_direct_self_update() -> i32 {
     };
     match activate_direct_update(&plan) {
         Ok(version) => {
-            println!("rpi updated successfully to {version}");
+            println!("ki updated successfully to {version}");
             0
         }
         Err(error) => {
@@ -1037,9 +1037,9 @@ fn build_direct_update_plan(
     let staging_dir = validated_real_directory(staging_dir, "self-update staging directory")?;
     let staged_exe = validated_regular_file(
         &staging_dir.join("bin").join(crate::APP_NAME),
-        "staged rpi executable",
+        "staged ki executable",
     )?;
-    let target_exe = validated_regular_file(target_exe, "current rpi executable")?;
+    let target_exe = validated_regular_file(target_exe, "current ki executable")?;
     let target_dir = validated_real_directory(
         target_exe
             .parent()
@@ -1070,52 +1070,52 @@ fn activate_direct_update(plan: &DirectUpdatePlan) -> Result<semver::Version, St
         &plan.staged_exe,
         &plan.staging_dir,
         crate::VERSION,
-        "staged rpi",
+        "staged ki",
     )?;
     preflight_direct_replacement(plan)?;
 
     let result = (|| {
         std::fs::copy(&plan.staged_exe, &plan.replacement_temp).map_err(|error| {
-            format!("could not copy staged rpi beside the current executable: {error}")
+            format!("could not copy staged ki beside the current executable: {error}")
         })?;
-        validated_regular_file(&plan.replacement_temp, "replacement rpi executable")?;
+        validated_regular_file(&plan.replacement_temp, "replacement ki executable")?;
         let copied_version = validate_rpi_executable_version(
             &plan.replacement_temp,
             plan.target_exe
                 .parent()
                 .ok_or_else(|| "current executable has no parent directory".to_string())?,
             crate::VERSION,
-            "replacement rpi",
+            "replacement ki",
         )?;
         if copied_version != staged_version
             || !files_are_identical(&plan.staged_exe, &plan.replacement_temp)?
         {
             return Err(
-                "replacement rpi does not match the validated staged executable".to_string(),
+                "replacement ki does not match the validated staged executable".to_string(),
             );
         }
 
         std::fs::hard_link(&plan.target_exe, &plan.backup_file)
-            .map_err(|error| format!("could not preserve the current rpi executable: {error}"))?;
+            .map_err(|error| format!("could not preserve the current ki executable: {error}"))?;
         let installed_version = validate_rpi_executable_version(
             &plan.backup_file,
             plan.target_exe
                 .parent()
                 .ok_or_else(|| "current executable has no parent directory".to_string())?,
             crate::VERSION,
-            "current rpi",
+            "current ki",
         )?;
         if staged_version < installed_version {
             return Err(format!(
-                "refusing to replace rpi {installed_version} with older version {staged_version}"
+                "refusing to replace ki {installed_version} with older version {staged_version}"
             ));
         }
         if !files_are_identical(&plan.target_exe, &plan.backup_file)? {
-            return Err("current rpi executable changed while preparing the update".to_string());
+            return Err("current ki executable changed while preparing the update".to_string());
         }
 
         std::fs::rename(&plan.replacement_temp, &plan.target_exe).map_err(|error| {
-            format!("could not atomically replace the current rpi executable: {error}")
+            format!("could not atomically replace the current ki executable: {error}")
         })?;
         Ok(())
     })();
@@ -1128,7 +1128,7 @@ fn activate_direct_update(plan: &DirectUpdatePlan) -> Result<semver::Version, St
 
     let validation = (|| {
         if !files_are_identical(&plan.staged_exe, &plan.target_exe)? {
-            return Err("updated rpi executable does not match the staged executable".to_string());
+            return Err("updated ki executable does not match the staged executable".to_string());
         }
         let updated_version = validate_rpi_executable_version(
             &plan.target_exe,
@@ -1136,11 +1136,11 @@ fn activate_direct_update(plan: &DirectUpdatePlan) -> Result<semver::Version, St
                 .parent()
                 .ok_or_else(|| "current executable has no parent directory".to_string())?,
             crate::VERSION,
-            "updated rpi",
+            "updated ki",
         )?;
         if updated_version != staged_version {
             return Err(format!(
-                "updated rpi reported version {updated_version}, expected {staged_version}"
+                "updated ki reported version {updated_version}, expected {staged_version}"
             ));
         }
         Ok(())
@@ -1178,7 +1178,7 @@ fn preflight_direct_replacement(plan: &DirectUpdatePlan) -> Result<(), String> {
 fn rollback_direct_update(plan: &DirectUpdatePlan, failure: &str) -> String {
     let _ = remove_file_if_exists(&plan.replacement_temp);
     match std::fs::rename(&plan.backup_file, &plan.target_exe) {
-        Ok(()) => format!("{failure}; restored the previous rpi executable"),
+        Ok(()) => format!("{failure}; restored the previous ki executable"),
         Err(rollback) => format!(
             "{failure}; automatic rollback failed ({rollback}); the previous executable remains at {}",
             plan.backup_file.display()
@@ -1364,7 +1364,7 @@ try {
         throw 'replacement, backup, or rollback path already exists'
     }
 
-    Write-UpdateStatus -State 'waiting' -Message 'waiting for the current rpi process to exit'
+    Write-UpdateStatus -State 'waiting' -Message 'waiting for the current ki process to exit'
     if ($ParentPid -lt 1 -or $ParentPid -gt [int]::MaxValue) {
         throw 'parent process id is outside the supported Windows range'
     }
@@ -1391,7 +1391,7 @@ try {
     if ($null -ne $parentProcess) {
         try {
             if (-not $parentProcess.WaitForExit(600000)) {
-                throw 'timed out waiting for the current rpi process to exit'
+                throw 'timed out waiting for the current ki process to exit'
             }
         } finally {
             $parentProcess.Dispose()
@@ -1402,14 +1402,14 @@ try {
     Assert-WindowsExecutable -Path $stagedFull -Label 'staged executable'
     Assert-WindowsExecutable -Path $targetFull -Label 'current executable'
     if ((Get-FileSha256 -Path $stagedFull) -ne $expectedHash) {
-        throw 'staged executable changed while waiting for rpi to exit'
+        throw 'staged executable changed while waiting for ki to exit'
     }
     if ((Get-FileSha256 -Path $targetFull) -ne $originalTargetHash) {
-        throw 'current executable changed while waiting for rpi to exit'
+        throw 'current executable changed while waiting for ki to exit'
     }
     if ([IO.File]::Exists($tempFull) -or [IO.File]::Exists($backupFull) -or
         [IO.File]::Exists($rollbackDisplacedFull)) {
-        throw 'replacement, backup, or rollback path appeared while waiting for rpi to exit'
+        throw 'replacement, backup, or rollback path appeared while waiting for ki to exit'
     }
 
     [IO.File]::Copy($stagedFull, $tempFull, $false)
@@ -1459,7 +1459,7 @@ try {
     exit 1
 }
 
-try { Write-UpdateStatus -State 'succeeded' -Message 'rpi executable replaced successfully' } catch {}
+try { Write-UpdateStatus -State 'succeeded' -Message 'ki executable replaced successfully' } catch {}
 if ([IO.File]::Exists($BackupPath)) {
     try { Remove-Item -LiteralPath $BackupPath -Force } catch {}
 }
@@ -1487,7 +1487,7 @@ fn run_windows_self_update() -> i32 {
     let current_exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
-            let message = format!("could not resolve the current rpi executable: {error}");
+            let message = format!("could not resolve the current ki executable: {error}");
             let _ = write_windows_update_status(&status_file, "failed", &message);
             eprintln!("error: {message}");
             return 1;
@@ -1573,7 +1573,7 @@ fn run_windows_self_update() -> i32 {
     let _ = write_windows_update_status(
         &plan.status_file,
         "scheduled",
-        &format!("validated rpi {staged_version}; waiting to replace rpi after this process exits"),
+        &format!("validated ki {staged_version}; waiting to replace ki after this process exits"),
     );
     let mut command = windows_update_helper_command(
         &powershell,
@@ -1587,7 +1587,7 @@ fn run_windows_self_update() -> i32 {
         Ok(_) => {
             let persisted_staging = staging.directory.keep();
             println!(
-                "rpi {staged_version} staged; quit this rpi and it will be applied.\n\
+                "ki {staged_version} staged; quit this ki and it will be applied.\n\
                  Status: {}",
                 plan.status_file.display()
             );
@@ -1649,10 +1649,10 @@ fn build_windows_update_plan(
         validated_regular_file(status_file, "self-update status file")?;
     }
     let staged_exe = validated_windows_executable(
-        &staging_dir.join("bin").join("rpi.exe"),
-        "staged rpi executable",
+        &staging_dir.join("bin").join("ki.exe"),
+        "staged ki executable",
     )?;
-    let target_exe = validated_windows_executable(target_exe, "current rpi executable")?;
+    let target_exe = validated_windows_executable(target_exe, "current ki executable")?;
     let target_dir = validated_real_directory(
         target_exe
             .parent()
@@ -1713,7 +1713,7 @@ fn validate_staged_rpi(plan: &WindowsUpdatePlan) -> Result<semver::Version, Stri
         .helper_script
         .parent()
         .ok_or_else(|| "self-update staging directory is missing".to_string())?;
-    validate_rpi_executable_version(&plan.staged_exe, cwd, crate::VERSION, "staged rpi")
+    validate_rpi_executable_version(&plan.staged_exe, cwd, crate::VERSION, "staged ki")
 }
 
 /// Captured output of a bounded self-update probe.
@@ -1726,7 +1726,7 @@ struct BoundedProcessOutput {
 /// Run a short-lived probe under both a wall-clock and an output cap.
 ///
 /// The child runs on its own thread and current-thread runtime so this stays
-/// safe when `rpi update` is entered from inside a Tokio runtime. The old
+/// safe when `ki update` is entered from inside a Tokio runtime. The old
 /// implementation reused the npm bridge's process runner, which went away with
 /// the Pi compatibility layer.
 fn run_bounded_process_blocking(
@@ -1782,7 +1782,7 @@ fn cap_bytes(bytes: Vec<u8>, limit: usize) -> Vec<u8> {
     }
 }
 
-/// Byte-for-byte comparison, used to prove a copied or replaced rpi binary is
+/// Byte-for-byte comparison, used to prove a copied or replaced ki binary is
 /// the one that was validated.
 #[cfg(not(windows))]
 fn files_are_identical(left: &Path, right: &Path) -> Result<bool, String> {
@@ -1853,15 +1853,15 @@ fn validate_staged_rpi_version_output(
     current: &str,
 ) -> Result<semver::Version, String> {
     if !stderr.is_empty() {
-        return Err("staged rpi --version wrote unexpected stderr output".to_string());
+        return Err("staged ki --version wrote unexpected stderr output".to_string());
     }
     let staged = parse_rpi_version_output(stdout)
-        .ok_or_else(|| "staged rpi returned an invalid --version response".to_string())?;
+        .ok_or_else(|| "staged ki returned an invalid --version response".to_string())?;
     let current = semver::Version::parse(current)
-        .map_err(|_| "the running rpi version is not valid semantic versioning".to_string())?;
+        .map_err(|_| "the running ki version is not valid semantic versioning".to_string())?;
     if staged < current {
         return Err(format!(
-            "refusing to replace rpi {current} with older version {staged}"
+            "refusing to replace ki {current} with older version {staged}"
         ));
     }
     Ok(staged)
@@ -1885,7 +1885,7 @@ fn parse_rpi_version_output(output: &[u8]) -> Option<semver::Version> {
 
 /// A real directory *by its own entry*: the leaf is not a link, so the update
 /// is free to write into it. Links further up are resolved rather than
-/// refused — a launch path such as `C:\tools\current\rpi.exe` where `current`
+/// refused — a launch path such as `C:\tools\current\ki.exe` where `current`
 /// is a junction names the real install directory, which is exactly what an
 /// update should rewrite.
 fn validated_real_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -2085,7 +2085,7 @@ fn consume_self_update_statuses(agent_dir: &Path) -> Vec<UpdateWarning> {
 
         if status.state == "succeeded" {
             // Kept as the durable record of what was installed. The path is
-            // printed by `rpi update`, so deleting the file on the next start
+            // printed by `ki update`, so deleting the file on the next start
             // made a finished update look like it had never run. It ages out
             // with the rest of the record set instead.
             let old = status.updated_at_ms > 0
@@ -2109,10 +2109,10 @@ fn consume_self_update_statuses(agent_dir: &Path) -> Vec<UpdateWarning> {
         }
         warnings.push(UpdateWarning {
             message: format!(
-                "The previously scheduled rpi update failed: {}",
+                "The previously scheduled ki update failed: {}",
                 sanitized_self_update_status_message(&status.message)
             ),
-            command: "rpi update".to_string(),
+            command: "ki update".to_string(),
         });
     }
 
@@ -2144,7 +2144,7 @@ fn consume_self_update_statuses(agent_dir: &Path) -> Vec<UpdateWarning> {
 /// directory stays behind forever: nothing else in the update path removes it,
 /// and because its status file was still `preparing` the next start never
 /// looked at it either. Those are the directories that pile up in
-/// `~/.rpi/agent/self-update`.
+/// `~/.ki/agent/self-update`.
 ///
 /// A directory a status file already proved dead (`obsolete`) goes as soon as
 /// its name validates. Otherwise the evidence has to come from the directory
@@ -2455,7 +2455,7 @@ mod tests {
         });
         std::fs::write(
             path,
-            format!("#!/bin/sh\n{failure}printf 'rpi {version}\\n'\n"),
+            format!("#!/bin/sh\n{failure}printf 'ki {version}\\n'\n"),
         )
         .unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2588,7 +2588,7 @@ mod tests {
     fn direct_update_replaces_the_selected_target_and_rejects_downgrades() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging");
-        let staged = staging.join("bin/rpi");
+        let staged = staging.join("bin/ki");
         let target = temp.path().join("target/rpi-current");
         fake_unix_rpi(&staged, "9.9.9", None);
         fake_unix_rpi(&target, crate::VERSION, None);
@@ -2612,7 +2612,7 @@ mod tests {
     fn direct_update_rolls_back_when_post_replace_validation_fails() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging");
-        let staged = staging.join("bin/rpi");
+        let staged = staging.join("bin/ki");
         let target = temp.path().join("target/rpi-current");
         fake_unix_rpi(&staged, "9.9.9", Some("rpi-current"));
         fake_unix_rpi(&target, crate::VERSION, None);
@@ -2679,12 +2679,12 @@ mod tests {
         let _guard = crate::config::test_support::env_lock().lock().unwrap();
         let _restore_config = RestoreConfigDir(std::env::var_os(crate::config::CONFIG_DIR_ENV));
         let _restore_offline = RestoreEnv::capture(crate::args::RPI_OFFLINE_ENV);
-        let _restore_disabled = RestoreEnv::capture("RPI_DISABLE_UPDATE_CHECK");
+        let _restore_disabled = RestoreEnv::capture("KI_DISABLE_UPDATE_CHECK");
         let temp = real_tempdir();
         let agent = temp.path().join("offline-agent");
         std::env::set_var(crate::config::CONFIG_DIR_ENV, &agent);
         std::env::set_var(crate::args::RPI_OFFLINE_ENV, "YES");
-        std::env::remove_var("RPI_DISABLE_UPDATE_CHECK");
+        std::env::remove_var("KI_DISABLE_UPDATE_CHECK");
 
         let report = super::check_rpi_startup().await;
 
@@ -2719,12 +2719,12 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0]
             .message
-            .contains("rpi update failed: permission [31m denied"));
+            .contains("ki update failed: permission [31m denied"));
         assert!(!warnings[0].message.chars().any(char::is_control));
-        assert_eq!(warnings[0].command, "rpi update");
+        assert_eq!(warnings[0].command, "ki update");
         assert!(!failed.exists());
         // A `succeeded` record is the receipt for the version now installed —
-        // `rpi update` prints its path — so it survives consumption instead of
+        // `ki update` prints its path — so it survives consumption instead of
         // being deleted the moment the next start looks at it.
         assert!(succeeded.exists());
         assert!(waiting.exists());
@@ -2759,7 +2759,7 @@ mod tests {
         let live_status = name('1');
         let live_staging = update_root.join("pending-Live001");
         std::fs::create_dir_all(live_staging.join("bin")).unwrap();
-        std::fs::write(live_staging.join("bin").join("rpi.exe"), b"payload").unwrap();
+        std::fs::write(live_staging.join("bin").join("ki.exe"), b"payload").unwrap();
         std::fs::write(
             &live_status,
             serde_json::to_vec(&serde_json::json!({
@@ -2776,7 +2776,7 @@ mod tests {
         let dead_status = name('2');
         let dead_staging = update_root.join("pending-Dead002");
         std::fs::create_dir_all(dead_staging.join("bin")).unwrap();
-        std::fs::write(dead_staging.join("bin").join("rpi.exe"), b"payload").unwrap();
+        std::fs::write(dead_staging.join("bin").join("ki.exe"), b"payload").unwrap();
         write_test_update_status_at(&dead_status, "preparing", "installing", stale_ms);
         // Name the staging directory in the stale record, the way the Windows
         // helper does: that is the evidence its payload is debris even though
@@ -2790,7 +2790,7 @@ mod tests {
         // Orphan: no status file ever named it, and it was created long ago.
         let orphan = update_root.join("pending-Orphan3");
         std::fs::create_dir_all(orphan.join("bin")).unwrap();
-        std::fs::write(orphan.join("bin").join("rpi.exe"), b"payload").unwrap();
+        std::fs::write(orphan.join("bin").join("ki.exe"), b"payload").unwrap();
 
         // Debris that can never be serving an update: an empty staging
         // directory, even while it is brand new.
@@ -2826,7 +2826,7 @@ mod tests {
         let now = super::now_ms();
         let staging = update_root.join("pending-Done001");
         std::fs::create_dir_all(staging.join("bin")).unwrap();
-        std::fs::write(staging.join("bin").join("rpi.exe"), b"payload").unwrap();
+        std::fs::write(staging.join("bin").join("ki.exe"), b"payload").unwrap();
 
         // A `waiting` leftover naming the same directory as a completed run.
         let leftover = update_root.join(format!("status-{}.json", "3".repeat(32)));
@@ -2846,7 +2846,7 @@ mod tests {
             &recent,
             serde_json::to_vec(&serde_json::json!({
                 "state": "succeeded",
-                "message": "rpi executable replaced successfully",
+                "message": "ki executable replaced successfully",
                 "staging": staging,
                 "updatedAtMs": now,
             }))
@@ -2859,7 +2859,7 @@ mod tests {
             &aged,
             serde_json::to_vec(&serde_json::json!({
                 "state": "succeeded",
-                "message": "rpi executable replaced successfully",
+                "message": "ki executable replaced successfully",
                 "updatedAtMs": now - super::COMPLETED_SELF_UPDATE_STATUS_TTL_MS - 60_000,
             }))
             .unwrap(),
@@ -2968,7 +2968,7 @@ mod tests {
     fn windows_update_helper_atomically_replaces_a_valid_target() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging 'semi;& with spaces");
-        let staged = staging.join("bin/rpi.exe");
+        let staged = staging.join("bin/ki.exe");
         let target = temp.path().join("target 'semi;& with spaces/rpi-copy.exe");
         fake_windows_executable(&staged, b"new-version");
         fake_windows_executable(&target, b"old-version");
@@ -3030,7 +3030,7 @@ mod tests {
     fn windows_update_helper_failure_preserves_the_old_executable() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging with spaces");
-        let staged = staging.join("bin/rpi.exe");
+        let staged = staging.join("bin/ki.exe");
         let target = temp.path().join("target with spaces/rpi-copy.exe");
         fake_windows_executable(&staged, b"new-version");
         fake_windows_executable(&target, b"old-version");
@@ -3078,7 +3078,7 @@ mod tests {
     fn windows_update_helper_rolls_back_after_post_replace_validation_failure() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging");
-        let staged = staging.join("bin/rpi.exe");
+        let staged = staging.join("bin/ki.exe");
         let target = temp.path().join("target/rpi-copy.exe");
         fake_windows_executable(&staged, b"new-version");
         fake_windows_executable(&target, b"old-version");
@@ -3134,8 +3134,8 @@ mod tests {
     fn windows_update_plan_rejects_a_non_executable_staged_file() {
         let temp = real_tempdir();
         let staging = temp.path().join("staging");
-        let staged = staging.join("bin/rpi.exe");
-        let target = temp.path().join("target/rpi.exe");
+        let staged = staging.join("bin/ki.exe");
+        let target = temp.path().join("target/ki.exe");
         std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
         std::fs::write(&staged, b"not-a-pe").unwrap();
         fake_windows_executable(&target, b"old-version");
@@ -3157,25 +3157,25 @@ mod tests {
     #[test]
     fn staged_rpi_version_output_is_exact_and_cannot_downgrade() {
         assert_eq!(
-            parse_rpi_version_output(b"rpi 1.2.3\r\n").unwrap(),
+            parse_rpi_version_output(b"ki 1.2.3\r\n").unwrap(),
             semver::Version::new(1, 2, 3)
         );
         assert_eq!(
-            validate_staged_rpi_version_output(b"rpi 1.2.3\n", b"", "1.2.3").unwrap(),
+            validate_staged_rpi_version_output(b"ki 1.2.3\n", b"", "1.2.3").unwrap(),
             semver::Version::new(1, 2, 3)
         );
         assert!(
-            validate_staged_rpi_version_output(b"rpi 1.2.2\n", b"", "1.2.3")
+            validate_staged_rpi_version_output(b"ki 1.2.2\n", b"", "1.2.3")
                 .unwrap_err()
                 .contains("older version")
         );
 
         for output in [
             &b"pi 1.2.3\n"[..],
-            &b"rpi v1.2.3\n"[..],
-            &b"rpi 1.2.3 extra\n"[..],
-            &b"rpi 1.2.3\nsecond line\n"[..],
-            &b" rpi 1.2.3\n"[..],
+            &b"ki v1.2.3\n"[..],
+            &b"ki 1.2.3 extra\n"[..],
+            &b"ki 1.2.3\nsecond line\n"[..],
+            &b" ki 1.2.3\n"[..],
         ] {
             assert!(
                 parse_rpi_version_output(output).is_none(),
@@ -3183,7 +3183,7 @@ mod tests {
             );
         }
         assert!(
-            validate_staged_rpi_version_output(b"rpi 1.2.3\n", b"warning", "1.2.3")
+            validate_staged_rpi_version_output(b"ki 1.2.3\n", b"warning", "1.2.3")
                 .unwrap_err()
                 .contains("stderr")
         );

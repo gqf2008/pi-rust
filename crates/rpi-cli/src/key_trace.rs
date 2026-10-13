@@ -33,7 +33,7 @@ fn target() -> Option<&'static std::path::PathBuf> {
     static TARGET: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     TARGET
         .get_or_init(|| {
-            let value = std::env::var("RPI_DEBUG_KEYS").ok()?;
+            let value = std::env::var("KI_DEBUG_KEYS").ok()?;
             let value = value.trim();
             if value.is_empty() || value == "0" {
                 return None;

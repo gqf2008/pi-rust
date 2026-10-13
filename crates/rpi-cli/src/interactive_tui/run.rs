@@ -34,7 +34,7 @@ pub(super) async fn maybe_add_startup_changelog(
         has_messages,
         existing_profile,
     );
-    // Copy an identified rpi legacy baseline even when there is no new notice.
+    // Copy an identified ki legacy baseline even when there is no new notice.
     // On resume this copies only the old version, so unseen updates stay pending.
     if notice.version_to_record.is_none() && settings.last_rpi_changelog_version.is_none() {
         notice.version_to_record = baseline.map(str::to_owned);
@@ -90,7 +90,7 @@ pub(super) fn launch_external_editor(draft: String, tx: mpsc::UnboundedSender<Tu
             ))));
             return;
         }
-        let editor = std::env::var("RPI_EXTERNAL_EDITOR")
+        let editor = std::env::var("KI_EXTERNAL_EDITOR")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .or_else(|| std::env::var("VISUAL").ok())

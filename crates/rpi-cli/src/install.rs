@@ -1,7 +1,7 @@
-//! `rpi install` — install a Rust `cdylib` extension from crates.io.
+//! `ki install` — install a Rust `cdylib` extension from crates.io.
 //!
 //! Cargo's `cargo install` command is intended for binaries and does not copy
-//! dynamic-library targets. rpi extensions are cdylibs loaded by
+//! dynamic-library targets. ki extensions are cdylibs loaded by
 //! `rpi-extensions`, so this command creates a tiny temporary Cargo workspace,
 //! resolves the requested crate through Cargo, builds the dependency in
 //! release mode, and copies its cdylib into the same global directory scanned
@@ -19,7 +19,7 @@ const NATIVE_PACKAGES_FILE: &str = "native-packages.json";
 const NATIVE_PACKAGES_LOCK_FILE: &str = "native-packages.lock";
 const CDYLIB_EXTENSION_HINT: &str = "hint: the crate must declare `crate-type = [\"cdylib\"]` and export `rpi_plugin_register` (the unified ABI; legacy `rpi_plugin_register_v2` and `rpi_plugin_register_v3` remain supported for migration)";
 
-/// A Rust-native extension installed through `rpi install`.
+/// A Rust-native extension installed through `ki install`.
 ///
 /// `source` is absent for crates.io packages and contains the local source
 /// path for `--path` installs. Local development crates are intentionally not
@@ -123,7 +123,7 @@ struct CargoTarget {
     crate_types: Vec<String>,
 }
 
-/// Run `rpi install ...`. This is intentionally synchronous: it is a short
+/// Run `ki install ...`. This is intentionally synchronous: it is a short
 /// lived package operation and keeping Cargo's build output attached to the
 /// user's terminal makes failures actionable.
 pub fn run(args: &[String]) -> i32 {
@@ -194,7 +194,7 @@ pub fn run(args: &[String]) -> i32 {
         .collect();
     if cdylib_targets.is_empty() {
         eprintln!(
-            "error: `{}` is not an rpi extension crate; it has no `cdylib` target",
+            "error: `{}` is not an ki extension crate; it has no `cdylib` target",
             options.package
         );
         eprintln!("{CDYLIB_EXTENSION_HINT}");
@@ -218,7 +218,7 @@ pub fn run(args: &[String]) -> i32 {
     let agent_dir = match crate::config::agent_dir() {
         Ok(dir) => dir,
         Err(error) => {
-            eprintln!("error: could not resolve the rpi config directory: {error}");
+            eprintln!("error: could not resolve the ki config directory: {error}");
             return 1;
         }
     };
@@ -262,14 +262,14 @@ pub fn run(args: &[String]) -> i32 {
     for target in installed {
         println!("installed {}", target.display());
     }
-    println!("rpi will load this extension on the next start.");
+    println!("ki will load this extension on the next start.");
     0
 }
 
-/// Remove a Rust-native extension installed by `rpi install`.
+/// Remove a Rust-native extension installed by `ki install`.
 ///
 /// The install registry is authoritative for new installs. For metadata from
-/// older rpi versions, dynamic libraries whose normalized file stem matches
+/// older ki versions, dynamic libraries whose normalized file stem matches
 /// the crate name are removed as a compatibility fallback.
 pub fn uninstall(args: &[String]) -> i32 {
     if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
@@ -287,7 +287,7 @@ pub fn uninstall(args: &[String]) -> i32 {
     let agent = match crate::config::agent_dir() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("error: could not resolve the rpi config directory: {error}");
+            eprintln!("error: could not resolve the ki config directory: {error}");
             return 1;
         }
     };
@@ -390,7 +390,7 @@ fn parse_uninstall_name(args: &[String]) -> Result<String, String> {
     let mut name = None;
     for arg in args {
         match arg.as_str() {
-            "--help" | "-h" => return Err("use `rpi uninstall --help` for usage".into()),
+            "--help" | "-h" => return Err("use `ki uninstall --help` for usage".into()),
             value if value.starts_with('-') => {
                 return Err(format!("unknown uninstall option `{value}`"))
             }
@@ -1044,18 +1044,18 @@ fn valid_package_name(name: &str) -> bool {
 }
 
 fn help_requested() -> &'static str {
-    "use `rpi install --help` for usage"
+    "use `ki install --help` for usage"
 }
 
 pub fn print_help() {
     println!(
-        "Usage: rpi install [<crate>] [options]\n\nInstall an rpi Rust cdylib extension from crates.io or a local Cargo crate.\n\nOptions:\n  --version <version>  Install a specific crates.io version\n  --path <directory>   Build a local extension crate; crate name may be omitted\n  --locked             Require Cargo.lock to remain unchanged\n  --force, -f          Replace an existing installed extension\n  --help, -h           Show this help\n\nExamples:\n  rpi install rpi-extension-example\n  rpi install rpi-extension-example --version 0.1.0\n  rpi install --path . --force\n  rpi install my-extension --path ../my-rpi-extension --force"
+        "Usage: ki install [<crate>] [options]\n\nInstall an ki Rust cdylib extension from crates.io or a local Cargo crate.\n\nOptions:\n  --version <version>  Install a specific crates.io version\n  --path <directory>   Build a local extension crate; crate name may be omitted\n  --locked             Require Cargo.lock to remain unchanged\n  --force, -f          Replace an existing installed extension\n  --help, -h           Show this help\n\nExamples:\n  ki install rpi-extension-example\n  ki install rpi-extension-example --version 0.1.0\n  ki install --path . --force\n  ki install my-extension --path ../my-rpi-extension --force"
     );
 }
 
 fn print_uninstall_help() {
     println!(
-        "Usage: rpi uninstall <crate>\n\nRemove a Rust cdylib extension installed by `rpi install`.\n\nOptions:\n  --help, -h           Show this help\n\nExample:\n  rpi uninstall rpi-extension-example"
+        "Usage: ki uninstall <crate>\n\nRemove a Rust cdylib extension installed by `ki install`.\n\nOptions:\n  --help, -h           Show this help\n\nExample:\n  ki uninstall rpi-extension-example"
     );
 }
 
@@ -1066,7 +1066,7 @@ fn write_manifest(path: &Path, options: &InstallOptions) -> Result<(), String> {
         .join("src");
     std::fs::create_dir_all(&source_dir).map_err(|error| error.to_string())?;
     // Cargo requires the temporary root package to have a target even though
-    // rpi never builds it; the requested extension is built as a dependency.
+    // ki never builds it; the requested extension is built as a dependency.
     std::fs::write(source_dir.join("lib.rs"), "pub fn installer_marker() {}\n")
         .map_err(|error| error.to_string())?;
     let dependency = if let Some(local_path) = &options.path {

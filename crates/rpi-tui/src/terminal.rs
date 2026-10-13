@@ -28,7 +28,7 @@ const fn mouse_tracking_enabled_by_default() -> bool {
 /// default; `RPI_KITTY_KEYBOARD=1` re-enables it for push-to-talk-style
 /// key-release handling, `RPI_KITTY_KEYBOARD=0` forces it off elsewhere.
 fn keyboard_protocol_enabled() -> bool {
-    if let Some(value) = std::env::var_os("RPI_KITTY_KEYBOARD") {
+    if let Some(value) = std::env::var_os("KI_KITTY_KEYBOARD") {
         return value != "0";
     }
     !cfg!(target_os = "macos")

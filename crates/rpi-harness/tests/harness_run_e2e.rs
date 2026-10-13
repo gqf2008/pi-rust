@@ -1308,7 +1308,7 @@ async fn a_completed_run_leaves_no_frames_to_salvage() {
 
 /// Reopen an existing session in a fresh harness.
 ///
-/// This is what a user does after a crash (`rpi` again on the same session), and
+/// This is what a user does after a crash (`ki` again on the same session), and
 /// opening the harness is what runs `finish_interrupted_operation`.
 async fn reopen_harness(session: rpi_harness::session::session::Session) -> AgentHarness {
     let provider = FauxProvider::new(FauxScript::new().with_text("unused"));

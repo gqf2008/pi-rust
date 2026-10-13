@@ -1,11 +1,11 @@
-//! Rust-native (cdylib) plugin loader + `AgentTool` adapter for rpi.
+//! Rust-native (cdylib) plugin loader + `AgentTool` adapter for ki.
 //!
-//! This is Part B1 of the extension-alignment plan. `rpi` loads extensions as
+//! This is Part B1 of the extension-alignment plan. `ki` loads extensions as
 //! **compiled Rust cdylibs** (`.dll`/`.so`/`.dylib`) via `libloading` — **not**
 //! TS/jiti — because we control both sides and the plugin is Rust
 //! (`动态加载可以加载rs 的代码 没必要是 ts`). The ABI contract lives in
 //! [`rpi_plugin_sdk`]; this crate is the **host side** that loads plugins and
-//! bridges their tools/events into rpi's native async types.
+//! bridges their tools/events into ki's native async types.
 //!
 //! ## Crate DAG position
 //!

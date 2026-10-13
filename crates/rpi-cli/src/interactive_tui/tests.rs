@@ -25,7 +25,7 @@ fn changelog_command_shows_current_release_and_all_is_explicit() {
 
 #[test]
 fn startup_changelog_foreign_profile_is_shown_once_and_persisted() {
-    const CHILD: &str = "RPI_CHANGELOG_REGRESSION_CHILD";
+    const CHILD: &str = "KI_CHANGELOG_REGRESSION_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -206,7 +206,7 @@ fn monitor_function_key_works_with_a_draft_without_changing_text() {
     let session = load_session_mixed(
         &[],
         &[std::path::PathBuf::from(
-            std::env::var("RPI_STATS_DLL").unwrap(),
+            std::env::var("KI_STATS_DLL").unwrap(),
         )],
         Arc::new(NullDiagnostics),
         None,
@@ -792,19 +792,19 @@ fn resume_command_omits_the_default_session_dir() {
     assert_eq!(format_resume_command("", cwd, None), None);
     assert_eq!(
         format_resume_command("abc-123", cwd, None).as_deref(),
-        Some("rpi --session abc-123")
+        Some("ki --session abc-123")
     );
     // The default dir carries no flag (mirrors upstream).
     let default = crate::session::default_session_dir(cwd);
     assert_eq!(
         format_resume_command("abc-123", cwd, Some(default.as_path())).as_deref(),
-        Some("rpi --session abc-123")
+        Some("ki --session abc-123")
     );
     // A custom dir is echoed, quoting when needed.
     let custom = std::path::Path::new("/tmp/my sessions");
     assert_eq!(
         format_resume_command("abc-123", cwd, Some(custom)).as_deref(),
-        Some("rpi --session-dir \"/tmp/my sessions\" --session abc-123")
+        Some("ki --session-dir \"/tmp/my sessions\" --session abc-123")
     );
 }
 
@@ -817,8 +817,8 @@ fn quote_shell_arg_quotes_only_when_needed() {
 
 #[test]
 fn trust_command_uses_the_session_cwd_after_process_chdir() {
-    const CHILD_ENV: &str = "RPI_TEST_TRUST_COMMAND_CHILD";
-    const SESSION_CWD_ENV: &str = "RPI_TEST_TRUST_COMMAND_SESSION_CWD";
+    const CHILD_ENV: &str = "KI_TEST_TRUST_COMMAND_CHILD";
+    const SESSION_CWD_ENV: &str = "KI_TEST_TRUST_COMMAND_SESSION_CWD";
     const TEST_NAME: &str =
         "interactive_tui::tests::trust_command_uses_the_session_cwd_after_process_chdir";
 
@@ -947,7 +947,7 @@ fn tui_startup_settings_use_global_values_without_project_fields() {
 
 #[test]
 fn tui_startup_settings_read_native_nested_terminal_block() {
-    // upstream nests these under `terminal`; rpi's flat keys stay
+    // upstream nests these under `terminal`; ki's flat keys stay
     // compatible and the nested block is the fallback.
     let global = crate::settings::Settings {
         terminal: Some(crate::settings::TerminalSettings {
@@ -1090,7 +1090,7 @@ fn test_layout_renders_welcome_message() {
 
     let all: String = frame.lines.join("\n");
     assert!(
-        all.contains("rpi"),
+        all.contains("ki"),
         "Welcome message not found. Rendered: {}",
         all
     );
@@ -1108,19 +1108,16 @@ fn test_chat_container_has_welcome_content() {
         &chat,
         &["read".into(), "bash".into(), "web_fetch".into()],
         &["rust-review".into(), "release".into()],
-        &[
-            "/project/.rpi/SYSTEM.md".into(),
-            "/project/AGENTS.md".into(),
-        ],
+        &["/project/.ki/SYSTEM.md".into(), "/project/AGENTS.md".into()],
     );
 
     let lines = chat.render(80);
     let all: String = lines.join("\n");
-    // Welcome title is "rpi" (accent bold) + "interactive TUI" (muted),
+    // Welcome title is "ki" (accent bold) + "interactive TUI" (muted),
     // joined by an ANSI reset — strip ANSI before checking the substring.
     let plain = strip_ansi(&all);
     assert!(
-        plain.contains("rpi"),
+        plain.contains("ki"),
         "Welcome message not in chat container: {:?}",
         lines
     );
@@ -1131,7 +1128,7 @@ fn test_chat_container_has_welcome_content() {
     );
     assert!(plain.contains("Skills (2)"), "Skill count missing: {plain}");
     assert!(plain.contains("Context (2)"));
-    assert!(plain.contains("/project/.rpi/SYSTEM.md"));
+    assert!(plain.contains("/project/.ki/SYSTEM.md"));
     assert!(plain.contains("/project/AGENTS.md"));
     assert!(
         plain.contains("rust-review · release"),
@@ -1186,7 +1183,7 @@ fn welcome_header_renders_the_brand_mark() {
         "brand mark missing: {all}"
     );
     assert!(
-        all.contains("rpi"),
+        all.contains("ki"),
         "the mark must carry the product name: {all}"
     );
 
@@ -1206,14 +1203,14 @@ fn update_notices_render_inside_the_transcript() {
     let chat = Arc::new(Container::new());
     let report = crate::updates::UpdateReport {
         notices: vec![crate::updates::UpdateNotice {
-            name: "rpi".into(),
+            name: "ki".into(),
             current: "0.1.10".into(),
             latest: "0.1.11".into(),
-            command: "rpi update".into(),
+            command: "ki update".into(),
         }],
         warnings: vec![crate::updates::UpdateWarning {
-            message: "The previously scheduled rpi update failed: access denied".into(),
-            command: "rpi update".into(),
+            message: "The previously scheduled ki update failed: access denied".into(),
+            command: "ki update".into(),
         }],
     };
 
@@ -1222,13 +1219,10 @@ fn update_notices_render_inside_the_transcript() {
     assert_eq!(chat.child_count(), 1);
     let plain = strip_ansi(&chat.render(80).join("\n"));
     assert!(plain.contains("Update Failed"), "{plain}");
-    assert!(
-        plain.contains("rpi update failed: access denied"),
-        "{plain}"
-    );
+    assert!(plain.contains("ki update failed: access denied"), "{plain}");
     assert!(plain.contains("Update Available"), "{plain}");
     assert!(plain.contains("New version 0.1.11 is available"), "{plain}");
-    assert!(plain.contains("rpi update"), "{plain}");
+    assert!(plain.contains("ki update"), "{plain}");
 }
 
 #[test]

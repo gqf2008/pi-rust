@@ -239,7 +239,7 @@ async fn run_anthropic_stream(
             return;
         }
     };
-    let non_stream = std::env::var("RPI_ANTHROPIC_NON_STREAM").ok().as_deref() == Some("1");
+    let non_stream = std::env::var("KI_ANTHROPIC_NON_STREAM").ok().as_deref() == Some("1");
     if non_stream {
         body["stream"] = serde_json::Value::Bool(false);
         strip_cache_control(&mut body);
@@ -551,7 +551,7 @@ fn assemble_headers(
     // Anthropic clients (including matrixcode). Some gateways use this
     // identity when classifying requests from coding-agent clients.
     headers.push(("user-agent".into(), "curl/8.0".into()));
-    if std::env::var("RPI_ANTHROPIC_NON_STREAM").ok().as_deref() != Some("1") {
+    if std::env::var("KI_ANTHROPIC_NON_STREAM").ok().as_deref() != Some("1") {
         headers.push((
             "anthropic-dangerous-direct-browser-access".into(),
             "true".into(),

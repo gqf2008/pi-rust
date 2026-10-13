@@ -204,7 +204,7 @@ pub fn assistant_tool_calls(msg: &AssistantMessage) -> Vec<UiToolCall> {
 // Remote driver
 // ---------------------------------------------------------------------------
 
-/// A [`SessionDriver`] backed by a remote `rpi --server` over TCP JSON-RPC.
+/// A [`SessionDriver`] backed by a remote `ki --server` over TCP JSON-RPC.
 pub struct RemoteDriver {
     client: tokio::sync::Mutex<RemoteClient>,
     session_id: String,
@@ -435,7 +435,7 @@ pub fn map_remote_event(event: &RemoteEvent) -> Option<UiEvent> {
 fn auth_hint(error: String) -> String {
     let lower = error.to_lowercase();
     if lower.contains("authentication") || lower.contains("token") {
-        format!("{error} (retrieve the token printed by `rpi --server` and pass `--token <token>`)")
+        format!("{error} (retrieve the token printed by `ki --server` and pass `--token <token>`)")
     } else {
         error
     }

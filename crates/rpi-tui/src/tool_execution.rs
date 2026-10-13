@@ -379,7 +379,7 @@ impl Component for ToolExecutionComponent {
 
         // Top spacer — pi's tool-execution.ts adds a Spacer(1) child inside
         // the component so each tool panel is visually separated from the
-        // surrounding transcript (the old rpi drain path had no gap between
+        // surrounding transcript (the old ki drain path had no gap between
         // consecutive tool panels).
         lines.push(String::new());
 

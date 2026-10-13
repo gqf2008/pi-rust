@@ -141,7 +141,7 @@ fn voice_registers_ptt_shortcut_and_input_handler() {
     assert!(warned.is_empty(), "unexpected load diagnostics: {warned:?}");
 
     // The key the plugin claimed. Defaults to `space`.
-    let key = std::env::var("RPI_VOICE_PTT_KEY")
+    let key = std::env::var("KI_VOICE_PTT_KEY")
         .ok()
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
@@ -239,7 +239,7 @@ fn voice_registers_a_prompt_transformer_that_respects_the_speech_switch() {
     // The switch lives in the plugin's process-global state, driven by env at
     // registration; drive it through the same door the plugin reads so the test
     // is independent of test ordering. `/voice on|off` sets the same flag.
-    let speech_on = std::env::var("RPI_VOICE_AUTO_TTS")
+    let speech_on = std::env::var("KI_VOICE_AUTO_TTS")
         .map(|v| {
             matches!(
                 v.trim().to_ascii_lowercase().as_str(),

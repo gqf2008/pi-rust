@@ -1,4 +1,4 @@
-//! `pi-cli` — a terminal coding-agent CLI built on the rpi library crates.
+//! `pi-cli` — a terminal coding-agent CLI built on the ki library crates.
 //!
 //! It provides the argument surface, provider/model resolution, harness
 //! construction, output modes, and the interactive TUI that a harness-backed
@@ -24,8 +24,8 @@
 //! - **`app`** ([`app`]) — argument dispatch, model resolution, harness build,
 //!   mode dispatch, exit codes.
 //!
-//! Resources load from `.rpi/` and `~/.rpi/agent/`; extensions are Rust
-//! `cdylib` plugins installed and developed with `rpi install` / `rpi dev`.
+//! Resources load from `.ki/` and `~/.ki/agent/`; extensions are Rust
+//! `cdylib` plugins installed and developed with `ki install` / `ki dev`.
 
 pub mod agent_session;
 pub mod app;
@@ -69,7 +69,7 @@ pub mod trust;
 pub mod tui_shell;
 pub mod updates;
 
-/// Crate version, surfaced by `rpi --version`. Mirrors the TS `VERSION` export
+/// Crate version, surfaced by `ki --version`. Mirrors the TS `VERSION` export
 /// (sourced from `package.json`; here from `env!("CARGO_PKG_VERSION")`).
 ///
 /// Aliases [`rpi_plugin_sdk::HOST_VERSION`] so the version the CLI prints and
@@ -79,7 +79,7 @@ pub const VERSION: &str = rpi_plugin_sdk::HOST_VERSION;
 
 /// The application name used in help + version output. Mirrors TS `APP_NAME`
 /// (the TS bin is `"pi"`; the Rust crate publishes under the `rpi-` namespace,
-/// so the binary + displayed name is `"rpi"` to match).
+/// so the binary + displayed name is `"ki"` to match).
 ///
 /// Aliases [`rpi_plugin_sdk::HOST_NAME`] — the plugin contract owns the
 /// identity, so an extension can label its output (a trace name, a tag) without

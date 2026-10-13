@@ -1,7 +1,7 @@
-//! Development workflow for Rust-native rpi extensions.
+//! Development workflow for Rust-native ki extensions.
 //!
-//! `rpi dev` detects a Cargo `cdylib`, builds it, stages a uniquely named copy
-//! under `.rpi/extensions/.dev`, and optionally watches its source tree. Unique
+//! `ki dev` detects a Cargo `cdylib`, builds it, stages a uniquely named copy
+//! under `.ki/extensions/.dev`, and optionally watches its source tree. Unique
 //! staging directories are required on Windows because a loaded DLL cannot be
 //! overwritten until the old `Library` handle is released by `/reload`.
 
@@ -50,7 +50,7 @@ pub fn parse_args(args: &[String]) -> Result<DevOptions, String> {
                     let package = args
                         .get(index)
                         .filter(|value| !value.trim().is_empty())
-                        .ok_or("rpi dev --package requires a package name")?;
+                        .ok_or("ki dev --package requires a package name")?;
                     options.package = Some(package.clone());
                 }
                 _ => options.passthrough.push(value.clone()),
@@ -63,8 +63,8 @@ pub fn parse_args(args: &[String]) -> Result<DevOptions, String> {
 
 pub fn print_help() {
     println!(
-        "Usage: rpi dev [dev options] [--] [rpi options/messages...]\n       rpi dev-local [dev options] [--] [rpi options/messages...]\n\n\
-Build the current Rust rpi extension, load it, and watch for changes.\n\n\
+        "Usage: ki dev [dev options] [--] [ki options/messages...]\n       ki dev-local [dev options] [--] [ki options/messages...]\n\n\
+Build the current Rust ki extension, load it, and watch for changes.\n\n\
 Dev options:\n  \
 --package, -P <name>  Select a cdylib package in a multi-package workspace\n  \
 --release              Build with Cargo's release profile\n  \
@@ -72,10 +72,10 @@ Dev options:\n  \
 --local-only           Load only this extension and its discovered resources\n  \
 --help, -h             Show this help\n\n\
 Examples:\n  \
-rpi dev\n  \
-rpi dev-local\n  \
-rpi dev --package my-extension\n  \
-rpi dev --release -- --model gateway/model\n"
+ki dev\n  \
+ki dev-local\n  \
+ki dev --package my-extension\n  \
+ki dev --release -- --model gateway/model\n"
     );
 }
 
@@ -124,7 +124,7 @@ impl DevExtension {
         let project = detect_project(cwd, options.package.as_deref())?;
         let stage_root = project
             .workspace_root
-            .join(".rpi/extensions/.dev")
+            .join(".ki/extensions/.dev")
             .join(format!(
                 "{}-{}",
                 safe_name(&project.package),
@@ -249,7 +249,7 @@ impl DevExtension {
             return;
         }
         // A host-side keepalive can retain the mapped DLL until process exit.
-        // A detached copy of rpi retries after this process releases the file.
+        // A detached copy of ki retries after this process releases the file.
         if let Ok(exe) = std::env::current_exe() {
             let _ = Command::new(exe)
                 .arg("__rpi_dev_cleanup")
@@ -329,7 +329,7 @@ fn detect_project(cwd: &Path, requested: Option<&str>) -> Result<ExtensionProjec
         return Ok(candidates.remove(0));
     }
     Err(format!(
-        "multiple cdylib extensions found: {}. Select one with `rpi dev --package <name>`",
+        "multiple cdylib extensions found: {}. Select one with `ki dev --package <name>`",
         candidates
             .iter()
             .map(|project| project.package.as_str())
@@ -507,7 +507,7 @@ fn is_dev_stage_root(path: &Path) -> bool {
             .and_then(Path::parent)
             .and_then(Path::file_name)
             .and_then(|v| v.to_str())
-            == Some(".rpi")
+            == Some(".ki")
 }
 
 fn remove_empty_dev_dir(stage_root: &Path) {
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn local_only_apply_keeps_only_the_current_stage() {
-        let stage_root = PathBuf::from("workspace/.rpi/extensions/.dev/demo-123");
+        let stage_root = PathBuf::from("workspace/.ki/extensions/.dev/demo-123");
         let current_stage = stage_root.join("1");
         let dev = DevExtension {
             project: ExtensionProject {
@@ -596,7 +596,7 @@ mod tests {
     fn cleanup_helper_rejects_non_dev_paths() {
         assert!(!is_dev_stage_root(Path::new("target/debug")));
         assert!(is_dev_stage_root(Path::new(
-            "workspace/.rpi/extensions/.dev/example-123"
+            "workspace/.ki/extensions/.dev/example-123"
         )));
     }
 }

@@ -1,6 +1,6 @@
-//! Stable `#[repr(C)]` ABI contract for rpi **Rust-native (cdylib) plugins**.
+//! Stable `#[repr(C)]` ABI contract for ki **Rust-native (cdylib) plugins**.
 //!
-//! rpi loads extensions as compiled Rust cdylibs (`.dll`/`.so`/`.dylib`) via
+//! ki loads extensions as compiled Rust cdylibs (`.dll`/`.so`/`.dylib`) via
 //! `libloading` — **not** TS/jiti. Because we control both sides, the plugin is
 //! Rust, but the *boundary* is still a hand-defined C ABI: the two sides may be
 //! compiled with different Rust versions / crate versions, so no Rust type with
@@ -144,7 +144,7 @@ impl StbString {
         let len = buf.len();
         // Stabilize the pointer via `Box::into_raw`; the free fn reconstructs a
         // slice from ptr+len and drops it. Store the element pointer as
-        // `*mut c_char` (u8 ↔ c_char on every platform rpi targets). Ownership
+        // `*mut c_char` (u8 ↔ c_char on every platform ki targets). Ownership
         // moves into the `StbString` (we do NOT drop here).
         let ptr = Box::into_raw(buf) as *mut [u8] as *mut u8 as *mut c_char;
         let _ = len;
@@ -602,7 +602,7 @@ pub enum EventTag {
 /// `EVENT_TAG_COUNT == 37` so a future edit that adds/removes a tag is caught.
 pub const EVENT_TAG_COUNT: usize = 37;
 
-/// The application name of the host that loads plugins: `"rpi"`.
+/// The application name of the host that loads plugins: `"ki"`.
 ///
 /// This is the **contract's** copy of the host identity, and the host's
 /// `APP_NAME` is defined in terms of it, so the two cannot drift. An extension
@@ -615,7 +615,7 @@ pub const EVENT_TAG_COUNT: usize = 37;
 /// extension should prefer: that value always describes the process actually
 /// running, whereas these constants describe the host the plugin was *built*
 /// against.
-pub const HOST_NAME: &str = "rpi";
+pub const HOST_NAME: &str = "kiqi";
 
 /// Version of the [`HOST_NAME`] host that this SDK ships with.
 ///
@@ -630,16 +630,16 @@ pub const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The host **rewrites** it whenever a session becomes active — at startup and
 /// on every in-process swap (`/import`, fork, switch) — so the value always
 /// names the session currently being served. It is not an embedder override:
-/// a value inherited from a parent process would otherwise make a child `rpi`
+/// a value inherited from a parent process would otherwise make a child `ki`
 /// report its ancestor's session forever. Embedders that need to pin the id set
 /// it after the session is active rather than before.
 ///
 /// The id is a plain UTF-8 string (no NUL), which is what makes writing it with
 /// `std::env::set_var` sound.
-pub const SESSION_ID_ENV: &str = "RPI_SESSION_ID";
+pub const SESSION_ID_ENV: &str = "KI_SESSION_ID";
 
 /// Environment variable a tracing extension publishes to name the trace a
-/// *nested* `rpi` should attach to, and reads back to decide it is a subagent.
+/// *nested* `ki` should attach to, and reads back to decide it is a subagent.
 ///
 /// The name is `rpi-langfuse`'s (it owns the `LANGFUSE_` prefix), but the
 /// variable is declared here because **three** parties have to agree on it and
@@ -647,7 +647,7 @@ pub const SESSION_ID_ENV: &str = "RPI_SESSION_ID";
 ///
 /// - the extension writes it (so a launcher can attach a nested run),
 /// - the host's `bash`/`powershell` must *not* pass it on to a shell (or a plain
-///   `rpi` started from one mistakes itself for a subagent), and
+///   `ki` started from one mistakes itself for a subagent), and
 /// - a launcher may set it deliberately, which is the supported nesting path.
 ///
 /// Declaring it once here is what keeps those three in step. The host builds its

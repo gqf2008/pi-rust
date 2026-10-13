@@ -1,4 +1,4 @@
-//! The startup brand lockup: the three-bar mark, the `rpi` wordmark, and the
+//! The startup brand lockup: the three-bar mark, the `ki` wordmark, and the
 //! Rust crab standing in for the language name.
 //!
 //! The layout exists as a module rather than inline in the welcome header for
@@ -17,7 +17,7 @@ use rpi_tui::{bold as tui_bold, theme as current_theme, Component};
 use crate::args::is_truthy_env_flag;
 
 /// Set to `1`/`true`/`yes` to render the lockup without the crab.
-pub const NO_EMOJI_ENV: &str = "RPI_NO_EMOJI";
+pub const NO_EMOJI_ENV: &str = "KI_NO_EMOJI";
 
 /// The Rust mascot, standing where the word "rust" used to be.
 ///
@@ -26,7 +26,7 @@ pub const NO_EMOJI_ENV: &str = "RPI_NO_EMOJI";
 /// `rpi-tui`), so this one is opt-out rather than mandatory.
 pub const CRAB: &str = "🦀";
 
-/// Separator between `rpi` and the crab.
+/// Separator between `ki` and the crab.
 const SEPARATOR: &str = "·";
 
 /// The three-bar mark as a single plain-text row: the lockup's silhouette,
@@ -55,13 +55,13 @@ fn crab_enabled() -> bool {
     crab_enabled_from(std::env::var(NO_EMOJI_ENV).ok().as_deref())
 }
 
-/// The wordmark plus the language mark, in plain text: `rpi · 🦀`, or bare
-/// `rpi` when the crab is disabled.
+/// The wordmark plus the language mark, in plain text: `ki · 🦀`, or bare
+/// `ki` when the crab is disabled.
 fn plain_name(crab: bool) -> String {
     if crab {
-        format!("rpi {SEPARATOR} {CRAB}")
+        format!("kiqi {SEPARATOR} {CRAB}")
     } else {
-        "rpi".to_string()
+        "kiqi".to_string()
     }
 }
 
@@ -100,11 +100,11 @@ fn render_lockup(crab: bool) -> Vec<String> {
     let name = if crab {
         format!(
             "{} {} {CRAB}",
-            c.accent.fg(&tui_bold("rpi")),
+            c.accent.fg(&tui_bold("kiqi")),
             c.muted.fg(SEPARATOR)
         )
     } else {
-        c.accent.fg(&tui_bold("rpi"))
+        c.accent.fg(&tui_bold("kiqi"))
     };
 
     vec![
@@ -190,7 +190,7 @@ mod tests {
         let rows = plain(true);
 
         // The crab replaces the word "rust" rather than sitting beside it.
-        assert_eq!(rows[4], "   ██ ██ ██   rpi · 🦀");
+        assert_eq!(rows[4], "   ██ ██ ██   ki · 🦀");
 
         // The crab is wider than the word it replaces, and the layout must
         // account for exactly that much: the separator plus the emoji.
@@ -203,17 +203,17 @@ mod tests {
 
     #[test]
     fn title_flattens_the_lockup_and_keeps_status_last() {
-        assert_eq!(window_title_from(true, ""), "▃ ▅ ▂ rpi · 🦀");
-        assert_eq!(window_title_from(true, "⟳"), "▃ ▅ ▂ rpi · 🦀 ⟳");
-        assert_eq!(window_title_from(true, "↻"), "▃ ▅ ▂ rpi · 🦀 ↻");
+        assert_eq!(window_title_from(true, ""), "▃ ▅ ▂ ki · 🦀");
+        assert_eq!(window_title_from(true, "⟳"), "▃ ▅ ▂ ki · 🦀 ⟳");
+        assert_eq!(window_title_from(true, "↻"), "▃ ▅ ▂ ki · 🦀 ↻");
     }
 
     #[test]
     fn title_shares_the_lockup_opt_out() {
         // Disabling the crab must not leave a dangling separator in the title
         // either — the lockup and the tab title must never disagree.
-        assert_eq!(window_title_from(false, ""), "▃ ▅ ▂ rpi");
-        assert_eq!(window_title_from(false, "⟳"), "▃ ▅ ▂ rpi ⟳");
+        assert_eq!(window_title_from(false, ""), "▃ ▅ ▂ ki");
+        assert_eq!(window_title_from(false, "⟳"), "▃ ▅ ▂ ki ⟳");
         assert!(!window_title_from(false, "").contains(CRAB));
     }
 
@@ -247,6 +247,6 @@ mod tests {
         assert!(!rows[4].contains(CRAB));
         // No dangling separator once the crab is gone.
         assert!(!rows[4].contains(SEPARATOR), "got {:?}", rows[4]);
-        assert!(rows[4].ends_with("rpi"), "got {:?}", rows[4]);
+        assert!(rows[4].ends_with("kiqi"), "got {:?}", rows[4]);
     }
 }

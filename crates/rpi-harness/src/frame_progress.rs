@@ -9,7 +9,7 @@
 //!
 //! Native keeps frames in session-scoped **list** storage
 //! (`pendingAssistantFrames(operationId, responseEntryId)`), which is separate
-//! from the branch. rpi has no list primitive, so frames ride the **record
+//! from the branch. ki has no list primitive, so frames ride the **record
 //! stream** (`LaneRecord::AssistantFrame`) instead.
 //!
 //! That choice is load-bearing: records are not entries, so a frame can never
@@ -54,7 +54,7 @@ pub const ASSISTANT_FRAME_RECORD_TYPE: &str = "assistant_frame";
 pub const INTERRUPTED_NOTICE: &str = "Assistant request was interrupted. The preceding content is \
 the latest committed partial; newer live output may be missing and the external outcome is unknown.";
 
-/// Turn a replayed partial into the interrupted message rpi records.
+/// Turn a replayed partial into the interrupted message ki records.
 ///
 /// Mirrors `interruptedAssistantMessage`: `stopReason: error` plus the notice,
 /// and **usage zeroed** so a salvaged partial cannot double-count tokens that a
@@ -91,7 +91,7 @@ pub struct UnknownToolOutcome {
 /// "no report" instead of failing the whole recovery.
 ///
 /// Resolved by `tool_call_id` against the lane's entries rather than by a
-/// reserved result-entry id: rpi persists tool results with a freshly minted id
+/// reserved result-entry id: ki persists tool results with a freshly minted id
 /// at run end, so the id a `tool_started` record would have named is not known
 /// when the tool actually runs. `tool_call_id` is the durable link that exists.
 pub async fn unknown_tool_outcomes(

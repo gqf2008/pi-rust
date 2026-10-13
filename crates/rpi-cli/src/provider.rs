@@ -27,7 +27,7 @@
 //! - `--base-url` overrides the selected `model.base_url` at resolve time;
 //!   `ANTHROPIC_BASE_URL` is the fallback for the built-in `anthropic` identity
 //!   only (the request URL is built from it per-request in rpi-ai).
-//! - `~/.rpi/models.json` (if present) merges/overrides the built-in catalog:
+//! - `~/.ki/models.json` (if present) merges/overrides the built-in catalog:
 //!   each `anthropic-messages` provider contributes its models, with
 //!   provider-level `base_url`/`headers`/`authHeader` folded in. The models.json
 //!   provider id (e.g. `gateway`) remains the routing and credential identity,
@@ -86,7 +86,7 @@ use crate::settings;
 pub const DEFAULT_MODEL_ID: &str = "claude-opus-4-8";
 
 /// upstream checks these provider defaults in declaration order before it
-/// falls back to `availableModels[0]`. Configured providers using one of rpi's
+/// falls back to `availableModels[0]`. Configured providers using one of ki's
 /// supported wire protocols participate too, even when they are not built in.
 const DEFAULT_MODELS_PER_PROVIDER: &[(&str, &str)] = &[
     ("amazon-bedrock", "us.anthropic.claude-opus-4-6-v1"),
@@ -158,7 +158,7 @@ pub struct ResolvedModel {
     /// configuredProviders.has(m.provider))`) and surface only models that
     /// won't fail at request time with "No API key for provider".
     pub has_provider_key: bool,
-    /// Saved theme name from `~/.rpi/agent/settings.json`, if any. Best-effort:
+    /// Saved theme name from `~/.ki/agent/settings.json`, if any. Best-effort:
     /// the TUI applies it at startup when it matches a known preset
     /// (dark/light/monochrome); otherwise ignored.
     pub theme: Option<String>,
@@ -231,11 +231,11 @@ pub const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 /// Hint text surfaced when no credential source is available. Lists every
 /// accepted source so the user can pick the one that fits their setup.
 pub const NO_API_KEY_HINT: &str =
-    "models.json apiKey, OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN env, --api-key, or `rpi auth login`";
+    "models.json apiKey, OPENAI_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN env, --api-key, or `ki auth login`";
 
 /// Provider/model identity used when the interactive TUI starts with nothing
 /// configured. Opening the TUI instead of exiting lets the user run
-/// `rpi configure` in another terminal (or `/login`) — the startup gate only
+/// `ki configure` in another terminal (or `/login`) — the startup gate only
 /// made sense before the configuration could be reached at all.
 pub const UNCONFIGURED_PROVIDER_ID: &str = "unconfigured";
 pub const UNCONFIGURED_MODEL_ID: &str = "unconfigured";
@@ -274,8 +274,8 @@ impl Provider for UnconfiguredProvider {
             StopReason::Error,
             format!(
                 "No provider is configured yet, so there is nothing to send this to.\n\n\
-                 Run `rpi configure` in another terminal to add a provider (or \
-                 `rpi auth login` for an API-key/OAuth credential), then restart rpi.\n\n{}",
+                 Run `ki configure` in another terminal to add a provider (or \
+                 `ki auth login` for an API-key/OAuth credential), then restart ki.\n\n{}",
                 crate::auth_guidance::provider_login_help()
             ),
             now_millis(),
@@ -354,7 +354,7 @@ pub enum ResolveError {
 }
 
 /// Resolve the provider + model + thinking level from the CLI flags + env +
-/// `~/.rpi/` config.
+/// `~/.ki/` config.
 ///
 /// `cli_provider` is the `--provider` value (optional). `cli_model` is the
 /// `--model` value (optional; may be `provider/id[:thinking]` or `id[:thinking]`).
@@ -449,7 +449,7 @@ fn resolve_with_settings(
         .ok()
         .filter(|value| !value.is_empty());
 
-    // ---- Catalog: built-in + ~/.rpi/models.json (merged, reusing the
+    // ---- Catalog: built-in + ~/.ki/models.json (merged, reusing the
     // already-loaded config) ----
     let mut catalog = anthropic_models();
     catalog.extend(openai_responses_models());
@@ -617,7 +617,7 @@ fn resolve_with_settings(
             // (3) Saved default from settings, when the provider is anthropic
             // (or absent — v1 is anthropic-only) OR names a configured
             // models.json gateway (config-namespacing: the saved
-            // `defaultProvider` id matches a `~/.rpi/models.json` provider
+            // `defaultProvider` id matches a `~/.ki/models.json` provider
             // key), and the saved model is authed. Without the gateway arm a
             // copied pi settings.json (`defaultProvider:
             // "cc-switch-deep-seek-copy-2"`) is ignored and the default falls
@@ -951,7 +951,7 @@ pub fn catalog_all() -> Result<Vec<Model>, config::ConfigError> {
     Ok(catalog)
 }
 
-/// Merge `~/.rpi/models.json` providers into the built-in catalog. Models from
+/// Merge `~/.ki/models.json` providers into the built-in catalog. Models from
 /// the same runtime provider and API replace entries with the same id; models
 /// with the same id under different OpenAI-compatible providers remain
 /// distinct so `provider/id` can select the intended endpoint.
@@ -1586,7 +1586,7 @@ mod tests {
         // A copied pi `settings.json` carrying `defaultModel` (step 3 of pi's
         // `findInitialModel`) overrides the built-in Anthropic default
         // when that model is in the catalog and authed. Mirrors the on-disk-
-        // Drop an agent dir at `~/.rpi/agent/` and the saved
+        // Drop an agent dir at `~/.ki/agent/` and the saved
         // default comes alive on launch (no `--model` needed).
         let _env = TestEnv::new();
         std::env::set_var(ANTHROPIC_API_KEY_ENV, "k");
@@ -2929,9 +2929,9 @@ mod tests {
         )
         .unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project.path().join(".rpi")).unwrap();
+        std::fs::create_dir_all(project.path().join(".ki")).unwrap();
         std::fs::write(
-            project.path().join(".rpi/settings.json"),
+            project.path().join(".ki/settings.json"),
             r#"{"defaultProvider":"project","defaultModel":"project-model"}"#,
         )
         .unwrap();
@@ -3014,7 +3014,7 @@ mod tests {
     /// `findInitialModel` step-4 fallback `availableModels[0]` over the
     /// auth-filtered snapshot. The built-in Anthropic models carry no auth in a
     /// gateway-only setup, so the gateway model is the first (and only)
-    /// authenticated model. This is the `rpi -p hi` (no `--model`) case.
+    /// authenticated model. This is the `ki -p hi` (no `--model`) case.
     #[test]
     fn default_prefers_gateway_when_only_gateway_configured() {
         // TestEnv already holds the shared env_lock for its whole lifetime —
@@ -3122,7 +3122,7 @@ mod tests {
     /// the default selector must pick the gateway model (the only authed one),
     // NOT the built-in claude-sonnet-5 — which would carry a gateway x-api-key to
     // api.anthropic.com → 401, the same misrouting the Bearer fold guards
-    // against. This is the `rpi -p hi` (no `--model`) case for a bare-apiKey
+    // against. This is the `ki -p hi` (no `--model`) case for a bare-apiKey
     /// gateway.
     #[test]
     fn default_prefers_gateway_when_only_bare_apikey_configured() {
@@ -3152,13 +3152,13 @@ mod tests {
 
     /// A bare `apiKey` that references an unset env var resolves to `None` and
     /// is skipped (mirrors pi `resolveConfigValue` semantics) — the auth gate
-    /// falls through to the env/`rpi auth login` sources rather than partially
+    /// falls through to the env/`ki auth login` sources rather than partially
     /// authenticating with an empty key.
     #[test]
     fn models_json_bare_apikey_env_template_resolves() {
         let _env = TestEnv::new();
         // Prime the env var the apiKey references.
-        std::env::set_var("RPI_TEST_GATEWAY_KEY", "env-resolved-secret");
+        std::env::set_var("KI_TEST_GATEWAY_KEY", "env-resolved-secret");
         std::fs::write(
             config::models_path().unwrap(),
             r#"{
@@ -3185,7 +3185,7 @@ mod tests {
                 "env-resolved-secret".into()
             ))
         );
-        std::env::remove_var("RPI_TEST_GATEWAY_KEY");
+        std::env::remove_var("KI_TEST_GATEWAY_KEY");
     }
 
     /// `authHeader: true` takes precedence over a bare `apiKey` on the SAME or a
@@ -3474,7 +3474,7 @@ mod tests {
             }
         }
         let message = saw_error.expect("placeholder must yield an Error event");
-        assert!(message.contains("rpi configure"), "{message}");
+        assert!(message.contains("ki configure"), "{message}");
         assert!(message.contains("No provider is configured"), "{message}");
     }
 }

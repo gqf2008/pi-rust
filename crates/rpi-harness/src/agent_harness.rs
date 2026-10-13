@@ -393,10 +393,10 @@ pub trait AgentLane: Send + Sync {
     /// Replace the provider runtimes this lane routes to.
     ///
     /// `models.json` can gain a provider (or move a model under a new provider)
-    /// while rpi is running, and the lane resolves a provider by
+    /// while ki is running, and the lane resolves a provider by
     /// `model.provider` id — so a freshly configured provider has no runtime
     /// until the rebuilt set is installed. Used by the TUI's `models.json`
-    /// hot-reload so `rpi configure` edits apply without a restart.
+    /// hot-reload so `ki configure` edits apply without a restart.
     ///
     /// Defaulted (not required) so adding it is not a breaking change for
     /// out-of-tree lanes; the in-tree lanes override it. An unsupported lane
@@ -569,7 +569,7 @@ impl Drop for ActiveRunLease<'_> {
 /// restating their request.
 ///
 /// Upstream resumes the interrupted operation in place (`driveOperation`
-/// re-enters at `state.at`). rpi's run has no durable re-entry point, so the
+/// re-enters at `state.at`). ki's run has no durable re-entry point, so the
 /// equivalent is to start a run with **no new prompt**: the branch already
 /// ends with the resolved tool results, so the next thing the loop does is
 /// exactly what the interrupted run would have done next — ask the provider

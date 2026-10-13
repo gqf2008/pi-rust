@@ -258,7 +258,7 @@ pub(super) fn cycle_prev_model(
 }
 
 /// Build + open the `/session` selector. Lists JSONL session files under the
-/// default session dir (`<cwd>/.rpi/sessions`
+/// default session dir (`<cwd>/.ki/sessions`
 /// fallback), newest-first, labelled with the session name or first prompt so
 /// two sessions are distinguishable. Header-only sessions are skipped: there is
 /// nothing to switch to.

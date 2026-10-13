@@ -58,7 +58,7 @@ fn take_flag_value(argv: &[String], flag: &str) -> Option<String> {
 /// `RPI_SERVER_TOKEN` environment variable (ignoring empty/whitespace values).
 fn resolve_connect_token(argv: &[String]) -> Option<String> {
     take_flag_value(argv, "--token").or_else(|| {
-        std::env::var("RPI_SERVER_TOKEN")
+        std::env::var("KI_SERVER_TOKEN")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
@@ -68,7 +68,7 @@ fn resolve_connect_token(argv: &[String]) -> Option<String> {
 /// The v1 CLI entry point. Mirrors TS `export async function main(args)`.
 ///
 /// Returns the process exit code (0 = success). The binary wrapper
-/// ([`crate::bin`] / `src/bin/rpi.rs`) calls this under a tokio runtime and
+/// ([`crate::bin`] / `src/bin/ki.rs`) calls this under a tokio runtime and
 /// `std::process::exit`s with the returned code.
 pub async fn run() -> i32 {
     // Startup profiling wrapper: RPI_TIMING=1 records namespace timings and
@@ -88,10 +88,10 @@ async fn run_inner() -> i32 {
         return crate::dev_extension::run_cleanup_helper(&argv[1..]);
     }
 
-    // ---- `rpi --connect <addr>` — pure remote client ----
+    // ---- `ki --connect <addr>` — pure remote client ----
     // Intercepted before any provider / harness / session / extension work so
     // the client holds no local agent resources at all: it only connects to a
-    // running `rpi --server` and renders the remote transcript.
+    // running `ki --server` and renders the remote transcript.
     if let Some(addr) = take_flag_value(&argv, "--connect") {
         let token = resolve_connect_token(&argv);
         return crate::remote::tui::run(&addr, token.as_deref()).await;
@@ -101,7 +101,7 @@ async fn run_inner() -> i32 {
     // the regular parsed path all observe the same process-wide gate.
     crate::args::normalize_offline_mode(&argv);
 
-    // `rpi dev` wraps the normal CLI: consume only development-specific
+    // `ki dev` wraps the normal CLI: consume only development-specific
     // options, then pass every remaining argument through the regular parser.
     let dev_command = argv.first().map(String::as_str);
     let dev_options = if matches!(dev_command, Some("dev" | "dev-local")) {
@@ -155,13 +155,13 @@ async fn run_inner() -> i32 {
         // falling through to the prompt path.
         Some(removed @ ("pi-package" | "pi-update" | "install-pi" | "uninstall-pi")) => {
             eprintln!(
-                "error: `rpi {removed}` is not available; use `rpi package`, `rpi install`, or `rpi update`."
+                "error: `ki {removed}` is not available; use `ki package`, `ki install`, or `ki update`."
             );
             return EXIT_USAGE;
         }
         // // Never a working invocation; the same fall-through applies.
         // Some("self-update") => {
-        //     eprintln!("error: unknown command `self-update`; use `rpi update`");
+        //     eprintln!("error: unknown command `self-update`; use `ki update`");
         //     return EXIT_USAGE;
         // }
         _ => {}
@@ -180,7 +180,7 @@ async fn run_inner() -> i32 {
         Err(code) => return code,
     };
 
-    // ---- Legacy-layout migration (flat ~/.rpi → ~/.rpi/agent/) ----
+    // ---- Legacy-layout migration (flat ~/.ki → ~/.ki/agent/) ----
     // Best-effort; never blocks startup. Skipped when RPI_CODING_AGENT_DIR is
     // set (an explicit override is its own layout).
     let _ = crate::config::migrate_legacy_layout();
@@ -216,7 +216,7 @@ async fn run_inner() -> i32 {
 
     // ---- stdin ownership ----
     // Do NOT drain stdin when the run is an RPC/server session: stdin is the
-    // JSONL command channel there (a spawned `rpi --mode rpc` child reads its
+    // JSONL command channel there (a spawned `ki --mode rpc` child reads its
     // commands from stdin), so consuming it up-front would leave the protocol
     // loop nothing to read. `--mode rpc` and `--server` both select RunMode::Rpc.
     //
@@ -262,7 +262,7 @@ async fn run_inner() -> i32 {
         Err(e) if matches!(e, ResolveError::NoApiKey { .. }) && interactively_configured => {
             eprintln!("warning: {e}");
             eprintln!(
-                "Starting rpi without a model — run `rpi configure` (or `rpi auth login`) to add one, then restart."
+                "Starting ki without a model — run `ki configure` (or `ki auth login`) to add one, then restart."
             );
             crate::provider::unconfigured_resolved(
                 crate::settings::load_settings().ok().and_then(|s| s.theme),
@@ -372,7 +372,7 @@ async fn run_inner() -> i32 {
 
     // Debug/testing escape hatch: RPI_FORCE_TUI=1 forces interactive mode
     // (for testing the TUI in non-TTY environments).
-    let mode = if std::env::var("RPI_FORCE_TUI")
+    let mode = if std::env::var("KI_FORCE_TUI")
         .map(|v| v == "1")
         .unwrap_or(false)
     {
@@ -444,7 +444,7 @@ async fn run_inner() -> i32 {
             // Headless lifecycle (P0): no TUI, but a session still starts/ends —
             // extensions (e.g. rpi-server) auto-start on SessionStart and clean
             // up on SessionShutdown, exactly as in interactive mode. This is why
-            // `rpi --server` works headless: the SessionStart hook fires and the
+            // `ki --server` works headless: the SessionStart hook fires and the
             // extension brings up the TCP server.
             let veto = crate::session::dispatch_session_event_async(
                 &reload_context,
@@ -452,7 +452,7 @@ async fn run_inner() -> i32 {
             )
             .await;
             if let Some(reason) = veto {
-                eprintln!("[rpi] startup vetoed by extension: {reason}");
+                eprintln!("[ki] startup vetoed by extension: {reason}");
                 EXIT_VETOED
             } else {
                 if let Some(reason) = crate::session::dispatch_session_event_async(
@@ -462,7 +462,7 @@ async fn run_inner() -> i32 {
                 .await
                 {
                     tracing::warn!(
-                        "[rpi] extension vetoed SessionStart (headless, advisory): {reason}"
+                        "[ki] extension vetoed SessionStart (headless, advisory): {reason}"
                     );
                 }
 
@@ -471,7 +471,7 @@ async fn run_inner() -> i32 {
                     // owns the process's I/O. Wait for its completion or Ctrl+C,
                     // then dispatch SessionShutdown before unloading plugins.
                     eprintln!(
-                        "[rpi] running in headless mode (no TUI); extension owns stdio; Ctrl+C to stop"
+                        "[ki] running in headless mode (no TUI); extension owns stdio; Ctrl+C to stop"
                     );
                     if stdio_claimed {
                         let lifecycle = stdio_lifecycle
@@ -488,7 +488,7 @@ async fn run_inner() -> i32 {
                 } else {
                     // `--mode rpc`: JSONL command loop over stdio — the
                     // server-side agent that rpi-server spawns and that
-                    // `rpi --connect` talks to. The extension `UiDialog`
+                    // `ki --connect` talks to. The extension `UiDialog`
                     // mailbox is bridged over the same channel so a permission
                     // gate can ask the client mid-run.
                     crate::modes::rpc(
@@ -507,7 +507,7 @@ async fn run_inner() -> i32 {
                 .await
                 {
                     tracing::warn!(
-                        "[rpi] extension vetoed SessionShutdown (ignored, closing): {reason}"
+                        "[ki] extension vetoed SessionShutdown (ignored, closing): {reason}"
                     );
                 }
                 code
@@ -776,7 +776,7 @@ async fn list_models(search: &str) -> i32 {
 fn read_piped_stdin() -> Option<String> {
     // Debug/testing escape hatch: RPI_SKIP_STDIN=1 skips reading piped stdin
     // (avoids blocking on non-TTY stdin in automated environments).
-    if std::env::var("RPI_SKIP_STDIN")
+    if std::env::var("KI_SKIP_STDIN")
         .map(|v| v == "1")
         .unwrap_or(false)
     {
@@ -897,7 +897,9 @@ fn print_resolve_error(e: &ResolveError) {
         ResolveError::Config(_) => {
             eprintln!("error: {e}");
             eprintln!();
-            eprintln!("Check ~/.rpi/auth.json / ~/.rpi/models.json (set RPI_CODING_AGENT_DIR to relocate).");
+            eprintln!(
+                "Check ~/.ki/auth.json / ~/.ki/models.json (set RPI_CODING_AGENT_DIR to relocate)."
+            );
         }
         _ => eprintln!("error: {e}"),
     }

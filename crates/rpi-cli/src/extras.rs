@@ -9,7 +9,7 @@ use rpi_tui::Container;
 use crate::config;
 
 /// Path of the "first-time setup done" sentinel, under the agent dir
-/// (`~/.rpi/agent/.setup_done`).
+/// (`~/.ki/agent/.setup_done`).
 pub fn setup_done_path() -> Option<std::path::PathBuf> {
     config::agent_dir().ok().map(|d| d.join(".setup_done"))
 }
@@ -22,7 +22,7 @@ pub fn setup_done() -> bool {
 /// Mark first-time setup complete (write the sentinel). Best-effort.
 pub fn mark_setup_done() -> std::io::Result<()> {
     let path = setup_done_path().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "no home dir for .rpi/agent")
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no home dir for .ki/agent")
     })?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -44,8 +44,8 @@ pub fn maybe_first_time_setup(chat: &Arc<Container>) -> bool {
     let mut lines: Vec<String> = Vec::new();
     lines.extend(border.render(80));
     lines.push(format!(
-        " {} Welcome to rpi!",
-        accent.fg(&bold("Welcome to rpi!"))
+        " {} Welcome to kiqi!",
+        accent.fg(&bold("Welcome to kiqi!"))
     ));
     lines.push(format!(
         " {} Pick a theme with /theme (dark/light/monochrome).",

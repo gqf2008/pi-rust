@@ -19,12 +19,12 @@
 //! # Off by default (upstream parity)
 //!
 //! Upstream's loop has no turn/token ceiling at all — it runs until the model
-//! stops asking for tools, an abort, or an error. `rpi` therefore ships the
+//! stops asking for tools, an abort, or an error. `ki` therefore ships the
 //! guard **disabled** so default behaviour is identical to native, and you opt
 //! in per process:
 //!
 //! ```text
-//! RPI_MAX_TURNS_PER_RUN=120 rpi      # stop a single run after 120 turns
+//! RPI_MAX_TURNS_PER_RUN=120 ki      # stop a single run after 120 turns
 //! ```
 //!
 //! Unset, empty, non-numeric or `0` all mean "no ceiling", exactly like native.
@@ -69,7 +69,7 @@ pub const DEFAULT_MAX_TURNS_PER_RUN: u32 = 120;
 /// Environment variable that switches the guard on: `RPI_MAX_TURNS_PER_RUN=<n>`
 /// (`n > 0`). Anything else — unset, empty, non-numeric, `0` — leaves the run
 /// unbounded, matching upstream.
-pub const MAX_TURNS_ENV: &str = "RPI_MAX_TURNS_PER_RUN";
+pub const MAX_TURNS_ENV: &str = "KI_MAX_TURNS_PER_RUN";
 
 /// Counts turns in one run and reports when the budget is exhausted.
 ///
@@ -85,7 +85,7 @@ pub struct RunBudget {
 }
 
 impl Default for RunBudget {
-    /// Disabled: upstream has no run-level ceiling, so neither does `rpi`
+    /// Disabled: upstream has no run-level ceiling, so neither does `ki`
     /// unless the operator asks for one (see [`RunBudget::from_env`]).
     fn default() -> Self {
         Self::new(0)

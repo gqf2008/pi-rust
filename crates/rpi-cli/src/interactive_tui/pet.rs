@@ -4,7 +4,7 @@ use rpi_tui::ansi::visible_width;
 use rpi_tui::utils::{truncate_to_width, wrap_text_with_ansi};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-pub(super) const PET_KEY: &str = "rpi.pet";
+pub(super) const PET_KEY: &str = "ki.pet";
 
 #[derive(serde::Deserialize)]
 struct PetState {
@@ -126,7 +126,7 @@ fn pet_lines(state: &PetState, width: usize, height: usize, frame: u64) -> Vec<S
     };
     let mut lines = vec![
         fit(
-            &colors.accent.fg(&format!("rpi / pet · {name} · {voice}")),
+            &colors.accent.fg(&format!("ki / pet · {name} · {voice}")),
             width,
         ),
         String::new(),

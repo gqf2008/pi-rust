@@ -1,17 +1,17 @@
-//! `rpi events …` — inspect the extension event journal (P3).
+//! `ki events …` — inspect the extension event journal (P3).
 //!
 //! The journal is written only when `RPI_EVENT_LOG=1` is set (see
 //! [`rpi_extensions::event_log`]). This subcommand reads the same file:
 //!
-//! - `rpi events path` — print the resolved log path.
-//! - `rpi events tail` — print the log and follow new entries (Ctrl+C to stop).
+//! - `ki events path` — print the resolved log path.
+//! - `ki events tail` — print the log and follow new entries (Ctrl+C to stop).
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::Duration;
 
 use crate::app::{EXIT_RUNTIME, EXIT_USAGE};
 
-/// Dispatch `rpi events <subcommand>`.
+/// Dispatch `ki events <subcommand>`.
 pub async fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("tail") => tail().await,
@@ -38,7 +38,7 @@ pub async fn run(args: &[String]) -> i32 {
 }
 
 fn print_help() {
-    println!("Usage: rpi events <command>");
+    println!("Usage: ki events <command>");
     println!();
     println!("Commands:");
     println!("  path    Print the event log path (JSONL)");

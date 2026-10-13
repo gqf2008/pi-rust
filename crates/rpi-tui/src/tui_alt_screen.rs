@@ -516,7 +516,7 @@ impl TuiAltScreen {
     /// `\x1b]2;{title}\x07` (OSC 2); the `DummyTerminal` stub is a no-op. This
     /// accessor locks the real underlying terminal (bypassing the no-op trait
     /// impl returned by [`TUI::terminal`]) so hosts can reflect run state in
-    /// the window title — e.g. "rpi — working" while a turn is in flight.
+    /// the window title — e.g. "ki — working" while a turn is in flight.
     pub fn set_title(&self, title: &str) {
         if let Ok(terminal) = self.terminal.lock() {
             terminal.set_title(title);

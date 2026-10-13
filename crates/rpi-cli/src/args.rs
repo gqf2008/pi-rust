@@ -31,7 +31,7 @@ use rpi_ai::ThinkingLevel;
 /// upstream's process-wide offline flag. The CLI normalizes a truthy value
 /// to `1` before dispatch so early subcommands and the regular app path share
 /// the same network gate.
-pub(crate) const RPI_OFFLINE_ENV: &str = "RPI_OFFLINE";
+pub(crate) const RPI_OFFLINE_ENV: &str = "KI_OFFLINE";
 
 /// Match upstream's environment-flag contract exactly: empty values and
 /// values other than `1`, `true`, or `yes` are false; words are ASCII
@@ -62,7 +62,7 @@ pub(crate) fn normalize_offline_mode(args: &[String]) -> bool {
 }
 
 /// Drop the global `--offline` flag before an early-dispatched subcommand parses
-/// its own arguments (`rpi update --offline` must not see it as a stray arg).
+/// its own arguments (`ki update --offline` must not see it as a stray arg).
 pub(crate) fn without_offline_flag(args: &[String]) -> Vec<String> {
     args.iter()
         .filter(|arg| arg.as_str() != "--offline")
@@ -70,7 +70,7 @@ pub(crate) fn without_offline_flag(args: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Output mode. Mirrors rpi's text/json/rpc modes.
+/// Output mode. Mirrors ki's text/json/rpc modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
     #[default]
@@ -177,7 +177,7 @@ pub struct Args {
     /// Built-in presets remain available unless a custom `--theme` is given.
     pub no_themes: bool,
     /// `--extensions-dir`/`-ed`: an extra directory to scan for cdylib plugins
-    /// (`.dll`/`.so`/`.dylib`), in addition to project `.rpi/extensions`
+    /// (`.dll`/`.so`/`.dylib`), in addition to project `.ki/extensions`
     /// and global
     /// `agent_dir()/extensions` defaults. May be repeated; scanned after
     /// the defaults (so a same-named tool in a default dir wins first, mirroring
@@ -274,7 +274,7 @@ pub fn parse_args(args: &[String]) -> Args {
     // `RPI_EXTENSIONS_DIR` env: an extra list of plugin dirs prepended to any
     // `--extensions-dir` flags. Semicolon-separated on Windows, colon-separated
     // on Unix (PATH-style). Empty entries skipped. `--no-extensions` still wins.
-    if let Ok(raw) = std::env::var("RPI_EXTENSIONS_DIR") {
+    if let Ok(raw) = std::env::var("KI_EXTENSIONS_DIR") {
         if !raw.is_empty() {
             let sep = if cfg!(windows) { ';' } else { ':' };
             for part in raw.split(sep) {
@@ -636,7 +636,7 @@ pub fn print_help() {
                                  (also via RPI_EXTENSIONS_DIR env: ';' on Windows, ':' on Unix)
   --local-only                   Skip automatic extension discovery: load only
                                  --extensions-dir / --extension paths (no project
-                                 .rpi/extensions, no global extensions)
+                                 .ki/extensions, no global extensions)
   --package-only, --project-only Load project skills/prompts/extensions/packages
                                  from the active project; exclude global resources
   --debug-system-prompt          Print the resolved system-prompt sections to stderr (verification)
@@ -645,22 +645,22 @@ pub fn print_help() {
   --version, -v                  Show version
 
 {u}Subcommands:{r}
-  update                       Update the rpi CLI from crates.io
-  auth login|check|logout        Manage persisted credentials in ~/.rpi/auth.json
-                                (see `rpi auth --help`)
+  update                       Update the ki CLI from crates.io
+  auth login|check|logout        Manage persisted credentials in ~/.ki/auth.json
+                                (see `ki auth --help`)
   configure [list]               Add, edit, or remove providers and models in
-                                ~/.rpi/agent/models.json (see `rpi configure --help`)
+                                ~/.ki/agent/models.json (see `ki configure --help`)
   events path|tail               Inspect the extension event journal (needs
-                                RPI_EVENT_LOG=1; see `rpi events --help`)
+                                RPI_EVENT_LOG=1; see `ki events --help`)
   install <crate>                Build and install a Rust cdylib extension
-                                (see `rpi install --help`)
+                                (see `ki install --help`)
   uninstall <crate>              Remove an installed Rust cdylib extension
   package link|list|update|unlink Manage project-local Rust extension packages
-                                (see `rpi package --help`)
+                                (see `ki package --help`)
   dev [options]                  Build, watch, and hot-reload a Rust extension
-                                (see `rpi dev --help`)
+                                (see `ki dev --help`)
   dev-local [options]            Debug only the current Rust extension
-                                (shortcut for `rpi dev --local-only`)
+                                (shortcut for `ki dev --local-only`)
 
 {u}Built-in Tools:{r}
   {builtin}  (enabled by default)
@@ -693,14 +693,14 @@ pub fn print_help() {
   ANTHROPIC_BASE_URL             Override the Anthropic endpoint (e.g. a compatible proxy)
   OPENAI_API_KEY                 Bearer token for openai-completions/responses
   RPI_OFFLINE                     Disable startup network operations when set to 1/true/yes
-  RPI_CODING_AGENT_DIR           Override the ~/.rpi config directory (auth.json + models.json)
+  RPI_CODING_AGENT_DIR           Override the ~/.ki config directory (auth.json + models.json)
   RPI_SESSION_ID                 Session id served by a plugin (set by the host; also honored as an override)
   RPI_NO_EMOJI                   Render the brand lockup without the crab (1/true/yes)
 
 {u}Notes:{r}
   Supported HTTP protocols are Anthropic Messages and OpenAI Chat Completions.
   Define custom model catalogs and provider apiKey values in
-  ~/.rpi/agent/models.json. The interactive TUI, Rust extensions, skills,
+  ~/.ki/agent/models.json. The interactive TUI, Rust extensions, skills,
   prompt templates, themes, model cycling, session fork/export, and trust
   commands are available in the current build. OAuth, RPC, and full model
   cycling remain outside the current implementation.
@@ -993,7 +993,7 @@ mod tests {
 
     #[test]
     fn local_only_flag_is_honored_on_the_regular_parser() {
-        // The plain `rpi --local-only` form sets the same scope `rpi dev
+        // The plain `ki --local-only` form sets the same scope `ki dev
         // --local-only` uses, without the build/watch layer.
         let a = parse_args(&s(&["--local-only"]));
         assert!(a.errors.is_empty());

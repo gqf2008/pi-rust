@@ -3,7 +3,7 @@
 //! # Why this exists
 //!
 //! `tool_started` is the record that lets recovery say *which tool's side effect
-//! is unknown* after a crash. It cannot be written from rpi's old model, where a
+//! is unknown* after a crash. It cannot be written from ki's old model, where a
 //! whole run's messages were persisted in one pass at the end: the reducer's
 //! `validate_tool_start` requires `assistant_entry_id` to **already exist** with
 //! a matching tool call at `tool_index`, and a tool runs long before the run

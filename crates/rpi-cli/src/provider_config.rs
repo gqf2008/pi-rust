@@ -1,7 +1,7 @@
 //! Read/write helpers for the providers and models in
-//! `~/.rpi/agent/models.json`.
+//! `~/.ki/agent/models.json`.
 //!
-//! Shared by the `rpi configure` subcommand (this used to live in the TUI's
+//! Shared by the `ki configure` subcommand (this used to live in the TUI's
 //! `/provider` surface). Every write rewrites the whole file, so the helpers
 //! here own the invariants: a duplicate provider/model id is refused, an edit
 //! touches only the fields the caller supplied, and a display name that merely
@@ -24,7 +24,7 @@ pub const PROTOCOLS: [(&str, &str); 3] = [
     ("openai-responses", "OpenAI Responses"),
 ];
 
-/// A provider as collected by the `rpi configure` wizard.
+/// A provider as collected by the `ki configure` wizard.
 #[derive(Clone, Debug, Default)]
 pub struct ProviderDraft {
     pub mode: DraftMode,
@@ -41,7 +41,7 @@ pub struct ProviderDraft {
     pub model_name: String,
 }
 
-/// A model as collected by the `rpi configure` wizard.
+/// A model as collected by the `ki configure` wizard.
 #[derive(Clone, Debug, Default)]
 pub struct ModelDraft {
     pub mode: DraftMode,
@@ -125,7 +125,7 @@ pub fn save_provider(draft: &ProviderDraft) -> Result<String, String> {
     let id = draft.id.trim().to_string();
     if cfg.providers.contains_key(&id) {
         return Err(format!(
-            "Provider \"{id}\" already exists. Use `rpi configure` → edit instead."
+            "Provider \"{id}\" already exists. Use `ki configure` → edit instead."
         ));
     }
     if draft.model_id.trim().is_empty() {
@@ -276,7 +276,7 @@ mod tests {
     use super::*;
     use crate::config::test_support::env_lock;
 
-    /// Run `body` against a throwaway `~/.rpi/agent` (holds the shared env lock
+    /// Run `body` against a throwaway `~/.ki/agent` (holds the shared env lock
     /// so parallel env-mutating tests serialise).
     fn with_isolated_config_dir<T>(body: impl FnOnce() -> T) -> T {
         let _guard = env_lock().lock().unwrap();

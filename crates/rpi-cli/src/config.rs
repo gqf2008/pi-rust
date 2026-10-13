@@ -1,10 +1,10 @@
 //! # Layout
 //!
-//! Uses a nested layout: a `~/.rpi/agent/` directory (or one pointed at via
+//! Uses a nested layout: a `~/.ki/agent/` directory (or one pointed at via
 //! `RPI_CODING_AGENT_DIR`) "just works":
 //!
 //! ```text
-//! ~/.rpi/                 (RPI_CODING_AGENT_DIR env overrides the agent/ dir)
+//! ~/.ki/                 (RPI_CODING_AGENT_DIR env overrides the agent/ dir)
 //! └── agent/
 //!     ├── auth.json       # persisted credentials (mode 0o600 on Unix)
 //!     ├── models.json     # user-defined provider/model catalog (hand-edited)
@@ -13,7 +13,7 @@
 //!     ├── .setup_done     # first-time-setup sentinel (extras.rs)
 //! ```
 //!
-//! Flat-installed `~/.rpi/{auth.json,models.json}` from older rpi releases are
+//! Flat-installed `~/.ki/{auth.json,models.json}` from older ki releases are
 //! migrated under `agent/` on the next launch by [`migrate_legacy_layout`]
 //! (best-effort, idempotent; only when the env override is unset).
 //!
@@ -22,7 +22,7 @@
 //! v1 is a single-process CLI, so we use **atomic rename** instead of upstream's
 //! `proper-lockfile`: write a sibling temp file, `fs::rename` over the target,
 //! then `chmod 0o600` on Unix (Windows chmod is a no-op, matching Node).
-//! Concurrent `rpi auth login` from two shells could lose one update — that's
+//! Concurrent `ki auth login` from two shells could lose one update — that's
 //! accepted and documented; adding a file lock is deferred.
 //!
 //! # Config-value expansion
@@ -30,7 +30,7 @@
 //! [`resolve_config_value`] expands `$ENV`/`${ENV}`/`!command` inside
 //! `apiKey`/`headers` exactly like upstream's `resolve-config-value.ts` — so a
 //! copied pi `models.json`/`auth.json` that references env vars or shell
-//! commands resolves the same way. Applied where rpi consumes those values
+//! commands resolves the same way. Applied where ki consumes those values
 //! (auth.json key, models.json bearer apiKey, provider/model `headers`).
 
 use std::collections::BTreeMap;
@@ -40,13 +40,13 @@ use std::path::{Path, PathBuf};
 use rpi_ai::{Api, InputModality, Model, StreamingProtocolCompat};
 
 /// The config directory name under the home dir.
-pub const CONFIG_DIR_NAME: &str = ".rpi";
+pub const CONFIG_DIR_NAME: &str = ".ki";
 
 /// Env var that overrides the whole config dir. Absolute path; relative
 /// values are rejected.
-pub const CONFIG_DIR_ENV: &str = "RPI_CODING_AGENT_DIR";
+pub const CONFIG_DIR_ENV: &str = "KI_CODING_AGENT_DIR";
 
-/// The provider id under which `rpi auth login` stores the Anthropic key.
+/// The provider id under which `ki auth login` stores the Anthropic key.
 /// Mirrors upstream's fixed `anthropic` provider id.
 pub const DEFAULT_PROVIDER_ID: &str = "anthropic";
 
@@ -86,7 +86,7 @@ pub enum ConfigError {
 // Path resolution
 // ---------------------------------------------------------------------------
 
-/// The rpi config directory (`~/.rpi/agent` by default, `RPI_CODING_AGENT_DIR`
+/// The ki config directory (`~/.ki/agent` by default, `RPI_CODING_AGENT_DIR`
 /// override). Creates nothing — purely a path computation. The `agent/` layer
 /// is `join(homedir(), CONFIG_DIR_NAME, "agent")`. The env override points at
 /// the agent dir itself.
@@ -107,7 +107,7 @@ pub fn agent_dir() -> Result<PathBuf, ConfigError> {
     Ok(home.join(CONFIG_DIR_NAME).join("agent"))
 }
 
-/// The config dir one level above the agent dir (`~/.rpi`, or the parent of an
+/// The config dir one level above the agent dir (`~/.ki`, or the parent of an
 /// env override). Used by [`migrate_legacy_layout`] to locate the old flat
 /// layout. Returns `None` when the env override has no parent (a root path).
 fn config_root_dir() -> Result<PathBuf, ConfigError> {
@@ -120,22 +120,22 @@ fn config_root_dir() -> Result<PathBuf, ConfigError> {
         })
 }
 
-/// `~/.rpi/agent/auth.json`.
+/// `~/.ki/agent/auth.json`.
 pub fn auth_path() -> Result<PathBuf, ConfigError> {
     Ok(agent_dir()?.join("auth.json"))
 }
 
-/// `~/.rpi/agent/models.json`.
+/// `~/.ki/agent/models.json`.
 pub fn models_path() -> Result<PathBuf, ConfigError> {
     Ok(agent_dir()?.join("models.json"))
 }
 
-/// `~/.rpi/agent/settings.json` (saved default provider/model/thinking + theme).
+/// `~/.ki/agent/settings.json` (saved default provider/model/thinking + theme).
 pub fn settings_path() -> Result<PathBuf, ConfigError> {
     Ok(agent_dir()?.join("settings.json"))
 }
 
-/// `~/.rpi/agent/trust.json` (per-cwd project trust decisions).
+/// `~/.ki/agent/trust.json` (per-cwd project trust decisions).
 pub fn trust_path() -> Result<PathBuf, ConfigError> {
     Ok(agent_dir()?.join("trust.json"))
 }
@@ -167,8 +167,8 @@ fn read_text_with_fallback(
 }
 
 /// One-time best-effort migration of a pre-nesting flat layout
-/// (`~/.rpi/{auth.json,models.json,.setup_done}`) into the
-/// nested `~/.rpi/agent/` layout. **No-op when `RPI_CODING_AGENT_DIR` is set**
+/// (`~/.ki/{auth.json,models.json,.setup_done}`) into the
+/// nested `~/.ki/agent/` layout. **No-op when `RPI_CODING_AGENT_DIR` is set**
 /// (never touch an explicit override), when the agent dir already exists, or
 /// when no flat files are present. Idempotent: a partial move resumes. Errors
 /// are swallowed (logged via the returned `Result` only so tests can observe);
@@ -400,7 +400,7 @@ pub struct ModelDefinition {
     pub compat: Option<serde_json::Value>,
 }
 
-/// Load `~/.rpi/models.json`. Missing file ⇒ empty config (no error).
+/// Load `~/.ki/models.json`. Missing file ⇒ empty config (no error).
 pub fn load_models_config() -> Result<ModelsConfig, ConfigError> {
     let path = models_path()?;
     match read_text_with_fallback(path, None)? {
@@ -411,7 +411,7 @@ pub fn load_models_config() -> Result<ModelsConfig, ConfigError> {
     }
 }
 
-/// Atomically write the whole `~/.rpi/models.json` (used by the interactive
+/// Atomically write the whole `~/.ki/models.json` (used by the interactive
 /// provider form). Note: unlike [`crate::settings::save_settings`], this
 /// serializes the modeled config directly, so hand-written comments and unknown
 /// fields in `models.json` are not preserved on rewrite. A timestamped
@@ -443,12 +443,12 @@ pub fn save_models_config(cfg: &ModelsConfig) -> Result<(), ConfigError> {
 
 /// The trust store: `canonicalCwd -> decision` (`true`/`false`/`null`). Mirrors
 /// pi's `TrustFile = Record<string, boolean | null | undefined>`
-/// (`trust-manager.ts`). rpi reads this for layout parity (a copied pi
+/// (`trust-manager.ts`). ki reads this for layout parity (a copied pi
 /// `trust.json` parses + is located correctly) but does **not** gate any
 /// project resources behind trust in v1 — there is no trust prompt. Deferred.
 pub type TrustStore = BTreeMap<String, Option<bool>>;
 
-/// Read `~/.rpi/agent/trust.json`. Missing file ⇒ empty store (not an error).
+/// Read `~/.ki/agent/trust.json`. Missing file ⇒ empty store (not an error).
 /// Malformed JSON ⇒ `ConfigError::Json`. `null` decisions deserialize as
 /// `None`; absent entries are simply not present.
 pub fn read_trust() -> Result<TrustStore, ConfigError> {
@@ -1029,7 +1029,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ConfigError>
     })?;
     let tmp = dir.join(format!(
         ".{}.{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("rpi"),
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("ki"),
         uuid::Uuid::new_v4().simple()
     ));
     let mut options = std::fs::OpenOptions::new();
@@ -1394,7 +1394,7 @@ mod tests {
     #[test]
     fn custom_openai_provider_resolves_explicit_api_key_environment_reference() {
         let _guard = env_lock().lock().unwrap();
-        let env_name = "RPI_FAKE_PROVIDER_API_KEY";
+        let env_name = "KI_FAKE_PROVIDER_API_KEY";
         std::env::set_var(env_name, "env-secret");
         let cfg = ProviderConfig {
             name: None,
@@ -1532,7 +1532,7 @@ mod tests {
 
     #[test]
     fn agent_dir_nests_under_agent_by_default() {
-        // With no env override, agent_dir() must end in `.../.rpi/agent`
+        // With no env override, agent_dir() must end in `.../.ki/agent`
         // (mirrors pi's `getAgentDir`). We can't assertion the home prefix
         // portably, but the leaf two segments are stable.
         let _guard = env_lock().lock().unwrap();
@@ -1632,9 +1632,9 @@ mod tests {
     #[test]
     fn resolve_config_value_env_var() {
         let _guard = env_lock().lock().unwrap();
-        let prev = std::env::var_os("RPI_TEST_CFG_KEY");
-        let prev2 = std::env::var_os("RPI_TEST_CFG_KEY2");
-        std::env::set_var("RPI_TEST_CFG_KEY", "secret-from-env");
+        let prev = std::env::var_os("KI_TEST_CFG_KEY");
+        let prev2 = std::env::var_os("KI_TEST_CFG_KEY2");
+        std::env::set_var("KI_TEST_CFG_KEY", "secret-from-env");
         assert_eq!(
             resolve_config_value("$RPI_TEST_CFG_KEY", None),
             Some("secret-from-env".into())
@@ -1644,34 +1644,34 @@ mod tests {
             Some("prefix-secret-from-env-suffix".into())
         );
         // Two vars in one template.
-        std::env::set_var("RPI_TEST_CFG_KEY2", "two");
+        std::env::set_var("KI_TEST_CFG_KEY2", "two");
         assert_eq!(
             resolve_config_value("a-$RPI_TEST_CFG_KEY-b-$RPI_TEST_CFG_KEY2-c", None),
             Some("a-secret-from-env-b-two-c".into())
         );
         // Env overlay wins over process env.
         let mut overlay = BTreeMap::new();
-        overlay.insert("RPI_TEST_CFG_KEY".into(), "overlay-value".into());
+        overlay.insert("KI_TEST_CFG_KEY".into(), "overlay-value".into());
         assert_eq!(
             resolve_config_value("$RPI_TEST_CFG_KEY", Some(&overlay)),
             Some("overlay-value".into())
         );
-        restore_env("RPI_TEST_CFG_KEY", prev);
-        restore_env("RPI_TEST_CFG_KEY2", prev2);
+        restore_env("KI_TEST_CFG_KEY", prev);
+        restore_env("KI_TEST_CFG_KEY2", prev2);
     }
 
     #[test]
     fn resolve_config_value_unset_env_is_none() {
         let _guard = env_lock().lock().unwrap();
-        let prev = std::env::var_os("RPI_TEST_CFG_ABSENT");
-        std::env::remove_var("RPI_TEST_CFG_ABSENT");
+        let prev = std::env::var_os("KI_TEST_CFG_ABSENT");
+        std::env::remove_var("KI_TEST_CFG_ABSENT");
         // Any referenced unset var ⇒ the whole value is None (pi semantics).
         assert_eq!(resolve_config_value("$RPI_TEST_CFG_ABSENT", None), None);
         assert_eq!(
             resolve_config_value("prefix-$RPI_TEST_CFG_ABSENT-suffix", None),
             None
         );
-        restore_env("RPI_TEST_CFG_ABSENT", prev);
+        restore_env("KI_TEST_CFG_ABSENT", prev);
     }
 
     #[test]
@@ -1697,8 +1697,8 @@ mod tests {
     #[test]
     fn resolve_headers_drops_unresolvable() {
         let _guard = env_lock().lock().unwrap();
-        let prev = std::env::var_os("RPI_TEST_HDR_SET");
-        std::env::set_var("RPI_TEST_HDR_SET", "set-value");
+        let prev = std::env::var_os("KI_TEST_HDR_SET");
+        std::env::set_var("KI_TEST_HDR_SET", "set-value");
         let mut h = BTreeMap::new();
         h.insert("x-set".into(), "$RPI_TEST_HDR_SET".into());
         h.insert("x-unset".into(), "$RPI_TEST_HDR_UNSET".into());
@@ -1711,7 +1711,7 @@ mod tests {
             Some("literal-value")
         );
         assert!(!resolved.contains_key("x-unset"));
-        restore_env("RPI_TEST_HDR_SET", prev);
+        restore_env("KI_TEST_HDR_SET", prev);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Shared wire protocol for rpi's headless RPC mode (`--mode rpc`, the server)
+//! Shared wire protocol for ki's headless RPC mode (`--mode rpc`, the server)
 //! and the remote client (`--connect`).
 //!
 //! Single source of truth: the server serializes these types and the client

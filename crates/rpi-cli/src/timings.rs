@@ -15,7 +15,7 @@ use std::time::Instant;
 pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("RPI_TIMING")
+        std::env::var("KI_TIMING")
             .map(|v| v == "1")
             .unwrap_or(false)
     })
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn disabled_by_default() {
         // The env var is unset in the test process unless explicitly set.
-        if std::env::var_os("RPI_TIMING").is_none() {
+        if std::env::var_os("KI_TIMING").is_none() {
             assert!(!enabled());
         }
     }
