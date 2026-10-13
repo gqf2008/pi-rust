@@ -29,8 +29,6 @@ pub(super) enum SelectorKind {
     Session,
     /// `/theme` — dark / light / monochrome presets applied live.
     Theme,
-    /// `/provider` — set the default provider (persisted, applies on restart).
-    Provider,
     /// `/scoped-models` — multi-toggle Ctrl+P cycle scope.
     ScopedModels,
     /// `/settings` — interactive settings menu (and its sub-selectors).

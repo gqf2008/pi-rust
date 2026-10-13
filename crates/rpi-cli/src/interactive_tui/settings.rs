@@ -601,10 +601,6 @@ pub(super) fn find_model_selector_match(
     }
 }
 
-/// Build `/provider` selector items: every provider present in the merged
-/// catalog (built-in + models.json), labelled with its model count, origin
-/// (built-in vs configured), wire protocol, and whether a key is configured.
-/// Catalog order (provider id) keeps this deterministic.
 /// Persist a specific default provider + model pair (used when `/model` picks a
 /// model from a different provider than the one currently bound to the lane).
 pub(super) fn set_default_model(provider_id: &str, model_id: &str) -> Result<String, String> {

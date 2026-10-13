@@ -678,7 +678,7 @@ enum TuiMessage {
     /// Share the current session (`/share`): `gh gist create` when the gh CLI
     /// is available, otherwise copy the transcript to the clipboard.
     ShareSession,
-    /// `models.json` changed on disk (a `/provider` write): re-resolve the
+    /// `models.json` changed on disk (a `rpi configure` write): re-resolve the
     /// provider runtimes + `/model` catalog so the change applies without
     /// restarting rpi.
     ReloadModels,
@@ -845,7 +845,7 @@ fn resolve_tui_startup_settings(
 /// fn), it falls back to a blocking, await-final-text path.
 ///
 /// `models.json`'s modification time. Drives the in-session reload that makes
-/// `/provider` writes (and external edits) take effect without a restart.
+/// `rpi configure` writes (and external edits) take effect without a restart.
 fn models_json_mtime() -> Option<std::time::SystemTime> {
     crate::config::models_path()
         .ok()
@@ -1569,7 +1569,7 @@ pub async fn interactive_tui(
             rpi_tui::loader::SPINNER_FRAME_MS,
         ));
         interval.tick().await; // discard immediate
-                               // `models.json` mtime watcher: every `/provider` write lands on disk, and
+                               // `models.json` mtime watcher: every `rpi configure` write lands on disk, and
                                // reloading here (instead of threading a channel through the form
                                // callbacks) also picks up edits made outside rpi.
         let mut models_mtime = models_json_mtime();
@@ -2980,7 +2980,7 @@ pub async fn interactive_tui(
                 tui.request_render(false);
             }
             Some(TuiMessage::ReloadModels) => {
-                // `models.json` was written (a `/provider` edit). Re-resolve the
+                // `models.json` was written (a `rpi configure` edit). Re-resolve the
                 // provider runtimes + catalog from the same inputs this launch
                 // used, then install them on the live lane. Without this a newly
                 // added provider had no runtime and a newly added model never

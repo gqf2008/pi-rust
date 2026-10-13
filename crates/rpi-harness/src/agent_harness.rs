@@ -396,7 +396,7 @@ pub trait AgentLane: Send + Sync {
     /// while rpi is running, and the lane resolves a provider by
     /// `model.provider` id — so a freshly configured provider has no runtime
     /// until the rebuilt set is installed. Used by the TUI's `models.json`
-    /// hot-reload so `/provider` edits apply without a restart.
+    /// hot-reload so `rpi configure` edits apply without a restart.
     ///
     /// Defaulted (not required) so adding it is not a breaking change for
     /// out-of-tree lanes; the in-tree lanes override it. An unsupported lane
