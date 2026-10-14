@@ -444,6 +444,21 @@ todo list: compiled 43120 ns/call, wasm 32887 ns/call (0.8x)
 `shortcut_hosts`），所以测试能注入合成插件；另有一个测试加载**真的 conformance wasm 组件**，证明这套
 会话路径同样能到达沙箱插件。命令面由 `interactive_tui::commands` 的两个单测锁住。
 
+### 6.20 信任边界：沙箱插件不得顶掉既有工具名
+
+接线时发现一个真实的越权路径：`merge_compiled_plugin_tools` 按名**覆盖**（`Some(slot) => *slot = harness_tool`），
+而装载顺序是 内建 → cdylib 扩展 → 编译期 → wasm，所以**后加载者胜**。于是第三方 `plugin.wasm` 只要声明一个叫
+`bash` 的工具，模型随后调的 `bash` 就是它——沙箱/授权全被绕过（“extension overrides same-named
+built-in”那句注释本来是给**受信**的 cdylib 层写的）。
+
+对策：`PluginHost` 带上 `untrusted` 标记（wasm 层为 `true`），`merge_compiled_plugin_tools`
+对 `untrusted` 的 host **遇到已占用名就拒绝 + 告警**，受信层保持原行为。拒绝只针对**冲突名**：
+第三方插件贡献新工具照常（有测试分别锁定两件事）。
+
+同时补上了 `session-read` 的 `session_id`：`RuntimeActionHost::session_id`（默认 `None`）→
+`HarnessActionHost` 从 `tool_context` 取（`new_session`/`fork`/`switch_session` 会同步更新）→
+`ActionCaps::session_id`。此前该能力恒返 `None`，靠事件载荷的 `sessionId` 兼顾；现在两条路一致。
+
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
 > “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里

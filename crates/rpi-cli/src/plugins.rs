@@ -140,6 +140,12 @@ impl kiqi_plugin::SessionRead for ActionCaps {
         })
         .unwrap_or(serde_json::Value::Null)
     }
+
+    /// Answer from the host rather than the trait default `None`: a plugin
+    /// tracing a run needs to say which session it is tracing.
+    fn session_id(&self) -> Option<String> {
+        self.host.session_id()
+    }
 }
 
 /// `SessionControl` and `InjectApi`. The mutation actions answer with a
@@ -643,7 +649,21 @@ pub fn merge_compiled_plugin_tools(
             let name = spec.name.clone();
             let harness_tool = rpi_harness::types::HarnessTool::new(std::sync::Arc::new(adapter));
             match tools.iter_mut().find(|t| t.tool.schema().name == name) {
-                Some(slot) => *slot = harness_tool,
+                Some(slot) => {
+                    // A sandboxed third-party plugin must not impersonate a tool
+                    // the user already has: tools are called by name, so a
+                    // collision would silently redirect e.g. `bash` into the
+                    // plugin, bypassing the grant the user did not give.
+                    if host.is_untrusted() {
+                        eprintln!(
+                            "plugin `{}`: refusing tool `{}` — the name already belongs to the host or a first-party plugin",
+                            host.id(),
+                            name
+                        );
+                        continue;
+                    }
+                    *slot = harness_tool;
+                }
                 None => tools.push(harness_tool),
             }
         }
@@ -690,6 +710,12 @@ pub fn compiled_tool_schemas(hosts: &[PluginHost]) -> Vec<rpi_ai::types::Tool> {
 pub struct PluginHost {
     id: String,
     plugin: Box<dyn Plugin>,
+    /// Third-party and sandboxed (currently: wasm). A trusted host may take a
+    /// name over — that is what "extension overrides same-named built-in" means
+    /// for the tiers the user opted into — but an untrusted one must not, or an
+    /// installed component could impersonate `bash` and intercept every command
+    /// the model runs.
+    untrusted: bool,
 }
 
 impl PluginHost {
@@ -697,7 +723,22 @@ impl PluginHost {
         Self {
             id: id.into(),
             plugin,
+            untrusted: false,
         }
+    }
+
+    /// A sandboxed third-party plugin: its tools may not collide with a name the
+    /// host or a trusted plugin already provides.
+    pub fn untrusted(id: impl Into<String>, plugin: Box<dyn Plugin>) -> Self {
+        Self {
+            id: id.into(),
+            plugin,
+            untrusted: true,
+        }
+    }
+
+    pub fn is_untrusted(&self) -> bool {
+        self.untrusted
     }
 
     pub fn id(&self) -> &str {
@@ -1023,7 +1064,7 @@ pub fn load_wasm_hosts(plugins_dir: &std::path::Path) -> Vec<PluginHost> {
             continue;
         }
         match kiqi_plugin_host::WasmPlugin::load(&id, &wasm) {
-            Ok(plugin) => hosts.push(PluginHost::new(id, Box::new(plugin))),
+            Ok(plugin) => hosts.push(PluginHost::untrusted(id, Box::new(plugin))),
             Err(error) => eprintln!("plugin `{id}`: {error}"),
         }
     }
@@ -1397,6 +1438,9 @@ mod tests {
                 _ => serde_json::Value::Null,
             };
             Ok(serde_json::json!({ "value": value }))
+        }
+        fn session_id(&self) -> Option<String> {
+            Some("sess-test".into())
         }
         async fn get_session_branch(
             &self,
@@ -2140,5 +2184,132 @@ mod tests {
             "got {first:?}"
         );
         assert_eq!(hooks.compiled_transform(7, &event), first);
+    }
+
+    /// A plugin that contributes exactly one tool, to exercise name collisions
+    /// between tiers.
+    struct FixedTool {
+        id: &'static str,
+        tool: &'static str,
+    }
+
+    impl Plugin for FixedTool {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn tools(&self) -> Vec<kiqi_plugin::ToolSpec> {
+            vec![kiqi_plugin::ToolSpec {
+                name: self.tool.into(),
+                description: self.id.into(),
+                parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            }]
+        }
+
+        fn call(
+            &self,
+            _name: &str,
+            _arguments: &serde_json::Value,
+            _caps: &HostCaps<'_>,
+            _sink: &dyn kiqi_plugin::ProgressSink,
+        ) -> Result<kiqi_plugin::ToolOutcome, kiqi_plugin::PluginError> {
+            Ok(kiqi_plugin::ToolOutcome::text(self.id))
+        }
+    }
+
+    fn empty_caps() -> OwnedCaps {
+        OwnedCaps {
+            session: None,
+            control: None,
+            inject: None,
+            ui: None,
+            log: std::sync::Arc::new(StderrLog),
+        }
+    }
+
+    async fn tool_text(tool: &rpi_harness::types::HarnessTool) -> String {
+        use rpi_agent::agent_tool::AgentTool;
+        let result = tool
+            .tool
+            .execute(
+                "c",
+                serde_json::json!({}),
+                tokio_util::sync::CancellationToken::new(),
+                std::sync::Arc::new(|_| {}),
+            )
+            .await
+            .expect("the tool runs");
+        result
+            .content
+            .iter()
+            .map(|block| match block {
+                rpi_agent::types::TextContentOrImage::Text(text) => text.text.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    /// A tool-name collision is refused for an untrusted (wasm) plugin, so an
+    /// installed component cannot impersonate `bash` or a first-party tool.
+    #[tokio::test]
+    async fn an_untrusted_plugin_cannot_take_over_a_tool_name() {
+        let hosts = vec![
+            std::sync::Arc::new(PluginHost::new(
+                "trusted",
+                Box::new(FixedTool {
+                    id: "trusted",
+                    tool: "shadow",
+                }),
+            )),
+            std::sync::Arc::new(PluginHost::untrusted(
+                "third-party",
+                Box::new(FixedTool {
+                    id: "third-party",
+                    tool: "shadow",
+                }),
+            )),
+        ];
+        let mut tools = Vec::new();
+        merge_compiled_plugin_tools(&mut tools, &hosts, &empty_caps(), &|_| true);
+        assert_eq!(tools.len(), 1, "the untrusted collision must be dropped");
+        assert_eq!(
+            tool_text(&tools[0]).await,
+            "trusted",
+            "the trusted tool must survive, not the third-party one"
+        );
+    }
+
+    /// Refusing collisions must not turn into refusing untrusted plugins: a
+    /// genuinely new name is still contributed.
+    #[tokio::test]
+    async fn an_untrusted_plugin_may_still_add_a_new_tool() {
+        let hosts = vec![std::sync::Arc::new(PluginHost::untrusted(
+            "third-party",
+            Box::new(FixedTool {
+                id: "third-party",
+                tool: "extra",
+            }),
+        ))];
+        let mut tools = Vec::new();
+        merge_compiled_plugin_tools(&mut tools, &hosts, &empty_caps(), &|_| true);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tool_text(&tools[0]).await, "third-party");
+    }
+
+    /// The `session-read` capability answers the session id the host serves,
+    /// rather than falling back to the trait's `None`.
+    #[test]
+    fn session_read_reports_the_session_id() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let caps = ActionCaps::new(
+            std::sync::Arc::new(FakeHost::default()),
+            runtime.handle().clone(),
+        );
+        assert_eq!(caps.session_id().as_deref(), Some("sess-test"));
     }
 }

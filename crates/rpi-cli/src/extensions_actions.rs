@@ -256,6 +256,12 @@ impl RuntimeActionHost for HarnessActionHost {
         }))
     }
 
+    /// The id of the session currently being served (republished on
+    /// `new_session`/`fork`/`switch_session`, like `tool_context` itself).
+    fn session_id(&self) -> Option<String> {
+        self.tool_context.session_id()
+    }
+
     async fn send_message(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
         // `{"message": <AgentMessage json>}` — drive a full run from any message
         // kind. Falls back to `{"text": "..."}` as a user-text shorthand.

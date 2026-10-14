@@ -425,6 +425,14 @@ pub trait RuntimeActionHost: Send + Sync {
     ) -> Result<serde_json::Value, String> {
         Err("session branch lookup is not configured".to_string())
     }
+
+    /// `SessionId` — the id of the session the host is currently serving, when
+    /// known. Read by `SessionRead::session_id` so a compiled or wasm plugin can
+    /// label what it observes; the same value the `BeforeAgentStart` payload
+    /// carries as `sessionId`.
+    fn session_id(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The host-side bridge carried in [`PluginApi::user_data`] so

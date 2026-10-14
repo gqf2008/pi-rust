@@ -174,6 +174,22 @@ A missing grants file grants nothing; the host never authorizes for a plugin."
     );
 }
 
+/// Whether to grant the capabilities an install newly declares.
+///
+/// Split out because the interactive branch is invisible to CI (no terminal):
+/// the decision is the part that matters, and it is testable on its own.
+/// Anything short of an explicit `y`/`Y`/`yes` — an empty line, `n`, EOF — is a
+/// no, so the default answer is to grant nothing.
+fn approve_new_capabilities(yes: bool, interactive: bool, answer: Option<&str>) -> bool {
+    if yes {
+        return true;
+    }
+    if !interactive {
+        return false;
+    }
+    matches!(answer.map(str::trim), Some("y" | "Y" | "yes"))
+}
+
 /// `ki plugin install <path.wasm> [--id ID] [--yes] [--host H]...`
 fn install(args: &[String]) -> i32 {
     let mut wasm: Option<String> = None;
@@ -257,9 +273,8 @@ fn install(args: &[String]) -> i32 {
         .collect();
     let mut granted_now: Vec<String> = Vec::new();
     if !new_caps.is_empty() {
-        let approve = if yes {
-            true
-        } else if std::io::stdin().is_terminal() {
+        let interactive = std::io::stdin().is_terminal();
+        if !yes && interactive {
             print!(
                 "grant {} to `{id}`? [y/N] ",
                 new_caps
@@ -269,12 +284,14 @@ fn install(args: &[String]) -> i32 {
                     .join(", ")
             );
             let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+        let answer = if !yes && interactive {
             let mut line = String::new();
-            std::io::stdin().read_line(&mut line).is_ok()
-                && matches!(line.trim(), "y" | "Y" | "yes")
+            std::io::stdin().read_line(&mut line).ok().map(|_| line)
         } else {
-            false
+            None
         };
+        let approve = approve_new_capabilities(yes, interactive, answer.as_deref());
         if approve {
             for cap in &new_caps {
                 match grants.grant(cap, hosts.clone()) {
@@ -427,6 +444,30 @@ mod tests {
         match previous {
             Some(value) => std::env::set_var("KI_AGENT_DIR", value),
             None => std::env::remove_var("KI_AGENT_DIR"),
+        }
+    }
+
+    /// The interactive answer path — unreachable in CI, which has no terminal —
+    /// decided on its own. Only an explicit yes grants; the default is no.
+    #[test]
+    fn install_grants_only_on_an_explicit_yes() {
+        assert!(approve_new_capabilities(true, false, None), "--yes");
+        assert!(
+            !approve_new_capabilities(false, false, None),
+            "headless without --yes"
+        );
+        for answer in ["y\n", "Y\n", "yes\n", "  y  "] {
+            assert!(
+                approve_new_capabilities(false, true, Some(answer)),
+                "{answer:?}"
+            );
+        }
+        for answer in ["\n", "n\n", "no\n", "nah\n"]
+            .into_iter()
+            .map(Some)
+            .chain([None])
+        {
+            assert!(!approve_new_capabilities(false, true, answer), "{answer:?}");
         }
     }
 }
