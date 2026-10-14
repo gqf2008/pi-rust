@@ -115,7 +115,7 @@ pub trait Plugin: Send + Sync {
 ### 粒度与落点
 
 - 按能力 + scope：fs 给到具体根、http 给到 host allow-list、exec 给到命令白名单；
-- 存储：`~/.ki/agent/plugins/<id>/grants.toml`；
+- 存储：`~/.ki/agent/plugins/<id>/grants.json`（`KI_AGENT_DIR` 可覆盖根）；
 - CLI：`ki plugin grant|revoke|list`；交互 TUI 在缺授权时提示。
 
 ### 形状上的硬要求
@@ -285,6 +285,23 @@ wasm 层是“总是可实例化，但未授予的调用必定 `denied`” + “
   → `SessionStart` 触发恢复 → `list` 文本含恢复项、`details.todos` 带状态 → `add` 后 details 更新。
   两个 e2e 全绿。
 - 仍未做：能力**授权（grant）**模型；`session-read.info` 的 session-id/run-id 还返空。
+
+### 6.10 已落地：授权（grant）+ `net-http`
+
+- **`Grants`**：每插件一份，从 `$KI_AGENT_DIR/plugins/<id>/grants.json`（默认
+  `~/.ki/agent/plugins/<id>/grants.json`）读；**文件缺失 = 什么都不授予**，宿主不替插件拍板。
+  `WasmPlugin::load` 自动读，`WasmPlugin::load_with_grants` 供调用方自己管授权（与测试）。
+- **`net-http` 实现**：宿主侧 `reqwest` blocking；先按 URL 取 host，再查 grant 的
+  `hosts` allow-list（`*` 通配）；不在表里就 `denied`。请求/响应 JSON 形状写进了 WIT 注释：
+  `{url, method?, headers?, body?}` → `{status, headers, body}`。
+- 域能力（`session`/`control`/`inject`/`ui`）的“授予”仍由调用方构造的 `HostCaps` 表达；
+  grants 目前只管 wasm 独有、`HostCaps` 没有对应字段的能力。
+- e2e 新增 `net_http_is_gated_by_the_users_grant`：无 grant → `denied`；grant 的 hosts 不匹配
+  → `denied`；host 匹配 → 真正打到本地一次性 HTTP server 并拿到响应体。3 个 e2e 全绿。
+- 与规格的差异：实现用 `grants.json` 而非规格里的 `grants.toml`（省一个依赖，形状等价）。
+- 仍未做：`ki plugin grant/revoke/list` CLI、安装/更新时的提示与“增量声明才重问”、
+  `fs`/`exec`/`timer`/`net-sockets` 的实际实现（仍是 deny 桩）、以及能力错误只有
+  `denied` 一个分支（网络失败也被叫 `denied`，应当拆出 `failed`）。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里

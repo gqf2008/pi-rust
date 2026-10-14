@@ -15,9 +15,34 @@
 //! The returned string reports the deny reason so the host test can assert it.
 
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
-use kiqi_plugin_guest::bindings::kiqi::plugin::{log, progress, types, ui};
+use kiqi_plugin_guest::bindings::kiqi::plugin::{log, net_http, progress, types, ui};
 
 const TOOL: &str = "conformance";
+const FETCH_TOOL: &str = "fetch";
+
+/// Fetch a URL through the host's `net-http` capability. Whether it succeeds
+/// depends entirely on the user's grant; the plugin degrades either way.
+fn fetch(arguments: &str) -> Result<types::ToolResult, types::PluginError> {
+    let url = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("url")
+                .and_then(|url| url.as_str())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| types::PluginError::InvalidArguments("url is required".to_string()))?;
+    let request = serde_json::json!({ "url": url }).to_string();
+    let (text, is_error) = match net_http::fetch(&request) {
+        Ok(response) => (response, false),
+        Err(denied) => (format!("denied:{}", denied.reason), true),
+    };
+    Ok(types::ToolResult {
+        blocks: vec![types::ContentBlock::Text(text)],
+        is_error,
+        details: "null".to_string(),
+    })
+}
 
 struct Conformance;
 
@@ -27,15 +52,28 @@ impl Guest for Conformance {
     fn shutdown() {}
 
     fn list_tools() -> Vec<types::ToolSpec> {
-        vec![types::ToolSpec {
-            name: TOOL.to_string(),
-            description: "Conformance probe: streams progress, logs, reports a denied capability"
-                .to_string(),
-            parameters_schema: r#"{"type":"object","properties":{}}"#.to_string(),
-        }]
+        vec![
+            types::ToolSpec {
+                name: TOOL.to_string(),
+                description:
+                    "Conformance probe: streams progress, logs, reports a denied capability"
+                        .to_string(),
+                parameters_schema: r#"{"type":"object","properties":{}}"#.to_string(),
+            },
+            types::ToolSpec {
+                name: FETCH_TOOL.to_string(),
+                description: "Fetch a URL through the host (net-http capability)".to_string(),
+                parameters_schema:
+                    r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#
+                        .to_string(),
+            },
+        ]
     }
 
     fn call_tool(name: String, arguments: String) -> Result<types::ToolResult, types::PluginError> {
+        if name == FETCH_TOOL {
+            return fetch(&arguments);
+        }
         if name != TOOL {
             return Err(types::PluginError::UnknownTool(name));
         }

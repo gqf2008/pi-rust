@@ -146,10 +146,70 @@ fn denied() -> Denied {
     }
 }
 
-/// State every instantiated component gets: WASI plus the resource table.
+/// What the user authorized for one plugin.
+///
+/// Loaded from `$KI_AGENT_DIR/plugins/<id>/grants.json` (default
+/// `~/.ki/agent/plugins/<id>/grants.json`). A missing file grants nothing: the
+/// host never authorizes on a plugin's behalf.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Grants {
+    /// Host-mediated HTTP, with a host allow-list.
+    #[serde(default)]
+    pub net_http: Option<NetHttpGrant>,
+    #[serde(default)]
+    pub fs: bool,
+    #[serde(default)]
+    pub exec: bool,
+    #[serde(default)]
+    pub timer: bool,
+    #[serde(default)]
+    pub net_sockets: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NetHttpGrant {
+    /// Hosts the plugin may reach; `*` allows any.
+    pub hosts: Vec<String>,
+}
+
+impl Grants {
+    /// Read the user's grants for `plugin_id`; a missing file means nothing is
+    /// granted.
+    pub fn load_for(plugin_id: &str) -> Self {
+        let Some(root) = agent_dir() else {
+            return Self::default();
+        };
+        let path = root.join("plugins").join(plugin_id).join("grants.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        serde_json::from_str(&text).unwrap_or_default()
+    }
+
+    fn allows_host(&self, host: &str) -> bool {
+        self.net_http.as_ref().is_some_and(|grant| {
+            grant
+                .hosts
+                .iter()
+                .any(|allowed| allowed == "*" || allowed == host)
+        })
+    }
+}
+
+fn agent_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("KI_AGENT_DIR") {
+        return Some(std::path::PathBuf::from(dir));
+    }
+    std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".ki").join("agent"))
+}
+
+/// State every instantiated component gets: WASI plus the resource table and
+/// the grants the guest's host imports are allowed to act on.
 struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
+    grants: Grants,
 }
 
 impl WasiView for HostState {
@@ -302,9 +362,75 @@ impl crate::kiqi::plugin::ui::Host for HostState {
     }
 }
 
-deny_capability!(net_http {
-    fetch(request: String) -> Result<String, Denied>;
-});
+/// Host-mediated HTTP: the request's host must be in the grant's allow-list.
+impl crate::kiqi::plugin::net_http::Host for HostState {
+    fn fetch(&mut self, request: String) -> Result<String, Denied> {
+        let request: serde_json::Value =
+            serde_json::from_str(&request).map_err(|error| Denied {
+                reason: format!("invalid net-http request: {error}"),
+            })?;
+        let url = request
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| Denied {
+                reason: "net-http request.url is required".to_string(),
+            })?;
+        let parsed = reqwest::Url::parse(url).map_err(|error| Denied {
+            reason: format!("invalid url `{url}`: {error}"),
+        })?;
+        let host = parsed.host_str().unwrap_or_default().to_string();
+        if !self.grants.allows_host(&host) {
+            return Err(Denied {
+                reason: format!("net-http to `{host}` is not granted"),
+            });
+        }
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|error| Denied {
+                reason: error.to_string(),
+            })?;
+        let method = request
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("GET");
+        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|error| Denied {
+            reason: error.to_string(),
+        })?;
+        let mut builder = client.request(method, parsed);
+        if let Some(headers) = request
+            .get("headers")
+            .and_then(serde_json::Value::as_object)
+        {
+            for (name, value) in headers {
+                if let Some(value) = value.as_str() {
+                    builder = builder.header(name, value);
+                }
+            }
+        }
+        if let Some(body) = request.get("body").and_then(serde_json::Value::as_str) {
+            builder = builder.body(body.to_string());
+        }
+
+        let response = builder.send().map_err(|error| Denied {
+            reason: error.to_string(),
+        })?;
+        let status = response.status().as_u16();
+        let headers: serde_json::Map<String, serde_json::Value> = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.to_string(),
+                    serde_json::Value::String(value.to_str().unwrap_or_default().to_string()),
+                )
+            })
+            .collect();
+        let body = response.text().unwrap_or_default();
+        Ok(serde_json::json!({"status": status, "headers": headers, "body": body}).to_string())
+    }
+}
 
 deny_capability!(fs {
     read(rel_path: String) -> Result<Vec<u8>, Denied>;
@@ -349,8 +475,22 @@ pub struct WasmPlugin {
 }
 
 impl WasmPlugin {
-    /// Load and instantiate a component. `init` is called before returning.
+    /// Load and instantiate a component with the grants the user recorded for
+    /// this plugin id (a missing `grants.json` grants nothing). `init` is called
+    /// before returning.
     pub fn load(id: impl Into<String>, wasm: &Path) -> Result<Self, PluginError> {
+        let id = id.into();
+        let grants = Grants::load_for(&id);
+        Self::load_with_grants(id, wasm, grants)
+    }
+
+    /// Load and instantiate with explicit grants (used by callers that manage
+    /// authorization themselves, and by tests).
+    pub fn load_with_grants(
+        id: impl Into<String>,
+        wasm: &Path,
+        grants: Grants,
+    ) -> Result<Self, PluginError> {
         let id = id.into();
         let engine = Engine::default();
         let component = Component::from_file(&engine, wasm)
@@ -367,6 +507,7 @@ impl WasmPlugin {
             HostState {
                 wasi: WasiCtxBuilder::new().build(),
                 table: ResourceTable::new(),
+                grants,
             },
         );
         let guest = World::instantiate(&mut store, &component, &linker)

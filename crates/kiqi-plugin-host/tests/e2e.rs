@@ -12,7 +12,7 @@ use kiqi_plugin::{
     Block, Event, EventAction, EventTag, HostCaps, Log, LogLevel, Plugin, PluginError, Progress,
     ProgressSink,
 };
-use kiqi_plugin_host::WasmPlugin;
+use kiqi_plugin_host::{Grants, NetHttpGrant, WasmPlugin};
 
 struct RecordingSink {
     blocks: Mutex<Vec<Progress>>,
@@ -91,8 +91,8 @@ fn loads_calls_streams_denies_and_unloads() {
 
     // The guest's declared tools are visible to the host.
     let tools = plugin.tools();
-    assert_eq!(tools.len(), 1, "one tool: {tools:?}");
-    assert_eq!(tools[0].name, "conformance");
+    assert!(tools.iter().any(|tool| tool.name == "conformance"));
+    assert!(tools.iter().any(|tool| tool.name == "fetch"));
 
     // A call: progress is streamed and the denied capability is reported.
     let sink = RecordingSink {
@@ -228,4 +228,98 @@ fn todo_guest_restores_from_the_session_branch() {
         "the added task is in the details: {}",
         added.details
     );
+}
+
+/// The `net-http` capability is gated by the user's grant, and the host checks
+/// the request's host against the allow-list.
+#[test]
+fn net_http_is_gated_by_the_users_grant() {
+    let wasm = fixture_wasm();
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    let request = serde_json::json!({"url": "http://127.0.0.1:9/"});
+
+    // No grant: the fetch tool degrades and reports the deny.
+    let plugin =
+        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    let denied = plugin.call("fetch", &request, &caps, &sink).expect("call");
+    assert!(denied.is_error, "ungranted net-http is an error result");
+    assert!(
+        text_of(&denied).contains("not granted"),
+        "got {}",
+        text_of(&denied)
+    );
+
+    // A grant whose allow-list does not cover the host is still denied.
+    let wrong_host = Grants {
+        net_http: Some(NetHttpGrant {
+            hosts: vec!["api.example.com".into()],
+        }),
+        ..Default::default()
+    };
+    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, wrong_host).expect("load");
+    let denied = plugin.call("fetch", &request, &caps, &sink).expect("call");
+    assert!(denied.is_error);
+    assert!(
+        text_of(&denied).contains("not granted"),
+        "got {}",
+        text_of(&denied)
+    );
+
+    // With the host allowed, the same call reaches a local server.
+    let (url, server) = spawn_http_server();
+    let granted = Grants {
+        net_http: Some(NetHttpGrant {
+            hosts: vec!["127.0.0.1".into()],
+        }),
+        ..Default::default()
+    };
+    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, granted).expect("load");
+    let allowed = plugin
+        .call("fetch", &serde_json::json!({"url": url}), &caps, &sink)
+        .expect("call");
+    assert!(!allowed.is_error, "granted fetch succeeds: {allowed:?}");
+    assert!(
+        text_of(&allowed).contains("hello from the host"),
+        "got {}",
+        text_of(&allowed)
+    );
+    server.join().unwrap();
+}
+
+fn text_of(outcome: &kiqi_plugin::ToolOutcome) -> String {
+    outcome
+        .blocks
+        .iter()
+        .map(|block| match block {
+            Block::Text(text) => text.clone(),
+            Block::Json(value) => value.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// One-shot HTTP server: replies to the first request with a fixed body.
+fn spawn_http_server() -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buffer = [0u8; 1024];
+            let _ = stream.read(&mut buffer);
+            let body = "hello from the host";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (format!("http://{addr}/"), handle)
 }

@@ -214,7 +214,11 @@ interface progress {
 /// Host-mediated HTTP (wraps `wasi:http` plus an allow-list); not raw sockets.
 interface net-http {
     use types.{denied};
-    /// Request and response are JSON, so the ABI does not model all of HTTP.
+    /// Host-mediated HTTP. The host checks the request's host against the
+    /// grant's allow-list before sending anything.
+    ///
+    /// `request` is JSON: `{url, method?, headers?: {name: value}, body?}`.
+    /// The response is JSON: `{status, headers: {name: value}, body}`.
     fetch: func(request: string) -> result<string, denied>;
 }
 

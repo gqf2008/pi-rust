@@ -1715,6 +1715,8 @@ name = "kiqi-plugin-host"
 version = "0.4.1"
 dependencies = [
  "kiqi-plugin",
+ "reqwest",
+ "serde",
  "serde_json",
  "wasmtime",
  "wasmtime-wasi",

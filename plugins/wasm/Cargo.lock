@@ -70,6 +70,7 @@ name = "kiqi-conformance-guest"
 version = "0.1.0"
 dependencies = [
  "kiqi-plugin-guest",
+ "serde_json",
 ]
 
 [[package]]

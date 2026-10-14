@@ -17,3 +17,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 kiqi-plugin-guest = { path = "../kiqi-plugin-guest" }
+serde_json = "1"
