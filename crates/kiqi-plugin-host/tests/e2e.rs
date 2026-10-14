@@ -1486,6 +1486,130 @@ fn webfetch_guest_keeps_its_url_policy_and_needs_the_grant() {
     assert!(denied.to_string().contains("denied"), "got {denied}");
 }
 
+/// `rpi-lens` ported to wasm: the check runs through the host's `exec`
+/// capability with a `project` cwd scope, so `git diff --check` runs against
+/// the project directory — and without the grant the tool degrades to a clear
+/// deny instead of running.
+#[test]
+fn rpi_lens_guest_runs_checks_in_the_project_directory() {
+    use kiqi_plugin_host::{ExecCwd, ExecGrant};
+
+    // The test needs `git` for real (the fixture init below and the guest's
+    // diff check). If it is not installed, say so and skip rather than fail on
+    // an environment fact.
+    if Command::new("git")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| !status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("skipping rpi_lens_guest_runs_checks_in_the_project_directory: no git on PATH");
+        return;
+    }
+
+    let wasm = build_guest("kiqi-rpi-lens-guest", "kiqi_rpi_lens_guest.wasm");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let init = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(project.path())
+        .status()
+        .expect("git init the project dir");
+    assert!(init.success());
+
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    // Granted with the project scope: the diff check runs in the project dir.
+    let plugin = WasmPlugin::load_with_options(
+        "rpi-lens",
+        &wasm,
+        Grants {
+            exec: Some(ExecGrant {
+                commands: vec!["git".to_string()],
+                cwd: ExecCwd::Project,
+                ..ExecGrant::default()
+            }),
+            ..Grants::default()
+        },
+        kiqi_plugin_host::Options {
+            project_dir: Some(project.path().to_path_buf()),
+            ..kiqi_plugin_host::Options::default()
+        },
+    )
+    .expect("load");
+    assert_eq!(plugin.id(), "rpi-lens");
+    assert!(
+        plugin.tools().iter().any(|tool| tool.name == "code_lens"),
+        "the tool is declared: {:?}",
+        plugin.tools()
+    );
+    let outcome = plugin
+        .call(
+            "code_lens",
+            &serde_json::json!({ "check": "diff" }),
+            &caps,
+            &sink,
+        )
+        .expect("call");
+    assert!(
+        text_of(&outcome).contains("check=diff exit=0"),
+        "git diff --check in a fresh repo passes cleanly: {}",
+        text_of(&outcome)
+    );
+
+    // Same plugin without the project scope: the child starts in the data
+    // directory, which is not a git repository.
+    let dir = tempfile::tempdir().expect("install tempdir");
+    let scoped_wasm = dir.path().join("plugin.wasm");
+    std::fs::copy(&wasm, &scoped_wasm).expect("copy the guest next to a data dir");
+    let plugin = WasmPlugin::load_with_grants(
+        "rpi-lens",
+        &scoped_wasm,
+        Grants {
+            exec: Some(ExecGrant {
+                commands: vec!["git".to_string()],
+                ..ExecGrant::default()
+            }),
+            ..Grants::default()
+        },
+    )
+    .expect("load");
+    let outcome = plugin
+        .call(
+            "code_lens",
+            &serde_json::json!({ "check": "diff" }),
+            &caps,
+            &sink,
+        )
+        .expect("call");
+    assert!(
+        text_of(&outcome).contains("check=diff exit=")
+            && text_of(&outcome).contains("Not a git repository"),
+        "without the project scope the check runs in the data dir (not a repo): {}",
+        text_of(&outcome)
+    );
+
+    // Without the grant at all, the tool reports the deny and how to fix it.
+    let plugin = WasmPlugin::load_with_grants("rpi-lens", &wasm, Grants::default()).expect("load");
+    let denied = plugin
+        .call(
+            "code_lens",
+            &serde_json::json!({ "check": "diff" }),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(
+        denied.to_string().contains("not granted"),
+        "the deny names the missing grant: {denied}"
+    );
+}
+
 /// A session that records what plan mode asked of it.
 #[derive(Default)]
 struct PlanSessionHost {
