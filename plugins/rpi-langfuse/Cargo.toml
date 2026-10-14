@@ -1,0 +1,23 @@
+[package]
+publish = false
+name = "rpi-langfuse"
+version = "0.4.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Langfuse tracing, scoring, and prompt management tools for the rpi Rust agent"
+readme = "README.md"
+keywords = ["rpi", "langfuse", "tracing", "observability", "llm"]
+categories = ["development-tools"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kiqi-plugin = { path = "../../crates/kiqi-plugin" }
+rpi-plugin-sdk = { path = "../../crates/rpi-plugin-sdk" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }

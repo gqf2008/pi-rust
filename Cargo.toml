@@ -14,6 +14,7 @@ members = [
     "plugins/rpi-plan-mode",
     "plugins/rpi-codegraph",
     "plugins/rpi-ask-user",
+    "plugins/rpi-langfuse",
     "plugins/rpi-subagents",
     "plugins/rpi-permissions",
     "plugins/rpi-lens",

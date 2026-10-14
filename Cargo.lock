@@ -2391,6 +2391,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpi-langfuse"
+version = "0.4.1"
+dependencies = [
+ "kiqi-plugin",
+ "reqwest",
+ "rpi-plugin-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rpi-lens"
 version = "0.4.0"
 dependencies = [
