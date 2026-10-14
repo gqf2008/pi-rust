@@ -20,3 +20,9 @@ kiqi-plugin = { path = "../../crates/kiqi-plugin" }
 rpi-plugin-sdk = { path = "../../crates/rpi-plugin-sdk" }
 serde_json = { workspace = true }
 wait-timeout = { workspace = true }
+
+[features]
+# Set by the `ki` binary: keeps the cdylib `#[no_mangle]` entrypoint out of the
+# rlib, so linking several plugins into one executable cannot collide on it.
+# Left off when the plugin is built standalone (the `ki dev` cdylib channel).
+compile-time = []

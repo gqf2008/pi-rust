@@ -1311,6 +1311,13 @@ pub fn guard_or<R>(fallback: R, body: impl FnOnce() -> R) -> R {
 #[macro_export]
 macro_rules! export_plugin {
     ($body:expr) => {
+        // The cdylib entrypoint is the one `#[no_mangle]` symbol a plugin crate
+        // emits. Every plugin compiled into the `ki` binary would define the
+        // same symbol, and lld (Linux) refuses to link several of them into one
+        // executable — so the host enables the invoking crate's `compile-time`
+        // feature, which removes the cdylib export from that build while the
+        // standalone cdylib (`ki dev`, `cargo build -p <plugin>`) keeps it.
+        #[cfg(not(feature = "compile-time"))]
         #[no_mangle]
         pub extern "C" fn rpi_plugin_register(api: *const $crate::PluginApi) -> i32 {
             // SAFETY: host guarantees `api` is valid for this call.
