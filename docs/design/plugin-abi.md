@@ -15,8 +15,9 @@
 > 只有明确需要第三方分发/沙箱的才迁。
 >
 > `plugins/kiqi-plugin.wit` 已升到 parse-validated 的 `0.5.0`（0.1.0 连 `wasm-tools component wit`
-> 都过不了：variant case 带命名/多字段是非法的）：能力面做全、每个能力独立 interface、
-> 调用一律 `result<_, denied>`、进度用 import sink、timer 由宿主驱动。
+> 都过不了：variant case 带命名/多字段是非法的）：导出面与 `trait Plugin` **一一对应**、四个可授权能力
+> （`net-http`/`fs`/`exec`/`net-sockets`）**全部真实现且授权自带策略**、调用一律 `result<_, capability-error>`
+> （`denied` 授权拒 / `failed` 操作失败）、进度用 import sink。
 
 ## 1. 为什么换
 
