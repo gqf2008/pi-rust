@@ -721,6 +721,14 @@ fn run_with_limits(
         // Cleared, then only `PATH` back: a plugin must not inherit the host's
         // `KI_SESSION_ID` or any other ambient secret.
         .env_clear();
+    // Its own process group, so descendants can be reaped with it: a command that
+    // leaves a background child holding the pipe would otherwise block the
+    // readers below forever — and with them the tool call.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
@@ -755,6 +763,13 @@ fn run_with_limits(
             None => std::thread::sleep(std::time::Duration::from_millis(10)),
         }
     };
+    // Reap the whole group, not just the child: a surviving descendant would keep
+    // the pipes open and the joins below would never return. `ESRCH` (the group is
+    // already gone) is the common case and is ignored.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
     let stdout = stdout_reader.join().unwrap_or_default();
     let stderr = stderr_reader.join().unwrap_or_default();
     Ok(serde_json::json!({

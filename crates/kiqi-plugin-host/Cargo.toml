@@ -26,3 +26,7 @@ reqwest = { workspace = true, features = ["blocking"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# Killing a child's whole process group (see `run_with_limits`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

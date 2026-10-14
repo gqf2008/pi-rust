@@ -552,7 +552,7 @@ conformance guest 因此多了一路：拿 `fs` 写一个文件再读回来，�
 |---|---|---|
 | `net-http` | `{hosts:[...]}` | 请求 host 命中允许列表 |
 | `net-sockets` | `{hosts:[...]}` | 连接的 host 命中允许列表；**宿主持有 socket**，guest 只拿到 `u32` 句柄（正好是 WIT 原本的 `connect->u32` 形状），所以握完手也绕不过去 |
-| `exec` | `{commands:[...]}` | **裸命令名**（含 `/`/`\` 直接拒，无 shell）；cwd 关在插件自己的 data 目录（相对路径逐组件检查）；**环境变量清空后只回填 `PATH`**（不继承宿主的 `KI_SESSION_ID` 等）；stdout/stderr 各 256 KiB 上限；30s 墙上时钟超时后 kill |
+| `exec` | `{commands:[...]}` | **裸命令名**（含 `/`/`\` 直接拒，无 shell）；cwd 关在插件自己的 data 目录（相对路径逐组件检查）；**环境变量清空后只回填 `PATH`**（不继承宿主的 `KI_SESSION_ID` 等）；stdout/stderr 各 256 KiB 上限；30s 墙上时钟超时后 kill；子进程在**独立进程组**里，结束后**连组一起收** |
 | `fs` | `true` | 监禁在 `plugins/<id>/data/`（监禁即策略，所以仍是布尔） |
 
 “策略缺失”是**错误**而非“全放开”：`grant("exec", vec![])` 返回 `exec needs at least one --command`。
@@ -598,6 +598,12 @@ conformance fixture 相应地多了一个 `alloc` 工具，e2e 两边都验：**
 一个被授权（或被攻陷）的主机只要不停发就能把宿主内存吃干。现在封顶 **8 MiB**
 （`MAX_RESPONSE_BYTES`），超出返回 `failed` 并明说上限；e2e 用一个真发 9 MiB 的 loopback 服务验它
 （读端到上限就停，服务侧的 broken pipe 是预期内的）。
+
+`exec` 还修了一个**会挂死宿主**的缺陷：读线程 `join()` 等的是管道 EOF，而任何留下后台进程的命令
+（如 `sh -c 'sleep 60 & exit 0'`）都会让孙子进程攥着管道——**正常退出也会卡死**，不只是超时路径。
+现在子进程在独立进程组里（`process_group(0)`），子进程结束后无论成功还是超时都 `kill(-pid)`
+收掉整组，读线程才能拿到 EOF。e2e 用一个后台子进程的用例钉住，且它跑在单独线程上
+——回归时表现为 15s 后断言失败，而不是把测试进程挂死。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里

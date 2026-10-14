@@ -1172,3 +1172,36 @@ fn net_http_refuses_an_oversized_response_body() {
         "the reason must name the cap: {body}"
     );
 }
+
+/// A command that leaves a background child must not hang the call: the child's
+/// group is reaped with it, so the output pipes close. Run on its own thread so a
+/// regression fails an assertion instead of hanging the test binary.
+#[cfg(unix)]
+#[test]
+fn exec_does_not_hang_when_the_command_leaves_a_background_child() {
+    use kiqi_plugin_host::ExecGrant;
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (_dir, plugin) = load_fixture_in_temp(Grants {
+            exec: Some(ExecGrant {
+                commands: vec!["sh".to_string()],
+            }),
+            ..Grants::default()
+        });
+        let outcome = call_main_tool(
+            &plugin,
+            serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "sleep 60 & exit 0"] } }),
+        )
+        .expect("call");
+        let _ = sender.send(text_of(&outcome));
+    });
+
+    let text = receiver
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("exec must return even though a background child held the pipe");
+    assert!(
+        text.contains("exec=") && !text.contains("exec=exec of") && !text.contains("exec=failed:"),
+        "the command ran (its stdout is empty) rather than being denied or failing: {text}"
+    );
+}

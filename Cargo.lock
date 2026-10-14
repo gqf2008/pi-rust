@@ -1715,6 +1715,7 @@ name = "kiqi-plugin-host"
 version = "0.4.1"
 dependencies = [
  "kiqi-plugin",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

@@ -53,6 +53,25 @@ fn fetch(arguments: &str) -> Result<types::ToolResult, types::PluginError> {
 
 /// Render a capability error for the model: a refusal and a failure read
 /// differently on purpose.
+/// An explicit `{cmd, args}` from the tool arguments, so a caller can drive a
+/// command that is not the default `echo` (e.g. one that leaves a background
+/// child holding the pipe).
+fn exec_request(arguments: &str) -> Option<(String, Vec<String>)> {
+    let spec = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+    let spec = spec.get("exec")?;
+    let cmd = spec.get("cmd")?.as_str()?.to_string();
+    let args = spec
+        .get("args")
+        .and_then(|args| args.as_array())
+        .map(|args| {
+            args.iter()
+                .filter_map(|arg| arg.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((cmd, args))
+}
+
 /// The `address` field of the tool arguments, when the caller supplied one.
 fn address_from(arguments: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(arguments)
@@ -203,7 +222,9 @@ impl Guest for Conformance {
 
         // `exec`: an allow-listed bare command, no shell. Granted it returns the
         // child's stdout; otherwise the reason.
-        let exec_outcome = match exec::run("echo", &["conformance".to_string()], None) {
+        let (exec_cmd, exec_args) = exec_request(&arguments)
+            .unwrap_or_else(|| ("echo".to_string(), vec!["conformance".to_string()]));
+        let exec_outcome = match exec::run(&exec_cmd, &exec_args, None) {
             Ok(json) => serde_json::from_str::<serde_json::Value>(&json)
                 .ok()
                 .and_then(|value| {
