@@ -1116,6 +1116,8 @@ fn exec_cwd_project_scope_runs_in_the_project_directory() {
         "and not in the plugin's data directory"
     );
 
+    // A relative cwd descends into an existing subdirectory.
+    std::fs::create_dir_all(project.path().join("sub")).expect("project subdir");
     let outcome = call_main_tool(
         &plugin,
         serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch marker"], "cwd": "sub" } }),
@@ -1125,6 +1127,23 @@ fn exec_cwd_project_scope_runs_in_the_project_directory() {
         project.path().join("sub/marker").is_file(),
         "a relative cwd descends inside the project directory: {}",
         text_of(&outcome)
+    );
+
+    // But the project tree is the user's: a cwd that does not exist must fail,
+    // not be `mkdir -p`'d into it.
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "true"], "cwd": "typo-dir" } }),
+    )
+    .expect("call");
+    assert!(
+        text_of(&outcome).contains("does not exist"),
+        "a missing project cwd is an error: {}",
+        text_of(&outcome)
+    );
+    assert!(
+        !project.path().join("typo-dir").exists(),
+        "a refused cwd must not be created inside the project"
     );
 
     // The project root is still a root: `..` out of it is refused.

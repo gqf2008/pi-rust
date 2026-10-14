@@ -760,6 +760,11 @@ impl crate::kiqi::plugin::exec::Host for HostState {
             kiqi_plugin::grants::ExecCwd::PluginData => (self.data_dir()?, "the plugin directory"),
             kiqi_plugin::grants::ExecCwd::Project => (self.project_dir()?, "the project directory"),
         };
+        // The plugin's data directory is its sandbox — creating it (or a
+        // subdir) on demand is the point. The project directory is the user's
+        // tree: a misspelled cwd must fail there, not `mkdir -p` into it (the
+        // compile-time plugin's spawn failed the same way).
+        let sandboxed = matches!(grant.cwd, kiqi_plugin::grants::ExecCwd::PluginData);
         let cwd = match cwd {
             // The same lexical + symlink checks as `fs`: a guest-supplied cwd
             // must not walk out of the granted root, and a symlinked parent
@@ -773,15 +778,21 @@ impl crate::kiqi::plugin::exec::Host for HostState {
                 // parent against the root).
                 if resolved == root {
                     root.clone()
+                } else if !sandboxed && !resolved.exists() {
+                    return Err(CapabilityError::Failed(format!(
+                        "cwd `{rel}` does not exist inside {what}"
+                    )));
                 } else {
-                    symlink_checked_under(&root, &resolved, true, what)?
+                    symlink_checked_under(&root, &resolved, sandboxed, what)?
                 }
             }
             None => root,
         };
-        std::fs::create_dir_all(&cwd).map_err(|error| {
-            CapabilityError::Failed(format!("create {}: {error}", cwd.display()))
-        })?;
+        if sandboxed {
+            std::fs::create_dir_all(&cwd).map_err(|error| {
+                CapabilityError::Failed(format!("create {}: {error}", cwd.display()))
+            })?;
+        }
         run_with_limits(&cmd, &args, &cwd, grant.timeout_seconds)
     }
 }
