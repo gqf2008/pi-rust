@@ -327,7 +327,7 @@ e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许
 | 门禁 | 状态 |
 |---|---|
 | 1 跨平台同一份 `.wasm` | ✅ 同一 fixture 在本机 macOS 与 CI Linux 都构建+加载+跑通（与编译期版本的 golden diff 仍未做） |
-| 2 面覆盖断言 | ✅ `conformance_surface_is_reachable`：tools / commands / flags / shortcuts / before_agent_start / probe / ui.dialog / ui.set_status 全部被宿主真实触达 |
+| 2 面覆盖断言 | ✅ `conformance_surface_is_reachable` 断言契约层被真实触达；**会话层也已接线**（§6.19）：tools / events（原有）+ commands / shortcuts / before_agent_start / probe（新增） |
 | 3 流式进度 | ✅ conformance e2e 断言 3 个 progress 块按序到达 |
 | 4 UI 往返 | ✅ `ui.dialog` 成功往返 + 取消 + 超时都断言（`rpi-ask-user` wasm 移植，§6.15） |
 | 5 拒绝双态 | ✅ 无 UI → `set_status` denied；授予 UI → granted；net-http 无 grant / 错 host → denied，匹配 → 真请求 |
@@ -422,6 +422,27 @@ todo list: compiled 43120 ns/call, wasm 32887 ns/call (0.8x)
 - 注意：这是微基准，不含 wasmtime 实例化（`load` 每插件一次）与真实 I/O；真实成本主要在首次
   `Component` 编译/实例化（一次性），不在每次调用。
 - **§6.3 八条门禁全部收绿。**
+
+### 6.19 已落地：非工具贡献面接进会话（门禁 2 从契约层升级到会话层）
+
+原先会话只消费编译期/wasm 插件的 **tools** 与 **on_event**：`commands` / `flags` / `shortcuts` /
+`before_agent_start` / `probe` 在 trait 层实现、也在 `PluginHost` 层测过，但会话从不主动问。现在五个面全部接上：
+
+- **commands**：`register_compiled_commands` 把声明注册进 TUI 命令表（内置先注，重复跳过，不能遮蔽
+  `/help`）；`CompiledCommand::execute` 调 `run_command` 把返回文本记进 transcript。
+- **shortcuts**：`dispatch_key_event` 对声明了该键的插件派发 `Input` 事件；`Claimed`/`Replace` 即消费按键，
+  与原生 `CLAIMED` 同义。只问 `shortcut_hosts` 筛出来的插件。
+- **before_agent_start**：`compiled_prompt_hooks` 链在原生 `ExtensionProviderHooks` 之后，原生先算出提示词、
+  编译期/wasm 插件再有机会替换；**按 prompt 时间戳去重**（一次工具循环的多次 provider 调用只算一次）。
+  `rpi_extensions::before_agent_start_input` 让两半共用同一份载荷形状。
+- **probe**：`probe_tool_call` 在 harness 的 `BeforeToolCall` 钩子里跑 `before-tool-call` 闸门。它本地同步，
+  所以否决在原生的审批对话框弹开**之前**就生效；`Replace` 会带进原生派发，两边看到同一份 args。
+- **flags**：**不需要接线**——`get_cli_flag` 本就从“通用解析的未知长选项”里取值，插件的 `cli_flag(name)`
+  直接读到；声明只用于可发现性。
+
+可测性：闸门 / 变换 / 按键筛选都收显式 host 列表（`probe_tool_call_with`、`compiled_prompt_hooks_with`、
+`shortcut_hosts`），所以测试能注入合成插件；另有一个测试加载**真的 conformance wasm 组件**，证明这套
+会话路径同样能到达沙箱插件。命令面由 `interactive_tui::commands` 的两个单测锁住。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
