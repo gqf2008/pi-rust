@@ -96,12 +96,12 @@ wasm-tools component wit plugins/kiqi-plugin.wit
 ## 6. 测试与 CI
 
 ```bash
-cargo test -p kiqi-plugin-host --lib --test e2e      # 27 e2e + 2 单测
+cargo test -p kiqi-plugin-host --lib --test e2e      # 27 e2e + 5 单测
 cargo test -p rpi-plan-mode-core                      # 6
 cargo test -p rpi-lens                                # 3
-cargo test -p rpi-cli --lib                           # 508
+cargo test -p kiqi-plugin --lib                       # 7
+cargo test -p rpi-cli --lib                           # 510
 cargo test -p rpi-extensions --lib                    # 102
-cargo test -p kiqi-plugin --lib                       # 5
 ```
 
 CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows installer）全绿。
@@ -126,11 +126,19 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 ## 8. 提交轨迹（近期，`fork/main`）
 
 ```
-本批（exec cwd scope + rpi-lens 移植）：
+本批（exec cwd scope + rpi-lens 移植；含一轮分维度对抗审查的修正）：
 - feat(plugins): exec grant carries a cwd scope and a time budget
 - feat(plugins): port rpi-lens to wasm (kiqi-rpi-lens-guest)
 - fix(plugins): rpi-lens truncation no longer panics mid-codepoint
 - docs(plugin-abi): round 6.30 + correct three stale claims
+- fix(host): the jail check must not create directories outside the root
+- fix(plugins): the lens guest's deny advice must list every command it needs
+- fix(cli): exec flag hygiene in `ki plugin`
+- fix(host): a project-scoped exec cwd must exist
+- test(host): pin the exec timeout clamp and the project-dir fallback
+- fix(plugins): lens guest cwd mapping edge cases + documented parity gaps
+- docs(plugin-abi): correct the phantom manifest gate and stale states
+- fix(cli): announce when re-granting exec resets its scope/budget
 
 dce1216 移植 rpi-webfetch + rpi-plan-mode（ABI 0.6.0，补导入面两缺口）
 087f73b docs: intro 里已成假的现状描述

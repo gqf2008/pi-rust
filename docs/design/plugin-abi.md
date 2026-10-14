@@ -100,7 +100,7 @@ pub trait Plugin: Send + Sync {
 |---|---|---|
 | **声明** | 插件 import 哪些能力（WIT + manifest） | 插件作者 |
 | **授权** | 用户批准了哪些能力、什么 scope | **用户**（唯一决策者） |
-| **执行** | 为全部 import 提供实现（未授予的挂 deny 桩）；manifest 声明的 required 缺则拒载 | 宿主（纯机制） |
+| **执行** | 为全部 import 提供实现；未授予的调用在**调用时**回 `denied`（运行时授权检查） | 宿主（纯机制） |
 
 **宿主永不自动授权。** 没有用户的 grant，对应调用必定 `denied`（或 required 缺时拒绝加载），
 不是「默认给」。
@@ -129,10 +129,13 @@ pub trait Plugin: Send + Sync {
 `types`/`log`/`ui`/`progress`，world 里另七个 interface 根本没进组件），所以能“选择性不挂”的
 只是那些未被使用的 interface，**用到的**一个都不能缺。于是 wasm 层的实际做法是：
 
-- 宿主为**全部** import 提供实现——已授予的走真实实现，未授予的挂 **deny 桩**（每次调用回 `denied`）；
-- “缺能力 => 加载即拒”靠插件的 **manifest 声明 required 能力**，宿主在实例化前校验（fail-closed）；
+- 宿主为**全部** import 提供实现——已授予的走真实实现，未授予的调用在**调用时**回 `denied`；
 - “缺能力 => 不可表达”这个强保证**只属于编译期 `trait Plugin` 的 `HostCaps: None`**。
-wasm 层是“总是可实例化，但未授予的调用必定 `denied`” + “required 缺就拒绝加载”两层合起来等效。
+
+所以 wasm 层的实际形态是“**总是可实例化，但未授予的调用必定 `denied`**”，单层。
+~~manifest 声明 required 能力、宿主实例化前拒载~~——写过这个设想但从未实现，相关措辞已
+在 2026-10-15 随 §6.30 一并更正（WIT 顶部注释与 §6.9 曾同样误述）。fail-closed 由运行时
+检查承担：缺授权的调用拿不到能力，而不是加载失败。
 
 每个能力依然是**独立 interface**：deny 桩、审计与以后独立收紧都因此最小化。
 
@@ -282,7 +285,8 @@ wasm 层是“总是可实例化，但未授予的调用必定 `denied`” + “
 - **`HostCaps` 接进 host import**：调用期间把 `HostCaps` 与 `ProgressSink` 一起放进
   线程局部的 `CallContext`（借用期由 call 保证、调用被互斥序列化）；`session-read` 转发到
   `caps.session`，`session-control`/`inject`/`ui` 转发到对应能力（缺能力或 caps 不存在 →
-  `denied`）。**现状**（ABI 0.6.0）：`net-http` 与 `fs` 已真实现（`fs` 关在插件自己的
+  `denied`）。**当时现状**（ABI 0.6.0 之前的过渡态；`exec`/`net-sockets` 在 §6.26 已真实现，
+这行的「仍是 deny 桩」自此过期）：`net-http` 与 `fs` 已真实现（`fs` 关在插件自己的
   `plugins/<id>/data/` 里，越狱写法直接拒）；`exec`/`net-sockets` 仍是 deny 桩，所以
   `ki plugin install` 会对“声明了但本构建无法执行”的能力**明说**（`capability_is_enforced`），
   而不是让用户授权一个永远不会生效的东西；`timer` 已随 `on-tick` 一起删除。
@@ -683,12 +687,17 @@ handover 里点名的“下一个真实阻塞点”：诊断类插件要在**项
 
 **移植 `rpi-lens` → `plugins/wasm/kiqi-rpi-lens-guest`**（走 `exec` + `session-read`）。
 逻辑小（check 名 → argv、输出截断格式化），照 webfetch 的样子直接随 guest 带一份，
-不开 `-core` crate。三个差异写进 guest README：
+不开 `-core` crate。差异写进 guest README：
 
 1. **砍掉 `timeoutSeconds` 参数**——预算随授权，调用方不能出价盖过用户的预算；
 2. **`cwd` 限项目内**——编译期版本接受机器上任意绝对路径；wasm 版只收相对路径或
-   项目目录内的绝对路径（用 `session-read` 的 `info().cwd` 做词法前缀剥离）；
-3. 超时文案从 “timed out after {n}s” 变成 “hit the exec time budget”（数字在授权里）。
+   项目目录内的绝对路径（用 `session-read` 的 `info().cwd` 做词法前缀剥离，词法意味着
+   符号链接拼写（macOS `/tmp` ↔ `/private/tmp`）会被误拒——fail-safe，传相对路径即可）；
+3. 超时文案从 “timed out after {n}s” 变成 “hit the exec time budget”（数字在授权里）；
+4. **子进程环境清空**（只有 `PATH`）——没有 `CARGO_HOME`/`RUSTUP_HOME`/`RUSTFLAGS`/代理
+   变量；标准 rustup/cargo 安装不受影响，依赖这些变量的项目会构建得不一样；
+5. **参数 JSON 解析失败直接报错**——编译期版本把坏参数当 `null` 然后跑默认的 diff 检查；
+   wasm 版拒绝，而不是跑一个没人点的检查。
 
 顺手修掉编译期 `rpi-lens` 的一个潜伏 panic：输出截断 `text.truncate(40_000)` 在多字节
 字符中间下刀会 panic（`String::truncate` 的字符边界语义），改成退到字符边界再截，
@@ -698,6 +707,21 @@ e2e（`kiqi-plugin-host`）：cwd 默认 data 目录、相对 cwd 下钻、`..`/
 符号链接父目录被拒（unix）、project scope 落在注入的项目目录、超时预算真掐死 `sleep 10`；
 lens 移植验“project scope 下 `git diff --check` exit=0 / data 目录下报 Not a git repository /
 无授权报 denied 并指给用户该敲什么命令”。
+
+**审查后修正**（这批 diff 过了一轮分维度对抗审查，确认并修掉的）：
+
+- **监狱检查先建目录后验路径**（承重缺陷，fs 老代码带过来的）：`create_dir_all` 在
+  canonicalize 之前跑，符号链接中间件会把目录建到监狱外——操作照样被拒，污染却留下了。
+  改成先验最深的现存前缀、再建（必然干净的）尾巴；回归测试钉住“拒绝后监狱外零创建”。
+- **拒绝文案的破坏性引导**：guest 的 deny 建议只写被拦的那条命令，而 `ki plugin grant`
+  是整份替换 ExecGrant——照着敲会顺手吊销另一条命令。建议改为列全工具要用的命令。
+- CLI 卫生：`--timeout` 在解析期就验界（install 不再把授权错误降级成 note 还 exit 0）；
+  install 对不声明 exec 的组件硬拒 `--cwd/--timeout`、对已授权过的 exec 明说“没应用”；
+  revoke 拒收 flags。
+- project 范围的 cwd 必须**已存在**（写错路径不再往用户项目里 mkdir）；plugin-data 范围
+  照旧自动建（沙箱本来就是插件的）。
+- guest 的 cwd 前缀剥离补上尾部斜杠归一（`/proj/` == `/proj`），并写明词法剥离的
+  fail-safe 边界（符号链接拼写误拒时传相对路径）。
 
 ## 7. 待定
 
