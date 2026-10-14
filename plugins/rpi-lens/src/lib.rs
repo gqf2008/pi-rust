@@ -54,15 +54,27 @@ pub(crate) fn code_lens(params: &Value) -> Result<String, String> {
         .map_err(|err| format!("failed to collect {check} output: {err}"))?;
     let mut text = String::from_utf8_lossy(&output.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
-    if text.len() > 40_000 {
-        text.truncate(40_000);
-        text.push_str("\n[truncated]");
-    }
+    truncate_output(&mut text);
     Ok(format!(
         "check={check} exit={}\n{}",
         output.status.code().unwrap_or(-1),
         text.trim()
     ))
+}
+
+/// Cap combined output at 40_000 bytes, truncating on a char boundary:
+/// `String::truncate` panics when the byte offset lands mid-codepoint, so a
+/// large enough clippy report with non-ASCII (e.g. a quoted identifier in
+/// CJK) would take the tool down with a panic instead of returning.
+fn truncate_output(text: &mut String) {
+    if text.len() > 40_000 {
+        let mut end = 40_000;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str("\n[truncated]");
+    }
 }
 
 export_single_tool_plugin!(
@@ -80,5 +92,29 @@ mod tests {
     fn rejects_unknown_check() {
         let value = serde_json::json!({"check":"shell"});
         assert!(code_lens(&value).unwrap_err().contains("diff"));
+    }
+
+    /// Regression: the 40_000-byte cap must truncate on a char boundary. With
+    /// a multi-byte codepoint straddling the cut, `String::truncate(40_000)`
+    /// panics — this would have taken the tool down on a large non-ASCII
+    /// report.
+    #[test]
+    fn truncation_does_not_panic_mid_codepoint() {
+        // '中' is 3 bytes; put its start one byte before the cut so a naive
+        // truncate at 40_000 lands inside it.
+        let mut text = "a".repeat(39_999);
+        text.push_str("中文 tail");
+        truncate_output(&mut text);
+        assert!(text.ends_with("\n[truncated]"));
+        // The cut kept whole codepoints only: the body before the marker is
+        // at most the cap.
+        assert!(text.len() <= 40_000 + "\n[truncated]".len());
+    }
+
+    #[test]
+    fn truncation_leaves_short_output_alone() {
+        let mut text = "short output".to_string();
+        truncate_output(&mut text);
+        assert_eq!(text, "short output");
     }
 }
