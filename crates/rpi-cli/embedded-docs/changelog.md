@@ -11,6 +11,26 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-14
+
+### Added
+
+- **Compile-time plugins now receive events.** The host fans `SessionStart`,
+  `BeforeAgentStart`, provider requests, messages and tool calls out to every
+  compiled-in plugin's `on_event`, so a `ki` with no dynamic libraries still
+  traces a run and restores session state. `rpi-extensions` owns the dispatch
+  sink; `ki` installs it per session with that session's capabilities.
+- **`rpi-langfuse` is compiled in** behind `plugin-rpi-langfuse` (default on):
+  automatic Langfuse tracing over OTLP, plus the `langfuse_score`,
+  `langfuse_prompt` and `langfuse_trace` tools. Its 14 event handlers and three
+  tools left the cdylib ABI for the `Plugin` trait, and `set_status` now goes
+  through the host capability instead of a raw runtime-action id.
+
+### Fixed
+
+- The `rpi-goal` test target compiles again (its unknown-action test predated
+  the host-aware `goal()` signature).
+
 ## [0.4.0] - 2026-10-13
 
 ### Changed
