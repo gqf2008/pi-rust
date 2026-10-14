@@ -1067,6 +1067,24 @@ fn exec_cwd_refuses_a_symlinked_parent() {
         text_of(&outcome)
     );
     assert!(!outside.path().join("escaped").exists());
+
+    // A symlinked MIDDLE component: the refusal must be clean — the jail check
+    // verifies the existing prefix before creating anything, so the refused
+    // call must not leave `outside/sub` behind.
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "true"], "cwd": "link/sub" } }),
+    )
+    .expect("call");
+    assert!(
+        text_of(&outcome).contains("exec=failed:"),
+        "a symlinked middle component is refused: {}",
+        text_of(&outcome)
+    );
+    assert!(
+        !outside.path().join("sub").exists(),
+        "a refused cwd must not create directories outside the jail"
+    );
 }
 
 /// With the `project` cwd scope, the child starts in the project directory —

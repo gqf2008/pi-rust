@@ -591,30 +591,49 @@ fn symlink_checked_under(
     std::fs::create_dir_all(root)
         .map_err(|error| CapabilityError::Failed(format!("create {}: {error}", root.display())))?;
     let root = &root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    // A path equal to the root itself has no final component inside the jail —
+    // refuse it as before (callers name things inside the jail; `exec` handles
+    // its own "cwd is the root" case without calling this).
+    if resolved == root {
+        return Err(CapabilityError::Failed(format!(
+            "path has no file name inside {what}"
+        )));
+    }
+    // Verify the deepest EXISTING component before creating anything:
+    // `create_dir_all` on an unchecked parent would follow a symlinked middle
+    // component out of the jail and create directories in it — the escape
+    // check would still refuse the operation, but the pollution would stay.
+    // `resolved` is lexically inside the root already (`jail_under`), so this
+    // walk reaches the root at the latest. A broken symlink lstats fine but
+    // fails to canonicalize — fail closed.
+    let mut probe = resolved;
+    while probe != root && std::fs::symlink_metadata(probe).is_err() {
+        probe = probe.parent().unwrap_or(root);
+    }
+    let probe = probe.canonicalize().map_err(|error| {
+        CapabilityError::Failed(format!("resolve {}: {error}", probe.display()))
+    })?;
+    if !probe.starts_with(root) {
+        return Err(CapabilityError::Failed(format!("path escapes {what}")));
+    }
+    // Only now is creation safe: everything from the verified prefix down did
+    // not exist a moment ago, so no symlink can already sit inside it.
     let parent = resolved.parent().unwrap_or(root);
     if create_parents {
         std::fs::create_dir_all(parent).map_err(|error| {
             CapabilityError::Failed(format!("create {}: {error}", parent.display()))
         })?;
     }
-    let parent = parent.canonicalize().map_err(|error| {
-        CapabilityError::Failed(format!("resolve {}: {error}", parent.display()))
-    })?;
-    if !parent.starts_with(root) {
-        return Err(CapabilityError::Failed(format!("path escapes {what}")));
-    }
-    let name = resolved
-        .file_name()
-        .ok_or_else(|| CapabilityError::Failed("path has no file name".to_string()))?;
-    let target = parent.join(name);
-    if let Ok(metadata) = std::fs::symlink_metadata(&target) {
+    // The final component itself must not be a link, even to somewhere inside
+    // the root.
+    if let Ok(metadata) = std::fs::symlink_metadata(resolved) {
         if metadata.file_type().is_symlink() {
             return Err(CapabilityError::Failed(format!(
                 "refusing to follow a symlink inside {what}"
             )));
         }
     }
-    Ok(target)
+    Ok(resolved.to_path_buf())
 }
 
 /// Plugin filesystem, jailed to `plugins/<id>/data/`.
@@ -1419,5 +1438,33 @@ mod tests {
         state.grants.fs = false;
         let error = state.fs_path("x").expect_err("denied");
         assert!(matches!(error, CapabilityError::Denied(_)), "got {error:?}");
+    }
+
+    /// Regression: the jail check must verify the existing prefix BEFORE
+    /// creating anything. `create_dir_all` on an unchecked parent follows a
+    /// symlinked middle component out of the jail and pollutes it — the write
+    /// is then refused, but the directory it made outside stays.
+    #[cfg(unix)]
+    #[test]
+    fn the_jail_check_creates_nothing_outside_the_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("data");
+        std::fs::create_dir_all(&root).expect("data dir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::os::unix::fs::symlink(&outside, root.join("link")).expect("symlink");
+
+        let state = state(&root);
+        let resolved = state
+            .jail("link/newdir/file.txt")
+            .expect("lexically inside");
+        assert!(
+            state.symlink_checked(&resolved, true).is_err(),
+            "a symlinked middle component must be refused"
+        );
+        assert!(
+            !outside.join("newdir").exists(),
+            "the refusal must not have created directories outside the jail"
+        );
     }
 }
