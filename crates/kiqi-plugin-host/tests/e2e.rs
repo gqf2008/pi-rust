@@ -8,7 +8,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 
-use kiqi_plugin::{Block, HostCaps, Log, LogLevel, Plugin, PluginError, Progress, ProgressSink};
+use kiqi_plugin::{
+    Block, Event, EventAction, EventTag, HostCaps, Log, LogLevel, Plugin, PluginError, Progress,
+    ProgressSink,
+};
 use kiqi_plugin_host::WasmPlugin;
 
 struct RecordingSink {
@@ -78,6 +81,8 @@ fn loads_calls_streams_denies_and_unloads() {
         text.contains("ui=") && !text.contains("ui=granted"),
         "the denied capability must be reported: {text}"
     );
+    // `details` is the state channel that must survive fork/switch.
+    assert_eq!(outcome.details, serde_json::json!({"conformance": true}));
 
     let blocks = sink.blocks.lock().unwrap();
     assert_eq!(blocks.len(), 3, "three progress blocks streamed");
@@ -90,6 +95,21 @@ fn loads_calls_streams_denies_and_unloads() {
         .call("nope", &serde_json::json!({}), &caps, &sink)
         .unwrap_err();
     assert!(matches!(error, PluginError::UnknownTool(_)), "got {error}");
+
+    // Events carry an action: the fixture claims `BeforeAgentStart`.
+    let claimed = plugin.on_event(
+        &Event::new(
+            EventTag::BeforeAgentStart,
+            serde_json::json!({"prompt": "hi"}),
+        ),
+        &caps,
+    );
+    assert_eq!(claimed, EventAction::Claimed, "a wasm plugin can claim");
+    let observed = plugin.on_event(
+        &Event::new(EventTag::SessionStart, serde_json::Value::Null),
+        &caps,
+    );
+    assert_eq!(observed, EventAction::Continue);
 
     // Unload releases the instance; later calls fail cleanly instead of using a
     // released store.

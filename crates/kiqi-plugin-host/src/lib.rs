@@ -33,15 +33,16 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use kiqi_plugin::{
-    Event, EventAction, HostCaps, Plugin as PluginTrait, PluginError, Progress, ProgressSink,
-    ToolOutcome, ToolSpec,
+    Block, Event, EventAction, HostCaps, Plugin as PluginTrait, PluginError, Progress,
+    ProgressSink, ToolOutcome, ToolSpec,
 };
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::kiqi::plugin::types::{
-    Denied, Event as WitEvent, LogLevel, OtherEvent, ProgressBlock, ToolCall, ToolResultEvent,
+    ContentBlock, Denied, Event as WitEvent, EventAction as WitEventAction, LogLevel, OtherEvent,
+    ProgressBlock, ToolCall, ToolResult, ToolResultEvent,
 };
 use crate::Plugin as World;
 
@@ -358,7 +359,7 @@ impl PluginTrait for WasmPlugin {
         CURRENT_SINK.with(|slot| *slot.borrow_mut() = None);
 
         match result {
-            Ok(Ok(text)) => Ok(ToolOutcome::text(text)),
+            Ok(Ok(tool_result)) => Ok(to_tool_outcome(tool_result)),
             Ok(Err(error)) => Err(map_plugin_error(error)),
             Err(trap) => Err(PluginError::Failed(format!(
                 "{}: tool `{name}` trapped: {trap}",
@@ -373,16 +374,21 @@ impl PluginTrait for WasmPlugin {
             return EventAction::Continue;
         };
         let wit = to_wit_event(event);
-        if let Err(trap) = inner
+        match inner
             .guest
             .kiqi_plugin_plugin_api()
             .call_on_event(&mut inner.store, &wit)
         {
-            eprintln!("[kiqi-plugin] {}: on-event trapped: {trap}", self.id);
+            Ok(WitEventAction::Continue) => EventAction::Continue,
+            Ok(WitEventAction::Claimed) => EventAction::Claimed,
+            Ok(WitEventAction::Replace(json)) => {
+                EventAction::Replace(serde_json::from_str(&json).unwrap_or(serde_json::Value::Null))
+            }
+            Err(trap) => {
+                eprintln!("[kiqi-plugin] {}: on-event trapped: {trap}", self.id);
+                EventAction::Continue
+            }
         }
-        // The 0.2.0 ABI cannot express a claim yet (`on-event` returns
-        // nothing), so a wasm plugin only observes.
-        EventAction::Continue
     }
 
     fn shutdown(&self) {
@@ -401,6 +407,23 @@ fn map_plugin_error(error: crate::kiqi::plugin::types::PluginError) -> PluginErr
         Wit::InvalidArguments(detail) => PluginError::InvalidArguments(detail),
         Wit::Denied(detail) => PluginError::Denied(detail),
         Wit::Failed(detail) => PluginError::Failed(detail),
+    }
+}
+
+fn to_tool_outcome(tool_result: ToolResult) -> ToolOutcome {
+    ToolOutcome {
+        blocks: tool_result
+            .blocks
+            .into_iter()
+            .map(|block| match block {
+                ContentBlock::Text(text) => Block::Text(text),
+                ContentBlock::Json(json) => Block::Json(
+                    serde_json::from_str(&json).unwrap_or(serde_json::Value::String(json)),
+                ),
+            })
+            .collect(),
+        is_error: tool_result.is_error,
+        details: serde_json::from_str(&tool_result.details).unwrap_or(serde_json::Value::Null),
     }
 }
 

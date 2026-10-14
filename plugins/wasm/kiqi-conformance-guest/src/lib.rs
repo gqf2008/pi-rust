@@ -35,7 +35,7 @@ impl Guest for Conformance {
         }]
     }
 
-    fn call_tool(name: String, arguments: String) -> Result<String, types::PluginError> {
+    fn call_tool(name: String, arguments: String) -> Result<types::ToolResult, types::PluginError> {
         if name != TOOL {
             return Err(types::PluginError::UnknownTool(name));
         }
@@ -52,7 +52,12 @@ impl Guest for Conformance {
         };
 
         progress::emit(&types::ProgressBlock::Text("last".to_string()));
-        Ok(format!("{arguments}|ui={ui}"))
+        Ok(types::ToolResult {
+            blocks: vec![types::ContentBlock::Text(format!("{arguments}|ui={ui}"))],
+            is_error: false,
+            // `details` is how the host carries state that survives fork/switch.
+            details: r#"{"conformance":true}"#.to_string(),
+        })
     }
 
     fn list_commands() -> Vec<types::CommandSpec> {
@@ -71,7 +76,13 @@ impl Guest for Conformance {
         Vec::new()
     }
 
-    fn on_event(_event: types::Event) {}
+    fn on_event(event: types::Event) -> types::EventAction {
+        // Claim one event so the host test can assert the action channel.
+        match event {
+            types::Event::BeforeAgentStart(_) => types::EventAction::Claimed,
+            _ => types::EventAction::Continue,
+        }
+    }
 
     fn on_tick() {}
 

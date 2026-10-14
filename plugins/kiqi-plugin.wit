@@ -1,6 +1,6 @@
 /// kiqi plugin ABI — wasm component model (WASI Preview 2 / WIT).
 ///
-/// **Proposed 0.2.0.** The 0.1.0 draft never parsed: `other(kind: string,
+/// **Proposed 0.3.0.** The 0.1.0 draft never parsed: `other(kind: string,
 /// payload: string)` used named variant fields, which WIT does not allow. This
 /// version is checked with `wasm-tools component wit`.
 ///
@@ -12,13 +12,20 @@
 ///   * progress is an **imported sink**, not a return value — one tool call can
 ///     emit many blocks (16/18 real plugins need stepwise output);
 ///   * timers are **host-driven** (`plugin.on-tick`), because WASI Preview 2 has
-///     no OS threads to run a background loop.
+///     no OS threads to run a background loop;
+///   * a tool returns a **structured `tool-result`** (blocks + is-error +
+///     `details` JSON), not a bare string — `details` is how a plugin carries
+///     state that must survive fork/switch (`rpi-todo`'s task list);
+///   * `on-event` returns an **`event-action`** (`continue`/`claimed`/`replace`)
+///     so a wasm plugin can claim or rewrite an event like a compiled one.
 ///
-/// The component model requires every import of the world to be satisfied at
-/// instantiation, so the host always provides all interfaces: granted ones with
-/// real implementations, ungranted ones with a deny stub. "Required but not
-/// granted" is rejected before instantiation from the plugin manifest.
-package kiqi:plugin@0.2.0;
+/// The component model requires every import a component declares to be
+/// satisfied at instantiation, so the host always provides all interfaces:
+/// granted ones with real implementations, ungranted ones with a deny stub.
+/// (A built component prunes the interfaces it does not use, so a plugin that
+/// never touches `exec` never asks for it.) "Required but not granted" is
+/// rejected before instantiation from the plugin manifest.
+package kiqi:plugin@0.3.0;
 
 /// Types shared across the host <-> plugin boundary.
 interface types {
@@ -65,6 +72,23 @@ interface types {
     variant progress-block {
         text(string),
         json(string),
+    }
+
+    /// One block of a tool's final output, mirroring the host's `Block`.
+    variant content-block {
+        text(string),
+        json(string),
+    }
+
+    /// A tool's terminal result.
+    ///
+    /// `details` is JSON and is how a plugin carries state that must survive
+    /// fork/switch — `rpi-todo` keeps its whole task list there, so a bare
+    /// string result is not enough.
+    record tool-result {
+        blocks: list<content-block>,
+        is-error: bool,
+        details: string,
     }
 
     record tool-call {
@@ -121,6 +145,13 @@ interface types {
         continue,
         replace(string),
         block(string),
+    }
+
+    /// What a plugin decided to do about an event.
+    variant event-action {
+        continue,
+        claimed,
+        replace(string),
     }
 }
 
@@ -220,7 +251,7 @@ interface timer {
 
 /// What a plugin contributes to the runtime.
 interface plugin-api {
-    use types.{command-spec, event, flag-spec, plugin-error, shortcut-spec, tool-spec, verdict};
+    use types.{command-spec, event, event-action, flag-spec, plugin-error, shortcut-spec, tool-result, tool-spec, verdict};
 
     /// Called once, when the plugin is instantiated and before `list-tools`.
     init: func();
@@ -229,14 +260,14 @@ interface plugin-api {
     shutdown: func();
 
     list-tools: func() -> list<tool-spec>;
-    call-tool: func(name: string, arguments: string) -> result<string, plugin-error>;
+    call-tool: func(name: string, arguments: string) -> result<tool-result, plugin-error>;
 
     list-commands: func() -> list<command-spec>;
     run-command: func(name: string, arguments: string) -> result<string, plugin-error>;
     list-flags: func() -> list<flag-spec>;
     list-shortcuts: func() -> list<shortcut-spec>;
 
-    on-event: func(event: event);
+    on-event: func(event: event) -> event-action;
 
     /// Driven by the host at the period `timer.request-tick` was granted.
     on-tick: func();

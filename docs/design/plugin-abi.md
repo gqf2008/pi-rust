@@ -1,6 +1,6 @@
 # 插件 ABI：从 cdylib 到 wasm 组件
 
-状态：**推迟为第一方契约；作为第三方（不受信）层推进验证** · 目标版本 `kiqi:plugin@0.2.0`
+状态：**推迟为第一方契约；作为第三方（不受信）层推进验证** · 目标版本 `kiqi:plugin@0.3.0`
 
 > **本方案不再作为第一方插件的契约。** 实测 `rpi-package` 的 18 个包后改为
 > 「Rust `trait Plugin` + cargo feature 全编译接入」，见
@@ -14,7 +14,7 @@
 > 判据是 §6.3 的 8 条门禁，而不是「迁了几个插件」。第一方**其余插件留在编译期**，
 > 只有明确需要第三方分发/沙箱的才迁。
 >
-> `plugins/kiqi-plugin.wit` 已升到 parse-validated 的 `0.2.0` 骨架（0.1.0 连 `wasm-tools component wit`
+> `plugins/kiqi-plugin.wit` 已升到 parse-validated 的 `0.3.0`（0.1.0 连 `wasm-tools component wit`
 > 都过不了：variant case 带命名/多字段是非法的）：能力面做全、每个能力独立 interface、
 > 调用一律 `result<_, denied>`、进度用 import sink、timer 由宿主驱动。
 
@@ -262,13 +262,14 @@ wasm 层是“总是可实例化，但未授予的调用必定 `denied`” + “
   → 未知工具是 typed error → `unload()` 后调用报 “unloaded”。
 - CI 的 test job 加 `targets: wasm32-wasip2`。
 
-**这轮暴露的 ABI 缺口（0.2.0 不够用，下一步补）**：
+**这轮暴露的 ABI 缺口，两条已在 0.3.0 补上**：
 
-1. `call-tool` 只返回 string，**没有 `details`（状态）与 `is-error` 通道**——`rpi-todo`
-   靠 `ToolOutcome.details` 携带任务列表、跨 fork/switch 存活，现在表达不了。应改成结构化的
-   tool result（blocks + is-error + details JSON）。
-2. `on-event` 返回 `()`，**无法 claim / replace**（编译期 trait 的 `EventAction` 有）。
-3. `session-read` 目前返空、`HostCaps` 未接进 host import（真实 session 接入是下一增量）；
+1. ~~`call-tool` 只返回 string~~ → 已改为结构化 `tool-result`
+   （`blocks: list<content-block>` + `is-error` + `details` JSON）。e2e 断言 `details` 往返成功，
+   `rpi-todo` 的任务列表从此有地方放。
+2. ~~`on-event` 返回 `()`~~ → 已改为返回 `event-action`（`continue`/`claimed`/`replace`）。
+   e2e 断言一个 wasm 插件能真 `Claimed` 一个事件。
+3. 仍未做：`session-read` 返空、`HostCaps` 未接进 host import（真实 session 接入是下一增量）；
    能力**授权（grant）**也还没做（现阶段全是 deny 桩）。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
