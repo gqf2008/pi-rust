@@ -617,3 +617,221 @@ fn a_spinning_guest_is_metered_and_a_panicking_one_traps() {
         .iter()
         .any(|tool| tool.name == "conformance"));
 }
+
+fn ask_user_wasm() -> PathBuf {
+    build_guest("kiqi-ask-user-guest", "kiqi_ask_user_guest.wasm")
+}
+
+/// How the scripted host UI answers the next poll.
+#[derive(Clone)]
+enum DialogMode {
+    Answer(serde_json::Value),
+    Cancel,
+    Pending,
+}
+
+/// A `UiApi` that speaks the ask_user dialog protocol: `open` -> pending, then
+/// `poll` returns whatever the mode says.
+struct ScriptedUi {
+    mode: Mutex<DialogMode>,
+    ops: Mutex<Vec<String>>,
+}
+
+impl ScriptedUi {
+    fn new(mode: DialogMode) -> Self {
+        Self {
+            mode: Mutex::new(mode),
+            ops: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn ops(&self) -> Vec<String> {
+        self.ops.lock().unwrap().clone()
+    }
+}
+
+impl kiqi_plugin::UiApi for ScriptedUi {
+    fn dialog(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+        let op = request
+            .get("op")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        self.ops.lock().unwrap().push(op.clone());
+        Ok(match op.as_str() {
+            "poll" => match &*self.mode.lock().unwrap() {
+                DialogMode::Answer(answer) => {
+                    serde_json::json!({ "status": "answered", "answer": answer })
+                }
+                DialogMode::Cancel => serde_json::json!({ "status": "cancelled" }),
+                DialogMode::Pending => serde_json::json!({ "status": "pending" }),
+            },
+            "cancel" => serde_json::json!({ "status": "cancelled" }),
+            // open (and anything else) is pending until polled.
+            _ => serde_json::json!({ "status": "pending" }),
+        })
+    }
+
+    fn set_status(&self, _update: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+        Ok(())
+    }
+    fn set_editor_text(&self, _edit: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+        Ok(())
+    }
+    fn component(
+        &self,
+        _name: &str,
+        _payload: &serde_json::Value,
+    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+        Err(kiqi_plugin::PluginError::Failed("none".to_string()))
+    }
+}
+
+/// `rpi-ask-user` on wasm: a question round-trips through the host dialog and
+/// the answer rides the `details` channel.
+#[test]
+fn ask_user_round_trips_through_the_host_dialog() {
+    let wasm = ask_user_wasm();
+    let plugin =
+        WasmPlugin::load_with_grants("rpi-ask-user", &wasm, Grants::default()).expect("load");
+    assert!(plugin.tools().iter().any(|tool| tool.name == "ask_user"));
+
+    let ui = ScriptedUi::new(DialogMode::Answer(serde_json::json!({ "text": "7897" })));
+    let log = NullLog;
+    let caps = HostCaps {
+        session: None,
+        control: None,
+        inject: None,
+        ui: Some(&ui),
+        log: &log,
+    };
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    let outcome = plugin
+        .call(
+            "ask_user",
+            &serde_json::json!({ "question": "Which port?" }),
+            &caps,
+            &sink,
+        )
+        .expect("ask");
+    assert!(!outcome.is_error, "{outcome:?}");
+    assert!(
+        text_of(&outcome).contains("Which port?: 7897"),
+        "got {}",
+        text_of(&outcome)
+    );
+    assert_eq!(
+        outcome.details["answers"][0]["text"],
+        serde_json::json!("7897")
+    );
+    let ops = ui.ops();
+    assert!(ops.contains(&"open".to_string()), "ops: {ops:?}");
+    assert!(ops.contains(&"poll".to_string()), "ops: {ops:?}");
+
+    // A confirm prompt maps a yes to `Confirmed`.
+    let ui = ScriptedUi::new(DialogMode::Answer(serde_json::json!({ "values": ["Yes"] })));
+    let caps = HostCaps {
+        session: None,
+        control: None,
+        inject: None,
+        ui: Some(&ui),
+        log: &log,
+    };
+    let confirm = plugin
+        .call(
+            "ask_user",
+            &serde_json::json!({ "type": "confirm", "summary": "Deploy?" }),
+            &caps,
+            &sink,
+        )
+        .expect("confirm");
+    assert!(!confirm.is_error);
+    assert!(
+        text_of(&confirm).contains("Confirmed: Deploy?"),
+        "got {}",
+        text_of(&confirm)
+    );
+}
+
+/// Gate §6.3.4: cancellation reaches the plugin instead of being mistaken for
+/// an answer.
+#[test]
+fn ask_user_reports_cancellation() {
+    let wasm = ask_user_wasm();
+    let plugin =
+        WasmPlugin::load_with_grants("rpi-ask-user", &wasm, Grants::default()).expect("load");
+    let ui = ScriptedUi::new(DialogMode::Cancel);
+    let log = NullLog;
+    let caps = HostCaps {
+        session: None,
+        control: None,
+        inject: None,
+        ui: Some(&ui),
+        log: &log,
+    };
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    let outcome = plugin
+        .call(
+            "ask_user",
+            &serde_json::json!({ "question": "Which port?" }),
+            &caps,
+            &sink,
+        )
+        .expect("ask");
+    assert!(outcome.is_error, "a cancelled ask is an error result");
+    assert!(
+        text_of(&outcome).contains("cancelled"),
+        "got {}",
+        text_of(&outcome)
+    );
+}
+
+/// Gate §6.3.4: a `timeout` closes the dialog and fails the ask rather than
+/// waiting forever.
+#[test]
+fn ask_user_honours_timeout() {
+    let wasm = ask_user_wasm();
+    let plugin =
+        WasmPlugin::load_with_grants("rpi-ask-user", &wasm, Grants::default()).expect("load");
+    let ui = ScriptedUi::new(DialogMode::Pending);
+    let log = NullLog;
+    let caps = HostCaps {
+        session: None,
+        control: None,
+        inject: None,
+        ui: Some(&ui),
+        log: &log,
+    };
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    let outcome = plugin
+        .call(
+            "ask_user",
+            &serde_json::json!({ "question": "Which port?", "timeout": 1 }),
+            &caps,
+            &sink,
+        )
+        .expect("ask");
+    assert!(outcome.is_error);
+    assert!(
+        text_of(&outcome).contains("timed out"),
+        "got {}",
+        text_of(&outcome)
+    );
+    assert!(
+        ui.ops().contains(&"cancel".to_string()),
+        "a timeout must cancel the dialog: {:?}",
+        ui.ops()
+    );
+}

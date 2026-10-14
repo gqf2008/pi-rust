@@ -1,0 +1,20 @@
+[package]
+publish = false
+name = "kiqi-ask-user-guest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "rpi-ask-user ported to wasm: interactive dialogs over the ui capability"
+readme = "README.md"
+keywords = ["rpi", "kiqi", "wasm", "plugin", "ask-user"]
+categories = ["development-tools"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+kiqi-plugin-guest = { path = "../kiqi-plugin-guest" }
+serde_json = "1"

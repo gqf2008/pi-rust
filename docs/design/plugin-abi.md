@@ -329,14 +329,14 @@ e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许
 | 1 跨平台同一份 `.wasm` | ✅ 同一 fixture 在本机 macOS 与 CI Linux 都构建+加载+跑通（与编译期版本的 golden diff 仍未做） |
 | 2 面覆盖断言 | ✅ `conformance_surface_is_reachable`：tools / commands / flags / shortcuts / before_agent_start / probe / ui.dialog / ui.set_status 全部被宿主真实触达 |
 | 3 流式进度 | ✅ conformance e2e 断言 3 个 progress 块按序到达 |
-| 4 UI 往返 | 🟡 `ui.dialog` 真往返已断言；取消/超时未测（等 `rpi-ask-user` 忠实移植） |
+| 4 UI 往返 | ✅ `ui.dialog` 成功往返 + 取消 + 超时都断言（`rpi-ask-user` wasm 移植，§6.15） |
 | 5 拒绝双态 | ✅ 无 UI → `set_status` denied；授予 UI → granted；net-http 无 grant / 错 host → denied，匹配 → 真请求 |
 | 6 用户授权闭环 | 🟡 已有 `Grants`（缺失=拒）+ `load_with_grants`；缺 `ki plugin grant/revoke` CLI 与安装/更新“增量重问”提示 |
 | 7 隔离 | ✅ 燃料计量的死循环 → trap（不挂）；`panic!` → trap；宿主存活 |
 | 8 性能基线 | ⬜ 未测（wasm vs 编译期的 tool/事件开销） |
 
-参照集（§6.2）：`rpi-todo` ✅（真插件）、`rpi-langfuse` 子集 ✅（真实压力面）、conformance fixture ✅；
-`rpi-ask-user` 未做。
+参照集（§6.2）：`rpi-todo` ✅（真插件）、`rpi-langfuse` 子集 ✅（真实压力面）、
+`rpi-ask-user` ✅（§6.15）、conformance fixture ✅。
 
 ### 6.13 ABI 0.4.0：能力错误拆 `denied` / `failed`
 
@@ -366,6 +366,19 @@ e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许
   但**接缝在了，且没有拿 env 顶替**。
 - 仍未做：`ki plugin install/uninstall` 本身、以及“安装/更新时列出声明 + 增量重问”的提示
   （要有 install 才有落点）。
+
+### 6.15 已落地：`rpi-ask-user` 忠实移植（UI 往返 + 取消 + 超时）
+
+`plugins/wasm/kiqi-ask-user-guest`：参数归一化与编译期插件一致
+（`question`/`options`/`allow*`/`displayMode`/`timeout`/`confirm`/`questions`），交互则不同——
+C ABI 不能阻塞，原生版才需要 start/poll/cancel 状态机；wasm 里 `call_tool` 直接阻塞，
+所以是直筒的 **open → poll → answer**。
+
+- 每个问题：`ui.dialog({op:"open",...})`，然后循环 `{op:"poll"}`：`answered` 收答案、
+  `cancelled` 报错、`timeout` 到点先发 `{op:"cancel"}` 再报 “ask timed out”。
+- e2e 4 个：问答往返（答案进 `details.answers`）、confirm 映射 `Confirmed`/`Declined`、
+  **取消**、**超时**（并断言 guest 真发了 `cancel`）。
+- 门禁 4 由此收绿；**e2e 共 9 个全绿**。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
