@@ -1595,4 +1595,66 @@ mod tests {
         };
         assert!(text.contains("ui="), "got {text}");
     }
+
+    /// Gate §6.3.8: quantify the wasm sandbox tax and keep it from exploding.
+    ///
+    /// The bound is a **ratio against the compiled path measured in the same
+    /// process** (never an absolute latency), so a slow or busy CI runner moves
+    /// both sides together. This is a regression guard, not a benchmark.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn wasm_call_overhead_stays_within_the_compiled_paths_ballpark() {
+        fn per_call_ns(iterations: u64, mut call: impl FnMut()) -> u128 {
+            let start = std::time::Instant::now();
+            for _ in 0..iterations {
+                call();
+            }
+            start.elapsed().as_nanos() / u128::from(iterations)
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = root.join("plugins/wasm/kiqi-todo-guest/Cargo.toml");
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--manifest-path"])
+            .arg(&manifest)
+            .args(["--target", "wasm32-wasip2", "--release"])
+            .status()
+            .expect("build the todo guest");
+        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
+        let wasm_path = root.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_todo_guest.wasm");
+        let wasm_plugin = kiqi_plugin_host::WasmPlugin::load_with_grants(
+            "rpi-todo-wasm",
+            &wasm_path,
+            kiqi_plugin_host::Grants::default(),
+        )
+        .expect("load the wasm todo");
+
+        let compiled = PluginHost::new("rpi-todo", rpi_todo::kiqi::factory());
+        let wasm = PluginHost::new("rpi-todo-wasm", Box::new(wasm_plugin));
+        let silent = Silent;
+        let caps = HostCaps::observer(&silent);
+        let params = serde_json::json!({ "action": "list" });
+
+        // Warm both paths so neither pays first-call costs.
+        let _ = compiled.call_tool("todo", &params, &caps, &NoProgress);
+        let _ = wasm.call_tool("todo", &params, &caps, &NoProgress);
+
+        let iterations = 2_000;
+        let compiled_ns = per_call_ns(iterations, || {
+            let _ = compiled.call_tool("todo", &params, &caps, &NoProgress);
+        });
+        let wasm_ns = per_call_ns(iterations, || {
+            let _ = wasm.call_tool("todo", &params, &caps, &NoProgress);
+        });
+        let ratio = wasm_ns as f64 / compiled_ns as f64;
+        eprintln!(
+            "todo list: compiled {compiled_ns} ns/call, wasm {wasm_ns} ns/call ({ratio:.1}x)"
+        );
+        // Generous: the point is to catch an order-of-magnitude regression, not
+        // to pin a number that varies by runner.
+        assert!(
+            ratio < 200.0,
+            "wasm tax exploded: {ratio:.1}x ({wasm_ns} vs {compiled_ns} ns/call)"
+        );
+    }
 }

@@ -333,7 +333,7 @@ e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许
 | 5 拒绝双态 | ✅ 无 UI → `set_status` denied；授予 UI → granted；net-http 无 grant / 错 host → denied，匹配 → 真请求 |
 | 6 用户授权闭环 | ✅ `Grants`（缺失=拒）+ `ki plugin grant/revoke/list` + `install`（列声明、**只对增量重问**、无头默认拒）+ `uninstall`（移到备份）（§6.14/§6.17） |
 | 7 隔离 | ✅ 燃料计量的死循环 → trap（不挂）；`panic!` → trap；宿主存活 |
-| 8 性能基线 | ⬜ 未测（wasm vs 编译期的 tool/事件开销） |
+| 8 性能基线 | ✅ 同机对比 `todo list`：wasm 33µs/次 vs 编译期 43µs/次（0.8x），断言比值而非绝对阈值（§6.18） |
 
 参照集（§6.2）：`rpi-todo` ✅（真插件）、`rpi-langfuse` 子集 ✅（真实压力面）、
 `rpi-ask-user` ✅（§6.15）、conformance fixture ✅。
@@ -406,6 +406,22 @@ C ABI 不能阻塞，原生版才需要 start/poll/cancel 状态机；wasm 里 `
   `install --yes --host 127.0.0.1` → 复制 + `grants.granted()==["net-http"]` + host 匹配 →
   `uninstall` → 目录被移走。**10 个 host e2e + 4 个 CLI 测试绿。**
 - 门禁 6 由此收绿；§6.3 只剩门禁 8（性能基线）。
+
+### 6.18 已落地：性能基线（门禁 8）
+
+`crates/rpi-cli` 里一个同进程对比测试：同一个 `todo` list 调用，编译期插件 vs wasm 插件，warm 后
+各 2000 次：
+
+```
+todo list: compiled 43120 ns/call, wasm 32887 ns/call (0.8x)
+```
+
+- 两者都在 ~30–40µs/次，由 `serde_json` 主导；**本工作负载下可观测的沙箱税≈0**（wasm 侧甚至略快：
+  它直接返回结构化 `tool-result`，编译期侧要先拼 JSON envelope 再重新解析）。
+- 断言用**同机比值**（<200x）而非绝对阈值，避免 runner 抖动；它防的是“数量级回归”，不是钉数。
+- 注意：这是微基准，不含 wasmtime 实例化（`load` 每插件一次）与真实 I/O；真实成本主要在首次
+  `Component` 编译/实例化（一次性），不在每次调用。
+- **§6.3 八条门禁全部收绿。**
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
