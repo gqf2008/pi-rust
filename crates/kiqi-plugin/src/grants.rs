@@ -24,15 +24,30 @@ pub struct Grants {
     pub net_http: Option<NetHttpGrant>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fs: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub exec: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub net_sockets: bool,
+    /// Running a child process, with a command allow-list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<ExecGrant>,
+    /// Raw TCP, with a host allow-list (same shape as `net-http`: the grant
+    /// carries its policy, so "granted" and "to what" are one decision).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_sockets: Option<NetSocketsGrant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NetHttpGrant {
     /// Hosts the plugin may reach; `*` allows any.
+    pub hosts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecGrant {
+    /// Command names (no path, no shell) the plugin may run; `*` allows any.
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetSocketsGrant {
+    /// Hosts the plugin may open a TCP connection to; `*` allows any.
     pub hosts: Vec<String>,
 }
 
@@ -81,12 +96,24 @@ impl Grants {
 
     /// True when HTTP to `host` is granted.
     pub fn allows_host(&self, host: &str) -> bool {
-        self.net_http.as_ref().is_some_and(|grant| {
-            grant
-                .hosts
-                .iter()
-                .any(|allowed| allowed == "*" || allowed == host)
-        })
+        self.net_http
+            .as_ref()
+            .is_some_and(|grant| allows(&grant.hosts, host))
+    }
+
+    /// True when a TCP connection to `host` is granted.
+    pub fn allows_socket_host(&self, host: &str) -> bool {
+        self.net_sockets
+            .as_ref()
+            .is_some_and(|grant| allows(&grant.hosts, host))
+    }
+
+    /// True when `command` (a bare name, matched exactly against the list) is
+    /// granted.
+    pub fn allows_command(&self, command: &str) -> bool {
+        self.exec
+            .as_ref()
+            .is_some_and(|grant| allows(&grant.commands, command))
     }
 
     /// The capability names currently granted, for display.
@@ -98,30 +125,43 @@ impl Grants {
         if self.fs {
             out.push("fs");
         }
-        if self.exec {
+        if self.exec.is_some() {
             out.push("exec");
         }
-        if self.net_sockets {
+        if self.net_sockets.is_some() {
             out.push("net-sockets");
         }
         out
     }
 
-    /// Grant one capability. `net-http` takes its host allow-list; the rest are
-    /// boolean.
-    pub fn grant(&mut self, capability: &str, net_http_hosts: Vec<String>) -> Result<(), String> {
+    /// Grant one capability. Every capability carries its policy: hosts for
+    /// `net-http`/`net-sockets`, command names for `exec`, nothing for `fs`
+    /// (whose jail is the policy).
+    pub fn grant(&mut self, capability: &str, policy: Vec<String>) -> Result<(), String> {
+        let non_empty = |what: &str| -> Result<Vec<String>, String> {
+            if policy.is_empty() {
+                Err(format!("{capability} needs at least one {what}"))
+            } else {
+                Ok(policy.clone())
+            }
+        };
         match capability {
             "net-http" => {
-                if net_http_hosts.is_empty() {
-                    return Err("net-http needs at least one --host (or --host '*')".to_string());
-                }
                 self.net_http = Some(NetHttpGrant {
-                    hosts: net_http_hosts,
-                });
+                    hosts: non_empty("--host (or --host '*'))")?,
+                })
+            }
+            "net-sockets" => {
+                self.net_sockets = Some(NetSocketsGrant {
+                    hosts: non_empty("--host (or --host '*'))")?,
+                })
+            }
+            "exec" => {
+                self.exec = Some(ExecGrant {
+                    commands: non_empty("--command (or --command '*')")?,
+                })
             }
             "fs" => self.fs = true,
-            "exec" => self.exec = true,
-            "net-sockets" => self.net_sockets = true,
             other => return Err(format!("unknown capability `{other}`")),
         }
         Ok(())
@@ -132,12 +172,18 @@ impl Grants {
         match capability {
             "net-http" => self.net_http = None,
             "fs" => self.fs = false,
-            "exec" => self.exec = false,
-            "net-sockets" => self.net_sockets = false,
+            "exec" => self.exec = None,
+            "net-sockets" => self.net_sockets = None,
             other => return Err(format!("unknown capability `{other}`")),
         }
         Ok(())
     }
+}
+
+/// Exact match, or `*` for "any" — the one allow-list rule every policy uses.
+fn allows(list: &[String], value: &str) -> bool {
+    list.iter()
+        .any(|allowed| allowed == "*" || allowed == value)
 }
 
 /// The agent data directory: `$KI_AGENT_DIR`, else `$HOME/.ki/agent`.
@@ -228,5 +274,32 @@ mod tests {
         let mut grants = Grants::default();
         grants.grant("net-http", vec!["*".to_string()]).unwrap();
         assert!(grants.allows_host("anything.example"));
+    }
+
+    /// Every capability carries its policy, so "granted" and "to what" are one
+    /// decision — and a policy-carrying capability without one is an error
+    /// rather than a silent allow-all.
+    #[test]
+    fn every_capability_carries_its_policy() {
+        let mut grants = Grants::default();
+        grants
+            .grant("net-sockets", vec!["127.0.0.1".to_string()])
+            .unwrap();
+        grants.grant("exec", vec!["echo".to_string()]).unwrap();
+        grants.grant("fs", vec![]).unwrap();
+
+        assert!(grants.allows_socket_host("127.0.0.1"));
+        assert!(!grants.allows_socket_host("example.com"));
+        assert!(grants.allows_command("echo"));
+        assert!(!grants.allows_command("rm"));
+        assert_eq!(grants.granted(), vec!["fs", "exec", "net-sockets"]);
+
+        assert!(grants.grant("exec", vec![]).is_err());
+        assert!(grants.grant("net-sockets", vec![]).is_err());
+        assert!(grants.grant("net-http", vec![]).is_err());
+
+        grants.revoke("exec").unwrap();
+        assert!(!grants.allows_command("echo"));
+        assert!(!grants.granted().contains(&"exec"));
     }
 }

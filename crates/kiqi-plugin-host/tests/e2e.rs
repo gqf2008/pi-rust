@@ -848,36 +848,48 @@ fn declared_capabilities_reads_the_components_imports() {
     let caps = kiqi_plugin_host::declared_capabilities(&wasm).expect("read component imports");
     assert_eq!(
         caps,
-        vec!["fs".to_string(), "net-http".to_string()],
+        vec![
+            "exec".to_string(),
+            "fs".to_string(),
+            "net-http".to_string(),
+            "net-sockets".to_string(),
+        ],
         "got {caps:?}"
     );
+}
+
+/// Load the fixture from a scratch directory, so `fs`/`exec` write into a temp
+/// data directory instead of the build output.
+fn load_fixture_in_temp(grants: Grants) -> (tempfile::TempDir, WasmPlugin) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wasm = dir.path().join("plugin.wasm");
+    std::fs::copy(fixture_wasm(), &wasm).expect("copy the fixture next to a writable data dir");
+    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, grants).expect("load");
+    (dir, plugin)
+}
+
+fn call_main_tool(
+    plugin: &WasmPlugin,
+    arguments: serde_json::Value,
+) -> Result<kiqi_plugin::ToolOutcome, PluginError> {
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    plugin.call("conformance", &arguments, &caps, &sink)
 }
 
 /// `fs` is a real capability, and the jail is its policy: granted, the guest
 /// round-trips a file inside its own data directory.
 #[test]
 fn fs_is_granted_and_jailed_to_the_plugins_data_directory() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let wasm = dir.path().join("plugin.wasm");
-    std::fs::copy(fixture_wasm(), &wasm).expect("copy the fixture next to a writable data dir");
-    let plugin = WasmPlugin::load_with_grants(
-        "conformance",
-        &wasm,
-        Grants {
-            fs: true,
-            ..Grants::default()
-        },
-    )
-    .expect("load");
-    let log = NullLog;
-    let caps = HostCaps::observer(&log);
-    let sink = RecordingSink {
-        blocks: Mutex::new(Vec::new()),
-    };
+    let (dir, plugin) = load_fixture_in_temp(Grants {
+        fs: true,
+        ..Grants::default()
+    });
 
-    let outcome = plugin
-        .call("conformance", &serde_json::json!({}), &caps, &sink)
-        .expect("call");
+    let outcome = call_main_tool(&plugin, serde_json::json!({})).expect("call");
     assert!(
         text_of(&outcome).contains("fs=conformance"),
         "the write/read round trip must succeed: {}",
@@ -886,6 +898,86 @@ fn fs_is_granted_and_jailed_to_the_plugins_data_directory() {
     assert!(
         dir.path().join("data/conformance/probe.txt").is_file(),
         "the file lands inside the plugin's own data directory"
+    );
+}
+
+/// `exec` runs an allow-listed bare command and returns its output; a command
+/// outside the grant (or no grant at all) is denied, not silently skipped.
+#[test]
+fn exec_runs_only_allow_listed_commands() {
+    use kiqi_plugin_host::ExecGrant;
+
+    let (_dir, plugin) = load_fixture_in_temp(Grants {
+        exec: Some(ExecGrant {
+            commands: vec!["echo".to_string()],
+        }),
+        ..Grants::default()
+    });
+    let allowed = call_main_tool(&plugin, serde_json::json!({})).expect("call");
+    assert!(
+        text_of(&allowed).contains("exec=conformance"),
+        "echo must run and its stdout come back: {}",
+        text_of(&allowed)
+    );
+
+    // Same plugin, a grant that does not include `echo`.
+    let (_dir, plugin) = load_fixture_in_temp(Grants {
+        exec: Some(ExecGrant {
+            commands: vec!["ls".to_string()],
+        }),
+        ..Grants::default()
+    });
+    let denied = call_main_tool(&plugin, serde_json::json!({})).expect("call");
+    assert!(
+        text_of(&denied).contains("exec=exec of `echo` is not granted"),
+        "an unlisted command must report the deny reason: {}",
+        text_of(&denied)
+    );
+}
+
+/// `net-sockets` is allow-listed per host, and the host holds the socket: the
+/// guest only ever sees a handle.
+#[test]
+fn net_sockets_connect_through_a_host_allow_list() {
+    use kiqi_plugin_host::NetSocketsGrant;
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
+    let address = listener.local_addr().unwrap().to_string();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buffer = [0u8; 64];
+        let read = stream.read(&mut buffer).expect("read the ping");
+        stream.write_all(&buffer[..read]).expect("echo it back");
+    });
+
+    let (_dir, plugin) = load_fixture_in_temp(Grants {
+        net_sockets: Some(NetSocketsGrant {
+            hosts: vec!["127.0.0.1".to_string()],
+        }),
+        ..Grants::default()
+    });
+    let outcome = call_main_tool(&plugin, serde_json::json!({ "address": address })).expect("call");
+    server.join().expect("server thread");
+    assert!(
+        text_of(&outcome).contains("socket=sent=4 recv=ping"),
+        "the loopback round trip must succeed: {}",
+        text_of(&outcome)
+    );
+
+    // A host outside the grant is denied before any connection is attempted.
+    let (_dir, plugin) = load_fixture_in_temp(Grants {
+        net_sockets: Some(NetSocketsGrant {
+            hosts: vec!["example.com".to_string()],
+        }),
+        ..Grants::default()
+    });
+    let denied =
+        call_main_tool(&plugin, serde_json::json!({ "address": "127.0.0.1:9" })).expect("call");
+    assert!(
+        text_of(&denied).contains("socket=net-sockets to `127.0.0.1` is not granted"),
+        "the allow-list must be consulted: {}",
+        text_of(&denied)
     );
 }
 
@@ -906,16 +998,15 @@ fn a_declared_id_does_not_override_the_install_directory() {
 /// names every declared capability that is not in it.
 #[test]
 fn only_enforced_capabilities_count_as_working() {
-    for enforced in ["net-http", "fs"] {
+    // Every grantable capability now has an implementation, so `install` has
+    // nothing to warn about for a component that declares all four.
+    for enforced in ["net-http", "fs", "exec", "net-sockets"] {
         assert!(
             kiqi_plugin_host::capability_is_enforced(enforced),
             "`{enforced}` is implemented and must be advertised as working"
         );
     }
-    for stub in ["exec", "net-sockets"] {
-        assert!(
-            !kiqi_plugin_host::capability_is_enforced(stub),
-            "`{stub}` is still a deny stub and must not be advertised as working"
-        );
-    }
+    assert!(!kiqi_plugin_host::capability_is_enforced(
+        "no-such-capability"
+    ));
 }

@@ -15,7 +15,9 @@
 //! The returned string reports the deny reason so the host test can assert it.
 
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
-use kiqi_plugin_guest::bindings::kiqi::plugin::{fs, log, net_http, progress, types, ui};
+use kiqi_plugin_guest::bindings::kiqi::plugin::{
+    exec, fs, log, net_http, net_sockets, progress, types, ui,
+};
 
 const TOOL: &str = "conformance";
 const FETCH_TOOL: &str = "fetch";
@@ -50,6 +52,15 @@ fn fetch(arguments: &str) -> Result<types::ToolResult, types::PluginError> {
 
 /// Render a capability error for the model: a refusal and a failure read
 /// differently on purpose.
+/// The `address` field of the tool arguments, when the caller supplied one.
+fn address_from(arguments: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()?
+        .get("address")?
+        .as_str()
+        .map(str::to_string)
+}
+
 fn capability_reason(error: types::CapabilityError) -> String {
     match error {
         types::CapabilityError::Denied(reason) => reason,
@@ -167,10 +178,42 @@ impl Guest for Conformance {
             Err(error) => capability_reason(error),
         };
 
+        // `exec`: an allow-listed bare command, no shell. Granted it returns the
+        // child's stdout; otherwise the reason.
+        let exec_outcome = match exec::run("echo", &["conformance".to_string()], None) {
+            Ok(json) => serde_json::from_str::<serde_json::Value>(&json)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("stdout")
+                        .and_then(|stdout| stdout.as_str())
+                        .map(|stdout| stdout.trim().to_string())
+                })
+                .unwrap_or_else(|| "unparseable".to_string()),
+            Err(error) => capability_reason(error),
+        };
+
+        // `net-sockets`: only exercised when the caller names an address, since
+        // it needs a peer. The host holds the socket; the guest gets a handle.
+        let socket_outcome = match address_from(&arguments) {
+            None => "skipped".to_string(),
+            Some(address) => match net_sockets::connect(&address) {
+                Ok(handle) => {
+                    let sent = net_sockets::send(handle, b"ping".as_slice()).unwrap_or(0);
+                    let received = net_sockets::recv(handle, 64)
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                        .unwrap_or_else(|error| capability_reason(error));
+                    let _ = net_sockets::close(handle);
+                    format!("sent={sent} recv={received}")
+                }
+                Err(error) => capability_reason(error),
+            },
+        };
+
         progress::emit(&types::ProgressBlock::Text("last".to_string()));
         Ok(types::ToolResult {
             blocks: vec![types::ContentBlock::Text(format!(
-                "{arguments}|ui={ui}|fs={fs_outcome}"
+                "{arguments}|ui={ui}|fs={fs_outcome}|exec={exec_outcome}|socket={socket_outcome}"
             ))],
             is_error: false,
             // `details` is how the host carries state that survives fork/switch.

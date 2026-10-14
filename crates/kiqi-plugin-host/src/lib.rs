@@ -152,7 +152,7 @@ fn denied() -> CapabilityError {
 
 /// What the user authorized for one plugin, shared with the CLI through the
 /// contract crate (`kiqi-plugin`).
-pub use kiqi_plugin::grants::{Grants, NetHttpGrant};
+pub use kiqi_plugin::grants::{ExecGrant, Grants, NetHttpGrant, NetSocketsGrant};
 
 /// The user-grantable capabilities a component declares — the `kiqi:plugin/*`
 /// imports that need authorization (`net-http`, `fs`, `exec`, `net-sockets`).
@@ -190,7 +190,7 @@ pub fn declared_capabilities(wasm: &Path) -> Result<Vec<String>, String> {
 /// what the host can honour. `ki plugin install` names any difference, so a user
 /// is never asked to grant something that would only ever come back denied.
 /// `net-sockets` and `exec` are declared in the ABI but still deny stubs.
-pub const ENFORCED_CAPABILITIES: &[&str] = &["net-http", "fs"];
+pub const ENFORCED_CAPABILITIES: &[&str] = &["net-http", "fs", "exec", "net-sockets"];
 
 /// See [`ENFORCED_CAPABILITIES`].
 pub fn capability_is_enforced(name: &str) -> bool {
@@ -204,10 +204,14 @@ struct HostState {
     table: ResourceTable,
     grants: Grants,
     /// The plugin's own data directory (`plugins/<id>/data/`). The `fs`
-    /// capability is jailed here, so the jail *is* the policy and the grant
-    /// stays a bool. `None` when the component's path has no parent (in-memory
-    /// components in tests), in which case `fs` reports `failed`.
+    /// capability is jailed here, and `exec`'s working directory is resolved
+    /// inside it, so the jail *is* the policy and both grants stay simple.
+    /// `None` when the component's path has no parent (in-memory components in
+    /// tests), in which case `fs` reports `failed`.
     fs_root: Option<std::path::PathBuf>,
+    /// Raw TCP connections, keyed by the handle the guest was handed.
+    sockets: std::collections::HashMap<u32, std::net::TcpStream>,
+    next_socket: u32,
 }
 
 impl WasiView for HostState {
@@ -273,19 +277,6 @@ impl crate::kiqi::plugin::progress::Host for HostState {
             ),
         });
     }
-}
-
-macro_rules! deny_capability {
-    ($iface:ident { $($method:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)* }) => {
-        impl crate::kiqi::plugin::$iface::Host for HostState {
-            $(
-                fn $method(&mut self, $($arg: $ty),*) -> $ret {
-                    $(let _ = $arg;)*
-                    Err(denied())
-                }
-            )*
-        }
-    };
 }
 
 /// Session mutations, forwarded to the call's `HostCaps::control`; a call
@@ -436,30 +427,39 @@ impl HostState {
         if !self.grants.fs {
             return Err(CapabilityError::Denied("fs is not granted".to_string()));
         }
-        let Some(root) = self.fs_root.as_deref() else {
-            return Err(CapabilityError::Failed(
-                "this plugin has no data directory".to_string(),
-            ));
-        };
+        self.jail(rel)
+    }
+
+    /// Resolve a relative path inside the plugin's data directory without any
+    /// capability check, for callers whose own grant already gates them
+    /// (`exec`'s cwd).
+    fn jail(&self, rel: &str) -> Result<std::path::PathBuf, CapabilityError> {
+        let root = self.data_dir()?;
         let candidate = std::path::Path::new(rel);
-        let mut resolved = root.to_path_buf();
+        let mut resolved = root.clone();
         for component in candidate.components() {
             match component {
                 std::path::Component::Normal(part) => resolved.push(part),
                 std::path::Component::CurDir => {}
                 _ => {
                     return Err(CapabilityError::Failed(format!(
-                        "fs path `{rel}` must be relative and stay inside the plugin directory"
+                        "path `{rel}` must be relative and stay inside the plugin directory"
                     )))
                 }
             }
         }
-        if !resolved.starts_with(root) {
+        if !resolved.starts_with(&root) {
             return Err(CapabilityError::Failed(format!(
-                "fs path `{rel}` escapes the plugin directory"
+                "path `{rel}` escapes the plugin directory"
             )));
         }
         Ok(resolved)
+    }
+
+    fn data_dir(&self) -> Result<std::path::PathBuf, CapabilityError> {
+        self.fs_root
+            .clone()
+            .ok_or_else(|| CapabilityError::Failed("this plugin has no data directory".to_string()))
     }
 }
 
@@ -496,16 +496,190 @@ impl crate::kiqi::plugin::fs::Host for HostState {
     }
 }
 
-deny_capability!(net_sockets {
-    connect(address: String) -> Result<u32, CapabilityError>;
-    send(handle: u32, bytes: Vec<u8>) -> Result<u64, CapabilityError>;
-    recv(handle: u32, max_bytes: u64) -> Result<Vec<u8>, CapabilityError>;
-    close(handle: u32) -> Result<(), CapabilityError>;
-});
+/// Raw TCP, allow-listed per host. The host holds the sockets and hands the
+/// guest opaque handles (which is exactly the shape the WIT already declared),
+/// so the grant cannot be bypassed by a second connect.
+impl crate::kiqi::plugin::net_sockets::Host for HostState {
+    fn connect(&mut self, address: String) -> Result<u32, CapabilityError> {
+        let (host, port) = split_host_port(&address)?;
+        if !self.grants.allows_socket_host(&host) {
+            return Err(CapabilityError::Denied(format!(
+                "net-sockets to `{host}` is not granted"
+            )));
+        }
+        use std::net::ToSocketAddrs;
+        let resolved = (host.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|error| CapabilityError::Failed(format!("resolve `{address}`: {error}")))?
+            .next()
+            .ok_or_else(|| CapabilityError::Failed(format!("`{address}` resolved to nothing")))?;
+        let stream =
+            std::net::TcpStream::connect_timeout(&resolved, std::time::Duration::from_secs(10))
+                .map_err(|error| {
+                    CapabilityError::Failed(format!("connect `{address}`: {error}"))
+                })?;
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
+        let handle = self.next_socket;
+        self.next_socket += 1;
+        self.sockets.insert(handle, stream);
+        Ok(handle)
+    }
 
-deny_capability!(exec {
-    run(cmd: String, args: Vec<String>, cwd: Option<String>) -> Result<String, CapabilityError>;
-});
+    fn send(&mut self, handle: u32, bytes: Vec<u8>) -> Result<u64, CapabilityError> {
+        use std::io::Write;
+        let stream = self.socket(handle)?;
+        stream
+            .write_all(&bytes)
+            .map_err(|error| CapabilityError::Failed(format!("socket {handle} write: {error}")))?;
+        Ok(bytes.len() as u64)
+    }
+
+    fn recv(&mut self, handle: u32, max_bytes: u64) -> Result<Vec<u8>, CapabilityError> {
+        use std::io::Read;
+        let cap = max_bytes.min(1024 * 1024) as usize;
+        let stream = self.socket(handle)?;
+        let mut buffer = vec![0u8; cap];
+        let read = stream
+            .read(&mut buffer)
+            .map_err(|error| CapabilityError::Failed(format!("socket {handle} read: {error}")))?;
+        buffer.truncate(read);
+        Ok(buffer)
+    }
+
+    fn close(&mut self, handle: u32) -> Result<(), CapabilityError> {
+        self.sockets
+            .remove(&handle)
+            .map(|_| ())
+            .ok_or_else(|| CapabilityError::Failed(format!("no open socket {handle}")))
+    }
+}
+
+/// Run a child process: allow-listed bare command name, jailed cwd, cleared
+/// environment, capped output, wall-clock timeout. No shell is involved, so
+/// shell metacharacters in `args` stay literal.
+impl crate::kiqi::plugin::exec::Host for HostState {
+    fn run(
+        &mut self,
+        cmd: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+    ) -> Result<String, CapabilityError> {
+        if !self.grants.allows_command(&cmd) {
+            return Err(CapabilityError::Denied(format!(
+                "exec of `{cmd}` is not granted"
+            )));
+        }
+        if cmd.contains('/') || cmd.contains('\\') {
+            return Err(CapabilityError::Failed(format!(
+                "exec command must be a bare name, not a path: `{cmd}`"
+            )));
+        }
+        let cwd = match cwd {
+            Some(rel) => self.jail(&rel)?,
+            None => self.data_dir()?,
+        };
+        std::fs::create_dir_all(&cwd).map_err(|error| {
+            CapabilityError::Failed(format!("create {}: {error}", cwd.display()))
+        })?;
+        run_with_limits(&cmd, &args, &cwd)
+    }
+}
+
+impl HostState {
+    fn socket(&mut self, handle: u32) -> Result<&mut std::net::TcpStream, CapabilityError> {
+        self.sockets
+            .get_mut(&handle)
+            .ok_or_else(|| CapabilityError::Failed(format!("no open socket {handle}")))
+    }
+}
+
+/// Split `host:port` (IPv6 in brackets, or a bare `SocketAddr`).
+fn split_host_port(address: &str) -> Result<(String, u16), CapabilityError> {
+    if let Ok(parsed) = address.parse::<std::net::SocketAddr>() {
+        return Ok((parsed.ip().to_string(), parsed.port()));
+    }
+    let (host, port) = address
+        .rsplit_once(':')
+        .ok_or_else(|| CapabilityError::Failed(format!("`{address}` must be host:port")))?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| CapabilityError::Failed(format!("invalid port in `{address}`")))?;
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    if host.is_empty() {
+        return Err(CapabilityError::Failed(format!("`{address}` has no host")));
+    }
+    Ok((host, port))
+}
+
+/// Spawn, capture output with a byte cap, and enforce a wall-clock deadline.
+fn run_with_limits(
+    cmd: &str,
+    args: &[String],
+    cwd: &std::path::Path,
+) -> Result<String, CapabilityError> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    const OUTPUT_CAP: u64 = 256 * 1024;
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let mut command = Command::new(cmd);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Cleared, then only `PATH` back: a plugin must not inherit the host's
+        // `KI_SESSION_ID` or any other ambient secret.
+        .env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| CapabilityError::Failed(format!("spawn `{cmd}`: {error}")))?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stdout.by_ref().take(OUTPUT_CAP).read_to_end(&mut buffer);
+        buffer
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stderr.by_ref().take(OUTPUT_CAP).read_to_end(&mut buffer);
+        buffer
+    });
+
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    let status = loop {
+        match child
+            .try_wait()
+            .map_err(|error| CapabilityError::Failed(format!("wait `{cmd}`: {error}")))?
+        {
+            Some(status) => break Some(status),
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    };
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    Ok(serde_json::json!({
+        "status": status.and_then(|status| status.code()),
+        "timedOut": status.is_none(),
+        "stdout": String::from_utf8_lossy(&stdout),
+        "stderr": String::from_utf8_lossy(&stderr),
+    })
+    .to_string())
+}
 
 // ---------------------------------------------------------------------------
 // WasmPlugin
@@ -589,6 +763,8 @@ impl WasmPlugin {
                 table: ResourceTable::new(),
                 grants,
                 fs_root,
+                sockets: std::collections::HashMap::new(),
+                next_socket: 1,
             },
         );
         if let Some(fuel) = options.fuel {

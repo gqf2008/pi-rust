@@ -145,7 +145,7 @@ fn grant(args: &[String]) -> i32 {
         Err(code) => return code,
     };
     let mut grants = Grants::load_for(&parsed.id);
-    if let Err(error) = grants.grant(&parsed.capability, parsed.hosts) {
+    if let Err(error) = grants.grant(&parsed.capability, parsed.policy) {
         eprintln!("error: {error}");
         return 2;
     }
@@ -178,21 +178,23 @@ fn revoke(args: &[String]) -> i32 {
 struct Target {
     id: String,
     capability: String,
-    hosts: Vec<String>,
+    /// The capability's policy: `--host` values for `net-http`/`net-sockets`,
+    /// `--command` values for `exec` (empty for `fs`, whose jail is the policy).
+    policy: Vec<String>,
 }
 
-/// `<id> <capability> [--host H]...`, shared by grant and revoke.
+/// `<id> <capability> [--host H | --command C]...`, shared by grant and revoke.
 fn parse_target(args: &[String]) -> Result<Target, i32> {
     let mut id = None;
     let mut capability = None;
-    let mut hosts = Vec::new();
+    let mut policy = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--host" => match iter.next() {
-                Some(host) => hosts.push(host.clone()),
+            "--host" | "--command" => match iter.next() {
+                Some(value) => policy.push(value.clone()),
                 None => {
-                    eprintln!("error: --host needs a value");
+                    eprintln!("error: {arg} needs a value");
                     return Err(2);
                 }
             },
@@ -209,13 +211,15 @@ fn parse_target(args: &[String]) -> Result<Target, i32> {
         }
     }
     let (Some(id), Some(capability)) = (id, capability) else {
-        eprintln!("error: expected `ki plugin <grant|revoke> <id> <capability> [--host H]...`");
+        eprintln!(
+            "error: expected `ki plugin <grant|revoke> <id> <capability> [--host H | --command C]...`"
+        );
         return Err(2);
     };
     Ok(Target {
         id,
         capability,
-        hosts,
+        policy,
     })
 }
 
@@ -227,16 +231,16 @@ ki plugin — manage per-plugin capability grants
 USAGE:
     ki plugin list
     ki plugin show <id>
-    ki plugin install <path.wasm> [--id <id>] [--yes] [--host <host>]...
+    ki plugin install <path.wasm> [--id <id>] [--yes] [--host <host>]... [--command <cmd>]...
     ki plugin uninstall <id>
-    ki plugin grant <id> <capability> [--host <host>]...
+    ki plugin grant <id> <capability> [--host <host> | --command <cmd>]...
     ki plugin revoke <id> <capability>
 
 CAPABILITIES:
     net-http      host-mediated HTTP; --host <host> (repeatable, `*` allows any)
-    fs            filesystem, scoped to a plugin sandbox root
-    exec          run a child process (host allow-list)
-    net-sockets   raw TCP sockets
+    fs            the plugin's own data directory (`plugins/<id>/data/`)
+    exec          run a child process; --command <name> (repeatable, `*` allows any)
+    net-sockets   raw TCP; --host <host> (repeatable, `*` allows any)
 
 `install` copies the component to `plugins/<id>/plugin.wasm`, shows the
 capabilities it declares, and grants only what the user approves (`--yes` for a
@@ -285,6 +289,7 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
     let mut id: Option<String> = None;
     let mut yes = false;
     let mut hosts: Vec<String> = Vec::new();
+    let mut commands: Vec<String> = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -300,6 +305,13 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
                 Some(value) => hosts.push(value.clone()),
                 None => {
                     eprintln!("error: --host needs a value");
+                    return 2;
+                }
+            },
+            "--command" => match iter.next() {
+                Some(value) => commands.push(value.clone()),
+                None => {
+                    eprintln!("error: --command needs a value");
                     return 2;
                 }
             },
@@ -384,7 +396,14 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
         let approve = approve_new_capabilities(yes, interactive, answer.as_deref());
         if approve {
             for cap in &new_caps {
-                match grants.grant(cap, hosts.clone()) {
+                // Each capability carries its own policy: hosts for the network
+                // capabilities, command names for exec.
+                let policy = if cap.as_str() == "exec" {
+                    commands.clone()
+                } else {
+                    hosts.clone()
+                };
+                match grants.grant(cap, policy) {
                     Ok(()) => granted_now.push(cap.to_string()),
                     Err(error) => eprintln!("note: {cap}: {error}"),
                 }
@@ -524,14 +543,21 @@ mod tests {
                 "--yes".into(),
                 "--host".into(),
                 "127.0.0.1".into(),
+                "--command".into(),
+                "echo".into(),
             ],
             Some(root),
         );
         assert_eq!(code, 0);
         assert!(root.join("plugins/conformance/plugin.wasm").is_file());
         let grants = Grants::load_for_at(root, "conformance");
-        assert_eq!(grants.granted(), vec!["net-http", "fs"]);
+        assert_eq!(
+            grants.granted(),
+            vec!["net-http", "fs", "exec", "net-sockets"]
+        );
         assert!(grants.allows_host("127.0.0.1"));
+        assert!(grants.allows_socket_host("127.0.0.1"));
+        assert!(grants.allows_command("echo"));
 
         let code = uninstall_into(&["conformance".into()], Some(root));
         assert_eq!(code, 0);

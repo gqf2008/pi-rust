@@ -544,6 +544,24 @@ before_agent_start 跑在同一套一致的能力上。测试：拿 `reload_caps
 conformance guest 因此多了一路：拿 `fs` 写一个文件再读回来，把结果报在工具输出里，e2e 分“授权”
 （真读到 `conformance`，且文件落在 `data/conformance/probe.txt`）与“未授权”（报 `denied`）两边验。
 
+### 6.26 能力面没有空头支票了：`exec`/`net-sockets` 也真实现（授权带策略）
+
+接上一节：`exec`/`net-sockets` 也不再是桩。它们的授权从布尔改成**带策略**（照 `net-http` 的样子）：
+
+| 能力 | 授权形状 | 执行约束 |
+|---|---|---|
+| `net-http` | `{hosts:[...]}` | 请求 host 命中允许列表 |
+| `net-sockets` | `{hosts:[...]}` | 连接的 host 命中允许列表；**宿主持有 socket**，guest 只拿到 `u32` 句柄（正好是 WIT 原本的 `connect->u32` 形状），所以握完手也绕不过去 |
+| `exec` | `{commands:[...]}` | **裸命令名**（含 `/`/`\` 直接拒，无 shell）；cwd 关在插件自己的 data 目录（相对路径逐组件检查）；**环境变量清空后只回填 `PATH`**（不继承宿主的 `KI_SESSION_ID` 等）；stdout/stderr 各 256 KiB 上限；30s 墙上时钟超时后 kill |
+| `fs` | `true` | 监禁在 `plugins/<id>/data/`（监禁即策略，所以仍是布尔） |
+
+“策略缺失”是**错误**而非“全放开”：`grant("exec", vec![])` 返回 `exec needs at least one --command`。
+CLI 侧 `ki plugin grant <id> exec --command echo`、`ki plugin install … --command echo`（`--host` 同理）。
+
+本次之后 `kiqi_plugin_host::ENFORCED_CAPABILITIES` 覆盖全部四个可授权能力，所以 `ki plugin install`
+对声明齐全的组件不再有警告；测试钉住这个集合本身，加上三路新 e2e：`exec` 白名单内/外、
+`net-sockets` 走真实 loopback 回声（`sent=4 recv=ping`）与 host 不在允许列表时的 `denied`。
+
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
 > “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里
