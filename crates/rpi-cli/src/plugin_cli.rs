@@ -8,7 +8,9 @@
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use kiqi_plugin::grants::{agent_dir, grants_path, installed_plugins, plugin_dir_at, Grants};
+use kiqi_plugin::grants::{
+    agent_dir, grants_path, installed_plugins, plugin_dir_at, ExecCwd, GrantOptions, Grants,
+};
 
 /// Entry for `ki plugin [sub]`; `args` is the slice after `plugin`.
 pub fn run(args: &[String]) -> i32 {
@@ -145,7 +147,7 @@ fn grant(args: &[String]) -> i32 {
         Err(code) => return code,
     };
     let mut grants = Grants::load_for(&parsed.id);
-    if let Err(error) = grants.grant(&parsed.capability, parsed.policy) {
+    if let Err(error) = grants.grant(&parsed.capability, parsed.policy, parsed.options) {
         eprintln!("error: {error}");
         return 2;
     }
@@ -181,13 +183,17 @@ struct Target {
     /// The capability's policy: `--host` values for `net-http`/`net-sockets`,
     /// `--command` values for `exec` (empty for `fs`, whose jail is the policy).
     policy: Vec<String>,
+    /// Exec-only options (`--cwd`, `--timeout`); other capabilities reject them.
+    options: GrantOptions,
 }
 
-/// `<id> <capability> [--host H | --command C]...`, shared by grant and revoke.
+/// `<id> <capability> [--host H | --command C | --cwd S | --timeout N]...`,
+/// shared by grant and revoke.
 fn parse_target(args: &[String]) -> Result<Target, i32> {
     let mut id = None;
     let mut capability = None;
     let mut policy = Vec::new();
+    let mut options = GrantOptions::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -195,6 +201,32 @@ fn parse_target(args: &[String]) -> Result<Target, i32> {
                 Some(value) => policy.push(value.clone()),
                 None => {
                     eprintln!("error: {arg} needs a value");
+                    return Err(2);
+                }
+            },
+            "--cwd" => match iter.next() {
+                Some(value) => match ExecCwd::parse(value) {
+                    Ok(cwd) => options.cwd = Some(cwd),
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        return Err(2);
+                    }
+                },
+                None => {
+                    eprintln!("error: --cwd needs a value");
+                    return Err(2);
+                }
+            },
+            "--timeout" => match iter.next() {
+                Some(value) => match value.parse::<u64>() {
+                    Ok(seconds) => options.timeout_seconds = Some(seconds),
+                    Err(_) => {
+                        eprintln!("error: --timeout needs seconds, got `{value}`");
+                        return Err(2);
+                    }
+                },
+                None => {
+                    eprintln!("error: --timeout needs a value");
                     return Err(2);
                 }
             },
@@ -212,7 +244,7 @@ fn parse_target(args: &[String]) -> Result<Target, i32> {
     }
     let (Some(id), Some(capability)) = (id, capability) else {
         eprintln!(
-            "error: expected `ki plugin <grant|revoke> <id> <capability> [--host H | --command C]...`"
+            "error: expected `ki plugin <grant|revoke> <id> <capability> [--host H | --command C | --cwd S | --timeout N]...`"
         );
         return Err(2);
     };
@@ -220,6 +252,7 @@ fn parse_target(args: &[String]) -> Result<Target, i32> {
         id,
         capability,
         policy,
+        options,
     })
 }
 
@@ -232,14 +265,18 @@ USAGE:
     ki plugin list
     ki plugin show <id>
     ki plugin install <path.wasm> [--id <id>] [--yes] [--host <host>]... [--command <cmd>]...
+                                  [--cwd <plugin-data|project>] [--timeout <seconds>]
     ki plugin uninstall <id>
-    ki plugin grant <id> <capability> [--host <host> | --command <cmd>]...
+    ki plugin grant <id> <capability> [--host <host> | --command <cmd> | --cwd <scope> | --timeout <seconds>]...
     ki plugin revoke <id> <capability>
 
 CAPABILITIES:
     net-http      host-mediated HTTP; --host <host> (repeatable, `*` allows any)
     fs            the plugin's own data directory (`plugins/<id>/data/`)
-    exec          run a child process; --command <name> (repeatable, `*` allows any)
+    exec          run a child process; --command <name> (repeatable, `*` allows any),
+                  --cwd plugin-data|project (default plugin-data: where the child
+                  may start — the plugin's data directory or the project
+                  directory), --timeout <seconds> (default 30, at most 300)
     net-sockets   raw TCP; --host <host> (repeatable, `*` allows any)
 
 `install` copies the component to `plugins/<id>/plugin.wasm`, shows the
@@ -275,7 +312,7 @@ fn approve_new_capabilities(yes: bool, interactive: bool, answer: Option<&str>) 
     matches!(answer.map(str::trim), Some("y" | "Y" | "yes"))
 }
 
-/// `ki plugin install <path.wasm> [--id ID] [--yes] [--host H]...`
+/// `ki plugin install <path.wasm> [--id ID] [--yes] [--host H]... [--command C]... [--cwd S] [--timeout N]`
 fn install(args: &[String]) -> i32 {
     install_into(args, None)
 }
@@ -290,6 +327,7 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
     let mut yes = false;
     let mut hosts: Vec<String> = Vec::new();
     let mut commands: Vec<String> = Vec::new();
+    let mut exec_options = GrantOptions::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -312,6 +350,32 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
                 Some(value) => commands.push(value.clone()),
                 None => {
                     eprintln!("error: --command needs a value");
+                    return 2;
+                }
+            },
+            "--cwd" => match iter.next() {
+                Some(value) => match ExecCwd::parse(value) {
+                    Ok(cwd) => exec_options.cwd = Some(cwd),
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        return 2;
+                    }
+                },
+                None => {
+                    eprintln!("error: --cwd needs a value");
+                    return 2;
+                }
+            },
+            "--timeout" => match iter.next() {
+                Some(value) => match value.parse::<u64>() {
+                    Ok(seconds) => exec_options.timeout_seconds = Some(seconds),
+                    Err(_) => {
+                        eprintln!("error: --timeout needs seconds, got `{value}`");
+                        return 2;
+                    }
+                },
+                None => {
+                    eprintln!("error: --timeout needs a value");
                     return 2;
                 }
             },
@@ -397,13 +461,13 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
         if approve {
             for cap in &new_caps {
                 // Each capability carries its own policy: hosts for the network
-                // capabilities, command names for exec.
-                let policy = if cap.as_str() == "exec" {
-                    commands.clone()
+                // capabilities, command names (plus --cwd/--timeout) for exec.
+                let (policy, options) = if cap.as_str() == "exec" {
+                    (commands.clone(), exec_options.clone())
                 } else {
-                    hosts.clone()
+                    (hosts.clone(), GrantOptions::default())
                 };
-                match grants.grant(cap, policy) {
+                match grants.grant(cap, policy, options) {
                     Ok(()) => granted_now.push(cap.to_string()),
                     Err(error) => eprintln!("note: {cap}: {error}"),
                 }
@@ -511,6 +575,43 @@ mod tests {
         assert!(parse_target(&args).is_err());
     }
 
+    /// The exec options parse; bad values and unknown flags are usage errors.
+    #[test]
+    fn grant_parses_exec_cwd_and_timeout() {
+        let args = vec![
+            "p".to_string(),
+            "exec".to_string(),
+            "--command".to_string(),
+            "cargo".to_string(),
+            "--cwd".to_string(),
+            "project".to_string(),
+            "--timeout".to_string(),
+            "120".to_string(),
+        ];
+        let target = parse_target(&args).expect("parse");
+        assert_eq!(target.policy, vec!["cargo".to_string()]);
+        assert_eq!(target.options.cwd, Some(ExecCwd::Project));
+        assert_eq!(target.options.timeout_seconds, Some(120));
+
+        for bad in [
+            vec!["p".to_string(), "exec".to_string(), "--cwd".to_string()],
+            vec![
+                "p".to_string(),
+                "exec".to_string(),
+                "--cwd".to_string(),
+                "elsewhere".to_string(),
+            ],
+            vec![
+                "p".to_string(),
+                "exec".to_string(),
+                "--timeout".to_string(),
+                "soon".to_string(),
+            ],
+        ] {
+            assert!(parse_target(&bad).is_err(), "{bad:?}");
+        }
+    }
+
     /// Installing copies the component, grants `--yes` only what the component
     /// declares, and uninstalling moves the directory aside.
     ///
@@ -545,6 +646,10 @@ mod tests {
                 "127.0.0.1".into(),
                 "--command".into(),
                 "echo".into(),
+                "--cwd".into(),
+                "project".into(),
+                "--timeout".into(),
+                "120".into(),
             ],
             Some(root),
         );
@@ -558,6 +663,9 @@ mod tests {
         assert!(grants.allows_host("127.0.0.1"));
         assert!(grants.allows_socket_host("127.0.0.1"));
         assert!(grants.allows_command("echo"));
+        let exec = grants.exec.as_ref().expect("exec was granted");
+        assert_eq!(exec.cwd, kiqi_plugin::grants::ExecCwd::Project);
+        assert_eq!(exec.timeout_seconds, 120);
 
         let code = uninstall_into(&["conformance".into()], Some(root));
         assert_eq!(code, 0);

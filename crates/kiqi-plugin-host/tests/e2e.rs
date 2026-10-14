@@ -911,6 +911,7 @@ fn exec_runs_only_allow_listed_commands() {
     let (_dir, plugin) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
             commands: vec!["echo".to_string()],
+            ..ExecGrant::default()
         }),
         ..Grants::default()
     });
@@ -925,6 +926,7 @@ fn exec_runs_only_allow_listed_commands() {
     let (_dir, plugin) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
             commands: vec!["ls".to_string()],
+            ..ExecGrant::default()
         }),
         ..Grants::default()
     });
@@ -933,6 +935,222 @@ fn exec_runs_only_allow_listed_commands() {
         text_of(&denied).contains("exec=exec of `echo` is not granted"),
         "an unlisted command must report the deny reason: {}",
         text_of(&denied)
+    );
+}
+
+/// Load the fixture with an explicit project directory: the data dir sits in
+/// `dir`, the cwd scope `project` resolves against `project`.
+fn load_fixture_with_project(grants: Grants) -> (tempfile::TempDir, tempfile::TempDir, WasmPlugin) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let wasm = dir.path().join("plugin.wasm");
+    std::fs::copy(fixture_wasm(), &wasm).expect("copy the fixture next to a writable data dir");
+    let plugin = WasmPlugin::load_with_options(
+        "conformance",
+        &wasm,
+        grants,
+        kiqi_plugin_host::Options {
+            project_dir: Some(project.path().to_path_buf()),
+            ..kiqi_plugin_host::Options::default()
+        },
+    )
+    .expect("load");
+    (dir, project, plugin)
+}
+
+/// The grant's cwd scope decides where the child starts: the default is the
+/// plugin's own data directory, and a guest-supplied relative cwd resolves
+/// inside it.
+#[test]
+fn exec_cwd_defaults_to_the_plugin_data_directory() {
+    use kiqi_plugin_host::ExecGrant;
+
+    let (dir, plugin) = load_fixture_in_temp(Grants {
+        exec: Some(ExecGrant {
+            commands: vec!["sh".to_string()],
+            ..ExecGrant::default()
+        }),
+        ..Grants::default()
+    });
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch marker"] } }),
+    )
+    .expect("call");
+    assert!(
+        dir.path().join("data/marker").is_file(),
+        "no cwd: the child starts in the data directory: {}",
+        text_of(&outcome)
+    );
+
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch marker"], "cwd": "sub" } }),
+    )
+    .expect("call");
+    assert!(
+        dir.path().join("data/sub/marker").is_file(),
+        "a relative cwd descends inside the data directory: {}",
+        text_of(&outcome)
+    );
+
+    // `.` is the root itself: no final component to check, and it must not be
+    // refused by the symlink guard comparing the root's parent against it.
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch dot"], "cwd": "." } }),
+    )
+    .expect("call");
+    assert!(
+        dir.path().join("data/dot").is_file(),
+        "cwd `.` means the scope root: {}",
+        text_of(&outcome)
+    );
+}
+
+/// A cwd the guest supplies may not walk out of the granted root, whether by
+/// `..` or by an absolute path.
+#[test]
+fn exec_cwd_cannot_escape_its_scope_root() {
+    use kiqi_plugin_host::ExecGrant;
+
+    let (dir, plugin) = load_fixture_in_temp(Grants {
+        exec: Some(ExecGrant {
+            commands: vec!["sh".to_string()],
+            ..ExecGrant::default()
+        }),
+        ..Grants::default()
+    });
+    for cwd in ["../outside", "/tmp"] {
+        let outcome = call_main_tool(
+            &plugin,
+            serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch escaped"], "cwd": cwd } }),
+        )
+        .expect("call");
+        assert!(
+            text_of(&outcome).contains("exec=failed:"),
+            "cwd {cwd:?} is refused: {}",
+            text_of(&outcome)
+        );
+    }
+    assert!(!dir.path().join("outside").exists());
+}
+
+/// A symlink inside the granted root must not be followed out of it. The exec
+/// path runs the same lexical + symlink checks as `fs` — a symlink left in the
+/// data directory would otherwise be followed as the child's cwd.
+#[cfg(unix)]
+#[test]
+fn exec_cwd_refuses_a_symlinked_parent() {
+    use kiqi_plugin_host::ExecGrant;
+
+    let (dir, plugin) = load_fixture_in_temp(Grants {
+        exec: Some(ExecGrant {
+            commands: vec!["sh".to_string()],
+            ..ExecGrant::default()
+        }),
+        ..Grants::default()
+    });
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).expect("create the data dir");
+    std::os::unix::fs::symlink(outside.path(), data.join("link")).expect("plant the symlink");
+
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch escaped"], "cwd": "link" } }),
+    )
+    .expect("call");
+    assert!(
+        text_of(&outcome).contains("exec=failed:"),
+        "a symlinked cwd is refused: {}",
+        text_of(&outcome)
+    );
+    assert!(!outside.path().join("escaped").exists());
+}
+
+/// With the `project` cwd scope, the child starts in the project directory —
+/// what a diagnostic plugin needs to run `cargo`/`clippy` on the user's tree.
+#[test]
+fn exec_cwd_project_scope_runs_in_the_project_directory() {
+    use kiqi_plugin_host::{ExecCwd, ExecGrant};
+
+    let (dir, project, plugin) = load_fixture_with_project(Grants {
+        exec: Some(ExecGrant {
+            commands: vec!["sh".to_string()],
+            cwd: ExecCwd::Project,
+            ..ExecGrant::default()
+        }),
+        ..Grants::default()
+    });
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch marker"] } }),
+    )
+    .expect("call");
+    assert!(
+        project.path().join("marker").is_file(),
+        "the child starts in the project directory: {}",
+        text_of(&outcome)
+    );
+    assert!(
+        !dir.path().join("data/marker").exists(),
+        "and not in the plugin's data directory"
+    );
+
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch marker"], "cwd": "sub" } }),
+    )
+    .expect("call");
+    assert!(
+        project.path().join("sub/marker").is_file(),
+        "a relative cwd descends inside the project directory: {}",
+        text_of(&outcome)
+    );
+
+    // The project root is still a root: `..` out of it is refused.
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "true"], "cwd": ".." } }),
+    )
+    .expect("call");
+    assert!(
+        text_of(&outcome).contains("exec=failed:"),
+        "the project scope is still a jail: {}",
+        text_of(&outcome)
+    );
+}
+
+/// The time budget rides with the grant: a command that overruns it is killed
+/// and reported as timed out, long before its own duration.
+#[test]
+fn exec_times_out_at_the_grants_budget() {
+    use kiqi_plugin_host::ExecGrant;
+
+    let (_dir, plugin) = load_fixture_in_temp(Grants {
+        exec: Some(ExecGrant {
+            commands: vec!["sh".to_string()],
+            timeout_seconds: 1,
+            ..ExecGrant::default()
+        }),
+        ..Grants::default()
+    });
+    let start = std::time::Instant::now();
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "sleep 10"] } }),
+    )
+    .expect("call");
+    let elapsed = start.elapsed();
+    assert!(
+        text_of(&outcome).contains("timedout"),
+        "a command past its budget is reported as timed out: {}",
+        text_of(&outcome)
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "the 1s budget fires long before the 10s command would finish ({elapsed:?})"
     );
 }
 
@@ -1191,6 +1409,7 @@ fn exec_does_not_hang_when_the_command_leaves_a_background_child() {
         let (_dir, plugin) = load_fixture_in_temp(Grants {
             exec: Some(ExecGrant {
                 commands: vec!["sh".to_string()],
+                ..ExecGrant::default()
             }),
             ..Grants::default()
         });

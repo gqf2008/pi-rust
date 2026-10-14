@@ -152,7 +152,7 @@ fn denied() -> CapabilityError {
 
 /// What the user authorized for one plugin, shared with the CLI through the
 /// contract crate (`kiqi-plugin`).
-pub use kiqi_plugin::grants::{allows, ExecGrant, Grants, NetHttpGrant, NetSocketsGrant};
+pub use kiqi_plugin::grants::{allows, ExecCwd, ExecGrant, Grants, NetHttpGrant, NetSocketsGrant};
 
 /// The user-grantable capabilities a component declares — the `kiqi:plugin/*`
 /// imports that need authorization (`net-http`, `fs`, `exec`, `net-sockets`).
@@ -209,6 +209,10 @@ struct HostState {
     /// `None` when the component's path has no parent (in-memory components in
     /// tests), in which case `fs` reports `failed`.
     fs_root: Option<std::path::PathBuf>,
+    /// The root an `exec` cwd scope of `project` resolves against. `None`
+    /// resolves to the host process's working directory at call time (see
+    /// [`Options::project_dir`]).
+    project_dir: Option<std::path::PathBuf>,
     /// Raw TCP connections, keyed by the handle the guest was handed.
     sockets: std::collections::HashMap<u32, std::net::TcpStream>,
     next_socket: u32,
@@ -494,32 +498,29 @@ impl HostState {
     /// capability check, for callers whose own grant already gates them
     /// (`exec`'s cwd).
     fn jail(&self, rel: &str) -> Result<std::path::PathBuf, CapabilityError> {
-        let root = self.data_dir()?;
-        let candidate = std::path::Path::new(rel);
-        let mut resolved = root.clone();
-        for component in candidate.components() {
-            match component {
-                std::path::Component::Normal(part) => resolved.push(part),
-                std::path::Component::CurDir => {}
-                _ => {
-                    return Err(CapabilityError::Failed(format!(
-                        "path `{rel}` must be relative and stay inside the plugin directory"
-                    )))
-                }
-            }
-        }
-        if !resolved.starts_with(&root) {
-            return Err(CapabilityError::Failed(format!(
-                "path `{rel}` escapes the plugin directory"
-            )));
-        }
-        Ok(resolved)
+        jail_under(&self.data_dir()?, rel, "the plugin directory")
     }
 
     fn data_dir(&self) -> Result<std::path::PathBuf, CapabilityError> {
         self.fs_root
             .clone()
             .ok_or_else(|| CapabilityError::Failed("this plugin has no data directory".to_string()))
+    }
+
+    /// The project directory an `exec` cwd scope of `project` resolves against.
+    ///
+    /// `None` (the normal embedding) means the host process's working
+    /// directory: `ki` never chdirs after startup and the session's recorded
+    /// cwd is initialised from the same place, so the process cwd *is* the
+    /// project directory. Tests and embedders that do relocate set the
+    /// [`Options::project_dir`] knob instead.
+    fn project_dir(&self) -> Result<std::path::PathBuf, CapabilityError> {
+        match &self.project_dir {
+            Some(dir) => Ok(dir.clone()),
+            None => std::env::current_dir().map_err(|error| {
+                CapabilityError::Failed(format!("resolve the project directory: {error}"))
+            }),
+        }
     }
 
     /// Re-check a lexically-jailed path against symlinks.
@@ -533,42 +534,86 @@ impl HostState {
         resolved: &std::path::Path,
         create_parents: bool,
     ) -> Result<std::path::PathBuf, CapabilityError> {
-        let root = self.data_dir()?;
-        // Create it first: `canonicalize` needs the directory to exist, and
-        // falling back to the un-canonicalized path would compare a symlinked
-        // root (`/var` vs `/private/var` on macOS) against a canonicalized
-        // parent and reject every path.
-        std::fs::create_dir_all(&root).map_err(|error| {
-            CapabilityError::Failed(format!("create {}: {error}", root.display()))
-        })?;
-        let root = root.canonicalize().unwrap_or(root);
-        let parent = resolved.parent().unwrap_or(&root);
-        if create_parents {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                CapabilityError::Failed(format!("create {}: {error}", parent.display()))
-            })?;
-        }
-        let parent = parent.canonicalize().map_err(|error| {
-            CapabilityError::Failed(format!("resolve {}: {error}", parent.display()))
-        })?;
-        if !parent.starts_with(&root) {
-            return Err(CapabilityError::Failed(
-                "path escapes the plugin directory".to_string(),
-            ));
-        }
-        let name = resolved
-            .file_name()
-            .ok_or_else(|| CapabilityError::Failed("path has no file name".to_string()))?;
-        let target = parent.join(name);
-        if let Ok(metadata) = std::fs::symlink_metadata(&target) {
-            if metadata.file_type().is_symlink() {
-                return Err(CapabilityError::Failed(
-                    "refusing to follow a symlink inside the plugin directory".to_string(),
-                ));
+        symlink_checked_under(
+            &self.data_dir()?,
+            resolved,
+            create_parents,
+            "the plugin directory",
+        )
+    }
+}
+
+/// Resolve a guest-supplied relative path inside `root`, or explain why it may
+/// not.
+///
+/// A path with any `..`, root or prefix component is refused outright, so a
+/// plugin cannot walk out of its jail — and `starts_with` is checked as well
+/// rather than relied on. `what` names the jail in errors (`the plugin
+/// directory` for `fs`, `the project directory` for a project-scoped `exec`).
+fn jail_under(
+    root: &std::path::Path,
+    rel: &str,
+    what: &str,
+) -> Result<std::path::PathBuf, CapabilityError> {
+    let candidate = std::path::Path::new(rel);
+    let mut resolved = root.to_path_buf();
+    for component in candidate.components() {
+        match component {
+            std::path::Component::Normal(part) => resolved.push(part),
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(CapabilityError::Failed(format!(
+                    "path `{rel}` must be relative and stay inside {what}"
+                )))
             }
         }
-        Ok(target)
     }
+    if !resolved.starts_with(root) {
+        return Err(CapabilityError::Failed(format!(
+            "path `{rel}` escapes {what}"
+        )));
+    }
+    Ok(resolved)
+}
+
+/// [`symlink_checked`](HostState::symlink_checked) against an explicit root.
+fn symlink_checked_under(
+    root: &std::path::Path,
+    resolved: &std::path::Path,
+    create_parents: bool,
+    what: &str,
+) -> Result<std::path::PathBuf, CapabilityError> {
+    // Create it first: `canonicalize` needs the directory to exist, and
+    // falling back to the un-canonicalized path would compare a symlinked
+    // root (`/var` vs `/private/var` on macOS) against a canonicalized
+    // parent and reject every path.
+    std::fs::create_dir_all(root)
+        .map_err(|error| CapabilityError::Failed(format!("create {}: {error}", root.display())))?;
+    let root = &root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let parent = resolved.parent().unwrap_or(root);
+    if create_parents {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            CapabilityError::Failed(format!("create {}: {error}", parent.display()))
+        })?;
+    }
+    let parent = parent.canonicalize().map_err(|error| {
+        CapabilityError::Failed(format!("resolve {}: {error}", parent.display()))
+    })?;
+    if !parent.starts_with(root) {
+        return Err(CapabilityError::Failed(format!("path escapes {what}")));
+    }
+    let name = resolved
+        .file_name()
+        .ok_or_else(|| CapabilityError::Failed("path has no file name".to_string()))?;
+    let target = parent.join(name);
+    if let Ok(metadata) = std::fs::symlink_metadata(&target) {
+        if metadata.file_type().is_symlink() {
+            return Err(CapabilityError::Failed(format!(
+                "refusing to follow a symlink inside {what}"
+            )));
+        }
+    }
+    Ok(target)
 }
 
 /// Plugin filesystem, jailed to `plugins/<id>/data/`.
@@ -658,9 +703,17 @@ impl crate::kiqi::plugin::net_sockets::Host for HostState {
     }
 }
 
-/// Run a child process: allow-listed bare command name, jailed cwd, cleared
-/// environment, capped output, wall-clock timeout. No shell is involved, so
-/// shell metacharacters in `args` stay literal.
+/// Run a child process: allow-listed bare command name, grant-scoped cwd,
+/// cleared environment, capped output, wall-clock timeout. No shell is
+/// involved, so shell metacharacters in `args` stay literal.
+///
+/// The cwd scope rides with the grant: `plugin-data` jails the child's working
+/// directory to `plugins/<id>/data/`; `project` jails it to the project
+/// directory (for diagnostic plugins that run `cargo`/`clippy`). Note the jail
+/// bounds where the child *starts*, not what it can reach: the child inherits
+/// the user's privileges and can read or write anywhere it can path to. The
+/// scope exists so a plugin cannot *accidentally* operate on the wrong tree
+/// and so the grant's intent stays legible — not to sandbox the child.
 impl crate::kiqi::plugin::exec::Host for HostState {
     fn run(
         &mut self,
@@ -678,14 +731,38 @@ impl crate::kiqi::plugin::exec::Host for HostState {
                 "exec command must be a bare name, not a path: `{cmd}`"
             )));
         }
+        let grant = self
+            .grants
+            .exec
+            .as_ref()
+            .expect("allows_command implies an exec grant");
+        let (root, what) = match grant.cwd {
+            kiqi_plugin::grants::ExecCwd::PluginData => (self.data_dir()?, "the plugin directory"),
+            kiqi_plugin::grants::ExecCwd::Project => (self.project_dir()?, "the project directory"),
+        };
         let cwd = match cwd {
-            Some(rel) => self.jail(&rel)?,
-            None => self.data_dir()?,
+            // The same lexical + symlink checks as `fs`: a guest-supplied cwd
+            // must not walk out of the granted root, and a symlinked parent
+            // (a project directory is the user's tree, not a fresh jail) must
+            // not be followed out of it either.
+            Some(rel) => {
+                let resolved = jail_under(&root, &rel, what)?;
+                // `.`/`./`/`` resolve to the root itself: the guest picked
+                // nothing, so there is no final component to symlink-check
+                // (the parent comparison would wrongly test the root's
+                // parent against the root).
+                if resolved == root {
+                    root.clone()
+                } else {
+                    symlink_checked_under(&root, &resolved, true, what)?
+                }
+            }
+            None => root,
         };
         std::fs::create_dir_all(&cwd).map_err(|error| {
             CapabilityError::Failed(format!("create {}: {error}", cwd.display()))
         })?;
-        run_with_limits(&cmd, &args, &cwd)
+        run_with_limits(&cmd, &args, &cwd, grant.timeout_seconds)
     }
 }
 
@@ -719,15 +796,32 @@ fn split_host_port(address: &str) -> Result<(String, u16), CapabilityError> {
 }
 
 /// Spawn, capture output with a byte cap, and enforce a wall-clock deadline.
+///
+/// `timeout_seconds` is the grant's budget, clamped to
+/// [`EXEC_TIMEOUT_MAX_SECONDS`](kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS):
+/// the CLI validates the grant, so only a hand-edited file can come in over
+/// the cap — the clamp is the last-resort guard, and it says so.
 fn run_with_limits(
     cmd: &str,
     args: &[String],
     cwd: &std::path::Path,
+    timeout_seconds: u64,
 ) -> Result<String, CapabilityError> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     const OUTPUT_CAP: u64 = 256 * 1024;
-    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    let timeout_seconds = {
+        let raw = timeout_seconds;
+        let clamped = raw.min(kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS);
+        if raw != clamped {
+            eprintln!(
+                "[kiqi-plugin] exec grant timeout {raw}s exceeds the {clamped}s cap; clamped \
+                 (a hand-edited grants.json is the only way in past the CLI's check)"
+            );
+        }
+        clamped
+    };
+    let timeout = std::time::Duration::from_secs(timeout_seconds);
 
     let mut command = Command::new(cmd);
     command
@@ -766,7 +860,7 @@ fn run_with_limits(
         buffer
     });
 
-    let deadline = std::time::Instant::now() + TIMEOUT;
+    let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         match child
             .try_wait()
@@ -818,6 +912,11 @@ pub struct Options {
     /// a guest that asks for more traps on the grow rather than taking the
     /// machine's memory.
     pub max_memory_bytes: Option<usize>,
+    /// The project directory an `exec` grant with cwd scope `project` resolves
+    /// against. `None` (the default) uses the host process's working directory
+    /// at call time — the right answer for `ki`, which never chdirs — while
+    /// tests and embedders that relocate set it explicitly.
+    pub project_dir: Option<std::path::PathBuf>,
 }
 
 /// The default linear-memory cap for a guest: 256 MiB, which is far above what
@@ -892,6 +991,7 @@ impl WasmPlugin {
                 table: ResourceTable::new(),
                 grants,
                 fs_root,
+                project_dir: options.project_dir.clone(),
                 sockets: std::collections::HashMap::new(),
                 next_socket: 1,
                 limits,
@@ -1264,6 +1364,7 @@ mod tests {
                 ..Grants::default()
             },
             fs_root: Some(root.to_path_buf()),
+            project_dir: None,
             sockets: std::collections::HashMap::new(),
             next_socket: 1,
             limits: wasmtime::StoreLimitsBuilder::new().build(),

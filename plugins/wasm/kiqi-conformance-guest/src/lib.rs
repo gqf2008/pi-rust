@@ -53,10 +53,11 @@ fn fetch(arguments: &str) -> Result<types::ToolResult, types::PluginError> {
 
 /// Render a capability error for the model: a refusal and a failure read
 /// differently on purpose.
-/// An explicit `{cmd, args}` from the tool arguments, so a caller can drive a
-/// command that is not the default `echo` (e.g. one that leaves a background
-/// child holding the pipe).
-fn exec_request(arguments: &str) -> Option<(String, Vec<String>)> {
+/// An explicit `{cmd, args, cwd?}` from the tool arguments, so a caller can
+/// drive a command that is not the default `echo` (e.g. one that leaves a
+/// background child holding the pipe), optionally with a relative cwd so the
+/// grant's cwd scope can be exercised.
+fn exec_request(arguments: &str) -> Option<(String, Vec<String>, Option<String>)> {
     let spec = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
     let spec = spec.get("exec")?;
     let cmd = spec.get("cmd")?.as_str()?.to_string();
@@ -69,7 +70,11 @@ fn exec_request(arguments: &str) -> Option<(String, Vec<String>)> {
                 .collect()
         })
         .unwrap_or_default();
-    Some((cmd, args))
+    let cwd = spec
+        .get("cwd")
+        .and_then(|cwd| cwd.as_str())
+        .map(str::to_string);
+    Some((cmd, args, cwd))
 }
 
 /// The `address` field of the tool arguments, when the caller supplied one.
@@ -222,16 +227,28 @@ impl Guest for Conformance {
 
         // `exec`: an allow-listed bare command, no shell. Granted it returns the
         // child's stdout; otherwise the reason.
-        let (exec_cmd, exec_args) = exec_request(&arguments)
-            .unwrap_or_else(|| ("echo".to_string(), vec!["conformance".to_string()]));
-        let exec_outcome = match exec::run(&exec_cmd, &exec_args, None) {
+        let (exec_cmd, exec_args, exec_cwd) = exec_request(&arguments)
+            .unwrap_or_else(|| ("echo".to_string(), vec!["conformance".to_string()], None));
+        let exec_outcome = match exec::run(&exec_cmd, &exec_args, exec_cwd.as_deref()) {
             Ok(json) => serde_json::from_str::<serde_json::Value>(&json)
                 .ok()
-                .and_then(|value| {
-                    value
+                .map(|value| {
+                    let stdout = value
                         .get("stdout")
                         .and_then(|stdout| stdout.as_str())
                         .map(|stdout| stdout.trim().to_string())
+                        .unwrap_or_default();
+                    // A timed-out call is not a clean run: say so, so a caller
+                    // can tell "ran and printed nothing" apart from "killed".
+                    if value
+                        .get("timedOut")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        format!("{stdout} timedout")
+                    } else {
+                        stdout
+                    }
                 })
                 .unwrap_or_else(|| "unparseable".to_string()),
             Err(error) => capability_reason(error),

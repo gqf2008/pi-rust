@@ -39,16 +39,97 @@ pub struct NetHttpGrant {
     pub hosts: Vec<String>,
 }
 
+/// The default wall-clock budget for one `exec` call when the grant says
+/// nothing — the value the host used before the budget was grant-carried.
+pub const EXEC_TIMEOUT_DEFAULT_SECONDS: u64 = 30;
+
+/// The largest budget a grant can ask for. The CLI rejects larger values and
+/// the host clamps them, so a hand-edited file cannot buy an unbounded child.
+pub const EXEC_TIMEOUT_MAX_SECONDS: u64 = 300;
+
+/// Which root an `exec` working directory resolves against. The scope rides
+/// with the grant — "granted" and "where" are one decision, the same rule the
+/// command allow-list follows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecCwd {
+    /// Inside `plugins/<id>/data/` — the default, and the same jail `fs` uses.
+    #[default]
+    PluginData,
+    /// The project directory the session runs in (the host process's working
+    /// directory). Needed by diagnostic plugins that run `cargo`/`clippy`
+    /// against the user's tree.
+    Project,
+}
+
+impl ExecCwd {
+    /// The CLI spelling (`--cwd plugin-data|project`).
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "plugin-data" => Ok(ExecCwd::PluginData),
+            "project" => Ok(ExecCwd::Project),
+            other => Err(format!(
+                "exec cwd must be `plugin-data` or `project`, got `{other}`"
+            )),
+        }
+    }
+
+    fn is_plugin_data(&self) -> bool {
+        matches!(self, ExecCwd::PluginData)
+    }
+}
+
+fn default_exec_timeout() -> u64 {
+    EXEC_TIMEOUT_DEFAULT_SECONDS
+}
+
+fn is_default_exec_timeout(value: &u64) -> bool {
+    *value == EXEC_TIMEOUT_DEFAULT_SECONDS
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct ExecGrant {
     /// Command names (no path, no shell) the plugin may run; `*` allows any.
     pub commands: Vec<String>,
+    /// Where the child may start. Absent in older grant files = `plugin-data`,
+    /// so an existing grant keeps its old meaning unchanged.
+    #[serde(default, skip_serializing_if = "ExecCwd::is_plugin_data")]
+    pub cwd: ExecCwd,
+    /// Wall-clock budget in seconds for one call; absent = the default,
+    /// capped at [`EXEC_TIMEOUT_MAX_SECONDS`].
+    #[serde(
+        default = "default_exec_timeout",
+        skip_serializing_if = "is_default_exec_timeout"
+    )]
+    pub timeout_seconds: u64,
+}
+
+impl Default for ExecGrant {
+    fn default() -> Self {
+        Self {
+            commands: Vec::new(),
+            cwd: ExecCwd::default(),
+            timeout_seconds: EXEC_TIMEOUT_DEFAULT_SECONDS,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NetSocketsGrant {
     /// Hosts the plugin may open a TCP connection to; `*` allows any.
     pub hosts: Vec<String>,
+}
+
+/// Options a grant may carry beyond its value list. Only `exec` has any; a
+/// caller setting them for another capability gets an error, not a silently
+/// dropped flag.
+#[derive(Debug, Clone, Default)]
+pub struct GrantOptions {
+    /// `--cwd plugin-data|project` (exec only).
+    pub cwd: Option<ExecCwd>,
+    /// `--timeout <seconds>` (exec only).
+    pub timeout_seconds: Option<u64>,
 }
 
 impl Grants {
@@ -136,8 +217,14 @@ impl Grants {
 
     /// Grant one capability. Every capability carries its policy: hosts for
     /// `net-http`/`net-sockets`, command names for `exec`, nothing for `fs`
-    /// (whose jail is the policy).
-    pub fn grant(&mut self, capability: &str, policy: Vec<String>) -> Result<(), String> {
+    /// (whose jail is the policy). `exec` additionally accepts a cwd scope and
+    /// a time budget through `options`; any other capability rejects them.
+    pub fn grant(
+        &mut self,
+        capability: &str,
+        policy: Vec<String>,
+        options: GrantOptions,
+    ) -> Result<(), String> {
         let non_empty = |what: &str| -> Result<Vec<String>, String> {
             if policy.is_empty() {
                 Err(format!("{capability} needs at least one {what}"))
@@ -146,22 +233,37 @@ impl Grants {
             }
         };
         match capability {
-            "net-http" => {
-                self.net_http = Some(NetHttpGrant {
-                    hosts: non_empty("--host (or --host '*'))")?,
-                })
-            }
-            "net-sockets" => {
-                self.net_sockets = Some(NetSocketsGrant {
-                    hosts: non_empty("--host (or --host '*'))")?,
-                })
+            "net-http" | "net-sockets" | "fs" => {
+                if options.cwd.is_some() || options.timeout_seconds.is_some() {
+                    return Err(format!(
+                        "`{capability}` takes no --cwd or --timeout (those are exec options)"
+                    ));
+                }
+                let hosts = || non_empty("--host (or --host '*'))");
+                match capability {
+                    "net-http" => self.net_http = Some(NetHttpGrant { hosts: hosts()? }),
+                    "net-sockets" => self.net_sockets = Some(NetSocketsGrant { hosts: hosts()? }),
+                    _ => self.fs = true,
+                }
             }
             "exec" => {
+                let commands = non_empty("--command (or --command '*')")?;
+                let timeout_seconds = match options.timeout_seconds {
+                    None => EXEC_TIMEOUT_DEFAULT_SECONDS,
+                    Some(0) => return Err("exec --timeout must be at least 1 second".to_string()),
+                    Some(seconds) if seconds > EXEC_TIMEOUT_MAX_SECONDS => {
+                        return Err(format!(
+                            "exec --timeout {seconds}s exceeds the {EXEC_TIMEOUT_MAX_SECONDS}s cap"
+                        ))
+                    }
+                    Some(seconds) => seconds,
+                };
                 self.exec = Some(ExecGrant {
-                    commands: non_empty("--command (or --command '*')")?,
-                })
+                    commands,
+                    cwd: options.cwd.unwrap_or_default(),
+                    timeout_seconds,
+                });
             }
-            "fs" => self.fs = true,
             other => return Err(format!("unknown capability `{other}`")),
         }
         Ok(())
@@ -252,27 +354,35 @@ mod tests {
     fn grant_revoke_and_host_matching() {
         let mut grants = Grants::default();
         grants
-            .grant("net-http", vec!["api.langfuse.com".to_string()])
+            .grant(
+                "net-http",
+                vec!["api.langfuse.com".to_string()],
+                GrantOptions::default(),
+            )
             .unwrap();
         assert!(grants.allows_host("api.langfuse.com"));
         assert!(!grants.allows_host("evil.example"));
         assert_eq!(grants.granted(), vec!["net-http"]);
 
-        grants.grant("fs", vec![]).unwrap();
+        grants.grant("fs", vec![], GrantOptions::default()).unwrap();
         assert_eq!(grants.granted(), vec!["net-http", "fs"]);
 
         grants.revoke("net-http").unwrap();
         assert!(grants.granted() == vec!["fs"]);
         assert!(!grants.allows_host("api.langfuse.com"));
 
-        assert!(grants.grant("nope", vec![]).is_err());
+        assert!(grants
+            .grant("nope", vec![], GrantOptions::default())
+            .is_err());
         assert!(grants.revoke("nope").is_err());
     }
 
     #[test]
     fn wildcard_host_is_allowed() {
         let mut grants = Grants::default();
-        grants.grant("net-http", vec!["*".to_string()]).unwrap();
+        grants
+            .grant("net-http", vec!["*".to_string()], GrantOptions::default())
+            .unwrap();
         assert!(grants.allows_host("anything.example"));
     }
 
@@ -283,10 +393,16 @@ mod tests {
     fn every_capability_carries_its_policy() {
         let mut grants = Grants::default();
         grants
-            .grant("net-sockets", vec!["127.0.0.1".to_string()])
+            .grant(
+                "net-sockets",
+                vec!["127.0.0.1".to_string()],
+                GrantOptions::default(),
+            )
             .unwrap();
-        grants.grant("exec", vec!["echo".to_string()]).unwrap();
-        grants.grant("fs", vec![]).unwrap();
+        grants
+            .grant("exec", vec!["echo".to_string()], GrantOptions::default())
+            .unwrap();
+        grants.grant("fs", vec![], GrantOptions::default()).unwrap();
 
         assert!(grants.allows_socket_host("127.0.0.1"));
         assert!(!grants.allows_socket_host("example.com"));
@@ -294,12 +410,124 @@ mod tests {
         assert!(!grants.allows_command("rm"));
         assert_eq!(grants.granted(), vec!["fs", "exec", "net-sockets"]);
 
-        assert!(grants.grant("exec", vec![]).is_err());
-        assert!(grants.grant("net-sockets", vec![]).is_err());
-        assert!(grants.grant("net-http", vec![]).is_err());
+        assert!(grants
+            .grant("exec", vec![], GrantOptions::default())
+            .is_err());
+        assert!(grants
+            .grant("net-sockets", vec![], GrantOptions::default())
+            .is_err());
+        assert!(grants
+            .grant("net-http", vec![], GrantOptions::default())
+            .is_err());
 
         grants.revoke("exec").unwrap();
         assert!(!grants.allows_command("echo"));
         assert!(!grants.granted().contains(&"exec"));
+    }
+
+    /// The exec policy: defaults preserve the pre-scope meaning (plugin data
+    /// dir, 30s), and only `exec` accepts the scope/budget options.
+    #[test]
+    fn exec_grant_carries_cwd_scope_and_time_budget() {
+        let mut grants = Grants::default();
+        grants
+            .grant(
+                "exec",
+                vec!["cargo".to_string()],
+                GrantOptions {
+                    cwd: Some(ExecCwd::Project),
+                    timeout_seconds: Some(120),
+                },
+            )
+            .unwrap();
+        let grant = grants.exec.as_ref().unwrap();
+        assert_eq!(grant.cwd, ExecCwd::Project);
+        assert_eq!(grant.timeout_seconds, 120);
+
+        // Defaults when the options are not passed.
+        grants
+            .grant("exec", vec!["echo".to_string()], GrantOptions::default())
+            .unwrap();
+        let grant = grants.exec.as_ref().unwrap();
+        assert_eq!(grant.cwd, ExecCwd::PluginData);
+        assert_eq!(grant.timeout_seconds, EXEC_TIMEOUT_DEFAULT_SECONDS);
+
+        // Validation: the budget is bounded, and only exec takes the options.
+        let bad_timeout = |seconds: u64| GrantOptions {
+            cwd: None,
+            timeout_seconds: Some(seconds),
+        };
+        assert!(grants
+            .grant("exec", vec!["echo".to_string()], bad_timeout(0))
+            .is_err());
+        assert!(grants
+            .grant(
+                "exec",
+                vec!["echo".to_string()],
+                bad_timeout(EXEC_TIMEOUT_MAX_SECONDS + 1),
+            )
+            .is_err());
+        assert!(grants
+            .grant(
+                "exec",
+                vec!["echo".to_string()],
+                bad_timeout(EXEC_TIMEOUT_MAX_SECONDS),
+            )
+            .is_ok());
+        assert!(grants
+            .grant(
+                "net-http",
+                vec!["example.com".to_string()],
+                GrantOptions {
+                    cwd: Some(ExecCwd::Project),
+                    timeout_seconds: None,
+                },
+            )
+            .is_err());
+    }
+
+    /// Grant files written before the cwd/timeout fields existed must keep
+    /// their meaning: an old `{"commands":[...]}` deserializes to the defaults.
+    #[test]
+    fn exec_grant_json_is_backward_compatible() {
+        let old = serde_json::json!({"exec": {"commands": ["cargo", "git"]}});
+        let grants: Grants = serde_json::from_value(old).unwrap();
+        let grant = grants.exec.as_ref().unwrap();
+        assert_eq!(grant.commands, vec!["cargo", "git"]);
+        assert_eq!(grant.cwd, ExecCwd::PluginData);
+        assert_eq!(grant.timeout_seconds, EXEC_TIMEOUT_DEFAULT_SECONDS);
+
+        // The default fields stay out of the file (minimal grants.json), and
+        // the explicit ones use the kebab-case spellings the CLI documents.
+        let minimal = serde_json::to_string(&grants).unwrap();
+        assert!(!minimal.contains("cwd") && !minimal.contains("timeout"));
+
+        let mut grants = Grants::default();
+        grants
+            .grant(
+                "exec",
+                vec!["cargo".to_string()],
+                GrantOptions {
+                    cwd: Some(ExecCwd::Project),
+                    timeout_seconds: Some(120),
+                },
+            )
+            .unwrap();
+        let json = serde_json::to_value(&grants).unwrap();
+        assert_eq!(
+            json["exec"],
+            serde_json::json!({
+                "commands": ["cargo"],
+                "cwd": "project",
+                "timeout-seconds": 120,
+            })
+        );
+        // Round-trip back through the file form.
+        let reparsed: Grants = serde_json::from_value(json).unwrap();
+        assert_eq!(reparsed, grants);
+
+        assert_eq!(ExecCwd::parse("project").unwrap(), ExecCwd::Project);
+        assert_eq!(ExecCwd::parse("plugin-data").unwrap(), ExecCwd::PluginData);
+        assert!(ExecCwd::parse("/abs/path").is_err());
     }
 }
