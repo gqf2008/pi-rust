@@ -1053,7 +1053,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_action() {
-        assert!(goal(&json!({"action": "bogus"})).is_err());
+        assert!(goal(&AbiHost, &json!({"action": "bogus"})).is_err());
     }
 
     #[test]
