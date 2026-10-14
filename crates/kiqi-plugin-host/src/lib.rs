@@ -212,6 +212,8 @@ struct HostState {
     /// Raw TCP connections, keyed by the handle the guest was handed.
     sockets: std::collections::HashMap<u32, std::net::TcpStream>,
     next_socket: u32,
+    /// The guest's linear-memory cap, read by the store's limiter.
+    limits: wasmtime::StoreLimits,
 }
 
 impl WasiView for HostState {
@@ -760,7 +762,15 @@ pub struct Options {
     /// Bound the guest's execution. With a budget, a plugin that spins traps
     /// instead of hanging the host; `None` leaves it unbounded.
     pub fuel: Option<u64>,
+    /// Cap the guest's linear memory. `None` uses [`DEFAULT_MAX_MEMORY_BYTES`];
+    /// a guest that asks for more traps on the grow rather than taking the
+    /// machine's memory.
+    pub max_memory_bytes: Option<usize>,
 }
+
+/// The default linear-memory cap for a guest: 256 MiB, which is far above what
+/// any real plugin needs and far below the wasm32 address space.
+pub const DEFAULT_MAX_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 
 /// A plugin loaded from a wasm component.
 pub struct WasmPlugin {
@@ -820,6 +830,9 @@ impl WasmPlugin {
             .map_err(|error| PluginError::Failed(format!("link wasi: {error}")))?;
 
         let fs_root = wasm.parent().map(|dir| dir.join("data"));
+        let limits = wasmtime::StoreLimitsBuilder::new()
+            .memory_size(options.max_memory_bytes.unwrap_or(DEFAULT_MAX_MEMORY_BYTES))
+            .build();
         let mut store = Store::new(
             &engine,
             HostState {
@@ -829,8 +842,11 @@ impl WasmPlugin {
                 fs_root,
                 sockets: std::collections::HashMap::new(),
                 next_socket: 1,
+                limits,
             },
         );
+        // The cap only matters if the store consults it.
+        store.limiter(|state| &mut state.limits);
         if let Some(fuel) = options.fuel {
             store.set_fuel(fuel).map_err(|error| {
                 PluginError::Failed(format!("set fuel budget for {id}: {error}"))
@@ -1198,6 +1214,7 @@ mod tests {
             fs_root: Some(root.to_path_buf()),
             sockets: std::collections::HashMap::new(),
             next_socket: 1,
+            limits: wasmtime::StoreLimitsBuilder::new().build(),
         }
     }
 

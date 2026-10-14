@@ -582,6 +582,18 @@ CLI 侧 `ki plugin grant <id> exec --command echo`、`ki plugin install … --co
 测试：host crate 新增 2 个单测（词法/符号链接监禁、未授权回 `denied` 而非 `failed`）与 1 个真
 起 HTTP 服务器验重定向不被跟随的 e2e。
 
+### 6.28 隔离再补一维：guest 内存上限
+
+此前只有 fuel（算力上限）与 panic/trap 包含，**内存没有上限**——一个 guest 可以一路
+`memory.grow` 到 wasm32 的 4 GiB 地址空间。现在 `StoreLimits` 默认封顶 **256 MiB**
+（`DEFAULT_MAX_MEMORY_BYTES`，可用 `Options::max_memory_bytes` 覆盖），并真的通过
+`store.limiter()` 接上（不接就只是一个配置值）。超过上限时 `memory.grow` 被拒，Rust 侧分配失败即
+trap，宿主不受影响——与 spin/panic 同一类隔离。
+
+conformance fixture 相应地多了一个 `alloc` 工具，e2e 两边都验：**低于上限要成功**
+（1 MiB）、**超过上限要 trap**（128 MiB，未真的分配）。只写“超限要 trap”是不够的——那无法区分
+“上限生效”与“分配被恒禁用”。
+
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
 > “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里

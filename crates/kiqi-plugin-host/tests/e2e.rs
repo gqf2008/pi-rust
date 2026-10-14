@@ -597,6 +597,7 @@ fn a_spinning_guest_is_metered_and_a_panicking_one_traps() {
         Grants::default(),
         kiqi_plugin_host::Options {
             fuel: Some(5_000_000),
+            ..Default::default()
         },
     )
     .expect("load");
@@ -1061,4 +1062,54 @@ fn net_http_does_not_follow_a_redirect_to_an_ungranted_host() {
         parsed["status"], 302,
         "the redirect must not be followed: {body}"
     );
+}
+
+/// A guest cannot take the machine's memory: a request past the cap traps on
+/// the `memory.grow`, and one under it still succeeds (so the cap is not a
+/// blanket disable).
+#[test]
+fn guest_memory_is_capped() {
+    let wasm = fixture_wasm();
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    let bounded = WasmPlugin::load_with_options(
+        "conformance",
+        &wasm,
+        Grants::default(),
+        kiqi_plugin_host::Options {
+            max_memory_bytes: Some(32 * 1024 * 1024),
+            ..Default::default()
+        },
+    )
+    .expect("load");
+
+    // Under the cap.
+    let small = bounded
+        .call(
+            "alloc",
+            &serde_json::json!({ "bytes": 1024 * 1024 }),
+            &caps,
+            &sink,
+        )
+        .expect("an allocation under the cap succeeds");
+    assert!(
+        text_of(&small).contains("allocated 1048576"),
+        "got {}",
+        text_of(&small)
+    );
+
+    // Over it: the grow is refused and the guest traps.
+    let over = bounded
+        .call(
+            "alloc",
+            &serde_json::json!({ "bytes": 128 * 1024 * 1024 }),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(!over.to_string().is_empty(), "an over-cap allocation traps");
 }

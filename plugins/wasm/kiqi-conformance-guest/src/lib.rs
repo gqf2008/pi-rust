@@ -24,6 +24,7 @@ const FETCH_TOOL: &str = "fetch";
 const DIALOG_TOOL: &str = "dialog";
 const SPIN_TOOL: &str = "spin";
 const PANIC_TOOL: &str = "panic";
+const ALLOC_TOOL: &str = "alloc";
 const COMMAND: &str = "conformance";
 
 /// Fetch a URL through the host's `net-http` capability. Whether it succeeds
@@ -132,6 +133,13 @@ impl Guest for Conformance {
                 description: "Panic (isolation probe)".to_string(),
                 parameters_schema: r#"{"type":"object","properties":{}}"#.to_string(),
             },
+            types::ToolSpec {
+                name: ALLOC_TOOL.to_string(),
+                description: "Allocate N bytes (memory-cap probe)".to_string(),
+                parameters_schema:
+                    r#"{"type":"object","properties":{"bytes":{"type":"integer"}},"required":["bytes"]}"#
+                        .to_string(),
+            },
         ]
     }
 
@@ -144,6 +152,21 @@ impl Guest for Conformance {
         }
         if name == PANIC_TOOL {
             panic!("conformance panics on purpose");
+        }
+        if name == ALLOC_TOOL {
+            let bytes = serde_json::from_str::<serde_json::Value>(&arguments)
+                .ok()
+                .and_then(|value| value.get("bytes").and_then(|bytes| bytes.as_u64()))
+                .unwrap_or(0) as usize;
+            // Touch every byte, so the allocation is a real `memory.grow` rather
+            // than something the allocator could defer.
+            let mut buffer = vec![7u8; bytes];
+            std::hint::black_box(&mut buffer);
+            return Ok(types::ToolResult {
+                blocks: vec![types::ContentBlock::Text(format!("allocated {bytes}"))],
+                is_error: false,
+                details: "null".to_string(),
+            });
         }
         if name == FETCH_TOOL {
             return fetch(&arguments);
