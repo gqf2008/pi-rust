@@ -231,6 +231,9 @@ interface net-http {
 }
 
 /// Filesystem operations, scoped to a sandbox root the host chooses.
+/// Plugin filesystem, jailed to the plugin's own data directory
+/// (`plugins/<id>/data/`). The jail *is* the policy, so `fs` is a boolean grant;
+/// the host refuses absolute paths and any `..` component.
 interface fs {
     use types.{capability-error};
     read: func(rel-path: string) -> result<list<u8>, capability-error>;

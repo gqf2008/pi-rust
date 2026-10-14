@@ -23,3 +23,6 @@ wasmparser = "0.259"
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

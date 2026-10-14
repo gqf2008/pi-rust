@@ -402,6 +402,20 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
     if !declared.is_empty() {
         println!("declared capabilities: {}", declared.join(", "));
     }
+    // A declared capability this build cannot enforce would otherwise look
+    // granted while every call comes back denied. Say so at install time.
+    let unenforceable: Vec<&str> = declared
+        .iter()
+        .map(String::as_str)
+        .filter(|capability| !kiqi_plugin_host::capability_is_enforced(capability))
+        .collect();
+    if !unenforceable.is_empty() {
+        println!(
+            "note: this build cannot enforce {} — the component still loads, but those calls \
+             return `failed` (not `denied`)",
+            unenforceable.join(", ")
+        );
+    }
     if !granted_now.is_empty() {
         println!("granted: {}", granted_now.join(", "));
     }
@@ -516,7 +530,7 @@ mod tests {
         assert_eq!(code, 0);
         assert!(root.join("plugins/conformance/plugin.wasm").is_file());
         let grants = Grants::load_for_at(root, "conformance");
-        assert_eq!(grants.granted(), vec!["net-http"]);
+        assert_eq!(grants.granted(), vec!["net-http", "fs"]);
         assert!(grants.allows_host("127.0.0.1"));
 
         let code = uninstall_into(&["conformance".into()], Some(root));

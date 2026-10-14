@@ -114,6 +114,10 @@ fn loads_calls_streams_denies_and_unloads() {
         text.contains("ui=") && !text.contains("ui=granted"),
         "the denied capability must be reported: {text}"
     );
+    assert!(
+        text.contains("fs=") && !text.contains("fs=conformance"),
+        "fs is not granted here, so it must report denied: {text}"
+    );
     // `details` is the state channel that must survive fork/switch.
     assert_eq!(outcome.details, serde_json::json!({"conformance": true}));
 
@@ -842,7 +846,47 @@ fn ask_user_honours_timeout() {
 fn declared_capabilities_reads_the_components_imports() {
     let wasm = fixture_wasm();
     let caps = kiqi_plugin_host::declared_capabilities(&wasm).expect("read component imports");
-    assert_eq!(caps, vec!["net-http".to_string()], "got {caps:?}");
+    assert_eq!(
+        caps,
+        vec!["fs".to_string(), "net-http".to_string()],
+        "got {caps:?}"
+    );
+}
+
+/// `fs` is a real capability, and the jail is its policy: granted, the guest
+/// round-trips a file inside its own data directory.
+#[test]
+fn fs_is_granted_and_jailed_to_the_plugins_data_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wasm = dir.path().join("plugin.wasm");
+    std::fs::copy(fixture_wasm(), &wasm).expect("copy the fixture next to a writable data dir");
+    let plugin = WasmPlugin::load_with_grants(
+        "conformance",
+        &wasm,
+        Grants {
+            fs: true,
+            ..Grants::default()
+        },
+    )
+    .expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    let outcome = plugin
+        .call("conformance", &serde_json::json!({}), &caps, &sink)
+        .expect("call");
+    assert!(
+        text_of(&outcome).contains("fs=conformance"),
+        "the write/read round trip must succeed: {}",
+        text_of(&outcome)
+    );
+    assert!(
+        dir.path().join("data/conformance/probe.txt").is_file(),
+        "the file lands inside the plugin's own data directory"
+    );
 }
 
 /// A component's self-declared `id` is reported, never trusted: the directory it
@@ -856,4 +900,22 @@ fn a_declared_id_does_not_override_the_install_directory() {
         "installed-as",
         "the conformance guest declares `conformance`, but the load id must win"
     );
+}
+
+/// The advertised-as-working list is the host's honesty contract: `install`
+/// names every declared capability that is not in it.
+#[test]
+fn only_enforced_capabilities_count_as_working() {
+    for enforced in ["net-http", "fs"] {
+        assert!(
+            kiqi_plugin_host::capability_is_enforced(enforced),
+            "`{enforced}` is implemented and must be advertised as working"
+        );
+    }
+    for stub in ["exec", "net-sockets"] {
+        assert!(
+            !kiqi_plugin_host::capability_is_enforced(stub),
+            "`{stub}` is still a deny stub and must not be advertised as working"
+        );
+    }
 }

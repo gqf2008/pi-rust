@@ -15,7 +15,7 @@
 //! The returned string reports the deny reason so the host test can assert it.
 
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
-use kiqi_plugin_guest::bindings::kiqi::plugin::{log, net_http, progress, types, ui};
+use kiqi_plugin_guest::bindings::kiqi::plugin::{fs, log, net_http, progress, types, ui};
 
 const TOOL: &str = "conformance";
 const FETCH_TOOL: &str = "fetch";
@@ -155,9 +155,23 @@ impl Guest for Conformance {
             Err(error) => capability_reason(error),
         };
 
+        // `fs` is exercised the same way, but through a real implementation:
+        // granted, it round-trips inside the plugin's own data directory;
+        // otherwise it reports the reason. Both outcomes keep the tool call
+        // successful, which is the fallible-capability contract.
+        let fs_outcome = match fs::write("conformance/probe.txt", b"conformance".as_slice()) {
+            Ok(()) => match fs::read("conformance/probe.txt") {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(error) => capability_reason(error),
+            },
+            Err(error) => capability_reason(error),
+        };
+
         progress::emit(&types::ProgressBlock::Text("last".to_string()));
         Ok(types::ToolResult {
-            blocks: vec![types::ContentBlock::Text(format!("{arguments}|ui={ui}"))],
+            blocks: vec![types::ContentBlock::Text(format!(
+                "{arguments}|ui={ui}|fs={fs_outcome}"
+            ))],
             is_error: false,
             // `details` is how the host carries state that survives fork/switch.
             details: r#"{"conformance":true}"#.to_string(),

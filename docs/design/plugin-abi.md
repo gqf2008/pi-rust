@@ -277,7 +277,10 @@ wasm 层是“总是可实例化，但未授予的调用必定 `denied`” + “
 - **`HostCaps` 接进 host import**：调用期间把 `HostCaps` 与 `ProgressSink` 一起放进
   线程局部的 `CallContext`（借用期由 call 保证、调用被互斥序列化）；`session-read` 转发到
   `caps.session`，`session-control`/`inject`/`ui` 转发到对应能力（缺能力或 caps 不存在 →
-  `denied`），`net-http`/`fs`/`net-sockets`/`exec`/`timer` 仍是 deny 桩（暂无插件要用）。
+  `denied`）。**现状**（ABI 0.5.0）：`net-http` 与 `fs` 已真实现（`fs` 关在插件自己的
+  `plugins/<id>/data/` 里，越狱写法直接拒）；`exec`/`net-sockets` 仍是 deny 桩，所以
+  `ki plugin install` 会对“声明了但本构建无法执行”的能力**明说**（`capability_is_enforced`），
+  而不是让用户授权一个永远不会生效的东西；`timer` 已随 `on-tick` 一起删除。
 - **`rpi-todo` 编成 wasm 插件**（`plugins/wasm/kiqi-todo-guest`）：list/add/update/toggle/clear
   语义不变；状态走结构化 `tool-result.details`；`SessionStart`/`SessionTree` 时经
   `session-read.session-branch` 恢复（不再是 runtime action）。
@@ -523,6 +526,23 @@ before_agent_start 跑在同一套一致的能力上。测试：拿 `reload_caps
 代价：`timer` 能力被删——它当初为“宿主驱动 tick”设计，但 trait 没有对应面、也没有任何插件在用。
 若要后台 tick，正确做法是**两边一起加**（先给 `trait Plugin` 加 `on_tick` + `HostCaps` 的 timer），
 而不是让 wasm 单方面多出一个面。
+
+### 6.25 能力不再开空头支票：`fs` 真实现，`exec`/`net-sockets` 明说做不到
+
+原先 `fs`/`net-sockets`/`exec` 都是 `deny_capability!` 桩，但 `ki plugin install` 会把它们
+列给用户授权、写进 `grants.json`——**授权了也永远是 `denied`**，只有 `net-http` 是真的。这是
+“声明了但没人执行”那一类问题的安全版：用户以为给了权限，其实什么也没给。
+
+- **`fs` 实现了**，关在插件自己的数据目录 `plugins/<id>/data/`（从 `plugin.wasm` 的位置推出来，
+  所以临时目录里的测试天然隔离）。绝对路径和任何 `..` 组件直接拒（逐组件解析 + `starts_with` 复核），
+  **监禁就是策略**，所以 `fs` 保持布尔授权。
+- **`exec`/`net-sockets` 仍是桩**，但 `ki plugin install` 现在会对声明了它们、而本构建无法执行的
+  能力**明说**——依据是 `kiqi_plugin_host::capability_is_enforced()`（单一事实源），一句
+  “this build cannot enforce …，调用会返回 `failed` 而不是 `denied`”写在 install 输出里，
+  并有 e2e 分别钉住“哪些算能用”与“哪些不算”。
+
+conformance guest 因此多了一路：拿 `fs` 写一个文件再读回来，把结果报在工具输出里，e2e 分“授权”
+（真读到 `conformance`，且文件落在 `data/conformance/probe.txt`）与“未授权”（报 `denied`）两边验。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里

@@ -184,12 +184,30 @@ pub fn declared_capabilities(wasm: &Path) -> Result<Vec<String>, String> {
     Ok(caps)
 }
 
+/// The capabilities this build of the host actually enforces.
+///
+/// [`declared_capabilities`] reports what a *component* asks for; this reports
+/// what the host can honour. `ki plugin install` names any difference, so a user
+/// is never asked to grant something that would only ever come back denied.
+/// `net-sockets` and `exec` are declared in the ABI but still deny stubs.
+pub const ENFORCED_CAPABILITIES: &[&str] = &["net-http", "fs"];
+
+/// See [`ENFORCED_CAPABILITIES`].
+pub fn capability_is_enforced(name: &str) -> bool {
+    ENFORCED_CAPABILITIES.contains(&name)
+}
+
 /// State every instantiated component gets: WASI plus the resource table and
 /// the grants the guest's host imports are allowed to act on.
 struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
     grants: Grants,
+    /// The plugin's own data directory (`plugins/<id>/data/`). The `fs`
+    /// capability is jailed here, so the jail *is* the policy and the grant
+    /// stays a bool. `None` when the component's path has no parent (in-memory
+    /// components in tests), in which case `fs` reports `failed`.
+    fs_root: Option<std::path::PathBuf>,
 }
 
 impl WasiView for HostState {
@@ -407,11 +425,76 @@ impl crate::kiqi::plugin::net_http::Host for HostState {
     }
 }
 
-deny_capability!(fs {
-    read(rel_path: String) -> Result<Vec<u8>, CapabilityError>;
-    write(rel_path: String, contents: Vec<u8>) -> Result<(), CapabilityError>;
-    read_dir(rel_dir: String) -> Result<Vec<String>, CapabilityError>;
-});
+impl HostState {
+    /// Resolve a guest-supplied relative path inside the plugin's data
+    /// directory, or explain why it may not.
+    ///
+    /// A path with any `..`, root or prefix component is refused outright, so a
+    /// plugin cannot walk out of its jail — and `starts_with` is checked as well
+    /// rather than relied on.
+    fn fs_path(&self, rel: &str) -> Result<std::path::PathBuf, CapabilityError> {
+        if !self.grants.fs {
+            return Err(CapabilityError::Denied("fs is not granted".to_string()));
+        }
+        let Some(root) = self.fs_root.as_deref() else {
+            return Err(CapabilityError::Failed(
+                "this plugin has no data directory".to_string(),
+            ));
+        };
+        let candidate = std::path::Path::new(rel);
+        let mut resolved = root.to_path_buf();
+        for component in candidate.components() {
+            match component {
+                std::path::Component::Normal(part) => resolved.push(part),
+                std::path::Component::CurDir => {}
+                _ => {
+                    return Err(CapabilityError::Failed(format!(
+                        "fs path `{rel}` must be relative and stay inside the plugin directory"
+                    )))
+                }
+            }
+        }
+        if !resolved.starts_with(root) {
+            return Err(CapabilityError::Failed(format!(
+                "fs path `{rel}` escapes the plugin directory"
+            )));
+        }
+        Ok(resolved)
+    }
+}
+
+/// Plugin filesystem, jailed to `plugins/<id>/data/`.
+impl crate::kiqi::plugin::fs::Host for HostState {
+    fn read(&mut self, rel_path: String) -> Result<Vec<u8>, CapabilityError> {
+        let path = self.fs_path(&rel_path)?;
+        std::fs::read(&path)
+            .map_err(|error| CapabilityError::Failed(format!("read {}: {error}", path.display())))
+    }
+
+    fn write(&mut self, rel_path: String, contents: Vec<u8>) -> Result<(), CapabilityError> {
+        let path = self.fs_path(&rel_path)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                CapabilityError::Failed(format!("create {}: {error}", parent.display()))
+            })?;
+        }
+        std::fs::write(&path, contents)
+            .map_err(|error| CapabilityError::Failed(format!("write {}: {error}", path.display())))
+    }
+
+    fn read_dir(&mut self, rel_dir: String) -> Result<Vec<String>, CapabilityError> {
+        let path = self.fs_path(&rel_dir)?;
+        let entries = std::fs::read_dir(&path).map_err(|error| {
+            CapabilityError::Failed(format!("read dir {}: {error}", path.display()))
+        })?;
+        let mut names: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+}
 
 deny_capability!(net_sockets {
     connect(address: String) -> Result<u32, CapabilityError>;
@@ -498,12 +581,14 @@ impl WasmPlugin {
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
             .map_err(|error| PluginError::Failed(format!("link wasi: {error}")))?;
 
+        let fs_root = wasm.parent().map(|dir| dir.join("data"));
         let mut store = Store::new(
             &engine,
             HostState {
                 wasi: WasiCtxBuilder::new().build(),
                 table: ResourceTable::new(),
                 grants,
+                fs_root,
             },
         );
         if let Some(fuel) = options.fuel {

@@ -1718,6 +1718,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "wasmparser 0.259.0",
  "wasmtime",
  "wasmtime-wasi",
