@@ -826,12 +826,24 @@ fn split_host_port(address: &str) -> Result<(String, u16), CapabilityError> {
     Ok((host, port))
 }
 
+/// The effective exec timeout: the grant's budget clamped to the cap. The CLI
+/// validates at grant time, so only a hand-edited `grants.json` can come in
+/// over the cap — the clamp is the last-resort guard, and it says so.
+fn effective_exec_timeout(timeout_seconds: u64) -> std::time::Duration {
+    let clamped = timeout_seconds.min(kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS);
+    if clamped != timeout_seconds {
+        eprintln!(
+            "[kiqi-plugin] exec grant timeout {timeout_seconds}s exceeds the {clamped}s cap; \
+             clamped (a hand-edited grants.json is the only way in past the CLI's check)"
+        );
+    }
+    std::time::Duration::from_secs(clamped)
+}
+
 /// Spawn, capture output with a byte cap, and enforce a wall-clock deadline.
 ///
 /// `timeout_seconds` is the grant's budget, clamped to
-/// [`EXEC_TIMEOUT_MAX_SECONDS`](kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS):
-/// the CLI validates the grant, so only a hand-edited file can come in over
-/// the cap — the clamp is the last-resort guard, and it says so.
+/// [`EXEC_TIMEOUT_MAX_SECONDS`](kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS).
 fn run_with_limits(
     cmd: &str,
     args: &[String],
@@ -841,18 +853,7 @@ fn run_with_limits(
     use std::io::Read;
     use std::process::{Command, Stdio};
     const OUTPUT_CAP: u64 = 256 * 1024;
-    let timeout_seconds = {
-        let raw = timeout_seconds;
-        let clamped = raw.min(kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS);
-        if raw != clamped {
-            eprintln!(
-                "[kiqi-plugin] exec grant timeout {raw}s exceeds the {clamped}s cap; clamped \
-                 (a hand-edited grants.json is the only way in past the CLI's check)"
-            );
-        }
-        clamped
-    };
-    let timeout = std::time::Duration::from_secs(timeout_seconds);
+    let timeout = effective_exec_timeout(timeout_seconds);
 
     let mut command = Command::new(cmd);
     command
@@ -1449,6 +1450,37 @@ mod tests {
         state.grants.fs = false;
         let error = state.fs_path("x").expect_err("denied");
         assert!(matches!(error, CapabilityError::Denied(_)), "got {error:?}");
+    }
+
+    /// The timeout clamp: a hand-edited grants.json over the cap is clamped
+    /// (the CLI rejects it at grant time; this is the last-resort guard), and
+    /// an in-range budget passes through untouched.
+    #[test]
+    fn the_exec_timeout_is_capped() {
+        let max = kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS;
+        assert_eq!(
+            effective_exec_timeout(max + 1),
+            std::time::Duration::from_secs(max),
+            "a hand-edited oversized budget clamps to the cap"
+        );
+        assert_eq!(
+            effective_exec_timeout(120),
+            std::time::Duration::from_secs(120),
+            "an in-range budget is untouched"
+        );
+    }
+
+    /// `Options::project_dir` unset — the production embedding for `ki` —
+    /// falls back to the process's working directory.
+    #[test]
+    fn the_project_dir_defaults_to_the_process_cwd() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = state(dir.path());
+        assert!(state.project_dir.is_none());
+        assert_eq!(
+            state.project_dir().expect("cwd"),
+            std::env::current_dir().expect("process cwd"),
+        );
     }
 
     /// Regression: the jail check must verify the existing prefix BEFORE
