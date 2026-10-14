@@ -244,3 +244,33 @@ caps 级：一次 `SessionStart` 后状态被重置；一次 `before_agent_start
 2. 删 StepHandle 机器，3 个工具改同步，编译。
 3. 加 `StatusHost` trait + `AbiHost`/`CapsHost`，穿 4 个函数，编译。
 4. 写 kiqi.rs（14 路 match），接线（feature + 注册表），跑 caps 级验收。
+
+### 7.7 最后两块（侦察完毕，规格已无未知项）
+
+**注册块**在 `src/lib.rs:3113` 的 `rpi_plugin_sdk::export_plugin!(|api| { .. })` 里：
+
+```rust
+let handlers: &[(EventTag, EventHandlerFn)] = &[ (EventTag::SessionStart, on_session_start), .. ]; // 14 个
+api.register_event_handler  -> 循环注册
+api.register_tool           -> 3 个 StableToolSchema
+```
+
+编译期路径下这一整块被 `impl Plugin` 取代：14 个 tag 变成 `on_event` 里的一路 match，
+`StableToolSchema` 变成 `kiqi_plugin::ToolSpec`，`HOST_RUNTIME.set(*api)` 彻底消失
+（`set_status` 改走 `StatusHost`）——**这是 `AbiHost` 存在的原因：保留 18 号裸 id 的调用路径**。
+
+**工具机器**（3038–3110 那一套 `start` / `execute_*` / `poll` / `cancel` / `destroy`）
+只是一层壳，真正的实现体是三个普通函数：
+
+```rust
+fn score(params: Value) -> Result<String, String>
+fn prompt(params: Value) -> Result<String, String>
+fn trace(params: Value)  -> Result<String, String>
+```
+
+`execute_score` ≡ `start(params, free, score)`。所以编译期下**直接调 `score`/`prompt`/`trace`**，
+壳与 `HANDLES` 注册表、`Drive` 结构、`StepHandle`/`StepResult`/`ToolPartialCb` 全部删除。
+
+**最后一处必须知道的事实**：`flush_ended_spans` 的调用方在 1589/1595（flush tick），
+它自己是被某个处理器调的（`on_agent_settled` / `on_session_shutdown` 之一）——
+写 §7.5 的穿参时以这两个处理器为入口确认，`host` 从 `on_event` 一路往下传即可。
