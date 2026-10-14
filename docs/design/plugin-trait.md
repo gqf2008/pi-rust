@@ -1,6 +1,6 @@
 # 插件契约：trait + cargo feature（编译期接入）
 
-状态：**落地中**（9 个插件已移植，见 §6）· 契约代码 `crates/kiqi-plugin`
+状态：**落地中**（11 个插件已移植，见 §6）· 契约代码 `crates/kiqi-plugin`
 
 ## 1. 决定
 
@@ -99,7 +99,7 @@
 |---|---|---|
 | `rpi-todo` `rpi-lens` `rpi-webfetch` `rpi-websearch` `rpi-subagents` `rpi-permissions` `rpi-goal` `rpi-plan-mode` `rpi-codegraph` | **编译期**（已移植，见 §6） | 纯进程内，宿主契约窄（0~5 处） |
 | `rpi-ask-user` | 编译期（已移植） | 纯进程内 |
-| `rpi-langfuse` | 编译期（待办） | 纯进程内（14 个事件，无后台线程） |
+| `rpi-langfuse` | 编译期（已移植，见 §7） | 纯进程内（14 个事件，无后台线程） |
 | `rpi-run-stats` | **原生** | 1 秒定时线程主动推送（判据 3） |
 | `rpi-im-message` | **原生** | 飞书 WebSocket 长连 + 专用服务 runtime + 驱动 `rpi print` 子进程 + `StartupContext` 散射（判据 1+2+3 全中） |
 | `rpi-voice` | **原生** | 录音设备流长连（判据 1） |
@@ -132,7 +132,8 @@
 
 ```
 rpi-todo · rpi-lens · rpi-webfetch · rpi-websearch ·
-rpi-subagents · rpi-permissions · rpi-goal · rpi-plan-mode · rpi-codegraph · rpi-ask-user
+rpi-subagents · rpi-permissions · rpi-goal · rpi-plan-mode · rpi-codegraph · rpi-ask-user ·
+rpi-langfuse
 ```
 
 `rpi-goal` 与 `rpi-plan-mode` 的宿主访问在**工具路径**上，因此用窄 trait 双适配器
@@ -149,7 +150,22 @@ rpi-subagents · rpi-permissions · rpi-goal · rpi-plan-mode · rpi-codegraph �
 
 正确度量是三者**取并集**：`RuntimeActionId::X` + 裸数字 id + 包装函数名。
 
-## 7. rpi-langfuse 端口规格（唯一待搬项，规格已完备）
+## 7. rpi-langfuse 端口规格（**已落地**，规格保留作度量记录）
+
+落地结果：`src/kiqi.rs` 是 `impl Plugin`（14 路 `handler_for` 表 + 3 个同步工具），
+`lib.rs` 的 8 个 `event_handler!` 宏块拆成普通 fn（签名 `(&Event, &dyn StatusHost) -> i32`），
+StepHandle 壳 / `HANDLES` / `Drive` / `StepResult` / `ToolPartialCb` 已删除，`set_status`
+改走 `StatusHost`（`AbiHost` 保留裸 id 18，`CapsHost` 走 `HostCaps::ui`），并接进
+`rpi-cli` 的 `plugin-rpi-langfuse` feature + 注册表。caps 级验收在
+`plugins/rpi-langfuse/src/kiqi.rs`（14 tag 一一对应）与 `lib.rs` 测试
+（`SessionStart` 重置、`BeforeAgentStart` 建 trace、`CapsHost` 经 `UiApi` 发状态）中。
+后续（宿主侧，**已随本轮完成**）：`crates/rpi-extensions/src/compiled.rs` 提供
+全局 sink，在 `dispatch_to_handlers` / `dispatch_lifecycle_event` /
+`dispatch_data_event_claiming` 三个分发入口把事件转成 `(tag, JSON)` 并交回宿主；
+`rpi-cli` 在 session build 时用 `install_compiled_event_sink(caps)` 安装闭包，
+把事件送给每个 `PluginHost::on_event`。`kiqi_plugin::EventTag::from_u32` 做判别值映射，
+`AgentEvent`/生命周期/provider hook 因此都到达编译期插件。附注：编译期插件目前只
+observe（全部返回 `Continue`），`Claimed`/`Replace` 尚未接线。
 
 实测（4227 行 / 94 个函数 / 14 个事件处理器 / 1 处宿主调用 / 无后台线程）。
 

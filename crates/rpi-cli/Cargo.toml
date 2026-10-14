@@ -31,6 +31,7 @@ rpi-goal = { path = "../../plugins/rpi-goal", optional = true }
 rpi-plan-mode = { path = "../../plugins/rpi-plan-mode", optional = true }
 rpi-codegraph = { path = "../../plugins/rpi-codegraph", optional = true }
 rpi-ask-user = { path = "../../plugins/rpi-ask-user", optional = true }
+rpi-langfuse = { path = "../../plugins/rpi-langfuse", optional = true }
 rpi-telemetry = { workspace = true }
 rpi-ai = { workspace = true, features = ["providers"] }
 rpi-agent = { workspace = true }
@@ -100,7 +101,7 @@ pkg-fmt = "tgz"
 pkg-fmt = "zip"
 
 [features]
-default = ["clipboard", "plugin-rpi-todo", "plugin-rpi-lens", "plugin-rpi-webfetch", "plugin-rpi-websearch", "plugin-rpi-subagents", "plugin-rpi-permissions", "plugin-rpi-goal", "plugin-rpi-plan-mode", "plugin-rpi-codegraph", "plugin-rpi-ask-user"]
+default = ["clipboard", "plugin-rpi-todo", "plugin-rpi-lens", "plugin-rpi-webfetch", "plugin-rpi-websearch", "plugin-rpi-subagents", "plugin-rpi-permissions", "plugin-rpi-goal", "plugin-rpi-plan-mode", "plugin-rpi-codegraph", "plugin-rpi-ask-user", "plugin-rpi-langfuse"]
 # Enables real clipboard support for `/copy` and image paste (best-effort).
 clipboard = ["dep:arboard"]
 # First-party plugins are compiled in. The cdylib channel keeps serving `ki dev`.
@@ -114,6 +115,7 @@ plugin-rpi-goal = ["dep:rpi-goal"]
 plugin-rpi-plan-mode = ["dep:rpi-plan-mode"]
 plugin-rpi-codegraph = ["dep:rpi-codegraph"]
 plugin-rpi-ask-user = ["dep:rpi-ask-user"]
+plugin-rpi-langfuse = ["dep:rpi-langfuse"]
 
 [dev-dependencies]
 

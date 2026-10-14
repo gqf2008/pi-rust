@@ -227,6 +227,56 @@ impl EventTag {
     pub fn as_u32(self) -> u32 {
         self as u32
     }
+
+    /// The tag for a wire discriminant, or `None` when the value is not one of
+    /// the 37 tags.
+    ///
+    /// The host translates its native `EventTag` to this contract through this
+    /// function: the two enumerations are pinned to the same discriminants
+    /// (rpi-cli's `event_tags_match_the_native_abi` test), so no separate table
+    /// has to be kept in sync.
+    pub fn from_u32(value: u32) -> Option<Self> {
+        Some(match value {
+            0 => Self::ProjectTrust,
+            1 => Self::ResourcesDiscover,
+            2 => Self::SessionStart,
+            3 => Self::SessionInfoChanged,
+            4 => Self::SessionBeforeSwitch,
+            5 => Self::SessionBeforeFork,
+            6 => Self::SessionBeforeCompact,
+            7 => Self::SessionCompact,
+            8 => Self::SessionShutdown,
+            9 => Self::SessionBeforeTree,
+            10 => Self::SessionTree,
+            11 => Self::Context,
+            12 => Self::BeforeProviderRequest,
+            13 => Self::BeforeProviderHeaders,
+            14 => Self::AfterProviderResponse,
+            15 => Self::BeforeAgentStart,
+            16 => Self::AgentStart,
+            17 => Self::AgentEnd,
+            18 => Self::AgentSettled,
+            19 => Self::TurnStart,
+            20 => Self::TurnEnd,
+            21 => Self::MessageStart,
+            22 => Self::MessageUpdate,
+            23 => Self::MessageEnd,
+            24 => Self::ToolExecutionStart,
+            25 => Self::ToolExecutionUpdate,
+            26 => Self::ToolExecutionEnd,
+            27 => Self::ModelSelect,
+            28 => Self::ThinkingLevelSelect,
+            29 => Self::ToolCall,
+            30 => Self::ToolResult,
+            31 => Self::UserBash,
+            32 => Self::Input,
+            33 => Self::BeforeTuiStart,
+            34 => Self::UiPromptStart,
+            35 => Self::UiPromptEnd,
+            36 => Self::EditorChange,
+            _ => return None,
+        })
+    }
 }
 
 /// One runtime event delivered to plugins.
@@ -530,3 +580,18 @@ pub trait Plugin: Send + Sync + 'static {
 
 /// Constructs a plugin. Each plugin crate exports exactly one of these.
 pub type Factory = fn() -> Box<dyn Plugin>;
+
+#[cfg(test)]
+mod tests {
+    use super::EventTag;
+
+    #[test]
+    fn tag_discriminants_round_trip_and_stop_at_the_surface() {
+        for value in 0..=36 {
+            let tag = EventTag::from_u32(value).expect("a tag for every discriminant");
+            assert_eq!(tag.as_u32(), value);
+        }
+        assert_eq!(EventTag::from_u32(37), None);
+        assert_eq!(EventTag::from_u32(u32::MAX), None);
+    }
+}

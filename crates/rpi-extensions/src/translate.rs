@@ -337,6 +337,9 @@ impl ExtensionEmitter {
 /// dispatcher ([`crate::provider_hooks`]). Handlers MUST NOT free the event
 /// strings; the host frees exactly once after the fan-out.
 pub fn dispatch_to_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEvent) {
+    // Compiled plugins observe the same event stream as cdylib handlers, whether
+    // or not any native handler subscribes (a `ki` with no dylibs still traces).
+    crate::compiled::dispatch(event);
     // Staleness guard: a stale registry (swapped-out session) does nothing.
     if !crate::registry::assert_active(snapshot.active_flag()) {
         return;
@@ -418,13 +421,12 @@ pub fn dispatch_to_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEve
 /// provider-hook observer path ([`crate::provider_hooks`]) which has no
 /// matching `AgentEvent` to translate.
 pub fn dispatch_data_event(snapshot: &RegistrySnapshot, tag: EventTag, data: &str) -> bool {
-    let handlers = snapshot.handlers_for(tag);
-    if handlers.is_empty() {
-        return false;
-    }
+    // `dispatch_to_handlers` fans the event to the compiled plugins even when no
+    // cdylib handler subscribes, so it must always be reached.
+    let invoked = !snapshot.handlers_for(tag).is_empty();
     let event = StablePluginEvent::data(tag, StbString::from_string(data.to_string()));
     dispatch_to_handlers(snapshot, &event);
-    true
+    invoked
 }
 
 /// Build + dispatch a **no-payload** event (e.g. `session_start`, `session_shutdown`,
@@ -433,13 +435,10 @@ pub fn dispatch_data_event(snapshot: &RegistrySnapshot, tag: EventTag, data: &st
 /// is `EventEmpty`; a handler that subscribes to a no-payload tag receives the
 /// event with an empty payload.
 pub fn dispatch_empty_event(snapshot: &RegistrySnapshot, tag: EventTag) -> bool {
-    let handlers = snapshot.handlers_for(tag);
-    if handlers.is_empty() {
-        return false;
-    }
+    let invoked = !snapshot.handlers_for(tag).is_empty();
     let event = StablePluginEvent::empty(tag);
     dispatch_to_handlers(snapshot, &event);
-    true
+    invoked
 }
 
 /// Timeout budget for a `ToolCall` approval dispatch. Generous because the
@@ -599,14 +598,20 @@ pub fn dispatch_data_event_claiming(
     tag: EventTag,
     data: &str,
 ) -> bool {
+    // Compiled plugins observe this event regardless of native subscriptions
+    // (they are observe-only today), so build and fan the event out before the
+    // native guards short-circuit.
+    let event = StablePluginEvent::data(tag, StbString::from_string(data.to_string()));
+    crate::compiled::dispatch(&event);
     if !crate::registry::assert_active(snapshot.active_flag()) {
+        free_dispatched_event(&event);
         return false;
     }
     let handlers = snapshot.handlers_for(tag);
     if handlers.is_empty() {
+        free_dispatched_event(&event);
         return false;
     }
-    let event = StablePluginEvent::data(tag, StbString::from_string(data.to_string()));
     let mut claimed = false;
     for h in handlers {
         if !crate::registry::platform_allows(&h.platforms) {
@@ -704,6 +709,10 @@ pub async fn dispatch_lifecycle_event(
     snapshot: &RegistrySnapshot,
     tag: EventTag,
 ) -> Option<String> {
+    // Compiled plugins subscribe to these no-payload lifecycle events too; fan
+    // them out before the native-handler early return (a `ki` with no dylibs
+    // would otherwise never deliver `SessionStart`/`SessionShutdown`).
+    crate::compiled::dispatch(&StablePluginEvent::empty(tag));
     // Staleness guard: a stale registry (swapped-out session) does nothing.
     if !crate::registry::assert_active(snapshot.active_flag()) {
         return None;

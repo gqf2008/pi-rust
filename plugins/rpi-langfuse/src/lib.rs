@@ -5,15 +5,13 @@
 
 #![forbid(unsafe_code)]
 
-use rpi_plugin_sdk::handles::ToolHandles;
-use rpi_plugin_sdk::{
-    EventHandlerFn, EventTag, FreeStringFn, PluginApi, StablePluginEvent, StableToolSchema,
-    StbString, StbStringRef, StepHandle, StepResult, ToolPartialCb,
-};
+pub mod kiqi;
+
+use kiqi_plugin::Event;
+use rpi_plugin_sdk::{PluginApi, StbString, StbStringRef};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -249,35 +247,68 @@ fn debug_log(msg: &str) {
 /// `RuntimeActionId::SetStatus` — publish a short status string for the host's
 /// UI (the TUI renders it in its footer). Numeric id pinned on purpose: the
 /// plugin must not depend on the SDK enum for a value the host has to match.
+#[cfg_attr(not(test), allow(dead_code))]
 const RUNTIME_ACTION_SET_STATUS: u32 = 18;
 
 /// Host fn pointers captured once at register time. `runtime_action` drives the
 /// host's status line; `user_data` is the host's opaque context.
 // Reuse the SDK's host-context lifetime and thread-safety contract.
+#[cfg_attr(not(test), allow(dead_code))]
 type HostRuntime = PluginApi;
 
+#[cfg_attr(not(test), allow(dead_code))]
 static HOST_RUNTIME: OnceLock<HostRuntime> = OnceLock::new();
 
-/// Best-effort: the host's footer shows what the extension is doing
-/// (`langfuse ✓ (trace sent)`), mirroring the JS observability plugin. A host
-/// without the action (older build) or a headless run simply ignores it, so
-/// failures are only surfaced under `RPI_LANGFUSE_DEBUG=1`.
-fn set_status(text: &str) {
-    let Some(runtime) = HOST_RUNTIME.get() else {
-        return;
-    };
-    let args = json!({ "key": "langfuse", "value": text }).to_string();
-    let mut output = StbString::empty();
-    let rc = (runtime.runtime_action)(
-        RUNTIME_ACTION_SET_STATUS,
-        StbStringRef::from_str(&args),
-        &mut output,
-        runtime.user_data,
-    );
-    let detail = output.to_string_lossy();
-    (runtime.free_string)(output);
-    if rc != 0 {
-        debug_log(&format!("set_status failed rc={rc}: {detail}"));
+/// The one host operation this plugin has: publish a short status string.
+///
+/// Two adapters, so neither channel regresses: the cdylib face keeps the raw
+/// id-18 call, the compile-time face goes through `HostCaps::ui`.
+pub(crate) trait StatusHost {
+    fn set_status(&self, text: &str);
+}
+
+/// cdylib adapter: the raw `RUNTIME_ACTION_SET_STATUS` (18) call, unchanged.
+///
+/// The compile-time port dropped the `export_plugin!` registration that used to
+/// install [`HOST_RUNTIME`], but the adapter is kept so the raw id-18 path is
+/// still expressed (and exercised by the status test); it is what the cdylib
+/// face would hand a handler that runs through `StatusHost`.
+#[cfg_attr(not(test), allow(dead_code))]
+struct AbiHost;
+
+impl StatusHost for AbiHost {
+    fn set_status(&self, text: &str) {
+        let Some(runtime) = HOST_RUNTIME.get() else {
+            return;
+        };
+        let args = json!({ "key": "langfuse", "value": text }).to_string();
+        let mut output = StbString::empty();
+        let rc = (runtime.runtime_action)(
+            RUNTIME_ACTION_SET_STATUS,
+            StbStringRef::from_str(&args),
+            &mut output,
+            runtime.user_data,
+        );
+        let detail = output.to_string_lossy();
+        (runtime.free_string)(output);
+        if rc != 0 {
+            debug_log(&format!("set_status failed rc={rc}: {detail}"));
+        }
+    }
+}
+
+/// compile-time adapter: the caller already holds the capabilities.
+pub(crate) struct CapsHost<'a>(pub &'a kiqi_plugin::HostCaps<'a>);
+
+impl StatusHost for CapsHost<'_> {
+    fn set_status(&self, text: &str) {
+        let Some(ui) = self.0.ui else {
+            debug_log("the host did not grant a UI; status not published");
+            return;
+        };
+        if let Err(error) = ui.set_status(&json!({ "key": "langfuse", "value": text })) {
+            debug_log(&format!("set_status failed: {error}"));
+        }
     }
 }
 
@@ -1529,7 +1560,7 @@ fn flush_otlp(spans: Vec<Value>) -> Result<(), String> {
 /// id) is still unknown. Ordering the batch root-last buys the last possible
 /// moment inside one OTLP request: every other span is in flight first, and the
 /// root carries whatever is known by then.
-fn flush_ended_spans(include_open: bool) -> Result<usize, String> {
+fn flush_ended_spans(include_open: bool, host: &dyn StatusHost) -> Result<usize, String> {
     let mut spans = Vec::new();
     {
         let state = tracer();
@@ -1556,9 +1587,9 @@ fn flush_ended_spans(include_open: bool) -> Result<usize, String> {
     let sent = spans.len();
     debug_log(&format!("exporting {sent} span(s) via OTLP"));
     match flush_otlp(spans) {
-        Ok(()) => set_status("langfuse ✓ (trace sent)"),
+        Ok(()) => host.set_status("langfuse ✓ (trace sent)"),
         Err(e) => {
-            set_status("langfuse ✗ (flush failed)");
+            host.set_status("langfuse ✗ (flush failed)");
             return Err(e);
         }
     }
@@ -1580,20 +1611,20 @@ fn flush_ended_spans(include_open: bool) -> Result<usize, String> {
 /// (same reason pi-rust's anthropic provider stopped writing stderr). The status
 /// line is the intended channel; the detailed message stays behind
 /// `RPI_LANGFUSE_DEBUG=1`, where the operator explicitly asked for stderr output.
-fn report_flush_error(err: &str) {
-    set_status("langfuse ✗ (flush failed)");
+fn report_flush_error(err: &str, host: &dyn StatusHost) {
+    host.set_status("langfuse ✗ (flush failed)");
     debug_log(&format!("flush error: {err}"));
 }
 
-fn maybe_flush(_state: &TracerState) {
-    if let Err(e) = flush_ended_spans(false) {
-        report_flush_error(&e);
+fn maybe_flush(_state: &TracerState, host: &dyn StatusHost) {
+    if let Err(e) = flush_ended_spans(false, host) {
+        report_flush_error(&e, host);
     }
 }
 
-fn force_flush(_state: &TracerState) {
-    if let Err(e) = flush_ended_spans(true) {
-        report_flush_error(&e);
+fn force_flush(_state: &TracerState, host: &dyn StatusHost) {
+    if let Err(e) = flush_ended_spans(true, host) {
+        report_flush_error(&e, host);
     }
 }
 // ---------------------------------------------------------------------------
@@ -1948,7 +1979,40 @@ fn end_observation(obs_id_param: &str) {
 // Event handlers
 // ---------------------------------------------------------------------------
 
-extern "C" fn on_session_start(_event: StablePluginEvent, _: *mut c_void) -> i32 {
+/// The payload of a data/message event as JSON.
+///
+/// The native ABI delivered these as JSON *strings* (`data_text()` /
+/// `message_text()`); the compile-time `Event` carries the same JSON already
+/// parsed. Accepting both keeps the two channels on one contract.
+fn payload_json(event: &Event) -> Value {
+    match &event.payload {
+        Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+        other => other.clone(),
+    }
+}
+
+/// The `ToolExecutionStart` payload: the tool call id, name and arguments.
+///
+/// Mirrors the native ABI's `tool_call` view (whose `params` was a JSON string);
+/// both `camelCase` and `snake_case` keys are accepted so the compile-time
+/// dispatcher can hand this through unchanged.
+fn tool_call_payload(event: &Event) -> Option<(String, String, Value)> {
+    let get = |keys: &[&str]| keys.iter().find_map(|key| event.payload.get(*key));
+    let tool_call_id = get(&["toolCallId", "tool_call_id"])
+        .and_then(Value::as_str)?
+        .to_string();
+    let tool_name = get(&["toolName", "tool_name"])
+        .and_then(Value::as_str)?
+        .to_string();
+    let params = match get(&["params", "args"]) {
+        Some(Value::String(text)) => serde_json::from_str(text).unwrap_or(Value::Null),
+        Some(other) => other.clone(),
+        None => Value::Null,
+    };
+    Some((tool_call_id, tool_name, params))
+}
+
+fn on_session_start(_event: &Event, _host: &dyn StatusHost) -> i32 {
     debug_log("event: SessionStart");
     if !is_enabled() {
         return 0;
@@ -1958,15 +2022,13 @@ extern "C" fn on_session_start(_event: StablePluginEvent, _: *mut c_void) -> i32
     0
 }
 
-rpi_plugin_sdk::event_handler! {
-fn on_before_agent_start(event, _user_data) {
+fn on_before_agent_start(event: &Event, host: &dyn StatusHost) -> i32 {
     debug_log("event: BeforeAgentStart");
     if !is_enabled() {
         return 0;
     }
 
-    let data_str = event.data_text().unwrap_or_default();
-    let data: Value = serde_json::from_str(&data_str).unwrap_or(Value::Null);
+    let data = payload_json(event);
 
     // Finalize previous state if exists
     if let Some(state) = prompt_state().lock().unwrap().take() {
@@ -2090,10 +2152,9 @@ fn on_before_agent_start(event, _user_data) {
 
     // Armed: the trace exists from here on. The footer flips to
     // `langfuse ✓ (trace sent)` once an export actually succeeded.
-    set_status("langfuse ✓");
+    host.set_status("langfuse ✓");
 
     0
-}
 }
 
 fn resolve_turn_number(session_id: &str, _prompt: &str) -> u32 {
@@ -2106,7 +2167,7 @@ fn resolve_turn_number(session_id: &str, _prompt: &str) -> u32 {
     *entry
 }
 
-extern "C" fn on_context(event: StablePluginEvent, _: *mut c_void) -> i32 {
+fn on_context(_event: &Event, _host: &dyn StatusHost) -> i32 {
     if !is_enabled() {
         return 0;
     }
@@ -2115,13 +2176,12 @@ extern "C" fn on_context(event: StablePluginEvent, _: *mut c_void) -> i32 {
     0
 }
 
-extern "C" fn on_agent_start(event: StablePluginEvent, _: *mut c_void) -> i32 {
+fn on_agent_start(_event: &Event, _host: &dyn StatusHost) -> i32 {
     debug_log("event: AgentStart");
     if !is_enabled() {
         return 0;
     }
     // AgentStart is dispatched with empty payload - don't read data
-    let _ = event;
 
     // Capture system prompt if available
     // In the new protocol, system prompt is retrieved via ctx.getSystemPrompt()
@@ -2131,8 +2191,7 @@ extern "C" fn on_agent_start(event: StablePluginEvent, _: *mut c_void) -> i32 {
     0
 }
 
-rpi_plugin_sdk::event_handler! {
-fn on_before_provider_request(event, _user_data) {
+fn on_before_provider_request(event: &Event, _host: &dyn StatusHost) -> i32 {
     debug_log("event: BeforeProviderRequest");
     if !is_enabled() {
         return 0;
@@ -2158,8 +2217,7 @@ fn on_before_provider_request(event, _user_data) {
         }
     }
 
-    let data_str = event.data_text().unwrap_or_default();
-    let data: Value = serde_json::from_str(&data_str).unwrap_or(Value::Null);
+    let data = payload_json(event);
 
     let index = state.generation_count + 1;
     state.generation_count = index;
@@ -2222,10 +2280,8 @@ fn on_before_provider_request(event, _user_data) {
 
     0
 }
-}
 
-rpi_plugin_sdk::event_handler! {
-fn on_message_update(event, _user_data) {
+fn on_message_update(event: &Event, _host: &dyn StatusHost) -> i32 {
     if !is_enabled() {
         return 0;
     }
@@ -2243,8 +2299,7 @@ fn on_message_update(event, _user_data) {
         return 0;
     }
 
-    let data_str = event.message_text().unwrap_or_default();
-    let data: Value = serde_json::from_str(&data_str).unwrap_or(Value::Null);
+    let data = payload_json(event);
 
     let content = data.get("content").unwrap_or(&Value::Null);
     let text = extract_text(content);
@@ -2261,10 +2316,8 @@ fn on_message_update(event, _user_data) {
 
     0
 }
-}
 
-rpi_plugin_sdk::event_handler! {
-fn on_message_end(event, _user_data) {
+fn on_message_end(event: &Event, host: &dyn StatusHost) -> i32 {
     debug_log("event: MessageEnd");
     if !is_enabled() {
         return 0;
@@ -2275,8 +2328,7 @@ fn on_message_end(event, _user_data) {
         return 0;
     };
 
-    let data_str = event.message_text().unwrap_or_default();
-    let data: Value = serde_json::from_str(&data_str).unwrap_or(Value::Null);
+    let data = payload_json(event);
 
     // Check if this is an assistant message (new protocol uses "role", old uses "kind")
     let role = data
@@ -2396,30 +2448,25 @@ fn on_message_end(event, _user_data) {
             finalize_root(&finished, false);
         }
         let state = tracer();
-        force_flush(&state);
+        force_flush(&state, host);
     } else {
         // Mid-turn: export whatever already ended (generations, finished tools)
         // so long tool-calling runs stay observable, and keep the open root.
         let state = tracer();
-        maybe_flush(&state);
+        maybe_flush(&state, host);
     }
 
     0
 }
-}
 
-rpi_plugin_sdk::event_handler! {
-fn on_tool_execution_start(event, _user_data) {
+fn on_tool_execution_start(event: &Event, _host: &dyn StatusHost) -> i32 {
     if !is_enabled() {
         return 0;
     }
 
-    let Some(payload) = event.tool_call() else { return 0; };
-    let tool_call_id = payload.tool_call_id.clone();
-    let tool_name = payload.tool_name.clone();
-    let params = payload.params.clone();
-
-    let input: Value = serde_json::from_str(&params).unwrap_or(Value::Null);
+    let Some((tool_call_id, tool_name, input)) = tool_call_payload(event) else {
+        return 0;
+    };
     // Read the host's `__rpi.sessionId` off the *raw* args: this is the only
     // channel that carries the real session id, and it must be captured before
     // the payload is redacted for export.
@@ -2465,17 +2512,17 @@ fn on_tool_execution_start(event, _user_data) {
 
     0
 }
-}
 
-rpi_plugin_sdk::event_handler! {
-fn on_tool_execution_end(event, _user_data) {
+fn on_tool_execution_end(event: &Event, _host: &dyn StatusHost) -> i32 {
     if !is_enabled() {
         return 0;
     }
 
-    let Some(payload) = event.tool_result() else { return 0; };
+    let Some(payload) = event.tool_result() else {
+        return 0;
+    };
     let tool_call_id = payload.tool_call_id.clone();
-    let result = payload.result.clone();
+    let result_value = payload.result.clone();
     let is_error = payload.is_error;
 
     let mut state_guard = prompt_state().lock().unwrap();
@@ -2486,8 +2533,6 @@ fn on_tool_execution_end(event, _user_data) {
     let Some(tool) = state.open_tools.remove(&tool_call_id) else {
         return 0;
     };
-
-    let result_value: Value = serde_json::from_str(&result).unwrap_or(Value::Null);
 
     let output = if let Some(content) = result_value.get("content") {
         render_content_with_image_markers(content)
@@ -2559,9 +2604,8 @@ fn on_tool_execution_end(event, _user_data) {
 
     0
 }
-}
 
-extern "C" fn on_session_before_compact(event: StablePluginEvent, _: *mut c_void) -> i32 {
+fn on_session_before_compact(_event: &Event, _host: &dyn StatusHost) -> i32 {
     if !is_enabled() {
         return 0;
     }
@@ -2570,14 +2614,12 @@ extern "C" fn on_session_before_compact(event: StablePluginEvent, _: *mut c_void
     0
 }
 
-rpi_plugin_sdk::event_handler! {
-fn on_session_compact(event, _user_data) {
+fn on_session_compact(event: &Event, _host: &dyn StatusHost) -> i32 {
     if !is_enabled() {
         return 0;
     }
 
-    let data_str = event.data_text().unwrap_or_default();
-    let data: Value = serde_json::from_str(&data_str).unwrap_or(Value::Null);
+    let data = payload_json(event);
 
     let entry = data.get("compactionEntry");
     let reason = data
@@ -2637,16 +2679,13 @@ fn on_session_compact(event, _user_data) {
 
     0
 }
-}
 
-rpi_plugin_sdk::event_handler! {
-fn on_session_tree(event, _user_data) {
+fn on_session_tree(event: &Event, _host: &dyn StatusHost) -> i32 {
     if !is_enabled() {
         return 0;
     }
 
-    let data_str = event.data_text().unwrap_or_default();
-    let data: Value = serde_json::from_str(&data_str).unwrap_or(Value::Null);
+    let data = payload_json(event);
 
     let entry = data.get("summaryEntry");
     if entry.is_none() {
@@ -2701,9 +2740,8 @@ fn on_session_tree(event, _user_data) {
 
     0
 }
-}
 
-extern "C" fn on_agent_settled(_event: StablePluginEvent, _: *mut c_void) -> i32 {
+fn on_agent_settled(_event: &Event, host: &dyn StatusHost) -> i32 {
     debug_log("event: AgentSettled");
     if !is_enabled() {
         return 0;
@@ -2714,7 +2752,7 @@ extern "C" fn on_agent_settled(_event: StablePluginEvent, _: *mut c_void) -> i32
     }
 
     let state = tracer();
-    force_flush(&state);
+    force_flush(&state, host);
 
     0
 }
@@ -2794,7 +2832,7 @@ fn finalize_root(state: &PromptState, cancelled: bool) {
     std::env::remove_var(ENV_PARENT_DEPTH);
 }
 
-extern "C" fn on_session_shutdown(_event: StablePluginEvent, _: *mut c_void) -> i32 {
+fn on_session_shutdown(_event: &Event, host: &dyn StatusHost) -> i32 {
     debug_log("event: SessionShutdown");
     if !is_enabled() {
         return 0;
@@ -2805,7 +2843,7 @@ extern "C" fn on_session_shutdown(_event: StablePluginEvent, _: *mut c_void) -> 
     }
 
     let state = tracer();
-    force_flush(&state);
+    force_flush(&state, host);
 
     0
 }
@@ -2813,16 +2851,6 @@ extern "C" fn on_session_shutdown(_event: StablePluginEvent, _: *mut c_void) -> 
 // ---------------------------------------------------------------------------
 // Manual tools
 // ---------------------------------------------------------------------------
-
-type Builder = fn(&Value) -> Result<String, String>;
-
-static HANDLES: ToolHandles<Drive> = ToolHandles::new();
-
-struct Drive {
-    params: Value,
-    builder: Builder,
-    done: bool,
-}
 
 fn client(timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
@@ -3035,153 +3063,6 @@ pub fn trace(p: &Value) -> Result<String, String> {
     }
 }
 
-fn start(params: StbString, free: Option<FreeStringFn>, builder: Builder) -> StepHandle {
-    let t = params.to_string_lossy();
-    params.free_with(free);
-    let params = serde_json::from_str(&t).unwrap_or(Value::Null);
-    HANDLES.insert(Drive {
-        params,
-        builder,
-        done: false,
-    })
-}
-
-extern "C" fn execute_score(
-    _: StbStringRef,
-    params: StbString,
-    free: Option<FreeStringFn>,
-) -> StepHandle {
-    start(params, free, score)
-}
-
-extern "C" fn execute_prompt(
-    _: StbStringRef,
-    params: StbString,
-    free: Option<FreeStringFn>,
-) -> StepHandle {
-    start(params, free, prompt)
-}
-
-extern "C" fn execute_trace(
-    _: StbStringRef,
-    params: StbString,
-    free: Option<FreeStringFn>,
-) -> StepHandle {
-    start(params, free, trace)
-}
-
-extern "C" fn poll(h: StepHandle, _: Option<ToolPartialCb>, _: *mut c_void) -> StepResult {
-    if h.is_null() {
-        return StepResult::err(StbString::from_string("null langfuse handle".into()));
-    }
-    let Some(entry) = HANDLES.get(h) else {
-        return StepResult::err(StbString::from_string(
-            "invalid or destroyed tool handle".into(),
-        ));
-    };
-    let mut d = entry.lock();
-    if entry.cancelled.load(Ordering::SeqCst) {
-        return StepResult::err(StbString::from_string("langfuse cancelled".into()));
-    }
-    if d.done {
-        return StepResult::err(StbString::from_string(
-            "langfuse polled after completion".into(),
-        ));
-    }
-    d.done = true;
-    let result = (d.builder)(&d.params);
-    match result {
-        Ok(t) => StepResult::done(StbString::from_string(
-            json!({"content":[{"type":"text","text":t}]}).to_string(),
-        )),
-        Err(e) => StepResult::err(StbString::from_string(e)),
-    }
-}
-
-extern "C" fn cancel(h: StepHandle) {
-    HANDLES.cancel(h);
-}
-
-extern "C" fn destroy(h: StepHandle) {
-    drop(HANDLES.remove(h));
-}
-
-use rpi_plugin_sdk::callbacks::free_string;
-
-// ---------------------------------------------------------------------------
-// Plugin registration
-// ---------------------------------------------------------------------------
-rpi_plugin_sdk::export_plugin!(|api| {
-    // Capture the host's action trampoline before anything else can run:
-    // event handlers and the flush path both publish status through it.
-    let _ = HOST_RUNTIME.set(*api);
-
-    if let Some(register_event) = api.register_event_handler {
-        let handlers: &[(EventTag, EventHandlerFn)] = &[
-            (EventTag::SessionStart, on_session_start),
-            (EventTag::BeforeAgentStart, on_before_agent_start),
-            (EventTag::Context, on_context),
-            (EventTag::AgentStart, on_agent_start),
-            (EventTag::BeforeProviderRequest, on_before_provider_request),
-            (EventTag::MessageUpdate, on_message_update),
-            (EventTag::MessageEnd, on_message_end),
-            (EventTag::ToolExecutionStart, on_tool_execution_start),
-            (EventTag::ToolExecutionEnd, on_tool_execution_end),
-            (EventTag::SessionBeforeCompact, on_session_before_compact),
-            (EventTag::SessionCompact, on_session_compact),
-            (EventTag::SessionTree, on_session_tree),
-            (EventTag::AgentSettled, on_agent_settled),
-            (EventTag::SessionShutdown, on_session_shutdown),
-        ];
-        for &(tag, handler) in handlers {
-            let rc = register_event(tag, handler, std::ptr::null_mut());
-            if rc != 0 {
-                return rc;
-            }
-        }
-    }
-
-    let Some(register) = api.register_tool else {
-        return 1;
-    };
-    let schemas = [
-    (
-        "langfuse_score",
-        "Create or list Langfuse scores",
-        r#"{"type":"object","properties":{"action":{"type":"string","enum":["create","list"]},"name":{"type":"string"},"value":{"type":["number","string","object"]},"traceId":{"type":"string"},"observationId":{"type":"string"},"comment":{"type":"string"},"userId":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100},"page":{"type":"integer","minimum":1}}}"#,
-    ),
-    (
-        "langfuse_prompt",
-        "Create, get, or list Langfuse prompts",
-        r#"{"type":"object","properties":{"action":{"type":"string","enum":["create","get","list"]},"name":{"type":"string"},"prompt":{"type":"string"},"config":{"type":"object"},"version":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100},"page":{"type":"integer","minimum":1}}}"#,
-    ),
-    (
-        "langfuse_trace",
-        "Query Langfuse traces (Langfuse v4 Observations API v2). 'get' returns every observation of one trace; 'list' returns one root observation per trace. 'update' is gone in v4.",
-        r#"{"type":"object","properties":{"action":{"type":"string","enum":["get","list"]},"id":{"type":"string","description":"trace id (action=get)"},"userId":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":1000}}}"#,
-    ),
-];
-    for (name, desc, params) in schemas {
-        let schema = Box::new(StableToolSchema {
-            name: StbString::from_string(name.into()),
-            description: StbString::from_string(desc.into()),
-            parameters: StbString::from_string(params.into()),
-        });
-        let execute = match name {
-            "langfuse_score" => execute_score,
-            "langfuse_prompt" => execute_prompt,
-            "langfuse_trace" => execute_trace,
-            _ => unreachable!(),
-        };
-        let rc = register(&*schema, execute, poll, cancel, destroy, free_string);
-        drop(schema);
-        if rc != 0 {
-            return rc;
-        }
-    }
-    0
-});
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3206,6 +3087,93 @@ mod tests {
         TURN_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A no-op status host for tests that do not assert on the footer.
+    struct SilentHost;
+
+    impl StatusHost for SilentHost {
+        fn set_status(&self, _text: &str) {}
+    }
+
+    static TEST_HOST: SilentHost = SilentHost;
+
+    /// Enable the plugin with dummy credentials so the turn handlers actually
+    /// run.
+    ///
+    /// The handlers short-circuit on `!is_enabled()`, so any test that asserts
+    /// on buffered spans must configure the plugin. `LANGFUSE_BASE_URL` points
+    /// at a bogus port on purpose: these tests never flush, and a real endpoint
+    /// would be a hazard.
+    fn enable_langfuse_for_test() {
+        std::env::set_var("LANGFUSE_PUBLIC_KEY", "pk-lf-test");
+        std::env::set_var("LANGFUSE_SECRET_KEY", "sk-lf-test");
+        std::env::set_var("LANGFUSE_BASE_URL", "http://127.0.0.1:1");
+        std::env::remove_var("LANGFUSE_TRACING_ENABLED");
+    }
+
+    /// Records the footer updates a handler publishes through `HostCaps::ui`.
+    #[derive(Default)]
+    struct RecordingUi {
+        statuses: Mutex<Vec<Value>>,
+    }
+
+    impl kiqi_plugin::UiApi for RecordingUi {
+        fn dialog(&self, _request: &Value) -> Result<Value, kiqi_plugin::PluginError> {
+            Err(kiqi_plugin::PluginError::Failed(
+                "no dialog in this test".into(),
+            ))
+        }
+        fn set_status(&self, update: &Value) -> Result<(), kiqi_plugin::PluginError> {
+            self.statuses.lock().unwrap().push(update.clone());
+            Ok(())
+        }
+        fn set_editor_text(&self, _edit: &Value) -> Result<(), kiqi_plugin::PluginError> {
+            Ok(())
+        }
+        fn component(
+            &self,
+            _name: &str,
+            _payload: &Value,
+        ) -> Result<Value, kiqi_plugin::PluginError> {
+            Err(kiqi_plugin::PluginError::Failed(
+                "no components in this test".into(),
+            ))
+        }
+    }
+
+    struct SilentLog;
+    impl kiqi_plugin::Log for SilentLog {
+        fn log(&self, _level: kiqi_plugin::LogLevel, _message: &str) {}
+    }
+
+    /// Build the `kiqi-plugin` event shape for a data-carrying tag (the native
+    /// ABI shipped the same JSON as a string; `payload_json` accepts both).
+    fn data_event(tag: kiqi_plugin::EventTag, text: &str) -> Event {
+        Event::new(tag, serde_json::from_str(text).unwrap_or(Value::Null))
+    }
+
+    fn tool_call_event(id: &str, name: &str, params: &str) -> Event {
+        Event::new(
+            kiqi_plugin::EventTag::ToolExecutionStart,
+            json!({
+                "toolCallId": id,
+                "toolName": name,
+                "params": serde_json::from_str::<Value>(params).unwrap_or(Value::Null),
+            }),
+        )
+    }
+
+    fn tool_result_event(id: &str, name: &str, result: &str, is_error: bool) -> Event {
+        Event::new(
+            kiqi_plugin::EventTag::ToolExecutionEnd,
+            json!({
+                "toolCallId": id,
+                "toolName": name,
+                "result": serde_json::from_str::<Value>(result).unwrap_or(Value::Null),
+                "isError": is_error,
+            }),
+        )
     }
 
     /// The status footer is driven through the host's `SetStatus` runtime
@@ -3233,7 +3201,7 @@ mod tests {
     fn set_status_sends_the_host_action() {
         // Only this test installs the host runtime, so `set` is uncontended.
         let _ = HOST_RUNTIME.set(PluginApi {
-            abi_version: rpi_plugin_sdk::RPI_PLUGIN_ABI_VERSION_UNIFIED,
+            abi_version: rpi_plugin_sdk::KI_PLUGIN_ABI_VERSION_UNIFIED,
             struct_size: std::mem::size_of::<PluginApi>() as u32,
             runtime_action: mock_runtime_action,
             free_string: mock_free_string,
@@ -3253,7 +3221,7 @@ mod tests {
             register_before_agent_start: None,
             register_oauth_provider: None,
         });
-        set_status("langfuse ✓ (trace sent)");
+        AbiHost.set_status("langfuse ✓ (trace sent)");
         let captured = CAPTURED_STATUS
             .lock()
             .unwrap()
@@ -3262,6 +3230,58 @@ mod tests {
         let payload: Value = serde_json::from_str(&captured).expect("args are JSON");
         assert_eq!(payload["key"], json!("langfuse"));
         assert_eq!(payload["value"], json!("langfuse ✓ (trace sent)"));
+    }
+
+    /// Caps-level acceptance (§7.4): driving the compiled-in plugin through
+    /// `HostCaps` clears state on `SessionStart`, opens it on
+    /// `BeforeAgentStart`, and publishes the footer through `UiApi` rather than
+    /// a raw action id.
+    #[test]
+    fn caps_level_session_start_and_before_agent_start() {
+        use kiqi_plugin::Plugin as _;
+        let _turn_guard = turn_test_lock();
+        enable_langfuse_for_test();
+        reset_session_id_latch();
+        *prompt_state().lock().unwrap() = None;
+        tracer().spans.lock().unwrap().clear();
+        std::env::remove_var(ENV_PARENT_TRACE_ID);
+        std::env::remove_var(ENV_PARENT_SPAN_ID);
+
+        let ui = RecordingUi::default();
+        let log = SilentLog;
+        let caps = kiqi_plugin::HostCaps {
+            session: None,
+            control: None,
+            inject: None,
+            ui: Some(&ui),
+            log: &log,
+        };
+        let plugin = crate::kiqi::LangfusePlugin::new();
+        let dispatch = |tag| plugin.on_event(&Event::new(tag, Value::Null), &caps);
+
+        // BeforeAgentStart opens a turn...
+        dispatch(kiqi_plugin::EventTag::BeforeAgentStart);
+        assert!(
+            prompt_state().lock().unwrap().is_some(),
+            "BeforeAgentStart must open the turn state"
+        );
+        let published = ui.statuses.lock().unwrap().clone();
+        assert!(
+            published
+                .iter()
+                .any(|s| s["key"] == json!("langfuse") && s["value"] == json!("langfuse ✓")),
+            "the footer must be published through UiApi: {published:?}"
+        );
+
+        // ...and SessionStart resets it.
+        dispatch(kiqi_plugin::EventTag::SessionStart);
+        assert!(
+            prompt_state().lock().unwrap().is_none(),
+            "SessionStart must reset the turn state"
+        );
+
+        tracer().spans.lock().unwrap().clear();
+        reset_session_id_latch();
     }
 
     #[test]
@@ -3430,6 +3450,11 @@ mod tests {
 
     #[test]
     fn otlp_spans_carry_langfuse_attributes() {
+        // `trace_name()`/`base_tags()` read the process-global host identity,
+        // which the identity test mutates under this lock; take it so the
+        // hardcoded `["rpi"]` assumption cannot race.
+        let _turn_guard = turn_test_lock();
+        *HOST_IDENTITY.lock().unwrap() = None;
         let trace = trace_id();
         let root_id = obs_id();
         let mut metadata = Map::new();
@@ -3618,9 +3643,7 @@ mod tests {
             load_config().is_some(),
             "set LANGFUSE_BASE_URL/PUBLIC_KEY/SECRET_KEY first"
         );
-        let tag = |s: &str| {
-            StablePluginEvent::data(EventTag::BeforeAgentStart, StbString::from_string(s.into()))
-        };
+        let tag = |s: &str| data_event(kiqi_plugin::EventTag::BeforeAgentStart, s);
         let _ = tag; // keep the closure type explicit above
 
         // Fresh state, and make sure we are treated as a top-level run.
@@ -3632,11 +3655,8 @@ mod tests {
         // 1) A turn starts: the plugin opens the root observation.
         let start = json!({ "prompt": "rpi-langfuse integration test", "images": [] });
         let rc = on_before_agent_start(
-            StablePluginEvent::data(
-                EventTag::BeforeAgentStart,
-                StbString::from_string(start.to_string()),
-            ),
-            std::ptr::null_mut(),
+            &data_event(kiqi_plugin::EventTag::BeforeAgentStart, &start.to_string()),
+            &TEST_HOST,
         );
         assert_eq!(rc, 0);
         // the plugin publishes its trace id for subagents through this env var
@@ -3651,11 +3671,11 @@ mod tests {
             "temperature": 0.0,
         });
         on_before_provider_request(
-            StablePluginEvent::data(
-                EventTag::BeforeProviderRequest,
-                StbString::from_string(req.to_string()),
+            &data_event(
+                kiqi_plugin::EventTag::BeforeProviderRequest,
+                &req.to_string(),
             ),
-            std::ptr::null_mut(),
+            &TEST_HOST,
         );
 
         // 3) The assistant message closes it (usage + output).
@@ -3666,17 +3686,14 @@ mod tests {
             "usage": { "input": 7, "output": 3, "totalTokens": 10 },
         });
         on_message_end(
-            StablePluginEvent::message(
-                EventTag::MessageEnd,
-                StbString::from_string(msg.to_string()),
-            ),
-            std::ptr::null_mut(),
+            &data_event(kiqi_plugin::EventTag::MessageEnd, &msg.to_string()),
+            &TEST_HOST,
         );
 
         // 4) The turn settles: finalize + export over OTLP.
         on_agent_settled(
-            StablePluginEvent::empty(EventTag::AgentSettled),
-            std::ptr::null_mut(),
+            &Event::new(kiqi_plugin::EventTag::AgentSettled, Value::Null),
+            &TEST_HOST,
         );
         assert!(
             tracer().spans.lock().unwrap().is_empty(),
@@ -3741,6 +3758,7 @@ mod tests {
     #[test]
     fn turn_handlers_do_not_deadlock_on_the_state_lock() {
         let _turn_guard = turn_test_lock();
+        enable_langfuse_for_test();
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             reset_session_id_latch();
@@ -3751,37 +3769,23 @@ mod tests {
 
             let start = json!({ "prompt": "deadlock probe", "sessionId": "s1" });
             on_before_agent_start(
-                StablePluginEvent::data(
-                    EventTag::BeforeAgentStart,
-                    StbString::from_string(start.to_string()),
-                ),
-                std::ptr::null_mut(),
+                &data_event(kiqi_plugin::EventTag::BeforeAgentStart, &start.to_string()),
+                &TEST_HOST,
             );
             on_before_provider_request(
-                StablePluginEvent::data(
-                    EventTag::BeforeProviderRequest,
-                    StbString::from_string(json!({ "model": "m" }).to_string()),
+                &data_event(
+                    kiqi_plugin::EventTag::BeforeProviderRequest,
+                    &json!({ "model": "m" }).to_string(),
                 ),
-                std::ptr::null_mut(),
+                &TEST_HOST,
             );
             on_tool_execution_start(
-                StablePluginEvent::tool_call(
-                    EventTag::ToolExecutionStart,
-                    StbString::from_string("c".into()),
-                    StbString::from_string("bash".into()),
-                    StbString::from_string(json!({ "command": "ls" }).to_string()),
-                ),
-                std::ptr::null_mut(),
+                &tool_call_event("c", "bash", &json!({ "command": "ls" }).to_string()),
+                &TEST_HOST,
             );
             on_tool_execution_end(
-                StablePluginEvent::tool_result(
-                    EventTag::ToolExecutionEnd,
-                    StbString::from_string("c".into()),
-                    StbString::from_string("bash".into()),
-                    StbString::from_string(json!({ "content": "ok" }).to_string()),
-                    false,
-                ),
-                std::ptr::null_mut(),
+                &tool_result_event("c", "bash", &json!({ "content": "ok" }).to_string(), false),
+                &TEST_HOST,
             );
             let _ = tx.send(tracer().spans.lock().unwrap().len());
         });
@@ -3806,6 +3810,7 @@ mod tests {
     #[test]
     fn subagent_root_keeps_its_parent_after_turn_teardown() {
         let _turn_guard = turn_test_lock();
+        enable_langfuse_for_test();
         reset_session_id_latch();
         *prompt_state().lock().unwrap() = None;
         tracer().spans.lock().unwrap().clear();
@@ -3817,13 +3822,11 @@ mod tests {
         std::env::set_var(ENV_PARENT_DEPTH, "1");
 
         on_before_agent_start(
-            StablePluginEvent::data(
-                EventTag::BeforeAgentStart,
-                StbString::from_string(
-                    json!({ "prompt": "sub", "sessionId": "parent-session" }).to_string(),
-                ),
+            &data_event(
+                kiqi_plugin::EventTag::BeforeAgentStart,
+                &json!({ "prompt": "sub", "sessionId": "parent-session" }).to_string(),
             ),
-            std::ptr::null_mut(),
+            &TEST_HOST,
         );
 
         let root_id = {
@@ -3865,6 +3868,7 @@ mod tests {
     #[test]
     fn a_late_session_id_upgrades_the_whole_buffered_trace() {
         let _turn_guard = turn_test_lock();
+        enable_langfuse_for_test();
         reset_session_id_latch();
         *prompt_state().lock().unwrap() = None;
         tracer().spans.lock().unwrap().clear();
@@ -3873,11 +3877,11 @@ mod tests {
 
         // Turn opens with no id anywhere → the pid fallback, as an old host does.
         on_before_agent_start(
-            StablePluginEvent::data(
-                EventTag::BeforeAgentStart,
-                StbString::from_string(json!({ "prompt": "hi" }).to_string()),
+            &data_event(
+                kiqi_plugin::EventTag::BeforeAgentStart,
+                &json!({ "prompt": "hi" }).to_string(),
             ),
-            std::ptr::null_mut(),
+            &TEST_HOST,
         );
         let trace = std::env::var(ENV_PARENT_TRACE_ID).expect("trace published");
         let before = tracer()
@@ -3894,15 +3898,12 @@ mod tests {
 
         // The real id shows up on the tool-call path.
         on_tool_execution_start(
-            StablePluginEvent::tool_call(
-                EventTag::ToolExecutionStart,
-                StbString::from_string("c1".into()),
-                StbString::from_string("bash".into()),
-                StbString::from_string(
-                    json!({ "__rpi": { "sessionId": "real-session" } }).to_string(),
-                ),
+            &tool_call_event(
+                "c1",
+                "bash",
+                &json!({ "__rpi": { "sessionId": "real-session" } }).to_string(),
             ),
-            std::ptr::null_mut(),
+            &TEST_HOST,
         );
 
         // Every buffered span of that trace — the earlier root included — must
@@ -3933,6 +3934,7 @@ mod tests {
     #[test]
     fn event_flow_exports_session_and_trace_context_on_every_span() {
         let _turn_guard = turn_test_lock();
+        enable_langfuse_for_test();
         reset_session_id_latch();
         *prompt_state().lock().unwrap() = None;
         tracer().spans.lock().unwrap().clear();
@@ -3948,11 +3950,8 @@ mod tests {
         });
         assert_eq!(
             on_before_agent_start(
-                StablePluginEvent::data(
-                    EventTag::BeforeAgentStart,
-                    StbString::from_string(start.to_string()),
-                ),
-                std::ptr::null_mut(),
+                &data_event(kiqi_plugin::EventTag::BeforeAgentStart, &start.to_string()),
+                &TEST_HOST,
             ),
             0
         );
@@ -3960,36 +3959,32 @@ mod tests {
         // 2) A generation, then a tool call (the path that also carries `__rpi`).
         let req = json!({ "model": "test-model", "maxTokens": 8 });
         on_before_provider_request(
-            StablePluginEvent::data(
-                EventTag::BeforeProviderRequest,
-                StbString::from_string(req.to_string()),
+            &data_event(
+                kiqi_plugin::EventTag::BeforeProviderRequest,
+                &req.to_string(),
             ),
-            std::ptr::null_mut(),
+            &TEST_HOST,
         );
         on_tool_execution_start(
-            StablePluginEvent::tool_call(
-                EventTag::ToolExecutionStart,
-                StbString::from_string("call-1".into()),
-                StbString::from_string("bash".into()),
-                StbString::from_string(
-                    json!({
-                        "command": "ls",
-                        "__rpi": { "cwd": "/tmp", "sessionId": "01adb026-session" },
-                    })
-                    .to_string(),
-                ),
+            &tool_call_event(
+                "call-1",
+                "bash",
+                &json!({
+                    "command": "ls",
+                    "__rpi": { "cwd": "/tmp", "sessionId": "01adb026-session" },
+                })
+                .to_string(),
             ),
-            std::ptr::null_mut(),
+            &TEST_HOST,
         );
         on_tool_execution_end(
-            StablePluginEvent::tool_result(
-                EventTag::ToolExecutionEnd,
-                StbString::from_string("call-1".into()),
-                StbString::from_string("bash".into()),
-                StbString::from_string(json!({ "content": "ok" }).to_string()),
+            &tool_result_event(
+                "call-1",
+                "bash",
+                &json!({ "content": "ok" }).to_string(),
                 false,
             ),
-            std::ptr::null_mut(),
+            &TEST_HOST,
         );
 
         // 3) Inspect every buffered span the way the exporter would see it.

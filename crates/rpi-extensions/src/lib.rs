@@ -71,6 +71,7 @@ pub use actions::{
     reload_callback_from_mailbox, trampoline_runtime_action, ActionBridge, ReloadMailbox,
     RuntimeActionHost, UiDialogMailbox, UiDialogRequest,
 };
+pub use compiled::{clear_compiled_event_sink, set_compiled_event_sink, CompiledEventSink};
 pub use editor_text::{EditorTextEdit, EditorTextMailbox, EditorTextMode};
 pub use event_log::{event_log_path, log_handler_invocation, EventLogger};
 pub use loader::{
@@ -102,6 +103,7 @@ pub use translate::{
 
 pub use stdio::StdioLifecycle;
 mod actions;
+mod compiled;
 mod editor_text;
 mod event_log;
 mod loader;

@@ -281,6 +281,11 @@ pub fn load_all() -> Vec<Registered> {
         id: "rpi-websearch",
         plugin: rpi_websearch::kiqi::factory(),
     });
+    #[cfg(feature = "plugin-rpi-langfuse")]
+    plugins.push(Registered {
+        id: "rpi-langfuse",
+        plugin: rpi_langfuse::kiqi::factory(),
+    });
     plugins
 }
 
@@ -335,6 +340,31 @@ pub fn owned_caps(
         caps.inject = Some(shared as std::sync::Arc<dyn kiqi_plugin::InjectApi>);
     }
     caps
+}
+
+/// Install the sink that fans dispatched events into the compiled plugins.
+///
+/// `rpi-extensions` owns the dispatch funnels (the `AgentEvent` emitter,
+/// lifecycle events, provider hooks); this closure is how those reach
+/// [`Plugin::on_event`](kiqi_plugin::Plugin::on_event). The host calls it once
+/// per session build with that session's capabilities; last writer wins, so a
+/// second build (or a test) simply replaces the sink.
+///
+/// The tag discriminant maps straight through: the two `EventTag` enums are
+/// pinned together by `event_tags_match_the_native_abi`.
+pub fn install_compiled_event_sink(caps: OwnedCaps) {
+    let hosts = compiled_plugin_hosts();
+    let sink: rpi_extensions::CompiledEventSink = std::sync::Arc::new(move |tag, payload| {
+        let Some(tag) = kiqi_plugin::EventTag::from_u32(tag) else {
+            return;
+        };
+        let event = kiqi_plugin::Event::new(tag, payload);
+        let caps = caps.caps();
+        for host in &hosts {
+            let _ = host.on_event(&event, &caps);
+        }
+    });
+    rpi_extensions::set_compiled_event_sink(sink);
 }
 
 /// Owners for compiled plugins start here, far above any registry id.
@@ -963,6 +993,24 @@ mod tests {
 
         assert_eq!(todo.plugin.commands()[0].name, "todos");
         assert!(todo.plugin.probe_points().is_empty());
+
+        // rpi-langfuse is the last package ported off the native ABI. Its three
+        // tools must be visible through the registry the same way todo's are.
+        let langfuse = plugins
+            .iter()
+            .find(|entry| entry.id == "rpi-langfuse")
+            .expect("rpi-langfuse is compiled in by the default feature");
+        let langfuse_tools = langfuse.plugin.tools();
+        let names: Vec<&str> = langfuse_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["langfuse_score", "langfuse_prompt", "langfuse_trace"]
+        );
+        assert!(langfuse.plugin.commands().is_empty());
+        assert!(langfuse.plugin.probe_points().is_empty());
     }
 
     /// A host that answers the two actions this test needs and refuses the
@@ -1285,6 +1333,57 @@ mod tests {
             other => panic!("unexpected block {other:?}"),
         };
         assert!(text.contains("from the branch"), "got {text}");
+    }
+
+    /// The host-side wiring: an event dispatched through `rpi-extensions`'
+    /// funnel reaches a compiled plugin's `on_event` with the session's
+    /// capabilities. This is what makes a `ki` with no cdylibs still deliver
+    /// events to `rpi-todo`, `rpi-langfuse`, and the rest.
+    #[test]
+    fn rpi_extensions_dispatch_reaches_compiled_plugins() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let fake = std::sync::Arc::new(FakeHost::default());
+        let owned = OwnedCaps {
+            session: Some(
+                std::sync::Arc::new(ActionCaps::new(fake, runtime.handle().clone()))
+                    as std::sync::Arc<dyn kiqi_plugin::SessionRead>,
+            ),
+            control: None,
+            inject: None,
+            ui: None,
+            log: std::sync::Arc::new(Silent),
+        };
+        install_compiled_event_sink(owned);
+
+        // A registry with no cdylib handlers still reaches the compiled plugin.
+        let snapshot = rpi_extensions::ExtensionRegistry::new().snapshot();
+        let native_handled =
+            rpi_extensions::dispatch_empty_event(&snapshot, rpi_plugin_sdk::EventTag::SessionStart);
+        assert!(!native_handled, "no cdylib subscribed");
+
+        // rpi-todo restored the task list the host served on the branch —
+        // through the sink, not a direct `host.on_event` call.
+        let host = PluginHost::new("rpi-todo", rpi_todo::kiqi::factory());
+        let silent = Silent;
+        let listed = host
+            .call_tool(
+                "todo",
+                &serde_json::json!({"action": "list"}),
+                &HostCaps::observer(&silent),
+                &NoProgress,
+            )
+            .unwrap();
+        let text = match &listed.blocks[0] {
+            kiqi_plugin::Block::Text(text) => text.clone(),
+            other => panic!("unexpected block {other:?}"),
+        };
+        assert!(text.contains("from the branch"), "got {text}");
+
+        rpi_extensions::clear_compiled_event_sink();
     }
 
     /// One worker thread on purpose: parking it without `block_in_place` would

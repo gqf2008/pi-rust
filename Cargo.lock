@@ -2304,6 +2304,7 @@ dependencies = [
  "rpi-extensions",
  "rpi-goal",
  "rpi-harness",
+ "rpi-langfuse",
  "rpi-lens",
  "rpi-permissions",
  "rpi-plan-mode",

@@ -334,14 +334,18 @@ pub async fn build(
         report_deferred_renderers(&extension_session);
     }
     merge_extension_tools(&mut tools, &extension_session, args, &tool_context);
+    // The same capabilities serve tools and events; install the event sink
+    // before anything can dispatch (the first `SessionStart` is still ahead).
+    let plugin_caps = crate::plugins::owned_caps(
+        std::sync::Arc::clone(&plugin_caps_host),
+        Some(runtime.clone()),
+        Some(std::sync::Arc::clone(&plugin_ui)),
+    );
+    crate::plugins::install_compiled_event_sink(plugin_caps.clone());
     crate::plugins::merge_compiled_plugin_tools(
         &mut tools,
         &crate::plugins::compiled_plugin_hosts(),
-        &crate::plugins::owned_caps(
-            std::sync::Arc::clone(&plugin_caps_host),
-            Some(runtime.clone()),
-            Some(std::sync::Arc::clone(&plugin_ui)),
-        ),
+        &plugin_caps,
         &|name| tool_name_allowed(name, args),
     );
     let active = filter_active_tool_names(active_tool_names(&tools, args), args);
