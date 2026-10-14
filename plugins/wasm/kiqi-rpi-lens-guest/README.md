@@ -39,6 +39,24 @@ Stated, not hidden:
    absolute *inside the project directory*; anything else is refused.
 3. **Timeouts surface as `… hit the exec time budget`** instead of
    "timed out after {n}s", because the number lives in the grant.
+4. **The child runs with a cleared environment.** The host's exec clears the
+   environment and re-adds only `PATH`, so the ported check runs without
+   `CARGO_HOME`/`RUSTUP_HOME`/`RUSTFLAGS`/proxy variables the compiled plugin
+   inherited. On a stock rustup/cargo setup the defaults still resolve; a
+   project that *requires* those variables builds differently — that's a
+   deliberate property of the exec capability, not a per-plugin choice.
+5. **Malformed JSON arguments are an error.** The compiled plugin parsed
+   unparseable arguments as `null` and ran the default `diff` check; the port
+   refuses with `invalid arguments` instead of running a check nobody asked
+   for.
+
+Known caveats on the `cwd` mapping (all fail-safe: wrong refusal, never a
+wrong grant): the guest strips an absolute cwd against the session's
+`info().cwd` *lexically*, so a path that reaches the project through a symlink
+spelling (macOS `/tmp/…` vs `/private/tmp/…`) is refused — pass a relative
+path instead. And when an embedder overrides the host's `Options::project_dir`
+to something other than the process cwd, the guest's strip anchor and the
+host's jail root diverge; the default `ki` embedding never does this.
 
 ## Build
 

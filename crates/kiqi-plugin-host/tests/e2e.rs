@@ -1599,6 +1599,84 @@ fn rpi_lens_guest_runs_checks_in_the_project_directory() {
         text_of(&outcome)
     );
 
+    // The tool's cwd mapping: `.` is the project root itself, a relative
+    // subdir descends, and an absolute path outside the project is refused by
+    // the guest before the host is even asked.
+    std::fs::create_dir_all(project.path().join("sub")).expect("project subdir");
+    let outcome = plugin
+        .call(
+            "code_lens",
+            &serde_json::json!({ "check": "diff", "cwd": "." }),
+            &caps,
+            &sink,
+        )
+        .expect("call");
+    assert!(
+        text_of(&outcome).contains("check=diff exit=0"),
+        "cwd `.` is the project root: {}",
+        text_of(&outcome)
+    );
+    let outcome = plugin
+        .call(
+            "code_lens",
+            &serde_json::json!({ "check": "diff", "cwd": "sub" }),
+            &caps,
+            &sink,
+        )
+        .expect("call");
+    assert!(
+        text_of(&outcome).contains("check=diff exit=0"),
+        "a relative subdir of the project works: {}",
+        text_of(&outcome)
+    );
+    let refused = plugin
+        .call(
+            "code_lens",
+            &serde_json::json!({ "check": "diff", "cwd": "/" }),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("outside the project directory"),
+        "an absolute cwd outside the project is refused by the guest: {refused}"
+    );
+
+    // Trailing slash + the production fallback: with no `Options::project_dir`
+    // the host resolves against the process cwd, which is also the guest's
+    // strip anchor — so an absolute path spelled the way shell completion
+    // emits it (with a trailing slash) is accepted, and `git diff --check`
+    // runs read-only in the repo the test process sits in.
+    let plugin = WasmPlugin::load_with_grants(
+        "rpi-lens",
+        &wasm,
+        Grants {
+            exec: Some(ExecGrant {
+                commands: vec!["git".to_string()],
+                cwd: ExecCwd::Project,
+                ..ExecGrant::default()
+            }),
+            ..Grants::default()
+        },
+    )
+    .expect("load");
+    let cwd_with_slash = format!("{}/", std::env::current_dir().unwrap().display());
+    let outcome = plugin
+        .call(
+            "code_lens",
+            &serde_json::json!({ "check": "diff", "cwd": cwd_with_slash }),
+            &caps,
+            &sink,
+        )
+        .expect("call");
+    assert!(
+        text_of(&outcome).contains("check=diff exit="),
+        "an absolute cwd with a trailing slash is accepted: {}",
+        text_of(&outcome)
+    );
+
     // Same plugin without the project scope: the child starts in the data
     // directory, which is not a git repository.
     let dir = tempfile::tempdir().expect("install tempdir");

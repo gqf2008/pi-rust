@@ -178,6 +178,9 @@ fn exec_cwd(params: &Value) -> Result<Option<String>, types::PluginError> {
         // Relative: the host's jail decides (it refuses `..` and friends).
         return Ok(Some(cwd.to_string()));
     }
+    // Trim trailing slashes: `/proj/` is `/proj` (shell completion emits the
+    // slash), and the prefix strip below wants a canonical spelling.
+    let cwd = cwd.trim_end_matches('/');
     let project = session_read::info().cwd;
     let project = project.trim_end_matches('/');
     if cwd == project {
