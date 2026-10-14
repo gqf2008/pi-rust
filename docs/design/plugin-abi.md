@@ -1,6 +1,6 @@
 # 插件 ABI：从 cdylib 到 wasm 组件
 
-状态：**推迟为第一方契约；作为第三方（不受信）层推进验证** · 目标版本 `kiqi:plugin@0.3.0`
+状态：**推迟为第一方契约；作为第三方（不受信）层推进验证** · 目标版本 `kiqi:plugin@0.4.0`
 
 > **本方案不再作为第一方插件的契约。** 实测 `rpi-package` 的 18 个包后改为
 > 「Rust `trait Plugin` + cargo feature 全编译接入」，见
@@ -14,7 +14,7 @@
 > 判据是 §6.3 的 8 条门禁，而不是「迁了几个插件」。第一方**其余插件留在编译期**，
 > 只有明确需要第三方分发/沙箱的才迁。
 >
-> `plugins/kiqi-plugin.wit` 已升到 parse-validated 的 `0.3.0`（0.1.0 连 `wasm-tools component wit`
+> `plugins/kiqi-plugin.wit` 已升到 parse-validated 的 `0.4.0`（0.1.0 连 `wasm-tools component wit`
 > 都过不了：variant case 带命名/多字段是非法的）：能力面做全、每个能力独立 interface、
 > 调用一律 `result<_, denied>`、进度用 import sink、timer 由宿主驱动。
 
@@ -337,6 +337,21 @@ e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许
 
 参照集（§6.2）：`rpi-todo` ✅（真插件）、`rpi-langfuse` 子集 ✅（真实压力面）、conformance fixture ✅；
 `rpi-ask-user` 未做。
+
+### 6.13 ABI 0.4.0：能力错误拆 `denied` / `failed`
+
+- `types` 里 `record denied { reason }` 换成 `variant capability-error { denied(string), failed(string) }`；
+  所有能力调用（session-control / inject / ui / net-http / fs / net-sockets / exec / timer）
+  改签名为 `result<_, capability-error>`。
+- 宿主：**授权拒绝 → `denied`**（含 allow-list 不匹配）；**已授予但操作失败 → `failed`**
+  （HTTP 发送失败、URL 非法、client 构建失败等）。`forward` 经 `capability_error(PluginError)` 区分
+  （`PluginError::Denied` → denied，其余 → failed）。
+- guest：conformance 把错误渲染成 `cap:<reason>` / `cap:failed:<reason>`；langfuse 的 flush 失败
+  现在记为 `rejected`，不再是“not granted”。
+- 语义收益：**超时的 flush 不再被误报成“没授权”**——正是 §6.11 记下的痛点。
+- 这是 0.4.0 breaking：WIT + host + 3 个 guest 一起改，6 个 e2e 全绿。
+- 仍未做（重记为需新接缝）：`session-read.info` 的 session-id/run-id 仍返空，需要一个
+  `SessionRead::session_id` 接口（不拿进程序 env 顶替）。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里

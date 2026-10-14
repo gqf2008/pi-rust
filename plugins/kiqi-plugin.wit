@@ -5,7 +5,7 @@
 /// version is checked with `wasm-tools component wit`.
 ///
 /// Shape decisions this version encodes:
-///   * capability calls are fallible (`result<_, denied>`) so a plugin still
+///   * capability calls are fallible (`result<_, capability-error>`) so a plugin still
 ///     loads when a capability is not granted and can degrade at call time;
 ///   * every capability is its own interface, so a deny stub, audit and future
 ///     tightening stay minimal and independent;
@@ -25,7 +25,7 @@
 /// (A built component prunes the interfaces it does not use, so a plugin that
 /// never touches `exec` never asks for it.) "Required but not granted" is
 /// rejected before instantiation from the plugin manifest.
-package kiqi:plugin@0.3.0;
+package kiqi:plugin@0.4.0;
 
 /// Types shared across the host <-> plugin boundary.
 interface types {
@@ -43,10 +43,15 @@ interface types {
         cwd: string,
     }
 
-    /// Why a capability call was refused: not granted, out of scope, or denied
-    /// by policy. Every capability call returns this so partial grants work.
-    record denied {
-        reason: string,
+    /// Why a capability call failed.
+    ///
+    /// `denied` is the authorization answer (not granted / out of scope);
+    /// `failed` is a granted capability whose operation failed (a network
+    /// error, a bad path). Keeping them apart matters: a flush that times out
+    /// is not a denied capability.
+    variant capability-error {
+        denied(string),
+        failed(string),
     }
 
     record tool-spec {
@@ -175,33 +180,33 @@ interface session-read {
 
 /// Session mutations.
 interface session-control {
-    use types.{denied};
-    set-session-name: func(name: string) -> result<_, denied>;
-    set-active-tools: func(tools: list<string>) -> result<_, denied>;
-    set-model: func(model: string) -> result<_, denied>;
-    set-thinking-level: func(level: string) -> result<_, denied>;
-    compact: func() -> result<_, denied>;
-    new-session: func() -> result<_, denied>;
-    fork: func() -> result<_, denied>;
-    navigate-tree: func(target: string) -> result<_, denied>;
-    switch-session: func(id: string) -> result<_, denied>;
-    reload: func() -> result<_, denied>;
+    use types.{capability-error};
+    set-session-name: func(name: string) -> result<_, capability-error>;
+    set-active-tools: func(tools: list<string>) -> result<_, capability-error>;
+    set-model: func(model: string) -> result<_, capability-error>;
+    set-thinking-level: func(level: string) -> result<_, capability-error>;
+    compact: func() -> result<_, capability-error>;
+    new-session: func() -> result<_, capability-error>;
+    fork: func() -> result<_, capability-error>;
+    navigate-tree: func(target: string) -> result<_, capability-error>;
+    switch-session: func(id: string) -> result<_, capability-error>;
+    reload: func() -> result<_, capability-error>;
 }
 
 /// Inject content into the run.
 interface inject {
-    use types.{denied};
-    send-message: func(message: string) -> result<_, denied>;
-    send-user-message: func(text: string) -> result<_, denied>;
-    append-entry: func(entry: string) -> result<_, denied>;
+    use types.{capability-error};
+    send-message: func(message: string) -> result<_, capability-error>;
+    send-user-message: func(text: string) -> result<_, capability-error>;
+    append-entry: func(entry: string) -> result<_, capability-error>;
 }
 
 /// The user-facing UI surface.
 interface ui {
-    use types.{denied};
-    dialog: func(request: string) -> result<string, denied>;
-    set-status: func(key: string, value: string) -> result<_, denied>;
-    set-editor-text: func(text: string) -> result<_, denied>;
+    use types.{capability-error};
+    dialog: func(request: string) -> result<string, capability-error>;
+    set-status: func(key: string, value: string) -> result<_, capability-error>;
+    set-editor-text: func(text: string) -> result<_, capability-error>;
 }
 
 /// Partial output for a running tool call. An import, not a return value, so a
@@ -213,44 +218,44 @@ interface progress {
 
 /// Host-mediated HTTP (wraps `wasi:http` plus an allow-list); not raw sockets.
 interface net-http {
-    use types.{denied};
+    use types.{capability-error};
     /// Host-mediated HTTP. The host checks the request's host against the
     /// grant's allow-list before sending anything.
     ///
     /// `request` is JSON: `{url, method?, headers?: {name: value}, body?}`.
     /// The response is JSON: `{status, headers: {name: value}, body}`.
-    fetch: func(request: string) -> result<string, denied>;
+    fetch: func(request: string) -> result<string, capability-error>;
 }
 
 /// Filesystem operations, scoped to a sandbox root the host chooses.
 interface fs {
-    use types.{denied};
-    read: func(rel-path: string) -> result<list<u8>, denied>;
-    write: func(rel-path: string, contents: list<u8>) -> result<_, denied>;
-    read-dir: func(rel-dir: string) -> result<list<string>, denied>;
+    use types.{capability-error};
+    read: func(rel-path: string) -> result<list<u8>, capability-error>;
+    write: func(rel-path: string, contents: list<u8>) -> result<_, capability-error>;
+    read-dir: func(rel-dir: string) -> result<list<string>, capability-error>;
 }
 
 /// Raw TCP sockets. Separate from `net-http` so it can be tightened alone.
 interface net-sockets {
-    use types.{denied};
-    connect: func(address: string) -> result<u32, denied>;
-    send: func(handle: u32, bytes: list<u8>) -> result<u64, denied>;
-    recv: func(handle: u32, max-bytes: u64) -> result<list<u8>, denied>;
-    close: func(handle: u32) -> result<_, denied>;
+    use types.{capability-error};
+    connect: func(address: string) -> result<u32, capability-error>;
+    send: func(handle: u32, bytes: list<u8>) -> result<u64, capability-error>;
+    recv: func(handle: u32, max-bytes: u64) -> result<list<u8>, capability-error>;
+    close: func(handle: u32) -> result<_, capability-error>;
 }
 
 /// Run a child process. WASI has no process interface; the host implements this
 /// with a command allow-list, a cwd jail, a scrubbed env and quotas.
 interface exec {
-    use types.{denied};
-    run: func(cmd: string, args: list<string>, cwd: option<string>) -> result<string, denied>;
+    use types.{capability-error};
+    run: func(cmd: string, args: list<string>, cwd: option<string>) -> result<string, capability-error>;
 }
 
 /// Host-driven timer. The plugin asks the host to call `plugin.on-tick` on a
 /// period, because there are no OS threads to run its own loop.
 interface timer {
-    use types.{denied};
-    request-tick: func(every-ms: u32) -> result<_, denied>;
+    use types.{capability-error};
+    request-tick: func(every-ms: u32) -> result<_, capability-error>;
 }
 
 /// What a plugin contributes to the runtime.

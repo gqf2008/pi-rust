@@ -39,13 +39,22 @@ fn fetch(arguments: &str) -> Result<types::ToolResult, types::PluginError> {
     let request = serde_json::json!({ "url": url }).to_string();
     let (text, is_error) = match net_http::fetch(&request) {
         Ok(response) => (response, false),
-        Err(denied) => (format!("denied:{}", denied.reason), true),
+        Err(error) => (format!("cap:{}", capability_reason(error)), true),
     };
     Ok(types::ToolResult {
         blocks: vec![types::ContentBlock::Text(text)],
         is_error,
         details: "null".to_string(),
     })
+}
+
+/// Render a capability error for the model: a refusal and a failure read
+/// differently on purpose.
+fn capability_reason(error: types::CapabilityError) -> String {
+    match error {
+        types::CapabilityError::Denied(reason) => reason,
+        types::CapabilityError::Failed(reason) => format!("failed:{reason}"),
+    }
 }
 
 struct Conformance;
@@ -63,7 +72,7 @@ fn dialog(arguments: &str) -> Result<types::ToolResult, types::PluginError> {
         .ok_or_else(|| types::PluginError::InvalidArguments("request is required".to_string()))?;
     let (text, is_error) = match ui::dialog(&request) {
         Ok(answer) => (answer, false),
-        Err(denied) => (format!("denied:{}", denied.reason), true),
+        Err(error) => (format!("cap:{}", capability_reason(error)), true),
     };
     Ok(types::ToolResult {
         blocks: vec![types::ContentBlock::Text(text)],
@@ -141,7 +150,7 @@ impl Guest for Conformance {
         // `Err(denied)` and leave the call itself successful.
         let ui = match ui::set_status("conformance", "probe") {
             Ok(()) => "granted".to_string(),
-            Err(denied) => denied.reason,
+            Err(error) => capability_reason(error),
         };
 
         progress::emit(&types::ProgressBlock::Text("last".to_string()));

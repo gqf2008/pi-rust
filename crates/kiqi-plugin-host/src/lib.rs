@@ -41,8 +41,8 @@ use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::kiqi::plugin::types::{
-    ContentBlock, Denied, Event as WitEvent, EventAction as WitEventAction, LogLevel, OtherEvent,
-    ProgressBlock, ToolCall, ToolResult, ToolResultEvent, Verdict as WitVerdict,
+    CapabilityError, ContentBlock, Event as WitEvent, EventAction as WitEventAction, LogLevel,
+    OtherEvent, ProgressBlock, ToolCall, ToolResult, ToolResultEvent, Verdict as WitVerdict,
 };
 use crate::Plugin as World;
 
@@ -129,21 +129,25 @@ fn with_ui<R>(f: impl FnOnce(&dyn kiqi_plugin::UiApi) -> R) -> Option<R> {
     with_caps_context(|caps| caps.ui.map(f)).flatten()
 }
 
-/// Collapse a capability call into the ABI's `denied` on any failure.
-fn forward(result: Option<Result<(), PluginError>>) -> Result<(), Denied> {
+/// Collapse a capability call into a `capability-error` on any failure.
+fn forward(result: Option<Result<(), PluginError>>) -> Result<(), CapabilityError> {
     match result {
         Some(Ok(())) => Ok(()),
-        Some(Err(error)) => Err(Denied {
-            reason: error.to_string(),
-        }),
+        Some(Err(error)) => Err(capability_error(error)),
         None => Err(denied()),
     }
 }
 
-fn denied() -> Denied {
-    Denied {
-        reason: NOT_GRANTED.to_string(),
+/// A granted capability whose *operation* failed is `failed`, not `denied`.
+fn capability_error(error: PluginError) -> CapabilityError {
+    match error {
+        PluginError::Denied(reason) => CapabilityError::Denied(reason),
+        other => CapabilityError::Failed(other.to_string()),
     }
+}
+
+fn denied() -> CapabilityError {
+    CapabilityError::Denied(NOT_GRANTED.to_string())
 }
 
 /// What the user authorized for one plugin.
@@ -291,48 +295,48 @@ macro_rules! deny_capability {
 /// Session mutations, forwarded to the call's `HostCaps::control`; a call
 /// without that capability gets `denied`.
 impl crate::kiqi::plugin::session_control::Host for HostState {
-    fn set_session_name(&mut self, name: String) -> Result<(), Denied> {
+    fn set_session_name(&mut self, name: String) -> Result<(), CapabilityError> {
         forward(with_control(|control| control.set_session_name(&name)))
     }
-    fn set_active_tools(&mut self, tools: Vec<String>) -> Result<(), Denied> {
+    fn set_active_tools(&mut self, tools: Vec<String>) -> Result<(), CapabilityError> {
         forward(with_control(|control| control.set_active_tools(&tools)))
     }
-    fn set_model(&mut self, model: String) -> Result<(), Denied> {
+    fn set_model(&mut self, model: String) -> Result<(), CapabilityError> {
         forward(with_control(|control| control.set_model(&model)))
     }
-    fn set_thinking_level(&mut self, level: String) -> Result<(), Denied> {
+    fn set_thinking_level(&mut self, level: String) -> Result<(), CapabilityError> {
         forward(with_control(|control| control.set_thinking_level(&level)))
     }
-    fn compact(&mut self) -> Result<(), Denied> {
+    fn compact(&mut self) -> Result<(), CapabilityError> {
         forward(with_control(|control| control.compact()))
     }
-    fn new_session(&mut self) -> Result<(), Denied> {
+    fn new_session(&mut self) -> Result<(), CapabilityError> {
         forward(with_control(|control| control.new_session()))
     }
-    fn fork(&mut self) -> Result<(), Denied> {
+    fn fork(&mut self) -> Result<(), CapabilityError> {
         forward(with_control(|control| control.fork()))
     }
-    fn navigate_tree(&mut self, target: String) -> Result<(), Denied> {
+    fn navigate_tree(&mut self, target: String) -> Result<(), CapabilityError> {
         forward(with_control(|control| control.navigate_tree(&target)))
     }
-    fn switch_session(&mut self, id: String) -> Result<(), Denied> {
+    fn switch_session(&mut self, id: String) -> Result<(), CapabilityError> {
         forward(with_control(|control| control.switch_session(&id)))
     }
-    fn reload(&mut self) -> Result<(), Denied> {
+    fn reload(&mut self) -> Result<(), CapabilityError> {
         forward(with_control(|control| control.reload()))
     }
 }
 
 /// Content injection, forwarded to the call's `HostCaps::inject`.
 impl crate::kiqi::plugin::inject::Host for HostState {
-    fn send_message(&mut self, message: String) -> Result<(), Denied> {
+    fn send_message(&mut self, message: String) -> Result<(), CapabilityError> {
         let message = serde_json::from_str(&message).unwrap_or(serde_json::Value::Null);
         forward(with_inject(|inject| inject.send_message(&message)))
     }
-    fn send_user_message(&mut self, text: String) -> Result<(), Denied> {
+    fn send_user_message(&mut self, text: String) -> Result<(), CapabilityError> {
         forward(with_inject(|inject| inject.send_user_message(&text)))
     }
-    fn append_entry(&mut self, entry: String) -> Result<(), Denied> {
+    fn append_entry(&mut self, entry: String) -> Result<(), CapabilityError> {
         let entry = serde_json::from_str(&entry).unwrap_or(serde_json::Value::Null);
         forward(with_inject(|inject| inject.append_message(&entry)))
     }
@@ -340,22 +344,20 @@ impl crate::kiqi::plugin::inject::Host for HostState {
 
 /// UI, forwarded to the call's `HostCaps::ui`.
 impl crate::kiqi::plugin::ui::Host for HostState {
-    fn dialog(&mut self, request: String) -> Result<String, Denied> {
+    fn dialog(&mut self, request: String) -> Result<String, CapabilityError> {
         let request = serde_json::from_str(&request).unwrap_or(serde_json::Value::Null);
         match with_ui(|ui| ui.dialog(&request)) {
             Some(Ok(value)) => Ok(value.to_string()),
-            Some(Err(error)) => Err(Denied {
-                reason: error.to_string(),
-            }),
+            Some(Err(error)) => Err(CapabilityError::Failed(error.to_string())),
             None => Err(denied()),
         }
     }
-    fn set_status(&mut self, key: String, value: String) -> Result<(), Denied> {
+    fn set_status(&mut self, key: String, value: String) -> Result<(), CapabilityError> {
         forward(with_ui(|ui| {
             ui.set_status(&serde_json::json!({"key": key, "value": value}))
         }))
     }
-    fn set_editor_text(&mut self, text: String) -> Result<(), Denied> {
+    fn set_editor_text(&mut self, text: String) -> Result<(), CapabilityError> {
         forward(with_ui(|ui| {
             ui.set_editor_text(&serde_json::json!({"text": text}))
         }))
@@ -364,40 +366,35 @@ impl crate::kiqi::plugin::ui::Host for HostState {
 
 /// Host-mediated HTTP: the request's host must be in the grant's allow-list.
 impl crate::kiqi::plugin::net_http::Host for HostState {
-    fn fetch(&mut self, request: String) -> Result<String, Denied> {
-        let request: serde_json::Value =
-            serde_json::from_str(&request).map_err(|error| Denied {
-                reason: format!("invalid net-http request: {error}"),
-            })?;
+    fn fetch(&mut self, request: String) -> Result<String, CapabilityError> {
+        let request: serde_json::Value = serde_json::from_str(&request).map_err(|error| {
+            CapabilityError::Failed(format!("invalid net-http request: {error}"))
+        })?;
         let url = request
             .get("url")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| Denied {
-                reason: "net-http request.url is required".to_string(),
+            .ok_or_else(|| {
+                CapabilityError::Failed("net-http request.url is required".to_string())
             })?;
-        let parsed = reqwest::Url::parse(url).map_err(|error| Denied {
-            reason: format!("invalid url `{url}`: {error}"),
-        })?;
+        let parsed = reqwest::Url::parse(url)
+            .map_err(|error| CapabilityError::Failed(format!("invalid url `{url}`: {error}")))?;
         let host = parsed.host_str().unwrap_or_default().to_string();
         if !self.grants.allows_host(&host) {
-            return Err(Denied {
-                reason: format!("net-http to `{host}` is not granted"),
-            });
+            return Err(CapabilityError::Denied(format!(
+                "net-http to `{host}` is not granted"
+            )));
         }
 
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|error| Denied {
-                reason: error.to_string(),
-            })?;
+            .map_err(|error| CapabilityError::Failed(error.to_string()))?;
         let method = request
             .get("method")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("GET");
-        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|error| Denied {
-            reason: error.to_string(),
-        })?;
+        let method = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|error| CapabilityError::Failed(error.to_string()))?;
         let mut builder = client.request(method, parsed);
         if let Some(headers) = request
             .get("headers")
@@ -413,9 +410,9 @@ impl crate::kiqi::plugin::net_http::Host for HostState {
             builder = builder.body(body.to_string());
         }
 
-        let response = builder.send().map_err(|error| Denied {
-            reason: error.to_string(),
-        })?;
+        let response = builder
+            .send()
+            .map_err(|error| CapabilityError::Failed(error.to_string()))?;
         let status = response.status().as_u16();
         let headers: serde_json::Map<String, serde_json::Value> = response
             .headers()
@@ -433,24 +430,24 @@ impl crate::kiqi::plugin::net_http::Host for HostState {
 }
 
 deny_capability!(fs {
-    read(rel_path: String) -> Result<Vec<u8>, Denied>;
-    write(rel_path: String, contents: Vec<u8>) -> Result<(), Denied>;
-    read_dir(rel_dir: String) -> Result<Vec<String>, Denied>;
+    read(rel_path: String) -> Result<Vec<u8>, CapabilityError>;
+    write(rel_path: String, contents: Vec<u8>) -> Result<(), CapabilityError>;
+    read_dir(rel_dir: String) -> Result<Vec<String>, CapabilityError>;
 });
 
 deny_capability!(net_sockets {
-    connect(address: String) -> Result<u32, Denied>;
-    send(handle: u32, bytes: Vec<u8>) -> Result<u64, Denied>;
-    recv(handle: u32, max_bytes: u64) -> Result<Vec<u8>, Denied>;
-    close(handle: u32) -> Result<(), Denied>;
+    connect(address: String) -> Result<u32, CapabilityError>;
+    send(handle: u32, bytes: Vec<u8>) -> Result<u64, CapabilityError>;
+    recv(handle: u32, max_bytes: u64) -> Result<Vec<u8>, CapabilityError>;
+    close(handle: u32) -> Result<(), CapabilityError>;
 });
 
 deny_capability!(exec {
-    run(cmd: String, args: Vec<String>, cwd: Option<String>) -> Result<String, Denied>;
+    run(cmd: String, args: Vec<String>, cwd: Option<String>) -> Result<String, CapabilityError>;
 });
 
 deny_capability!(timer {
-    request_tick(every_ms: u32) -> Result<(), Denied>;
+    request_tick(every_ms: u32) -> Result<(), CapabilityError>;
 });
 
 // ---------------------------------------------------------------------------

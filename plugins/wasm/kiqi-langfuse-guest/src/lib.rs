@@ -302,9 +302,9 @@ fn flush() {
     .to_string();
     match net_http::fetch(&request) {
         Ok(_) => log::write(types::LogLevel::Info, "langfuse: flushed span(s)"),
-        Err(denied) => log::write(
+        Err(error) => log::write(
             types::LogLevel::Warn,
-            &format!("langfuse: flush not granted: {}", denied.reason),
+            &format!("langfuse: flush rejected: {error:?}"),
         ),
     }
 }
