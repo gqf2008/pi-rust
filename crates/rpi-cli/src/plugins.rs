@@ -393,15 +393,48 @@ pub fn install_compiled_event_sink(caps: OwnedCaps) {
     let hosts = compiled_plugin_hosts();
     let sink: rpi_extensions::CompiledEventSink = std::sync::Arc::new(move |tag, payload| {
         let Some(tag) = kiqi_plugin::EventTag::from_u32(tag) else {
-            return;
+            return rpi_extensions::CompiledVerdict::Continue;
         };
-        let event = kiqi_plugin::Event::new(tag, payload);
-        let caps = caps.caps();
-        for host in &hosts {
-            let _ = host.on_event(&event, &caps);
-        }
+        dispatch_to_compiled(&hosts, &caps, tag, payload)
     });
     rpi_extensions::set_compiled_event_sink(sink);
+}
+
+/// Ask the plugins that should see `(tag, payload)` and fold their actions into
+/// one verdict.
+///
+/// Split from the closure in [`install_compiled_event_sink`] so the key filter
+/// and the claim fold can be exercised without the process-wide registry.
+pub(crate) fn dispatch_to_compiled(
+    hosts: &[std::sync::Arc<PluginHost>],
+    caps: &OwnedCaps,
+    tag: kiqi_plugin::EventTag,
+    payload: serde_json::Value,
+) -> rpi_extensions::CompiledVerdict {
+    let event = kiqi_plugin::Event::new(tag, payload);
+    let caps = caps.caps();
+    // An `Input` event is a key: only the plugins that declared it are asked,
+    // matching the native `has_shortcut` filter. Every other tag goes to all.
+    let key = (tag == kiqi_plugin::EventTag::Input)
+        .then(|| event.payload.get("key").and_then(|key| key.as_str()))
+        .flatten()
+        .map(str::to_string);
+    let asked = match &key {
+        Some(key) => shortcut_hosts(hosts, key),
+        None => hosts.to_vec(),
+    };
+    let mut verdict = rpi_extensions::CompiledVerdict::Continue;
+    for host in &asked {
+        // `Replace` counts as claimed: the plugin took the event, but the carried
+        // payload has no host channel to travel down.
+        if !matches!(
+            host.on_event(&event, &caps),
+            kiqi_plugin::EventAction::Continue
+        ) {
+            verdict = rpi_extensions::CompiledVerdict::Claimed;
+        }
+    }
+    verdict
 }
 
 /// The capabilities compiled plugins currently run with.
@@ -2036,6 +2069,20 @@ mod tests {
             let text = prompt["prompt"].as_str().unwrap_or("");
             Some(format!("{text}\n[surface]"))
         }
+
+        fn on_event(
+            &self,
+            event: &kiqi_plugin::Event,
+            _caps: &HostCaps<'_>,
+        ) -> kiqi_plugin::EventAction {
+            // It only ever sees `Input` for a key it declared (`f8`), which is
+            // what the dispatch-filter test relies on.
+            if event.tag == kiqi_plugin::EventTag::Input {
+                kiqi_plugin::EventAction::Claimed
+            } else {
+                kiqi_plugin::EventAction::Continue
+            }
+        }
     }
 
     fn surface_host() -> (
@@ -2136,6 +2183,45 @@ mod tests {
         let hosts = vec![host];
         assert_eq!(shortcut_hosts(&hosts, "f8").len(), 1);
         assert!(shortcut_hosts(&hosts, "f9").is_empty());
+    }
+
+    /// The compiled event fan-out: a key only reaches the plugins that declared
+    /// it, and a non-`Continue` action becomes a claim the routing dispatcher can
+    /// act on.
+    #[test]
+    fn compiled_event_dispatch_filters_keys_and_folds_claims() {
+        let (host, _surface) = surface_host();
+        let caps = empty_caps();
+        assert_eq!(
+            dispatch_to_compiled(
+                &[host.clone()],
+                &caps,
+                kiqi_plugin::EventTag::Input,
+                serde_json::json!({ "key": "f8" }),
+            ),
+            rpi_extensions::CompiledVerdict::Claimed,
+            "the plugin declared f8, so it is asked and its claim counts"
+        );
+        assert_eq!(
+            dispatch_to_compiled(
+                &[host.clone()],
+                &caps,
+                kiqi_plugin::EventTag::Input,
+                serde_json::json!({ "key": "f9" }),
+            ),
+            rpi_extensions::CompiledVerdict::Continue,
+            "an undeclared key must not reach the plugin at all"
+        );
+        assert_eq!(
+            dispatch_to_compiled(
+                &[host],
+                &caps,
+                kiqi_plugin::EventTag::SessionStart,
+                serde_json::Value::Null,
+            ),
+            rpi_extensions::CompiledVerdict::Continue,
+            "a lifecycle event is observed but not claimed"
+        );
     }
 
     /// The same wiring, driven through a real wasm component: the conformance

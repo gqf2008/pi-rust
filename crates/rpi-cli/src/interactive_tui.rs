@@ -462,12 +462,15 @@ fn dispatch_key_event(state: &TuiState, key: &KeyEvent, editor: &Editor) -> bool
     let native_claims = snapshot.as_ref().is_some_and(|snapshot| {
         snapshot.has_shortcut(&name) && !snapshot.handlers_for(EventTag::Input).is_empty()
     });
-    // Compiled-in and wasm plugins declare their keys the same way, and the key
-    // then arrives as an `Input` event. Held as hosts so the dispatch below uses
-    // the same stateful instance that declared it.
-    let compiled = crate::plugins::shortcut_hosts(&crate::plugins::compiled_plugin_hosts(), &name);
+    // Compiled-in and wasm plugins declare their keys the same way; whether any
+    // of them declared this one decides if the key is ours at all. Delivery is a
+    // single pass through the dispatch funnel below, which asks exactly those
+    // plugins and reports their claim — dispatching here as well would hand a
+    // compiled plugin the same key twice.
+    let compiled_declares_key =
+        !crate::plugins::shortcut_hosts(&crate::plugins::compiled_plugin_hosts(), &name).is_empty();
     // Nothing claimed this key — not ours.
-    if !native_claims && compiled.is_empty() {
+    if !native_claims && !compiled_declares_key {
         return false;
     }
     // Function keys do not insert text. Other keys belong to the draft editor
@@ -492,26 +495,13 @@ fn dispatch_key_event(state: &TuiState, key: &KeyEvent, editor: &Editor) -> bool
     // The handler decides whether it actually wants the key: it returns the
     // `CLAIMED` code while its feature is active and `CONTINUE` otherwise, so a
     // registered-but-disabled shortcut (push-to-talk toggled off) still lets the
-    // key reach the editor normally.
-    let mut claimed = snapshot.as_ref().is_some_and(|snapshot| {
-        rpi_extensions::dispatch_data_event_claiming(
-            snapshot,
-            EventTag::Input,
-            &payload.to_string(),
-        )
-    });
-    if !compiled.is_empty() {
-        let caps = crate::plugins::compiled_caps();
-        let event = kiqi_plugin::Event::new(kiqi_plugin::EventTag::Input, payload);
-        for host in &compiled {
-            if !matches!(
-                host.on_event(&event, &caps.caps()),
-                kiqi_plugin::EventAction::Continue
-            ) {
-                claimed = true;
-            }
-        }
-    }
+    // key reach the editor normally. Compiled plugins answer through the same
+    // call — the funnel fans the event to them and folds in their verdict.
+    let claimed = rpi_extensions::dispatch_data_event_claiming(
+        snapshot.as_deref(),
+        EventTag::Input,
+        &payload.to_string(),
+    );
     if claimed && key.kind == KeyEventKind::Press {
         state
             .extension_claimed_keys

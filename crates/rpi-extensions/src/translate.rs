@@ -339,7 +339,10 @@ impl ExtensionEmitter {
 pub fn dispatch_to_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEvent) {
     // Compiled plugins observe the same event stream as cdylib handlers, whether
     // or not any native handler subscribes (a `ki` with no dylibs still traces).
-    crate::compiled::dispatch(event);
+    // The verdict is ignored here on purpose: this is the observe fan-out, and
+    // the native path does not act on `CLAIMED` either (only the routing
+    // dispatchers do).
+    let _ = crate::compiled::dispatch(event);
     // Staleness guard: a stale registry (swapped-out session) does nothing.
     if !crate::registry::assert_active(snapshot.active_flag()) {
         return;
@@ -593,26 +596,36 @@ async fn dispatch_tool_call_event_with_timeout(
 /// Every handler is still invoked (fan-out is not short-circuited) so a later
 /// handler can disagree; the event is considered claimed if **any** returned
 /// [`EVENT_HANDLER_CLAIMED`].
+/// Dispatch a data event and report whether it was **claimed**: a native handler
+/// returning `CLAIMED`, or a compiled plugin returning anything other than
+/// `EventAction::Continue`.
+///
+/// `snapshot` is optional so a compiled-only session (no cdylibs loaded) still
+/// delivers the event: the compiled fan-out does not need a native registry.
 pub fn dispatch_data_event_claiming(
-    snapshot: &RegistrySnapshot,
+    snapshot: Option<&RegistrySnapshot>,
     tag: EventTag,
     data: &str,
 ) -> bool {
-    // Compiled plugins observe this event regardless of native subscriptions
-    // (they are observe-only today), so build and fan the event out before the
-    // native guards short-circuit.
     let event = StablePluginEvent::data(tag, StbString::from_string(data.to_string()));
-    crate::compiled::dispatch(&event);
+    // Compiled plugins are asked first and unconditionally: they are not gated on
+    // a native subscription, and a claim stands on its own.
+    let compiled_claimed =
+        crate::compiled::dispatch(&event) == crate::compiled::CompiledVerdict::Claimed;
+    let Some(snapshot) = snapshot else {
+        free_dispatched_event(&event);
+        return compiled_claimed;
+    };
     if !crate::registry::assert_active(snapshot.active_flag()) {
         free_dispatched_event(&event);
-        return false;
+        return compiled_claimed;
     }
     let handlers = snapshot.handlers_for(tag);
     if handlers.is_empty() {
         free_dispatched_event(&event);
-        return false;
+        return compiled_claimed;
     }
-    let mut claimed = false;
+    let mut claimed = compiled_claimed;
     for h in handlers {
         if !crate::registry::platform_allows(&h.platforms) {
             continue;
@@ -711,8 +724,10 @@ pub async fn dispatch_lifecycle_event(
 ) -> Option<String> {
     // Compiled plugins subscribe to these no-payload lifecycle events too; fan
     // them out before the native-handler early return (a `ki` with no dylibs
-    // would otherwise never deliver `SessionStart`/`SessionShutdown`).
-    crate::compiled::dispatch(&StablePluginEvent::empty(tag));
+    // would otherwise never deliver `SessionStart`/`SessionShutdown`). The
+    // verdict has no lifecycle meaning here — a compiled plugin cannot veto (the
+    // contract's `EventAction` has no abort, unlike the native `ABORT` code).
+    let _ = crate::compiled::dispatch(&StablePluginEvent::empty(tag));
     // Staleness guard: a stale registry (swapped-out session) does nothing.
     if !crate::registry::assert_active(snapshot.active_flag()) {
         return None;
@@ -1721,13 +1736,13 @@ mod tests {
 
         CLAIM_ROUTING.store(true, Ordering::SeqCst);
         assert!(
-            dispatch_data_event_claiming(&snap, EventTag::Input, r#"{"key":"space"}"#),
+            dispatch_data_event_claiming(Some(&*snap), EventTag::Input, r#"{"key":"space"}"#),
             "a CLAIMED handler must swallow the key"
         );
 
         CLAIM_ROUTING.store(false, Ordering::SeqCst);
         assert!(
-            !dispatch_data_event_claiming(&snap, EventTag::Input, r#"{"key":"space"}"#),
+            !dispatch_data_event_claiming(Some(&*snap), EventTag::Input, r#"{"key":"space"}"#),
             "a CONTINUE handler must let the key reach the editor"
         );
         CLAIM_ROUTING.store(true, Ordering::SeqCst);
@@ -1737,7 +1752,7 @@ mod tests {
     fn claiming_dispatch_without_subscribers_is_false() {
         let snap = input_snapshot(false);
         assert!(!dispatch_data_event_claiming(
-            &snap,
+            Some(&*snap),
             EventTag::Input,
             r#"{"key":"space"}"#
         ));

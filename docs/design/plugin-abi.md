@@ -486,6 +486,21 @@ mailbox，并且**顺带刷新事件 sink 与全局 caps**，让重载后的 too
 before_agent_start 跑在同一套一致的能力上。测试：拿 `reload_caps` 发一个 dialog，断言它落到 TUI 挂着的
 那个 mailbox。
 
+### 6.23 `on_event` 的动作语义在编译期/wasm 层闭合（并修掉一次重复投递）
+
+`Plugin::on_event` 返回 `EventAction`，但全局 sink 的类型是 `Arc<dyn Fn(u32, Value)>`——**没有返回值**，
+调用处 `let _ = host.on_event(..)` 把动作丢掉。于是编译期插件（以及复用同一条路径的 wasm 插件）
+永远无法 claim，而原生 handler 的 `CLAIMED` 是被认的。
+
+现在 `CompiledEventSink` 返回 `CompiledVerdict::{Continue, Claimed}`，`dispatch_data_event_claiming`
+把编译期侧的结果并入自己的返回值（并接收 `Option<&RegistrySnapshot>`，因为编译期扇出不需要原生 registry）。
+两个 observe 型漏斗仍不消费它，与原生一致。
+
+顺带修了一个本轮引入的真 bug：`dispatch_key_event` 既走漏斗（sink 会把 `Input` 扇一遍）又自己再扇一遍，
+**编译期插件会收到两次同一个按键**。现在只走漏斗，按键筛选（只问声明了该键的插件）移到 sink 里，
+由 `dispatch_to_compiled()` 统一负责，并有测试分别钉住“声明了的键被问到并 claim”与“未声明的键
+根本不会被问到”。
+
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
 > “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里

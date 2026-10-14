@@ -169,7 +169,12 @@ StepHandle 壳 / `HANDLES` / `Drive` / `StepResult` / `ToolPartialCb` 已删除�
 `rpi-cli` 在 session build 时用 `install_compiled_event_sink(caps)` 安装闭包，
 把事件送给每个 `PluginHost::on_event`。`kiqi_plugin::EventTag::from_u32` 做判别值映射，
 `AgentEvent`/生命周期/provider hook 因此都到达编译期插件。附注：编译期插件目前只
-observe（全部返回 `Continue`），`Claimed`/`Replace` 尚未接线。
+observe。**后续已补**：`CompiledEventSink` 现在返回 `CompiledVerdict`（`Continue`/`Claimed`），
+路由型分发器（`dispatch_data_event_claiming`）会把编译期/wasm 插件的声明并入自己的返回值，所以
+`Claimed` 与原生 handler 的 `CLAIMED` 等效；observe 型漏斗（`dispatch_to_handlers`）与生命周期
+漏斗不消费它——与原生一致（原生在 observe 路径也不理会 `CLAIMED`，生命周期用 `ABORT` 否决，
+而 `EventAction` 没有 abort，所以编译期插件不能否决生命周期）。`Replace` 映射为 `Claimed`：插件确实
+接管了事件，但它携带的替换载荷在本宿主里没有投递通道（原生 ABI 也没有），所以不假装它会传播。
 
 实测（4227 行 / 94 个函数 / 14 个事件处理器 / 1 处宿主调用 / 无后台线程）。
 

@@ -17,8 +17,24 @@ use rpi_plugin_sdk::events::EventView;
 use rpi_plugin_sdk::StablePluginEvent;
 use serde_json::Value;
 
-/// Receives one dispatched event as `(wire tag, JSON payload)`.
-pub type CompiledEventSink = Arc<dyn Fn(u32, Value) + Send + Sync>;
+/// What the compiled plugins decided about one event.
+///
+/// Deliberately a *claim* channel, mirroring the native ABI's
+/// `EVENT_HANDLER_CLAIMED` / `0`: the host has nowhere to deliver a replacement
+/// payload, so `kiqi_plugin::EventAction::Replace` maps to [`Self::Claimed`]
+/// (the plugin took the event) rather than pretending a rewrite can propagate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompiledVerdict {
+    /// No plugin objected; later handlers still run.
+    Continue,
+    /// A plugin consumed the event: a routing dispatcher must stop and report it
+    /// handled, exactly as a native handler's `CLAIMED` does.
+    Claimed,
+}
+
+/// Receives one dispatched event as `(wire tag, JSON payload)` and reports what
+/// the compiled plugins decided.
+pub type CompiledEventSink = Arc<dyn Fn(u32, Value) -> CompiledVerdict + Send + Sync>;
 
 static SINK: OnceLock<RwLock<Option<CompiledEventSink>>> = OnceLock::new();
 
@@ -46,13 +62,14 @@ pub fn clear_compiled_event_sink() {
 /// Fan one stable event out to the compiled plugins, if a sink is installed.
 ///
 /// Called from the same dispatch funnels the cdylib handlers go through, so a
-/// compiled plugin sees exactly the events a native one would.
-pub(crate) fn dispatch(event: &StablePluginEvent) {
+/// compiled plugin sees exactly the events a native one would — and, for the
+/// routing dispatchers, its verdict counts the same way.
+pub(crate) fn dispatch(event: &StablePluginEvent) -> CompiledVerdict {
     let slot = sink_slot().read().unwrap();
     let Some(sink) = slot.as_ref() else {
-        return;
+        return CompiledVerdict::Continue;
     };
-    sink(event.tag as u32, event_payload(event));
+    sink(event.tag as u32, event_payload(event))
 }
 
 /// The JSON payload the compile-time contract carries.
@@ -107,6 +124,7 @@ mod tests {
         let record = Arc::clone(&seen);
         set_compiled_event_sink(Arc::new(move |tag, payload| {
             record.lock().unwrap().push((tag, payload));
+            CompiledVerdict::Continue
         }));
 
         // A registry with no native handlers still reaches the sink: this is the
@@ -168,6 +186,28 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap();
         clear_compiled_event_sink();
         let event = StablePluginEvent::empty(EventTag::SessionStart);
-        dispatch(&event);
+        assert_eq!(dispatch(&event), CompiledVerdict::Continue);
+    }
+
+    /// A claim from the compiled side reaches the routing dispatcher, so a
+    /// compiled plugin can consume a key exactly like a cdylib handler.
+    #[test]
+    fn a_claimed_verdict_reaches_the_routing_dispatcher() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        set_compiled_event_sink(Arc::new(|_, _| CompiledVerdict::Claimed));
+        // No native handlers at all: the compiled verdict alone must decide.
+        assert!(crate::translate::dispatch_data_event_claiming(
+            None,
+            EventTag::Input,
+            r#"{"key":"f8"}"#,
+        ));
+        clear_compiled_event_sink();
+
+        // With no sink the same call is unclaimed.
+        assert!(!crate::translate::dispatch_data_event_claiming(
+            None,
+            EventTag::Input,
+            r#"{"key":"f8"}"#,
+        ));
     }
 }
