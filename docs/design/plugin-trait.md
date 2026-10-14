@@ -207,3 +207,40 @@ let data: Value = event.payload.clone();     // 本来就是 JSON
 
 caps 级：一次 `SessionStart` 后状态被重置；一次 `before_agent_start` 后 trace 状态建立；
 **且 14 个 tag 的 dispatch 一一对应**（断言每个 tag 都落到预期处理器，而不是 `_ => {}` 静默吞掉）。
+
+### 7.5 实测修订（写 §7 之后量出来的，比原先估计大）
+
+**`set_status` 穿参只有 4 个函数**，不是"94 个里的一串"：
+
+| 调用点 | 所在函数 | 处理 |
+|---|---|---|
+| 1559 / 1561 | `flush_ended_spans(include_open: bool)` | 加 `host: &dyn StatusHost` |
+| 1584 | `report_flush_error(err: &str)` | 加 `host: &dyn StatusHost` |
+| 2093 | `on_before_agent_start(event, _user_data)` | 处理器，本来就有 `host` |
+| 3256 | `extern "C" fn destroy(h: StepHandle)` | **随 StepHandle 机器一起删除** |
+
+两个辅助函数的调用方在 1589 / 1595（flush tick），一并穿。
+
+**第二块：StepHandle 机器必须整体丢弃（3038–3105，约 70 行）。**
+
+`start(params, free, builder) -> StepHandle`、另有 3 个返回 `StepHandle` 的函数、以及
+`poll(h, ...) -> StepResult` / `cancel(h)` / `destroy(h)`。它存在**只因为 C ABI 不能阻塞**——
+而 langfuse 的 3 个工具（`langfuse_score` / `langfuse_prompt` / `langfuse_trace`）走的是**阻塞 HTTP**，
+所以原生侧必须拆成 start/poll 两段。
+
+编译期路径下这整套没有存在理由：调用可以直接阻塞。做法与 `rpi-ask-user` 一致——
+**丢机器、写成同步循环**，而不是照搬（"移植后必须更简单，不能更复杂"）。
+
+净效果：这一块不是"改 70 行"，是**删 70 行 + 3 个工具的调用路径重写**。
+
+### 7.6 因此这需要一整轮预算
+
+按上面的实测，langfuse 的移植是一次完整会话的工作量（8 个宏块 + 14 个处理器 + 4 个函数穿参
++ 删 StepHandle 机器并重写 3 个工具 + kiqi.rs + 接线 + 验收）。
+**不要在一轮预算的尾巴上开它**——中途断掉只能把 langfuse 从工作区摘掉，等于白做。
+
+执行顺序建议（每步可编译、可回退）：
+1. 拆 8 个宏块 → 14 个处理器变普通 fn（签名 `(&Event, &dyn StatusHost) -> i32`），编译。
+2. 删 StepHandle 机器，3 个工具改同步，编译。
+3. 加 `StatusHost` trait + `AbiHost`/`CapsHost`，穿 4 个函数，编译。
+4. 写 kiqi.rs（14 路 match），接线（feature + 注册表），跑 caps 级验收。
