@@ -1,6 +1,6 @@
 /// kiqi plugin ABI — wasm component model (WASI Preview 2 / WIT).
 ///
-/// **0.5.0.** The 0.1.0 draft never parsed: `other(kind: string,
+/// **0.6.0.** The 0.1.0 draft never parsed: `other(kind: string,
 /// payload: string)` used named variant fields, which WIT does not allow. Every
 /// version is checked with `wasm-tools component wit`.
 ///
@@ -29,7 +29,7 @@
 /// (A built component prunes the interfaces it does not use, so a plugin that
 /// never touches `exec` never asks for it.) "Required but not granted" is
 /// rejected before instantiation from the plugin manifest.
-package kiqi:plugin@0.5.0;
+package kiqi:plugin@0.6.0;
 
 /// Types shared across the host <-> plugin boundary.
 interface types {
@@ -202,6 +202,11 @@ interface inject {
     send-message: func(message: string) -> result<_, capability-error>;
     send-user-message: func(text: string) -> result<_, capability-error>;
     append-entry: func(entry: string) -> result<_, capability-error>;
+    /// Append a custom-typed entry (`{"customType": ..., "data": ...}` on the
+    /// wire). Distinct from `append-entry`, which appends a message entry — the
+    /// compile-time `InjectApi` has both, and plan mode persists its state
+    /// through this one.
+    append-custom-entry: func(custom-type: string, data: string) -> result<_, capability-error>;
 }
 
 /// The user-facing UI surface.
@@ -210,6 +215,8 @@ interface ui {
     dialog: func(request: string) -> result<string, capability-error>;
     set-status: func(key: string, value: string) -> result<_, capability-error>;
     set-editor-text: func(text: string) -> result<_, capability-error>;
+    /// Write to a registered UI component (native runtime action 22).
+    component: func(name: string, payload: string) -> result<string, capability-error>;
 }
 
 /// Partial output for a running tool call. An import, not a return value, so a

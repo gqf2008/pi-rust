@@ -1,6 +1,6 @@
 # 插件 ABI：从 cdylib 到 wasm 组件
 
-状态：**推迟为第一方契约；作为第三方（不受信）层推进验证** · 目标版本 `kiqi:plugin@0.5.0`
+状态：**推迟为第一方契约；作为第三方（不受信）层推进验证** · 目标版本 `kiqi:plugin@0.6.0`
 
 > **本方案不再作为第一方插件的契约。** 实测 `rpi-package` 的 18 个包后改为
 > 「Rust `trait Plugin` + cargo feature 全编译接入」，见
@@ -14,7 +14,7 @@
 > 判据是 §6.3 的 8 条门禁，而不是「迁了几个插件」。第一方**其余插件留在编译期**，
 > 只有明确需要第三方分发/沙箱的才迁。
 >
-> `plugins/kiqi-plugin.wit` 已升到 parse-validated 的 `0.5.0`（0.1.0 连 `wasm-tools component wit`
+> `plugins/kiqi-plugin.wit` 已升到 parse-validated 的 `0.6.0`（0.1.0 连 `wasm-tools component wit`
 > 都过不了：variant case 带命名/多字段是非法的）：导出面与 `trait Plugin` **一一对应**、四个可授权能力
 > （`net-http`/`fs`/`exec`/`net-sockets`）**全部真实现且授权自带策略**、调用一律 `result<_, capability-error>`
 > （`denied` 授权拒 / `failed` 操作失败）、进度用 import sink。
@@ -278,7 +278,7 @@ wasm 层是“总是可实例化，但未授予的调用必定 `denied`” + “
 - **`HostCaps` 接进 host import**：调用期间把 `HostCaps` 与 `ProgressSink` 一起放进
   线程局部的 `CallContext`（借用期由 call 保证、调用被互斥序列化）；`session-read` 转发到
   `caps.session`，`session-control`/`inject`/`ui` 转发到对应能力（缺能力或 caps 不存在 →
-  `denied`）。**现状**（ABI 0.5.0）：`net-http` 与 `fs` 已真实现（`fs` 关在插件自己的
+  `denied`）。**现状**（ABI 0.6.0）：`net-http` 与 `fs` 已真实现（`fs` 关在插件自己的
   `plugins/<id>/data/` 里，越狱写法直接拒）；`exec`/`net-sockets` 仍是 deny 桩，所以
   `ki plugin install` 会对“声明了但本构建无法执行”的能力**明说**（`capability_is_enforced`），
   而不是让用户授权一个永远不会生效的东西；`timer` 已随 `on-tick` 一起删除。
@@ -610,6 +610,34 @@ conformance fixture 相应地多了一个 `alloc` 工具，e2e 两边都验：**
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
 > “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里
 > 单独门控。
+
+### 6.29 移植真实插件，并把**导入面**也对齐（ABI 0.6.0）
+
+前面几轮对齐的是**导出面**（插件实现什么）。这轮把两个典型一方插件移到 wasm，一眼就看出
+**导入面（能力）**也有缺口：
+
+| 接口 | `trait` 里的方法数 | WIT 0.5.0 | 0.6.0 |
+|---|---|---|---|
+| `inject` | 4（`send_message`/`send_user_message`/`append_message`/`append_custom_entry`） | 3（WIT 的 `append-entry` 映射到的是 **`append_message`**） | **加 `append-custom-entry`** |
+| `ui` | 4（含 `component`，即原生 runtime action 22） | 3 | **加 `component`** |
+
+其余导入一一对应：`log.write`；`session-read` 六个（`session_id` 在 `info()` 里）；
+`session-control` 十个；`progress`；以及沙箱专有的 `net-http`/`fs`/`net-sockets`/`exec`。
+
+**移植的两个插件**（都拿真实的 `Plugin::*` 语义对照，不是演示）：
+
+- **`rpi-webfetch` → `plugins/wasm/kiqi-webfetch-guest`**：走 `net-http`。保留了插件自己的 URL 策略
+  （绝本地/绝字面私有 IP、绝内嵌凭证），两个差异写在 guest 文档里而不是藏起来：
+  ① **不做 DNS 校验**（guest 无法解析，主机名交给用户允许列表管）；② **不再校验最终 URL**
+  （宿主回的是 status/headers/body，重定向安全已由宿主逐跳白名单保证）。
+- **`rpi-plan-mode` → `plugins/wasm/kiqi-plan-mode-guest`**：走 `session-read`/`session-control`/`inject`。
+  逻辑（保留哪些工具、`/plan` 打印什么、大纲解析）**一份实现**，抽到 `crates/rpi-plan-mode-core`，
+  编译期插件与 guest 共用——两个 `PlanHost` 适配器分别接 `HostCaps` 和 WIT 导入。
+  也正因为如此，“WIT 缺少 `append-custom-entry`” 这个缺口无法用“再写一份”绕过去。
+
+e2e：webfetch 验“插件策略先拦 + 没授权就 denied”（全 hermetic，不撞公网）；plan-mode 用记录型
+`SessionControl`/`InjectApi` 验“进入时换掉工具集、完成时恢复并写 `plan-mode` 自定义 entry、
+`/plan show` 能读回计划”。
 
 ## 7. 待定
 

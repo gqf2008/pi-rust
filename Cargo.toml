@@ -1,6 +1,7 @@
 # rpi — a Rust agent runtime + CLI. See README.md and docs/architecture/overview.md.
 [workspace]
 members = [
+    "crates/rpi-plan-mode-core",
     "crates/rpi-telemetry",
     "crates/rpi-ai",
     "crates/rpi-agent",

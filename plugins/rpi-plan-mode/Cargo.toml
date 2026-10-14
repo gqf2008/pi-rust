@@ -19,6 +19,7 @@ crate-type = ["cdylib", "rlib"]
 kiqi-plugin = { path = "../../crates/kiqi-plugin" }
 rpi-plugin-sdk = { path = "../../crates/rpi-plugin-sdk" }
 serde_json = { workspace = true }
+rpi-plan-mode-core = { path = "../../crates/rpi-plan-mode-core" }
 
 [features]
 # Set by the `ki` binary: keeps the cdylib `#[no_mangle]` entrypoint out of the

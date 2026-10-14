@@ -5,11 +5,12 @@
 //! `PlanHost` trait; the core (activate/deactivate/start_plan/complete_plan/
 //! run_command) is shared with the cdylib face.
 
-use crate::{complete_plan, run_command, CapsHost, PlanHost};
+use crate::CapsHost;
 use kiqi_plugin::{
     Block, CommandSpec, EventAction, EventTag, HostCaps, Plugin, PluginError, ProgressSink,
     ToolOutcome, ToolSpec,
 };
+use rpi_plan_mode_core::{complete_plan, run_command, start_plan, PlanHost};
 use serde_json::Value;
 
 const COMPLETE_TOOL: &str = "plan_mode_complete";
@@ -67,7 +68,7 @@ impl Plugin for PlanModePlugin {
         let host = CapsHost(caps);
         let outcome = match name {
             COMPLETE_TOOL => complete_plan(&host, arguments),
-            START_TOOL => crate::start_plan(&host, arguments),
+            START_TOOL => start_plan(&host, arguments),
             other => return Err(PluginError::UnknownTool(other.to_string())),
         };
         let value = outcome.map_err(PluginError::InvalidArguments)?;

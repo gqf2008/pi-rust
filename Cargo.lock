@@ -2983,7 +2983,15 @@ name = "rpi-plan-mode"
 version = "0.1.5"
 dependencies = [
  "kiqi-plugin",
+ "rpi-plan-mode-core",
  "rpi-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
+name = "rpi-plan-mode-core"
+version = "0.1.5"
+dependencies = [
  "serde_json",
 ]
 

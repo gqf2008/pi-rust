@@ -1181,6 +1181,11 @@ fn net_http_refuses_an_oversized_response_body() {
 fn exec_does_not_hang_when_the_command_leaves_a_background_child() {
     use kiqi_plugin_host::ExecGrant;
 
+    // Build outside the timed window: `fixture_wasm()` runs `cargo build`, and
+    // with the whole suite building guests in parallel that can take longer than
+    // the call is allowed to take.
+    let _ = fixture_wasm();
+
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let (_dir, plugin) = load_fixture_in_temp(Grants {
@@ -1204,4 +1209,206 @@ fn exec_does_not_hang_when_the_command_leaves_a_background_child() {
         text.contains("exec=") && !text.contains("exec=exec of") && !text.contains("exec=failed:"),
         "the command ran (its stdout is empty) rather than being denied or failing: {text}"
     );
+}
+
+/// `rpi-webfetch` ported to wasm: the tool's own URL policy runs in the guest,
+/// and where it may actually go is the user's grant — checked before any network
+/// access, so this stays hermetic.
+#[test]
+fn webfetch_guest_keeps_its_url_policy_and_needs_the_grant() {
+    let wasm = build_guest("kiqi-webfetch-guest", "kiqi_webfetch_guest.wasm");
+    let plugin = WasmPlugin::load("rpi-webfetch", &wasm).expect("load");
+    assert_eq!(plugin.id(), "rpi-webfetch");
+    assert!(
+        plugin.tools().iter().any(|tool| tool.name == "webfetch"),
+        "the tool is declared: {:?}",
+        plugin.tools()
+    );
+
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    // The plugin's own policy, not the host's: localhost and literal private IPs
+    // are refused inside the guest.
+    let local = plugin
+        .call(
+            "webfetch",
+            &serde_json::json!({ "url": "http://localhost/" }),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(local.to_string().contains("local hosts"), "got {local}");
+    let private = plugin
+        .call(
+            "webfetch",
+            &serde_json::json!({ "url": "http://127.0.0.1:1/" }),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(
+        private.to_string().contains("private or local IPs"),
+        "got {private}"
+    );
+
+    // A public URL passes the policy and is then the grant's to refuse.
+    let denied = plugin
+        .call(
+            "webfetch",
+            &serde_json::json!({ "url": "http://example.com/" }),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(denied.to_string().contains("denied"), "got {denied}");
+}
+
+/// A session that records what plan mode asked of it.
+#[derive(Default)]
+struct PlanSessionHost {
+    active: Mutex<Vec<String>>,
+    entries: Mutex<Vec<(String, serde_json::Value)>>,
+    messages: Mutex<Vec<String>>,
+}
+
+impl kiqi_plugin::SessionRead for PlanSessionHost {
+    fn active_tools(&self) -> Vec<String> {
+        self.active.lock().unwrap().clone()
+    }
+    fn system_prompt(&self) -> String {
+        String::new()
+    }
+    fn thinking_level(&self) -> String {
+        String::new()
+    }
+    fn cli_flag(&self, _name: &str) -> Option<String> {
+        None
+    }
+    fn session_branch(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+}
+
+impl kiqi_plugin::SessionControl for PlanSessionHost {
+    fn set_session_name(&self, _name: &str) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn set_active_tools(&self, tools: &[String]) -> Result<(), PluginError> {
+        *self.active.lock().unwrap() = tools.to_vec();
+        Ok(())
+    }
+    fn set_model(&self, _model: &str) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn set_thinking_level(&self, _level: &str) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn compact(&self) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn new_session(&self) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn fork(&self) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn navigate_tree(&self, _target: &str) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn switch_session(&self, _id: &str) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn reload(&self) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+impl kiqi_plugin::InjectApi for PlanSessionHost {
+    fn send_message(&self, _message: &serde_json::Value) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn send_user_message(&self, text: &str) -> Result<(), PluginError> {
+        self.messages.lock().unwrap().push(text.to_string());
+        Ok(())
+    }
+    fn append_message(&self, _message: &serde_json::Value) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn append_custom_entry(
+        &self,
+        custom_type: &str,
+        data: &serde_json::Value,
+    ) -> Result<(), PluginError> {
+        self.entries
+            .lock()
+            .unwrap()
+            .push((custom_type.to_string(), data.clone()));
+        Ok(())
+    }
+}
+
+/// `rpi-plan-mode` ported to wasm: entering swaps the tool set through
+/// `session-control`, completing restores it and persists the plan through
+/// `inject.append-custom-entry`, and `/plan show` reads it back.
+#[test]
+fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
+    let wasm = build_guest("kiqi-plan-mode-guest", "kiqi_plan_mode_guest.wasm");
+    let plugin = WasmPlugin::load("rpi-plan-mode", &wasm).expect("load");
+    assert_eq!(plugin.id(), "rpi-plan-mode");
+    assert!(plugin
+        .tools()
+        .iter()
+        .any(|tool| tool.name == "plan_mode_complete"));
+
+    let host = PlanSessionHost::default();
+    *host.active.lock().unwrap() = vec!["read".into(), "bash".into(), "edit".into()];
+    let log = NullLog;
+    let caps = HostCaps {
+        session: Some(&host),
+        control: Some(&host),
+        inject: Some(&host),
+        ui: None,
+        log: &log,
+    };
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    // Enter: the active set becomes the planning set.
+    plugin
+        .call("plan_mode_start", &serde_json::json!({}), &caps, &sink)
+        .expect("start plan mode");
+    assert_eq!(
+        *host.active.lock().unwrap(),
+        vec!["read", "bash", "docs", "plan_mode_complete"],
+        "planning keeps only the read-only set plus the complete tool"
+    );
+
+    // Complete: the previous set comes back and the plan is persisted.
+    plugin
+        .call(
+            "plan_mode_complete",
+            &serde_json::json!({ "plan": "1. Do the thing" }),
+            &caps,
+            &sink,
+        )
+        .expect("complete the plan");
+    assert_eq!(*host.active.lock().unwrap(), vec!["read", "bash", "edit"]);
+    let entries = host.entries.lock().unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|(kind, data)| kind == "plan-mode" && data["plan"] == "1. Do the thing"),
+        "the plan rides a custom entry: {entries:?}"
+    );
+
+    // `/plan show` reports what was stored.
+    let status = plugin
+        .run_command("plan", "show", &caps)
+        .expect("plan show");
+    assert!(status.contains("Do the thing"), "got {status}");
 }

@@ -1,6 +1,6 @@
 //! Host-side backend for **wasm plugins** (the component model tier).
 //!
-//! Binds `plugins/kiqi-plugin.wit` (ABI 0.5.0) with wasmtime's `bindgen!` and
+//! Binds `plugins/kiqi-plugin.wit` (ABI 0.6.0) with wasmtime's `bindgen!` and
 //! hosts a plugin component behind the same [`kiqi_plugin::Plugin`] seam the
 //! compiled-in plugins implement.
 //!
@@ -329,6 +329,16 @@ impl crate::kiqi::plugin::inject::Host for HostState {
         let entry = serde_json::from_str(&entry).unwrap_or(serde_json::Value::Null);
         forward(with_inject(|inject| inject.append_message(&entry)))
     }
+    fn append_custom_entry(
+        &mut self,
+        custom_type: String,
+        data: String,
+    ) -> Result<(), CapabilityError> {
+        let data = serde_json::from_str(&data).unwrap_or(serde_json::Value::Null);
+        forward(with_inject(|inject| {
+            inject.append_custom_entry(&custom_type, &data)
+        }))
+    }
 }
 
 /// UI, forwarded to the call's `HostCaps::ui`.
@@ -350,6 +360,14 @@ impl crate::kiqi::plugin::ui::Host for HostState {
         forward(with_ui(|ui| {
             ui.set_editor_text(&serde_json::json!({"text": text}))
         }))
+    }
+    fn component(&mut self, name: String, payload: String) -> Result<String, CapabilityError> {
+        let payload = serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+        match with_ui(|ui| ui.component(&name, &payload)) {
+            Some(Ok(value)) => Ok(value.to_string()),
+            Some(Err(error)) => Err(CapabilityError::Failed(error.to_string())),
+            None => Err(denied()),
+        }
     }
 }
 
