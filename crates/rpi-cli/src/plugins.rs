@@ -659,17 +659,20 @@ pub fn compiled_tool_schemas(hosts: &[PluginHost]) -> Vec<rpi_ai::types::Tool> {
 /// guarantee the wasm path gets from a trap, and the same one the native
 /// loader gets from `catch_unwind`.
 pub struct PluginHost {
-    id: &'static str,
+    id: String,
     plugin: Box<dyn Plugin>,
 }
 
 impl PluginHost {
-    pub fn new(id: &'static str, plugin: Box<dyn Plugin>) -> Self {
-        Self { id, plugin }
+    pub fn new(id: impl Into<String>, plugin: Box<dyn Plugin>) -> Self {
+        Self {
+            id: id.into(),
+            plugin,
+        }
     }
 
-    pub fn id(&self) -> &'static str {
-        self.id
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub fn plugin(&self) -> &dyn Plugin {
@@ -741,10 +744,48 @@ pub fn compiled_plugin_hosts() -> Vec<std::sync::Arc<PluginHost>> {
 
 /// Wrap every registered plugin with its isolation boundary.
 pub fn load_hosts() -> Vec<PluginHost> {
-    load_all()
+    let mut hosts: Vec<PluginHost> = load_all()
         .into_iter()
         .map(|registered| PluginHost::new(registered.id, registered.plugin))
-        .collect()
+        .collect();
+    // Wasm plugins live beside the compiled ones: `plugins/<id>/plugin.wasm`
+    // with `plugins/<id>/grants.json` (the user's authorization, read by
+    // `WasmPlugin::load`).
+    #[cfg(feature = "plugin-wasm")]
+    if let Some(plugins_dir) = kiqi_plugin::grants::agent_dir().map(|root| root.join("plugins")) {
+        hosts.extend(load_wasm_hosts(&plugins_dir));
+    }
+    hosts
+}
+
+/// Discover `plugins/<id>/plugin.wasm` under `plugins_dir` and load each behind
+/// the same [`Plugin`] seam as the compiled-in ones.
+///
+/// A plugin that fails to load (bad component, refused grants, missing WASI
+/// import) is reported and skipped rather than taking the session down.
+#[cfg(feature = "plugin-wasm")]
+pub fn load_wasm_hosts(plugins_dir: &std::path::Path) -> Vec<PluginHost> {
+    let Ok(entries) = std::fs::read_dir(plugins_dir) else {
+        return Vec::new();
+    };
+    let mut hosts = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Some(id) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let wasm = entry.path().join("plugin.wasm");
+        if !wasm.is_file() {
+            continue;
+        }
+        match kiqi_plugin_host::WasmPlugin::load(&id, &wasm) {
+            Ok(plugin) => hosts.push(PluginHost::new(id, Box::new(plugin))),
+            Err(error) => eprintln!("plugin `{id}`: {error}"),
+        }
+    }
+    hosts
 }
 
 #[cfg(test)]
@@ -1499,5 +1540,59 @@ mod tests {
             .call("nope", &serde_json::json!({}), &caps, &NoProgress)
             .unwrap_err();
         assert!(matches!(err, kiqi_plugin::PluginError::UnknownTool(_)));
+    }
+
+    /// The wasm tier is wired: a `.wasm` under `plugins/<id>/` is discovered and
+    /// registered behind the same [`Plugin`] seam as the compiled-in plugins.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn wasm_plugins_are_discovered_and_registered() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = root.join("plugins/wasm/kiqi-conformance-guest/Cargo.toml");
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--manifest-path"])
+            .arg(&manifest)
+            .args(["--target", "wasm32-wasip2", "--release"])
+            .status()
+            .expect("build the conformance guest");
+        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
+
+        // Lay it out the way the loader expects: plugins/<id>/plugin.wasm.
+        let plugins_dir = tempfile::tempdir().unwrap();
+        let package = plugins_dir.path().join("conformance");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::copy(
+            root.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm"),
+            package.join("plugin.wasm"),
+        )
+        .unwrap();
+
+        let hosts = load_wasm_hosts(plugins_dir.path());
+        let host = hosts
+            .iter()
+            .find(|host| host.id() == "conformance")
+            .expect("the wasm plugin is discovered");
+        let tools = host.plugin().tools();
+        assert!(
+            tools.iter().any(|tool| tool.name == "conformance"),
+            "tools: {tools:?}"
+        );
+
+        // And it runs through the trait exactly like a compiled-in plugin.
+        let silent = Silent;
+        let caps = HostCaps::observer(&silent);
+        let outcome = host
+            .call_tool(
+                "conformance",
+                &serde_json::json!({ "x": 1 }),
+                &caps,
+                &NoProgress,
+            )
+            .unwrap();
+        let text = match &outcome.blocks[0] {
+            kiqi_plugin::Block::Text(text) => text.clone(),
+            other => panic!("unexpected block {other:?}"),
+        };
+        assert!(text.contains("ui="), "got {text}");
     }
 }

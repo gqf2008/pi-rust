@@ -380,6 +380,18 @@ C ABI 不能阻塞，原生版才需要 start/poll/cancel 状态机；wasm 里 `
   **取消**、**超时**（并断言 guest 真发了 `cancel`）。
 - 门禁 4 由此收绿；**e2e 共 9 个全绿**。
 
+### 6.16 已落地：wasm 后端接进 `ki`
+
+- `ki` 的 `load_hosts()` 除编译期插件外，还扫描 `$KI_AGENT_DIR/plugins/<id>/plugin.wasm`
+  （`plugin-wasm` feature，默认开），用 `WasmPlugin::load`（顺带读同目录 `grants.json`）加载，
+  包成同一个 `PluginHost`——**没有第二套注册/派发路径**：工具经 `merge_compiled_plugin_tools`、
+  事件经 `install_compiled_event_sink`，与编译期插件完全同路。
+- 加载失败（坏组件 / 缺 WASI import）只打印并跳过，不拖垮会话。
+- 新增 rpi-cli 测试：把 conformance fixture 放到临时 `plugins/conformance/plugin.wasm`，
+  断言被发现、工具可见、且调用跑通（经 `HostCaps::observer` 拿到 `ui=` 的拒绝报告）。
+- 代价：`ki` 现依赖 `kiqi-plugin-host` → **wasmtime 进了主二进制**（体积/编译时间上升），
+  所以给了 `plugin-wasm` feature（默认开）；要精简二进制可关掉。
+
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
 > “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里
@@ -387,7 +399,8 @@ C ABI 不能阻塞，原生版才需要 start/poll/cancel 状态机；wasm 里 `
 
 ## 7. 待定
 
-- wasmtime 依赖很重（编译时间 + 体积）：独立 crate `kiqi-plugin-host` 还是 feature 开关？
+- ~~wasmtime 依赖很重：独立 crate 还是 feature 开关？~~ → 已定：**独立 crate `kiqi-plugin-host` +
+  `plugin-wasm` feature（默认开）**；`ki` 因此带上 wasmtime，要精简就关 feature。
 - `.wasm` 是否需要签名/摘要校验（防替换；「免签名分发」是卖点，但「防篡改」另说）？
 - 插件配置来源（`~/.ki/agent/plugins/<id>.json` 还是走 WIT）？
 - `wasm32-wasip2` 工具链版本锁定策略（生产要钉版本）。

@@ -2846,6 +2846,7 @@ dependencies = [
  "globset",
  "indexmap 2.14.2",
  "kiqi-plugin",
+ "kiqi-plugin-host",
  "nix",
  "png",
  "reqwest",
