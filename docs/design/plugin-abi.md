@@ -331,7 +331,7 @@ e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许
 | 3 流式进度 | ✅ conformance e2e 断言 3 个 progress 块按序到达 |
 | 4 UI 往返 | ✅ `ui.dialog` 成功往返 + 取消 + 超时都断言（`rpi-ask-user` wasm 移植，§6.15） |
 | 5 拒绝双态 | ✅ 无 UI → `set_status` denied；授予 UI → granted；net-http 无 grant / 错 host → denied，匹配 → 真请求 |
-| 6 用户授权闭环 | 🟡 已有 `Grants`（缺失=拒）+ `load_with_grants`；缺 `ki plugin grant/revoke` CLI 与安装/更新“增量重问”提示 |
+| 6 用户授权闭环 | ✅ `Grants`（缺失=拒）+ `ki plugin grant/revoke/list` + `install`（列声明、**只对增量重问**、无头默认拒）+ `uninstall`（移到备份）（§6.14/§6.17） |
 | 7 隔离 | ✅ 燃料计量的死循环 → trap（不挂）；`panic!` → trap；宿主存活 |
 | 8 性能基线 | ⬜ 未测（wasm vs 编译期的 tool/事件开销） |
 
@@ -391,6 +391,21 @@ C ABI 不能阻塞，原生版才需要 start/poll/cancel 状态机；wasm 里 `
   断言被发现、工具可见、且调用跑通（经 `HostCaps::observer` 拿到 `ui=` 的拒绝报告）。
 - 代价：`ki` 现依赖 `kiqi-plugin-host` → **wasmtime 进了主二进制**（体积/编译时间上升），
   所以给了 `plugin-wasm` feature（默认开）；要精简二进制可关掉。
+
+### 6.17 已落地：`ki plugin install/uninstall`（声明 + 增量重问 + 无头默认拒）
+
+- `ki plugin install <path.wasm> [--id ID] [--yes] [--host H]...`：
+  - 把组件复制到 `plugins/<id>/plugin.wasm`；
+  - **读组件声明的能力**（`kiqi_plugin_host::declared_capabilities`：wasmparser 扫 `kiqi:plugin/*`
+    import，只取可授权的 `net-http`/`fs`/`exec`/`timer`/`net-sockets`；`log`/`progress`/`ui` 等域接口不参与授权）；
+  - **只对“声明了但还没授权”的增量征求意见**：`--yes` 全批；有 tty 则一次 `[y/N]`；
+    **无 tty 且没 `--yes` → 什么都不授**（无头默认拒）；
+  - `net-http` 的 host allow-list 走 `--host`（缺则该项不授并提示）。
+- `ki plugin uninstall <id>`：把 `plugins/<id>` **移到** `plugins/<id>.removed-<ts>`（可恢复），不删文件。
+- 测试：host `declared_capabilities`（conformance fixture 只声明 `net-http`）；rpi-cli
+  `install --yes --host 127.0.0.1` → 复制 + `grants.granted()==["net-http"]` + host 匹配 →
+  `uninstall` → 目录被移走。**10 个 host e2e + 4 个 CLI 测试绿。**
+- 门禁 6 由此收绿；§6.3 只剩门禁 8（性能基线）。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里

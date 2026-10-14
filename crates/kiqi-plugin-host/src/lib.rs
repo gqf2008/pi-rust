@@ -154,6 +154,37 @@ fn denied() -> CapabilityError {
 /// contract crate (`kiqi-plugin`).
 pub use kiqi_plugin::grants::{Grants, NetHttpGrant};
 
+/// The user-grantable capabilities a component declares — the `kiqi:plugin/*`
+/// imports that need authorization (`net-http`, `fs`, `exec`, `timer`,
+/// `net-sockets`).
+///
+/// The domain interfaces (`log`, `session-read`, …) are always available through
+/// `HostCaps` and are not part of the grant set, so they are filtered out. This
+/// is what `ki plugin install` shows the user and re-prompts about when it grows.
+pub fn declared_capabilities(wasm: &Path) -> Result<Vec<String>, String> {
+    const GRANTABLE: &[&str] = &["net-http", "fs", "exec", "timer", "net-sockets"];
+    let bytes = std::fs::read(wasm).map_err(|error| format!("read {}: {error}", wasm.display()))?;
+    let mut caps: Vec<String> = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(&bytes) {
+        if let wasmparser::Payload::ComponentImportSection(reader) =
+            payload.map_err(|error| error.to_string())?
+        {
+            for import in reader {
+                let import = import.map_err(|error| error.to_string())?;
+                let Some(rest) = import.name.name.strip_prefix("kiqi:plugin/") else {
+                    continue;
+                };
+                let cap = rest.split('@').next().unwrap_or(rest);
+                if GRANTABLE.contains(&cap) && !caps.iter().any(|seen| seen == cap) {
+                    caps.push(cap.to_string());
+                }
+            }
+        }
+    }
+    caps.sort();
+    Ok(caps)
+}
+
 /// State every instantiated component gets: WASI plus the resource table and
 /// the grants the guest's host imports are allowed to act on.
 struct HostState {

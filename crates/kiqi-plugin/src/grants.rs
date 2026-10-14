@@ -139,7 +139,13 @@ pub fn agent_dir() -> Option<PathBuf> {
 
 /// Where a plugin's grants live.
 pub fn grants_path(plugin_id: &str) -> Option<PathBuf> {
-    agent_dir().map(|root| root.join("plugins").join(plugin_id).join("grants.json"))
+    plugin_dir(plugin_id).map(|dir| dir.join("grants.json"))
+}
+
+/// A plugin's own directory (`plugins/<id>/`), which holds its `plugin.wasm`
+/// and `grants.json`.
+pub fn plugin_dir(plugin_id: &str) -> Option<PathBuf> {
+    agent_dir().map(|root| root.join("plugins").join(plugin_id))
 }
 
 /// Plugin ids that have a directory under `plugins/`.

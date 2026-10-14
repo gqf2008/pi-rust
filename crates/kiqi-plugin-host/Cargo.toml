@@ -19,6 +19,7 @@ path = "src/lib.rs"
 kiqi-plugin = { path = "../kiqi-plugin" }
 wasmtime = { version = "49", features = ["component-model"] }
 wasmtime-wasi = "49"
+wasmparser = "0.259"
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }

@@ -835,3 +835,12 @@ fn ask_user_honours_timeout() {
         ui.ops()
     );
 }
+
+/// `ki plugin install` shows the user what a component declares. Only the
+/// grantable interfaces count; `log`/`progress`/`ui` are not gated.
+#[test]
+fn declared_capabilities_reads_the_components_imports() {
+    let wasm = fixture_wasm();
+    let caps = kiqi_plugin_host::declared_capabilities(&wasm).expect("read component imports");
+    assert_eq!(caps, vec!["net-http".to_string()], "got {caps:?}");
+}

@@ -5,7 +5,10 @@
 //! user sets it. Nothing here is wasm-specific: the same files govern a wasm
 //! plugin's `HostCaps`.
 
-use kiqi_plugin::grants::{grants_path, installed_plugins, Grants};
+use std::io::IsTerminal;
+use std::path::Path;
+
+use kiqi_plugin::grants::{grants_path, installed_plugins, plugin_dir, Grants};
 
 /// Entry for `ki plugin [sub]`; `args` is the slice after `plugin`.
 pub fn run(args: &[String]) -> i32 {
@@ -14,6 +17,8 @@ pub fn run(args: &[String]) -> i32 {
         Some("show") => show(args.get(1).map(String::as_str)),
         Some("grant") => grant(&args[1..]),
         Some("revoke") => revoke(&args[1..]),
+        Some("install") => install(&args[1..]),
+        Some("uninstall") => uninstall(&args[1..]),
         None | Some("--help") | Some("-h") | Some("help") => {
             print_help();
             0
@@ -148,6 +153,8 @@ ki plugin — manage per-plugin capability grants
 USAGE:
     ki plugin list
     ki plugin show <id>
+    ki plugin install <path.wasm> [--id <id>] [--yes] [--host <host>]...
+    ki plugin uninstall <id>
     ki plugin grant <id> <capability> [--host <host>]...
     ki plugin revoke <id> <capability>
 
@@ -158,8 +165,180 @@ CAPABILITIES:
     timer         host-driven ticks
     net-sockets   raw TCP sockets
 
+`install` copies the component to `plugins/<id>/plugin.wasm`, shows the
+capabilities it declares, and grants only what the user approves (`--yes` for a
+non-interactive run; without a terminal and without `--yes`, nothing is
+granted). `uninstall` moves the directory aside instead of deleting it.
+
 A missing grants file grants nothing; the host never authorizes for a plugin."
     );
+}
+
+/// `ki plugin install <path.wasm> [--id ID] [--yes] [--host H]...`
+fn install(args: &[String]) -> i32 {
+    let mut wasm: Option<String> = None;
+    let mut id: Option<String> = None;
+    let mut yes = false;
+    let mut hosts: Vec<String> = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--id" => match iter.next() {
+                Some(value) => id = Some(value.clone()),
+                None => {
+                    eprintln!("error: --id needs a value");
+                    return 2;
+                }
+            },
+            "--yes" | "-y" => yes = true,
+            "--host" => match iter.next() {
+                Some(value) => hosts.push(value.clone()),
+                None => {
+                    eprintln!("error: --host needs a value");
+                    return 2;
+                }
+            },
+            other if other.starts_with("--") => {
+                eprintln!("error: unknown flag `{other}`");
+                return 2;
+            }
+            other if wasm.is_none() => wasm = Some(other.to_string()),
+            other => {
+                eprintln!("error: unexpected argument `{other}`");
+                return 2;
+            }
+        }
+    }
+    let Some(wasm) = wasm else {
+        eprintln!("error: expected `ki plugin install <path.wasm> [--id <id>] [--yes] [--host <host>]...`");
+        return 2;
+    };
+    let wasm = Path::new(&wasm);
+    if !wasm.is_file() {
+        eprintln!("error: {} is not a file", wasm.display());
+        return 2;
+    }
+
+    let id = id.unwrap_or_else(|| {
+        wasm.file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("plugin")
+            .to_string()
+    });
+    let declared = match kiqi_plugin_host::declared_capabilities(wasm) {
+        Ok(caps) => caps,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return 1;
+        }
+    };
+
+    let Some(dir) = plugin_dir(&id) else {
+        eprintln!("error: cannot resolve the agent directory");
+        return 1;
+    };
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        eprintln!("error: create {}: {error}", dir.display());
+        return 1;
+    }
+    let target = dir.join("plugin.wasm");
+    if let Err(error) = std::fs::copy(wasm, &target) {
+        eprintln!("error: install {}: {error}", target.display());
+        return 1;
+    }
+
+    // Only capabilities this plugin declares that are not already granted need a
+    // decision, so an update that does not grow the set never re-prompts.
+    let mut grants = Grants::load_for(&id);
+    let already = grants.granted();
+    let new_caps: Vec<&String> = declared
+        .iter()
+        .filter(|cap| !already.contains(&cap.as_str()))
+        .collect();
+    let mut granted_now: Vec<String> = Vec::new();
+    if !new_caps.is_empty() {
+        let approve = if yes {
+            true
+        } else if std::io::stdin().is_terminal() {
+            print!(
+                "grant {} to `{id}`? [y/N] ",
+                new_caps
+                    .iter()
+                    .map(|cap| cap.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).is_ok()
+                && matches!(line.trim(), "y" | "Y" | "yes")
+        } else {
+            false
+        };
+        if approve {
+            for cap in &new_caps {
+                match grants.grant(cap, hosts.clone()) {
+                    Ok(()) => granted_now.push(cap.to_string()),
+                    Err(error) => eprintln!("note: {cap}: {error}"),
+                }
+            }
+            if !granted_now.is_empty() {
+                if let Err(error) = Grants::save_for(&id, &grants) {
+                    eprintln!("error: {error}");
+                    return 1;
+                }
+            }
+        }
+    }
+
+    println!("installed `{id}` -> {}", target.display());
+    if !declared.is_empty() {
+        println!("declared capabilities: {}", declared.join(", "));
+    }
+    if !granted_now.is_empty() {
+        println!("granted: {}", granted_now.join(", "));
+    }
+    let granted = grants.granted();
+    let missing: Vec<&str> = declared
+        .iter()
+        .map(String::as_str)
+        .filter(|cap| !granted.contains(cap))
+        .collect();
+    if !missing.is_empty() {
+        println!(
+            "not granted: {} — use `ki plugin grant {id} <capability>`",
+            missing.join(", ")
+        );
+    }
+    0
+}
+
+/// `ki plugin uninstall <id>` — moves the plugin directory aside rather than
+/// deleting it, so the files stay recoverable.
+fn uninstall(args: &[String]) -> i32 {
+    let Some(id) = args.first().map(String::as_str) else {
+        eprintln!("error: `ki plugin uninstall <id>` needs a plugin id");
+        return 2;
+    };
+    let Some(dir) = plugin_dir(id) else {
+        eprintln!("error: cannot resolve the agent directory");
+        return 1;
+    };
+    if !dir.is_dir() {
+        eprintln!("error: `{id}` is not installed");
+        return 1;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let backup = dir.with_file_name(format!("{id}.removed-{timestamp}"));
+    if let Err(error) = std::fs::rename(&dir, &backup) {
+        eprintln!("error: move {}: {error}", dir.display());
+        return 1;
+    }
+    println!("uninstalled `{id}` (moved to {})", backup.display());
+    0
 }
 
 #[cfg(test)]
@@ -184,5 +363,70 @@ mod tests {
             "--host".to_string(),
         ];
         assert!(parse_target(&args).is_err());
+    }
+
+    /// Installing copies the component, grants `--yes` only what the component
+    /// declares, and uninstalling moves the directory aside.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn install_and_uninstall_round_trip() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = root.join("plugins/wasm/kiqi-conformance-guest/Cargo.toml");
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--manifest-path"])
+            .arg(&manifest)
+            .args(["--target", "wasm32-wasip2", "--release"])
+            .status()
+            .expect("build the conformance guest");
+        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
+        let wasm =
+            root.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm");
+
+        let agent = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("KI_AGENT_DIR");
+        std::env::set_var("KI_AGENT_DIR", agent.path());
+
+        let code = install(&[
+            wasm.display().to_string(),
+            "--id".into(),
+            "conformance".into(),
+            "--yes".into(),
+            "--host".into(),
+            "127.0.0.1".into(),
+        ]);
+        assert_eq!(code, 0);
+        assert!(agent
+            .path()
+            .join("plugins/conformance/plugin.wasm")
+            .is_file());
+        let grants = Grants::load_for("conformance");
+        assert_eq!(grants.granted(), vec!["net-http"]);
+        assert!(grants.allows_host("127.0.0.1"));
+
+        let code = uninstall(&["conformance".into()]);
+        assert_eq!(code, 0);
+        assert!(!agent.path().join("plugins/conformance").exists());
+        let moved = std::fs::read_dir(agent.path().join("plugins"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .into_string()
+                    .map(|name| name.starts_with("conformance.removed-"))
+                    .unwrap_or(false)
+            });
+        assert!(moved, "uninstall keeps the files as a backup");
+
+        match previous {
+            Some(value) => std::env::set_var("KI_AGENT_DIR", value),
+            None => std::env::remove_var("KI_AGENT_DIR"),
+        }
     }
 }
