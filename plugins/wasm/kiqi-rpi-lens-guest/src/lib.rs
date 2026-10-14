@@ -126,8 +126,11 @@ fn code_lens(arguments: &str) -> Result<String, types::PluginError> {
 
     let result = exec::run(program, &args, cwd.as_deref()).map_err(|error| match error {
         types::CapabilityError::Denied(reason) => types::PluginError::Failed(format!(
-            "{reason} — grant it with `ki plugin grant {ID} exec --command {program} \
-             --cwd project --timeout 120`"
+            // Grant replaces the whole exec policy, so the advice must name
+            // every command this tool can run — not just the denied one —
+            // or following it would revoke the rest.
+            "{reason} — grant it with `ki plugin grant {ID} exec --command cargo \
+             --command git --cwd project --timeout 120`"
         )),
         types::CapabilityError::Failed(reason) => types::PluginError::Failed(reason),
     })?;

@@ -1613,6 +1613,9 @@ fn rpi_lens_guest_runs_checks_in_the_project_directory() {
     );
 
     // Without the grant at all, the tool reports the deny and how to fix it.
+    // The advice must name BOTH commands the tool can run — `ki plugin grant`
+    // replaces the whole exec policy, so advice naming only the denied command
+    // would steer the user into revoking the other one.
     let plugin = WasmPlugin::load_with_grants("rpi-lens", &wasm, Grants::default()).expect("load");
     let denied = plugin
         .call(
@@ -1622,9 +1625,14 @@ fn rpi_lens_guest_runs_checks_in_the_project_directory() {
             &sink,
         )
         .unwrap_err();
+    let denied = denied.to_string();
     assert!(
-        denied.to_string().contains("not granted"),
+        denied.contains("not granted"),
         "the deny names the missing grant: {denied}"
+    );
+    assert!(
+        denied.contains("grant rpi-lens exec --command cargo --command git"),
+        "the remediation advice covers every command the tool needs: {denied}"
     );
 }
 
