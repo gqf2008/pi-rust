@@ -42,9 +42,17 @@ impl Grants {
     /// Read the user's grants for `plugin_id`; a missing (or unreadable, or
     /// malformed) file means nothing is granted.
     pub fn load_for(plugin_id: &str) -> Self {
-        let Some(path) = grants_path(plugin_id) else {
-            return Self::default();
-        };
+        match agent_dir() {
+            Some(root) => Self::load_for_at(&root, plugin_id),
+            None => Self::default(),
+        }
+    }
+
+    /// [`Self::load_for`] against an explicit agent root, so a caller (a test, or
+    /// a CLI that was handed a directory) never has to write a process-global
+    /// environment variable to redirect it.
+    pub fn load_for_at(root: &std::path::Path, plugin_id: &str) -> Self {
+        let path = grants_path_at(root, plugin_id);
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
@@ -53,7 +61,17 @@ impl Grants {
 
     /// Write the grants, creating `plugins/<id>/` as needed.
     pub fn save_for(plugin_id: &str, grants: &Grants) -> Result<(), String> {
-        let path = grants_path(plugin_id).ok_or("cannot resolve the agent directory")?;
+        let root = agent_dir().ok_or("cannot resolve the agent directory")?;
+        Self::save_for_at(&root, plugin_id, grants)
+    }
+
+    /// [`Self::save_for`] against an explicit agent root.
+    pub fn save_for_at(
+        root: &std::path::Path,
+        plugin_id: &str,
+        grants: &Grants,
+    ) -> Result<(), String> {
+        let path = grants_path_at(root, plugin_id);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("create {}: {error}", parent.display()))?;
@@ -139,20 +157,34 @@ pub fn agent_dir() -> Option<PathBuf> {
 
 /// Where a plugin's grants live.
 pub fn grants_path(plugin_id: &str) -> Option<PathBuf> {
-    plugin_dir(plugin_id).map(|dir| dir.join("grants.json"))
+    agent_dir().map(|root| grants_path_at(&root, plugin_id))
+}
+
+/// Where a plugin's grants live under an explicit agent root.
+pub fn grants_path_at(root: &std::path::Path, plugin_id: &str) -> PathBuf {
+    plugin_dir_at(root, plugin_id).join("grants.json")
 }
 
 /// A plugin's own directory (`plugins/<id>/`), which holds its `plugin.wasm`
 /// and `grants.json`.
 pub fn plugin_dir(plugin_id: &str) -> Option<PathBuf> {
-    agent_dir().map(|root| root.join("plugins").join(plugin_id))
+    agent_dir().map(|root| plugin_dir_at(&root, plugin_id))
+}
+
+/// A plugin's own directory under an explicit agent root.
+pub fn plugin_dir_at(root: &std::path::Path, plugin_id: &str) -> PathBuf {
+    root.join("plugins").join(plugin_id)
 }
 
 /// Plugin ids that have a directory under `plugins/`.
 pub fn installed_plugins() -> Vec<String> {
-    let Some(root) = agent_dir() else {
-        return Vec::new();
-    };
+    agent_dir()
+        .map(|root| installed_plugins_at(&root))
+        .unwrap_or_default()
+}
+
+/// Plugin ids with a directory under `root/plugins/`.
+pub fn installed_plugins_at(root: &std::path::Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root.join("plugins")) else {
         return Vec::new();
     };

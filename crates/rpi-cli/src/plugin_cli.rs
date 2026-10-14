@@ -6,9 +6,9 @@
 //! plugin's `HostCaps`.
 
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use kiqi_plugin::grants::{grants_path, installed_plugins, plugin_dir, Grants};
+use kiqi_plugin::grants::{agent_dir, grants_path, installed_plugins, plugin_dir_at, Grants};
 
 /// Entry for `ki plugin [sub]`; `args` is the slice after `plugin`.
 pub fn run(args: &[String]) -> i32 {
@@ -248,6 +248,14 @@ A missing grants file grants nothing; the host never authorizes for a plugin."
     );
 }
 
+/// The agent root for this invocation: an explicit one (a test, or a caller
+/// handed a directory) or the environment's. Resolving it here — rather than
+/// reading `KI_AGENT_DIR` deep inside — is what keeps tests from mutating the
+/// process environment.
+fn resolve_root(root: Option<&Path>) -> Option<PathBuf> {
+    root.map(Path::to_path_buf).or_else(agent_dir)
+}
+
 /// Whether to grant the capabilities an install newly declares.
 ///
 /// Split out because the interactive branch is invisible to CI (no terminal):
@@ -266,6 +274,14 @@ fn approve_new_capabilities(yes: bool, interactive: bool, answer: Option<&str>) 
 
 /// `ki plugin install <path.wasm> [--id ID] [--yes] [--host H]...`
 fn install(args: &[String]) -> i32 {
+    install_into(args, None)
+}
+
+/// [`install`] against an explicit agent root (`None` = the environment's).
+///
+/// Taking the root as a parameter is why no test has to write `KI_AGENT_DIR`
+/// into the process environment, which is unsafe while other threads read it.
+fn install_into(args: &[String], root: Option<&Path>) -> i32 {
     let mut wasm: Option<String> = None;
     let mut id: Option<String> = None;
     let mut yes = false;
@@ -323,10 +339,11 @@ fn install(args: &[String]) -> i32 {
         }
     };
 
-    let Some(dir) = plugin_dir(&id) else {
+    let Some(root) = resolve_root(root) else {
         eprintln!("error: cannot resolve the agent directory");
         return 1;
     };
+    let dir = plugin_dir_at(&root, &id);
     if let Err(error) = std::fs::create_dir_all(&dir) {
         eprintln!("error: create {}: {error}", dir.display());
         return 1;
@@ -339,7 +356,7 @@ fn install(args: &[String]) -> i32 {
 
     // Only capabilities this plugin declares that are not already granted need a
     // decision, so an update that does not grow the set never re-prompts.
-    let mut grants = Grants::load_for(&id);
+    let mut grants = Grants::load_for_at(&root, &id);
     let already = grants.granted();
     let new_caps: Vec<&String> = declared
         .iter()
@@ -374,7 +391,7 @@ fn install(args: &[String]) -> i32 {
                 }
             }
             if !granted_now.is_empty() {
-                if let Err(error) = Grants::save_for(&id, &grants) {
+                if let Err(error) = Grants::save_for_at(&root, &id, &grants) {
                     eprintln!("error: {error}");
                     return 1;
                 }
@@ -407,14 +424,20 @@ fn install(args: &[String]) -> i32 {
 /// `ki plugin uninstall <id>` — moves the plugin directory aside rather than
 /// deleting it, so the files stay recoverable.
 fn uninstall(args: &[String]) -> i32 {
+    uninstall_into(args, None)
+}
+
+/// [`uninstall`] against an explicit agent root.
+fn uninstall_into(args: &[String], root: Option<&Path>) -> i32 {
     let Some(id) = args.first().map(String::as_str) else {
         eprintln!("error: `ki plugin uninstall <id>` needs a plugin id");
         return 2;
     };
-    let Some(dir) = plugin_dir(id) else {
+    let Some(root) = resolve_root(root) else {
         eprintln!("error: cannot resolve the agent directory");
         return 1;
     };
+    let dir = plugin_dir_at(&root, id);
     if !dir.is_dir() {
         eprintln!("error: `{id}` is not installed");
         return 1;
@@ -458,18 +481,15 @@ mod tests {
 
     /// Installing copies the component, grants `--yes` only what the component
     /// declares, and uninstalling moves the directory aside.
+    ///
+    /// Runs against an explicit root rather than by writing `KI_AGENT_DIR`:
+    /// mutating the process environment is unsafe while other test threads read
+    /// it, and a lock only serializes writers, not readers.
     #[cfg(feature = "plugin-wasm")]
     #[test]
     fn install_and_uninstall_round_trip() {
-        // The repo-wide env lock: `KI_AGENT_DIR` is process-global, so writing it
-        // must not overlap another test that reads env-derived state (the wasm
-        // tests resolve the plugins dir through it).
-        let _guard = crate::config::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let manifest = root.join("plugins/wasm/kiqi-conformance-guest/Cargo.toml");
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = workspace.join("plugins/wasm/kiqi-conformance-guest/Cargo.toml");
         let status = std::process::Command::new(env!("CARGO"))
             .args(["build", "--manifest-path"])
             .arg(&manifest)
@@ -478,33 +498,32 @@ mod tests {
             .expect("build the conformance guest");
         assert!(status.success(), "is the `wasm32-wasip2` target installed?");
         let wasm =
-            root.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm");
+            workspace.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm");
 
         let agent = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("KI_AGENT_DIR");
-        std::env::set_var("KI_AGENT_DIR", agent.path());
+        let root = agent.path();
 
-        let code = install(&[
-            wasm.display().to_string(),
-            "--id".into(),
-            "conformance".into(),
-            "--yes".into(),
-            "--host".into(),
-            "127.0.0.1".into(),
-        ]);
+        let code = install_into(
+            &[
+                wasm.display().to_string(),
+                "--id".into(),
+                "conformance".into(),
+                "--yes".into(),
+                "--host".into(),
+                "127.0.0.1".into(),
+            ],
+            Some(root),
+        );
         assert_eq!(code, 0);
-        assert!(agent
-            .path()
-            .join("plugins/conformance/plugin.wasm")
-            .is_file());
-        let grants = Grants::load_for("conformance");
+        assert!(root.join("plugins/conformance/plugin.wasm").is_file());
+        let grants = Grants::load_for_at(root, "conformance");
         assert_eq!(grants.granted(), vec!["net-http"]);
         assert!(grants.allows_host("127.0.0.1"));
 
-        let code = uninstall(&["conformance".into()]);
+        let code = uninstall_into(&["conformance".into()], Some(root));
         assert_eq!(code, 0);
-        assert!(!agent.path().join("plugins/conformance").exists());
-        let moved = std::fs::read_dir(agent.path().join("plugins"))
+        assert!(!root.join("plugins/conformance").exists());
+        let moved = std::fs::read_dir(root.join("plugins"))
             .unwrap()
             .filter_map(Result::ok)
             .any(|entry| {
@@ -515,11 +534,6 @@ mod tests {
                     .unwrap_or(false)
             });
         assert!(moved, "uninstall keeps the files as a backup");
-
-        match previous {
-            Some(value) => std::env::set_var("KI_AGENT_DIR", value),
-            None => std::env::remove_var("KI_AGENT_DIR"),
-        }
     }
 
     /// The interactive answer path — unreachable in CI, which has no terminal —
