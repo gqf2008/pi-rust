@@ -74,6 +74,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiqi-langfuse-guest"
+version = "0.1.0"
+dependencies = [
+ "kiqi-plugin-guest",
+ "serde_json",
+]
+
+[[package]]
 name = "kiqi-plugin-guest"
 version = "0.1.0"
 dependencies = [

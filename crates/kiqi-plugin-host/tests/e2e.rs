@@ -323,3 +323,134 @@ fn spawn_http_server() -> (String, std::thread::JoinHandle<()>) {
     });
     (format!("http://{addr}/"), handle)
 }
+
+fn langfuse_wasm() -> PathBuf {
+    build_guest("kiqi-langfuse-guest", "kiqi_langfuse_guest.wasm")
+}
+
+/// A server that reads one request and hands the caller its body.
+fn spawn_capturing_server() -> (String, std::thread::JoinHandle<String>) {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = match listener.accept() {
+            Ok(pair) => pair,
+            Err(_) => return String::new(),
+        };
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let mut header_end = None;
+        while header_end.is_none() {
+            let read = stream.read(&mut chunk).unwrap_or(0);
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+        }
+        let Some(header_end) = header_end else {
+            return String::new();
+        };
+        let headers = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+        let length = headers
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        let body_start = header_end + 4;
+        while buffer.len() < body_start + length {
+            let read = stream.read(&mut chunk).unwrap_or(0);
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let body = String::from_utf8_lossy(&buffer[body_start..]).to_string();
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+        body
+    });
+    (format!("http://{addr}"), handle)
+}
+
+/// langfuse, representative subset: build one turn trace from events and flush
+/// it to the OTLP endpoint through `net-http`.
+#[test]
+fn langfuse_subset_builds_a_trace_and_flushes_it_over_net_http() {
+    let wasm = langfuse_wasm();
+    let (base_url, server) = spawn_capturing_server();
+    let grants = Grants {
+        net_http: Some(NetHttpGrant {
+            hosts: vec!["127.0.0.1".into()],
+        }),
+        ..Default::default()
+    };
+    let plugin = WasmPlugin::load_with_grants("rpi-langfuse", &wasm, grants).expect("load");
+    assert!(plugin
+        .tools()
+        .iter()
+        .any(|tool| tool.name == "langfuse_config"));
+
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    let configured = plugin
+        .call(
+            "langfuse_config",
+            &serde_json::json!({
+                "baseUrl": base_url,
+                "publicKey": "pk-lf-test",
+                "secretKey": "sk-lf-test",
+            }),
+            &caps,
+            &sink,
+        )
+        .expect("configure");
+    assert!(!configured.is_error, "{configured:?}");
+
+    // One turn: root -> generation -> assistant message -> shutdown(flush).
+    let dispatch = |tag, payload| {
+        plugin.on_event(&Event::new(tag, payload), &caps);
+    };
+    dispatch(EventTag::SessionStart, serde_json::Value::Null);
+    dispatch(
+        EventTag::BeforeAgentStart,
+        serde_json::json!({
+            "prompt": "hello",
+            "sessionId": "sess-1",
+            "host": { "name": "kiqi", "version": "9" },
+        }),
+    );
+    dispatch(
+        EventTag::BeforeProviderRequest,
+        serde_json::json!({ "model": "test-model" }),
+    );
+    dispatch(
+        EventTag::MessageEnd,
+        serde_json::json!({
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "hi there" }],
+            "usage": { "input": 3, "output": 4 },
+            "stopReason": "endTurn",
+        }),
+    );
+    dispatch(EventTag::SessionShutdown, serde_json::Value::Null);
+
+    let body = server.join().unwrap();
+    assert!(body.contains("Conversational Turn"), "root span: {body}");
+    assert!(
+        body.contains("kiqi Turn"),
+        "trace name from the host: {body}"
+    );
+    assert!(body.contains("LLM Call"), "generation span: {body}");
+    assert!(body.contains("sess-1"), "session id: {body}");
+    assert!(body.contains("test-model"), "model: {body}");
+}

@@ -303,6 +303,25 @@ wasm 层是“总是可实例化，但未授予的调用必定 `denied`” + “
   `fs`/`exec`/`timer`/`net-sockets` 的实际实现（仍是 deny 桩）、以及能力错误只有
   `denied` 一个分支（网络失败也被叫 `denied`，应当拆出 `failed`）。
 
+### 6.11 已落地：`rpi-langfuse` 代表性子集（事件密度 + HTTP）
+
+`plugins/wasm/kiqi-langfuse-guest`：**不是**完整 langfuse（3 个管理工具与完整 usage/cost
+留在编译期插件），而是验证“高频事件 + 出站 HTTP”的最小真实体：
+
+- 从事件流建一轮 trace：`SessionStart` 重置 → `BeforeAgentStart` 建 root span
+  （trace name 用宿主传来的 `host.name`，如 `kiqi Turn`）→ `BeforeProviderRequest` 开
+  generation span → `MessageEnd` 用输出/usage 收尾 → `SessionShutdown` 关 root 并 flush；
+- `flush` 走 **`net-http`** POST 到 `{baseUrl}/api/public/otel/v1/traces`，带 `Basic` 认证头，
+  序列化成 OTLP/JSON（root 最后发：Langfuse 在 root 到达时冻结 trace header）；
+- 配置经 **`langfuse_config` 工具**传入（**不从进程 env 读**——guest 是沙箱，不该被塞宿主环境）。
+
+e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许 `127.0.0.1`、
+配置指向本地 server，派发一轮事件后断言 server 收到的 POST body 含 `Conversational Turn`、
+`kiqi Turn`、`LLM Call`、`sess-1`、`test-model`。**4 个 e2e 全绿**。
+
+这也把 §6.10 记的“能力错误只有 `denied`”从纸面变成现实痛点：flush 的网络失败也会被报成
+`denied`，语义不对（应拆 `denied` / `failed`，列为 0.4.0 待办）。
+
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
 > “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里
