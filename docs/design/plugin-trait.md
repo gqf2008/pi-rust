@@ -112,19 +112,23 @@
 
 ### 贡献面（`Plugin` 该实现多少）
 
-原生 ABI 有 12 个注册槽，实测**只有 6 个有真实使用者**：
+原生 ABI 有 12 个注册槽。「使用者」一列是**上游插件生态**的实测计数（本仓不含那些插件）：
 
-| 槽 | 使用者 | `Plugin` |
-|---|---|---|
-| `register_tool` | 14 个包 | `tools` |
-| `register_event_handler` | 11 个包 | `on_event`（37 tag） |
-| `register_command` | 6 个包 | `commands` + `run_command` |
-| `register_flag` | 3 个包 | `flags`（**声明**，值经 `SessionRead::cli_flag` 读） |
-| `register_shortcut` | 2 个包 | `shortcuts`（**声明**，按键走 `Input` 事件） |
-| `register_before_agent_start` | 2 个包 | `before_agent_start`（真钩子，返回替换的系统提示词） |
-| `register_provider` / `_message_renderer` / `_markdown_transformer` / `_entry_renderer` / `_resources_discover` / `_oauth_provider` | **无人用** | 不实现（实测，非省事） |
+| 槽 | 上游使用者 | `Plugin` | 本仓消费者 |
+|---|---|---|---|
+| `register_tool` | 14 个包 | `tools` | 会话 |
+| `register_event_handler` | 11 个包 | `on_event`（37 tag） | 会话 |
+| `register_command` | 6 个包 | `commands` + `run_command` | TUI 命令表 |
+| `register_flag` | 3 个包 | `flags`（**声明**，值经 `SessionRead::cli_flag` 读） | `ki plugin show` |
+| `register_shortcut` | 2 个包 | `shortcuts`（**声明**，按键走 `Input` 事件） | 按键路由 + `ki plugin show` |
+| `register_before_agent_start` | 2 个包 | `before_agent_start`（真钩子，返回替换的系统提示词） | provider 钩子 |
+| `register_provider` / `_message_renderer` / `_markdown_transformer` / `_entry_renderer` / `_resources_discover` / `_oauth_provider` | **无人用** | 不实现（实测，非省事） | — |
 
-加 `probes`（权限闸门）与 `shutdown`，`Plugin` 共 **8 个贡献面，每个都有真实使用者**。
+加 `probes`（权限闸门）与 `shutdown`，`Plugin` 共 **8 个贡献面**。
+
+> 注：本仓**在树内**没有插件注册 `register_flag` / `register_shortcut`（只有 `examples/plugin-stub` 用
+> `register_before_agent_start`，以及 `rpi-langfuse` 里的 `None` 占位），上表的计数描述的是**上游插件
+> 生态**。`Plugin` 侧对应面的消费者由会话与 `ki plugin show` 提供（见 `plugin-abi.md` §6.19–§6.21）。
 
 ## 6. 移植进度
 

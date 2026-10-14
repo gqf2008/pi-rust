@@ -62,7 +62,81 @@ fn show(id: Option<&str>) -> i32 {
         Ok(text) => println!("{text}"),
         Err(error) => eprintln!("error: {error}"),
     }
+    // Declarations, not grants: what the plugin claims it contributes. This is
+    // the consumer for `flags`/`shortcuts`, whose runtime paths are
+    // `SessionRead::cli_flag` and an `Input` event respectively — the
+    // declaration itself is only ever read here.
+    print_declared(id);
     0
+}
+
+/// List a plugin's declared surfaces, or say why nothing could be listed.
+fn print_declared(id: &str) {
+    let host = crate::plugins::compiled_plugin_hosts()
+        .into_iter()
+        .find(|host| host.id() == id);
+    match host {
+        Some(host) => println!("\n{}", declared_surfaces(host.plugin())),
+        None => eprintln!(
+            "note: no compiled or wasm plugin with id `{id}` is installed, so its declared \
+             surfaces cannot be listed"
+        ),
+    }
+}
+
+/// Render the surfaces a plugin declares. Split from the printing so it can be
+/// asserted on.
+fn declared_surfaces(plugin: &dyn kiqi_plugin::Plugin) -> String {
+    let mut out = String::new();
+    let mut section = |label: &str, items: Vec<String>| {
+        if items.is_empty() {
+            return;
+        }
+        out.push_str(&format!("{label}:\n"));
+        for item in items {
+            out.push_str(&format!("  {item}\n"));
+        }
+    };
+    section(
+        "tools",
+        plugin
+            .tools()
+            .iter()
+            .map(|spec| spec.name.clone())
+            .collect(),
+    );
+    section(
+        "commands",
+        plugin
+            .commands()
+            .iter()
+            .map(|spec| {
+                format!(
+                    "/{} \u{2014} {}",
+                    spec.name.trim_start_matches('/'),
+                    spec.description
+                )
+            })
+            .collect(),
+    );
+    section(
+        "flags",
+        plugin
+            .flags()
+            .iter()
+            .map(|spec| format!("--{} \u{2014} {}", spec.name, spec.description))
+            .collect(),
+    );
+    section(
+        "shortcuts",
+        plugin
+            .shortcuts()
+            .iter()
+            .map(|spec| format!("{} \u{2014} {}", spec.key, spec.description))
+            .collect(),
+    );
+    section("probe points", plugin.probe_points());
+    out
 }
 
 fn grant(args: &[String]) -> i32 {
@@ -468,6 +542,45 @@ mod tests {
             .chain([None])
         {
             assert!(!approve_new_capabilities(false, true, answer), "{answer:?}");
+        }
+    }
+
+    /// `ki plugin show` is the consumer for the `flags`/`shortcuts`
+    /// declarations: they have no runtime path of their own (a flag's value is
+    /// read through `cli_flag`, a key arrives as an `Input` event), so this is
+    /// where they become observable.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn declared_surfaces_include_the_guests_flags_and_shortcuts() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = root.join("plugins/wasm/kiqi-conformance-guest/Cargo.toml");
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--manifest-path"])
+            .arg(&manifest)
+            .args(["--target", "wasm32-wasip2", "--release"])
+            .status()
+            .expect("build the conformance guest");
+        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
+        let wasm =
+            root.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm");
+        let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants(
+            "conformance",
+            &wasm,
+            kiqi_plugin::grants::Grants::default(),
+        )
+        .expect("load the conformance guest");
+
+        let text = declared_surfaces(&plugin);
+        for expected in [
+            "commands:",
+            "flags:",
+            "--conformance-flag",
+            "shortcuts:",
+            "f8",
+            "probe points:",
+            "before-tool-call",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
         }
     }
 }

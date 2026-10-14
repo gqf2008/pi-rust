@@ -327,7 +327,7 @@ e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许
 | 门禁 | 状态 |
 |---|---|
 | 1 跨平台同一份 `.wasm` | ✅ 同一 fixture 在本机 macOS 与 CI Linux 都构建+加载+跑通（与编译期版本的 golden diff 仍未做） |
-| 2 面覆盖断言 | ✅ `conformance_surface_is_reachable` 断言契约层被真实触达；**会话层也已接线**（§6.19）：tools / events（原有）+ commands / shortcuts / before_agent_start / probe（新增） |
+| 2 面覆盖断言 | ✅ `conformance_surface_is_reachable` 断言契约层被真实触达；**会话层也已接线**（§6.19）：tools / events（原有）+ commands / shortcuts / before_agent_start / probe（新增）；`flags` 的声明由 `ki plugin show` 消费（§6.21） |
 | 3 流式进度 | ✅ conformance e2e 断言 3 个 progress 块按序到达 |
 | 4 UI 往返 | ✅ `ui.dialog` 成功往返 + 取消 + 超时都断言（`rpi-ask-user` wasm 移植，§6.15） |
 | 5 拒绝双态 | ✅ 无 UI → `set_status` denied；授予 UI → granted；net-http 无 grant / 错 host → denied，匹配 → 真请求 |
@@ -457,7 +457,25 @@ built-in”那句注释本来是给**受信**的 cdylib 层写的）。
 
 同时补上了 `session-read` 的 `session_id`：`RuntimeActionHost::session_id`（默认 `None`）→
 `HarnessActionHost` 从 `tool_context` 取（`new_session`/`fork`/`switch_session` 会同步更新）→
-`ActionCaps::session_id`。此前该能力恒返 `None`，靠事件载荷的 `sessionId` 兼顾；现在两条路一致。
+`ActionCaps::session_id`。此前该能力恒返 `None`，靠事件载荷的 `sessionId` 兼顾；现在两条路一致
+（两条通道由 `publish_session_identity` 同时写入，值不会分叉）。
+
+### 6.21 `flags`/`shortcuts` 的消费者，与三套传输的面差
+
+`flags`（以及 `shortcuts`）是**声明**面：运行时路径分别在 `SessionRead::cli_flag`（值来自通用
+`--foo=bar` 解析）和“按键走 `Input` 事件”。但原先这个**声明本身没有任何读者**：`snapshot.flags()`
+只有测试在调，`get_cli_flag` 也不查 registry——即“挂了名字的装饰”。现在 `ki plugin show <id>` 会实例化
+插件并把它声明的 tools / commands / flags / shortcuts / probe-points 列出来，声明由此变成可观测、可断言的。
+
+三套传输的面**本来就不同**，这里显式列清，别再让“8 个面”到处飘：
+
+| 面 | cdylib 扩展 | 编译期 kiqi | wasm |
+|---|---|---|---|
+| tools / events / commands / flags / shortcuts / before_agent_start | ✅ | ✅ | ✅ |
+| probe（权限闸门） | ❌ | ✅ | ✅ |
+| renderer / provider / resources_discover / oauth | ✅（上游用；本仓无对应 `Plugin` 面） | ❌ | ❌ |
+
+`ki` **同时**装载三层并合并进同一张工具表；同名工具的归属见 §6.20（受信层可覆盖，untrusted 拒绝）。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
