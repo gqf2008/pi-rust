@@ -46,8 +46,13 @@
 |---|---|---|
 | `net-http` | `{hosts:[…]}` | 逐跳白名单（重定向也查）；响应体上限 **8 MiB** |
 | `fs` | `true` | 监禁在 `plugins/<id>/data/`（词法 + 符号链接两层），监禁即策略 |
-| `exec` | `{commands:[…]}` | 裸命令名（无 shell）；cwd 关在 data 目录；环境清空只回填 `PATH`；输出各 **256 KiB**；**30s** 超时；子进程独立进程组、结束即收整组 |
+| `exec` | `{commands:[…], cwd?, timeout-seconds?}` | 裸命令名（无 shell）；cwd 随授权给范围：`plugin-data`（默认，关在 data 目录）或 `project`（关在**项目目录** = 宿主进程 cwd，`ki` 从不 chdir），词法 + 符号链接两层与 `fs` 同款；环境清空只回填 `PATH`；输出各 **256 KiB**；超时随授权（默认 **30s**、上限 **300s**，CLI 拒超、宿主兜底 clamp）；子进程独立进程组、结束即收整组 |
 | `net-sockets` | `{hosts:[…]}` | host 白名单；**宿主持 socket**，guest 只拿 `u32` 句柄 |
+
+> ⚠️ exec 的子进程**不被文件系统沙箱化**：cwd jail 约束的是“从哪起跑”，不是“能碰哪”——
+> 拿到 `sh`/`cargo` 授权的插件本来就能 `cd` 到任何地方（甚至改自己的 `grants.json` 等重载
+> 生效）。`cwd: project` 没有引入新风险类别，它加的是人体工学；授权的重量始终在 `exec`
+> 本身，批 `exec` 给第三方插件前请当成“授予本机用户权限”来对待。
 
 隔离：fuel（可选）、**guest 内存上限 256 MiB**（`Options::max_memory_bytes`）、spin/panic 均 trap 不拖垮宿主。
 `ENFORCED_CAPABILITIES` = 上表四个（可授权集合 == 可实现集合）；`declared_capabilities()` 读组件声明的 import。
@@ -60,7 +65,7 @@
 | 契约 Rust 侧（`trait Plugin`、`Event`/`Verdict`、`grants`） | `crates/kiqi-plugin` |
 | 宿主（wasmtime，把组件包成 `trait Plugin`） | `crates/kiqi-plugin-host` |
 | 插件 SDK（WIT → Rust trait） | `plugins/wasm/kiqi-plugin-guest` |
-| 已移植插件（6） | `plugins/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode}-guest` |
+| 已移植插件（7） | `plugins/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode,rpi-lens}-guest` |
 | 共享逻辑（编译期与 wasm 共用） | `crates/rpi-plan-mode-core` |
 | CLI | `crates/rpi-cli/src/plugin_cli.rs`（`ki plugin …`） |
 | 会话接线（发现/注册/事件 sink/各贡献面） | `crates/rpi-cli/src/plugins.rs` |
@@ -81,6 +86,8 @@ cargo build --manifest-path plugins/wasm/kiqi-webfetch-guest/Cargo.toml \
 ki plugin install <file.wasm> --id rpi-webfetch --yes --host api.example.com
 ki plugin list | show <id>          # show 会列出声明面（tools/commands/flags/shortcuts/probe）
 ki plugin grant <id> exec --command echo     # 或 revoke / uninstall（uninstall 移到备份，不删）
+# exec 还能带 cwd 范围与时间预算（诊断类插件要在项目目录跑 cargo/clippy 时）：
+ki plugin grant <id> exec --command cargo --cwd project --timeout 120
 
 # 校验契约
 wasm-tools component wit plugins/kiqi-plugin.wit
@@ -89,9 +96,10 @@ wasm-tools component wit plugins/kiqi-plugin.wit
 ## 6. 测试与 CI
 
 ```bash
-cargo test -p kiqi-plugin-host --lib --test e2e      # 21 e2e + 2 单测
+cargo test -p kiqi-plugin-host --lib --test e2e      # 27 e2e + 2 单测
 cargo test -p rpi-plan-mode-core                      # 6
-cargo test -p rpi-cli --lib                           # 507
+cargo test -p rpi-lens                                # 3
+cargo test -p rpi-cli --lib                           # 508
 cargo test -p rpi-extensions --lib                    # 102
 cargo test -p kiqi-plugin --lib                       # 5
 ```
@@ -104,7 +112,7 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 
 | 项 | 说明 |
 |---|---|
-| **`exec` 的 cwd 策略挡住 `rpi-lens`** | 诊断类插件要在**项目目录**跑 `cargo`/`clippy`，现在 cwd 只能关在插件 data 目录。需要给授权加 cwd 范围（如 `--cwd project\|plugin-data`），两边一起改。**这是下一个真实阻塞点。** |
+| ~~**`exec` 的 cwd 策略挡住 `rpi-lens`**~~ | ✅ 已解（§6.30）：exec 授权带 `cwd`（`plugin-data` 默认 / `project`）与 `timeout-seconds`（默认 30s、上限 300s）；`rpi-lens` 已移植为 `kiqi-rpi-lens-guest`。 |
 | Windows 不回收后台孙进程 | 用了 unix 进程组；Windows 需 job object，成本高，代码里已注明 |
 | `flags` 声明只有 `ki plugin show` 在读 | 取值路径是 `SessionRead::cli_flag`（通用 `--foo=bar`），声明本身是诊断用 |
 | `probe`/`shortcuts`/`before_agent_start` 无生产用户 | 会话已接线并有测试，但只有 conformance fixture 在用；移植 plan-mode/webfetch 也没用到它们 |
@@ -112,11 +120,18 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 | `wasmtime` 常驻 `ki` | 由 `plugin-wasm`（默认开）控制；要瘦身需单独门控 |
 | `.wasm` 无签名/摘要校验 | 见 `plugin-abi.md` §7 待定项 |
 | 装完需重启 | `compiled_plugin_hosts()` 是进程级 `OnceLock` |
-| 未移植 | `rpi-goal`、`rpi-lens`、`rpi-permissions`、`rpi-websearch`、`rpi-subagents`、`rpi-codegraph` |
+| e2e 的 `exec_does_not_hang_when_the_command_leaves_a_background_child` 在满负载并行跑时偶发超时 | 15s 的 `recv_timeout` 窗口里含 wasmtime 编译 fixture 的时间，并行构建时可能不够；单跑必过。改阈值属 `RULE_阈值变更`，未动 |
+| 未移植 | `rpi-goal`、`rpi-permissions`、`rpi-websearch`、`rpi-subagents`、`rpi-codegraph` |
 
 ## 8. 提交轨迹（近期，`fork/main`）
 
 ```
+本批（exec cwd scope + rpi-lens 移植）：
+- feat(plugins): exec grant carries a cwd scope and a time budget
+- feat(plugins): port rpi-lens to wasm (kiqi-rpi-lens-guest)
+- fix(plugins): rpi-lens truncation no longer panics mid-codepoint
+- docs(plugin-abi): round 6.30 + correct three stale claims
+
 dce1216 移植 rpi-webfetch + rpi-plan-mode（ABI 0.6.0，补导入面两缺口）
 087f73b docs: intro 里已成假的现状描述
 d1990cf exec 收整进程组（修“后台子进程挂死宿主”）

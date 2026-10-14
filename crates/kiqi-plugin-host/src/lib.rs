@@ -189,7 +189,8 @@ pub fn declared_capabilities(wasm: &Path) -> Result<Vec<String>, String> {
 /// [`declared_capabilities`] reports what a *component* asks for; this reports
 /// what the host can honour. `ki plugin install` names any difference, so a user
 /// is never asked to grant something that would only ever come back denied.
-/// `net-sockets` and `exec` are declared in the ABI but still deny stubs.
+/// All four grantable capabilities are enforced: `net-http`, `fs`, `exec`,
+/// `net-sockets`.
 pub const ENFORCED_CAPABILITIES: &[&str] = &["net-http", "fs", "exec", "net-sockets"];
 
 /// See [`ENFORCED_CAPABILITIES`].

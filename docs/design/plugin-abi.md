@@ -171,8 +171,12 @@ wasm 层是“总是可实例化，但未授予的调用必定 `denied`” + “
 过同一套一致性测试。
 
 **明确不迁**（选它们是在验证 host 的 exec/会话驱动，不是验证 ABI）：`im-message`、`voice`、
-`mcp-adapter`、`acp`、`server`、`run-stats`、`subagents`、`codegraph`、`lens`
+`mcp-adapter`、`acp`、`server`、`run-stats`、`subagents`、`codegraph`、~~`lens`~~
 （起子进程 / 长连 / 后台线程）。
+
+> 2026-10-15（§6.30）：`lens` 移出此名单并已移植（`plugins/wasm/kiqi-rpi-lens-guest`）。
+> 当初排除它是因为 exec 还没真实现、cwd 只能关在插件 data 目录；exec 授权带上 cwd 范围
+> 与时间预算后，“起子进程”不再是 ABI 验证之外的活。
 
 ### 6.3 验收门禁（「验证通过」的判据）
 
@@ -638,6 +642,62 @@ conformance fixture 相应地多了一个 `alloc` 工具，e2e 两边都验：**
 e2e：webfetch 验“插件策略先拦 + 没授权就 denied”（全 hermetic，不撞公网）；plan-mode 用记录型
 `SessionControl`/`InjectApi` 验“进入时换掉工具集、完成时恢复并写 `plan-mode` 自定义 entry、
 `/plan show` 能读回计划”。
+
+### 6.30 `exec` 的授权带 cwd 范围与时间预算（`rpi-lens` 移植）
+
+handover 里点名的“下一个真实阻塞点”：诊断类插件要在**项目目录**跑 `cargo`/`clippy`，而
+`exec` 的 cwd 只能关在插件自己的 data 目录。这轮把它解开，并把 §6.2「明确不迁」名单里的
+`lens` 移出来移植掉（排除它的理由——“验证 host 的 exec 驱动”——在 6.26 exec 真实现后
+已经过期）。
+
+**授权形状**（照 §5「策略随授权走」）：`exec` 从 `{commands:[...]}` 扩成
+
+```json
+{ "commands": ["cargo", "git"], "cwd": "project", "timeout-seconds": 120 }
+```
+
+- `cwd`: `plugin-data`（默认）| `project`。旧 grants.json 没有这两个字段，serde default
+  落到 `plugin-data` + 30s——**旧授权语义不变**；老宿主读到新文件里的未知字段直接忽略，
+  仍然是更严的那个方向。
+- `timeout-seconds`：默认 30s（正是原来硬编码的值，不是悄悄放宽），上限 **300s**——CLI
+  在 grant 时拒绝超限，宿主兜底 clamp 并在 stderr 留一行说明（手改 grants.json 是唯一能
+  绕过 CLI 校验的路）。
+- **ABI 不动（仍是 0.6.0）**：WIT 的 `exec.run` 本来就有 `cwd: option<string>`，scope 与
+  budget 全部落在授权侧，不需要改契约、不需要重新协商。
+
+**宿主侧的两个支撑点**：
+
+1. **项目目录从哪来**：宿主原本只有 data 目录一个文件系统锚点（从 wasm 路径推导）。
+   新增 `Options::project_dir`（load 期旋钮），默认取**宿主进程 cwd**——`ki` 启动后从不
+   chdir，session 记录的 cwd 也是从同一个地方初始化的，所以进程 cwd 就是项目目录；
+   测试与将来会迁移的嵌入方用旋钮显式给。
+2. **cwd 的越狱检查与 `fs` 对齐**：exec 的 cwd 此前只过词法 jail，没过 symlink 检查
+   （`fs` 在 6.27 就补上了）。现在两条路共用同一对 `jail_under`/`symlink_checked_under`，
+   project 根（用户的树，满是符号链接）尤其需要这一层。
+
+**一句必须写明的诚实表述**：exec 的子进程**不被文件系统沙箱化**（无 namespace/seccomp，
+环境清空只回填 `PATH`），cwd jail 约束的是“从哪起跑”，不是“能碰哪”——拿到 `sh`/`cargo`
+授权的插件本来就能 `cd` 到任何地方，甚至改自己的 `grants.json` 等下次加载生效。所以
+`cwd: project` 没有引入新的风险类别，它增加的是**人体工学**（让诊断插件落在正确的目录）；
+真正的授权重量始终在 `exec` 本身。给用户看的授权文案应当这么说。
+
+**移植 `rpi-lens` → `plugins/wasm/kiqi-rpi-lens-guest`**（走 `exec` + `session-read`）。
+逻辑小（check 名 → argv、输出截断格式化），照 webfetch 的样子直接随 guest 带一份，
+不开 `-core` crate。三个差异写进 guest README：
+
+1. **砍掉 `timeoutSeconds` 参数**——预算随授权，调用方不能出价盖过用户的预算；
+2. **`cwd` 限项目内**——编译期版本接受机器上任意绝对路径；wasm 版只收相对路径或
+   项目目录内的绝对路径（用 `session-read` 的 `info().cwd` 做词法前缀剥离）；
+3. 超时文案从 “timed out after {n}s” 变成 “hit the exec time budget”（数字在授权里）。
+
+顺手修掉编译期 `rpi-lens` 的一个潜伏 panic：输出截断 `text.truncate(40_000)` 在多字节
+字符中间下刀会 panic（`String::truncate` 的字符边界语义），改成退到字符边界再截，
+带回归测试（先红后绿验证过）；wasm 版不继承这个 bug。
+
+e2e（`kiqi-plugin-host`）：cwd 默认 data 目录、相对 cwd 下钻、`..`/绝对路径越狱被拒、
+符号链接父目录被拒（unix）、project scope 落在注入的项目目录、超时预算真掐死 `sleep 10`；
+lens 移植验“project scope 下 `git diff --check` exit=0 / data 目录下报 Not a git repository /
+无授权报 denied 并指给用户该敲什么命令”。
 
 ## 7. 待定
 

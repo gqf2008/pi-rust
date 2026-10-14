@@ -25,10 +25,12 @@
 ///
 /// The component model requires every import a component declares to be
 /// satisfied at instantiation, so the host always provides all interfaces:
-/// granted ones with real implementations, ungranted ones with a deny stub.
-/// (A built component prunes the interfaces it does not use, so a plugin that
-/// never touches `exec` never asks for it.) "Required but not granted" is
-/// rejected before instantiation from the plugin manifest.
+/// granted ones with real implementations, ungranted ones refuse at call time
+/// with `denied`. (A built component prunes the interfaces it does not use,
+/// so a plugin that never touches `exec` never asks for it.) The gate is the
+/// runtime grant check inside each implementation — there is no
+/// instantiation-time manifest rejection; `ki plugin install` is what lists
+/// declared capabilities and asks the user.
 package kiqi:plugin@0.6.0;
 
 /// Types shared across the host <-> plugin boundary.
