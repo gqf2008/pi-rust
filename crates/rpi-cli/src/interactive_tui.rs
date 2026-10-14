@@ -872,6 +872,8 @@ pub async fn interactive_tui(
     _no_themes: bool,
     reload_context: &crate::session::ReloadContext,
 ) -> i32 {
+    // A hung-up terminal must not leave this process spinning in crossterm.
+    crate::tui_hangup::spawn();
     let lane: Arc<dyn AgentLane> = harness.lane("main");
     // Reuse the startup snapshot captured before provider/session setup. An
     // extension may mutate the process cwd while loading; that must not change

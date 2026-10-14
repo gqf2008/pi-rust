@@ -81,7 +81,7 @@ windows-sys = { version = "0.59", features = [
 
 [target.'cfg(unix)'.dependencies]
 # `nix::sys::signal::raise` for the Ctrl+Z suspend (`app.suspend`).
-nix = { version = "0.29", features = ["signal"] }
+nix = { version = "0.29", features = ["signal", "poll"] }
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]
@@ -118,6 +118,9 @@ plugin-rpi-ask-user = ["dep:rpi-ask-user"]
 plugin-rpi-langfuse = ["dep:rpi-langfuse"]
 
 [dev-dependencies]
+# `term` is only needed by the pty-based tui_hangup regression test; keeping it
+# out of the normal feature set keeps the shipped binary lean.
+nix = { version = "0.29", features = ["term", "fs"] }
 
 [lib]
 path = "src/lib.rs"

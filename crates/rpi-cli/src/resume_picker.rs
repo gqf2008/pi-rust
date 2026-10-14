@@ -14,6 +14,7 @@ use rpi_tui::{
 ///
 /// Returns `Ok(None)` when the user cancels with Esc or Ctrl+C.
 pub async fn select(cwd: &Path) -> Result<Option<String>, String> {
+    crate::tui_hangup::spawn();
     let cwd_text = cwd.to_string_lossy().into_owned();
     let metadata = crate::session::list_session_metadata(&cwd_text)
         .await

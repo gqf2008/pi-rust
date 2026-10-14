@@ -67,6 +67,7 @@ pub mod timings;
 mod transcript_navigation;
 pub mod transcript_view;
 pub mod trust;
+pub mod tui_hangup;
 pub mod tui_shell;
 pub mod updates;
 

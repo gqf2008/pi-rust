@@ -31,6 +31,7 @@ use dialogs::ShellDialogs;
 /// Drive the generic shell against `driver` until the user exits (or the
 /// driver's event stream ends). `addr` is a display label for the banner.
 pub async fn run_driver_tui<D: SessionDriver>(driver: &D, addr: &str) -> Result<(), String> {
+    crate::tui_hangup::spawn();
     let mut events = driver
         .events()
         .ok_or("driver did not yield an event stream")?;

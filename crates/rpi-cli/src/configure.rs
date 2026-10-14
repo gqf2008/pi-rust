@@ -20,6 +20,7 @@ const INPUT_CLOSED: &str = "input closed";
 
 /// `ki configure [sub]` entry. `args` is the slice *after* `configure`.
 pub async fn run(args: &[String]) -> i32 {
+    crate::tui_hangup::spawn();
     match args.first().map(String::as_str).unwrap_or("") {
         "" => run_menu(),
         "list" => run_list(&args[1..]),
