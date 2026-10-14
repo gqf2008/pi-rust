@@ -147,6 +147,15 @@ fn grant(args: &[String]) -> i32 {
         Err(code) => return code,
     };
     let mut grants = Grants::load_for(&parsed.id);
+    // Grant REPLACES the capability's whole policy. When an exec grant with a
+    // non-default scope or budget is replaced without those flags, say what
+    // was reset rather than letting it silently revert.
+    let old_exec = if parsed.capability == "exec" {
+        grants.exec.clone()
+    } else {
+        None
+    };
+    let given_options = parsed.options.clone();
     if let Err(error) = grants.grant(&parsed.capability, parsed.policy, parsed.options) {
         eprintln!("error: {error}");
         return 2;
@@ -156,7 +165,36 @@ fn grant(args: &[String]) -> i32 {
         return 1;
     }
     println!("granted `{}` to {}", parsed.capability, parsed.id);
+    if let (Some(old), Some(new)) = (old_exec.as_ref(), grants.exec.as_ref()) {
+        if let Some(note) = exec_reset_note(old, &given_options, new) {
+            eprintln!("{note}");
+        }
+    }
     0
+}
+
+/// The note to print when re-granting `exec` silently resets a non-default
+/// scope/budget: grant REPLACES the whole policy, so an unstated `--cwd` /
+/// `--timeout` reverts to the defaults — visible beats silent.
+fn exec_reset_note(
+    old: &kiqi_plugin::grants::ExecGrant,
+    options: &GrantOptions,
+    new: &kiqi_plugin::grants::ExecGrant,
+) -> Option<String> {
+    let reset = (old.cwd != new.cwd && options.cwd.is_none())
+        || (old.timeout_seconds != new.timeout_seconds && options.timeout_seconds.is_none());
+    if !reset {
+        return None;
+    }
+    Some(format!(
+        "note: the previous exec policy (cwd: {}, timeout: {}s) was reset to the \
+         defaults; pass --cwd/--timeout to keep it",
+        match old.cwd {
+            ExecCwd::PluginData => "plugin-data",
+            ExecCwd::Project => "project",
+        },
+        old.timeout_seconds,
+    ))
 }
 
 fn revoke(args: &[String]) -> i32 {
@@ -669,6 +707,40 @@ mod tests {
         ] {
             assert!(parse_target(&bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// Re-granting exec without the flags resets a previously granted
+    /// scope/budget — that must produce a note, and only when the flags were
+    /// actually unstated.
+    #[test]
+    fn regrant_reset_is_announced() {
+        use kiqi_plugin::grants::ExecGrant;
+
+        let old = ExecGrant {
+            commands: vec!["cargo".to_string()],
+            cwd: ExecCwd::Project,
+            timeout_seconds: 120,
+        };
+        let fresh = ExecGrant {
+            commands: vec!["git".to_string()],
+            ..ExecGrant::default()
+        };
+        let note = exec_reset_note(&old, &GrantOptions::default(), &fresh)
+            .expect("a silent reset must be announced");
+        assert!(note.contains("project") && note.contains("120"));
+
+        // Restated explicitly: no note.
+        let kept = GrantOptions {
+            cwd: Some(ExecCwd::Project),
+            timeout_seconds: Some(120),
+        };
+        assert!(exec_reset_note(&old, &kept, &old.clone()).is_none());
+        // Nothing non-default to lose: no note.
+        let plain_old = ExecGrant {
+            commands: vec!["echo".to_string()],
+            ..ExecGrant::default()
+        };
+        assert!(exec_reset_note(&plain_old, &GrantOptions::default(), &fresh).is_none());
     }
 
     /// `revoke` clears a whole capability; flags would be silently ignored, so
