@@ -269,8 +269,22 @@ wasm 层是“总是可实例化，但未授予的调用必定 `denied`” + “
    `rpi-todo` 的任务列表从此有地方放。
 2. ~~`on-event` 返回 `()`~~ → 已改为返回 `event-action`（`continue`/`claimed`/`replace`）。
    e2e 断言一个 wasm 插件能真 `Claimed` 一个事件。
-3. 仍未做：`session-read` 返空、`HostCaps` 未接进 host import（真实 session 接入是下一增量）；
-   能力**授权（grant）**也还没做（现阶段全是 deny 桩）。
+3. **下一条增量已解决**：`HostCaps` 已接进 host import（见 §6.9）。仍未做的是能力**授权
+   （grant）**模型。
+
+### 6.9 已落地：`HostCaps` 接入 + 第一个真 wasm 插件（`rpi-todo`）
+
+- **`HostCaps` 接进 host import**：调用期间把 `HostCaps` 与 `ProgressSink` 一起放进
+  线程局部的 `CallContext`（借用期由 call 保证、调用被互斥序列化）；`session-read` 转发到
+  `caps.session`，`session-control`/`inject`/`ui` 转发到对应能力（缺能力或 caps 不存在 →
+  `denied`），`net-http`/`fs`/`net-sockets`/`exec`/`timer` 仍是 deny 桩（暂无插件要用）。
+- **`rpi-todo` 编成 wasm 插件**（`plugins/wasm/kiqi-todo-guest`）：list/add/update/toggle/clear
+  语义不变；状态走结构化 `tool-result.details`；`SessionStart`/`SessionTree` 时经
+  `session-read.session-branch` 恢复（不再是 runtime action）。
+- e2e 新增 `todo_guest_restores_from_the_session_branch`：给一个固定 branch 的 `SessionRead`
+  → `SessionStart` 触发恢复 → `list` 文本含恢复项、`details.todos` 带状态 → `add` 后 details 更新。
+  两个 e2e 全绿。
+- 仍未做：能力**授权（grant）**模型；`session-read.info` 的 session-id/run-id 还返空。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里

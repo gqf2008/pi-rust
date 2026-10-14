@@ -50,36 +50,94 @@ use crate::Plugin as World;
 /// it does not collide with the `kiqi_plugin::Plugin` trait.
 const NOT_GRANTED: &str = "capability not granted";
 
-thread_local! {
-    /// Sink for the tool call currently running on this thread.
-    ///
-    /// The host imports run on the thread that drives the guest call, and
-    /// [`WasmPlugin`] serializes calls behind a mutex, so a thread-local is
-    /// enough to hand the borrowed `&dyn ProgressSink` to `progress.emit`. It
-    /// also keeps that non-`Send` borrow out of the store data.
-    static CURRENT_SINK: RefCell<Option<*const (dyn ProgressSink + 'static)>> =
-        const { RefCell::new(None) };
+/// What the call running on this thread may reach.
+///
+/// The host imports run on the thread that drives the guest call, and
+/// [`WasmPlugin`] serializes calls behind a mutex, so one thread-local carries
+/// the running call's capabilities and progress sink. The pointers only need to
+/// live for the duration of that call.
+#[derive(Clone, Copy)]
+struct CallContext {
+    sink: Option<*const (dyn ProgressSink + 'static)>,
+    caps: *const HostCaps<'static>,
 }
 
-/// Erase the borrow's lifetime for a raw-pointer hand-off.
+thread_local! {
+    static CURRENT: RefCell<Option<CallContext>> = const { RefCell::new(None) };
+}
+
+/// Install the current call's context.
 ///
 /// # Safety
-/// The returned pointer is only valid while the borrow it came from is alive;
-/// callers must clear the slot before then.
-unsafe fn erase_sink_lifetime(sink: &dyn ProgressSink) -> *const (dyn ProgressSink + 'static) {
-    std::mem::transmute::<*const dyn ProgressSink, *const (dyn ProgressSink + 'static)>(sink)
+/// The erased lifetimes are only valid while the borrows the pointers came from
+/// are alive; [`clear_context`] must run before either ends.
+fn install_context(sink: Option<&dyn ProgressSink>, caps: &HostCaps<'_>) -> CallContext {
+    let context = CallContext {
+        sink: sink.map(|sink| {
+            // SAFETY: erased for the guest call's duration only.
+            unsafe {
+                std::mem::transmute::<*const dyn ProgressSink, *const (dyn ProgressSink + 'static)>(
+                    sink,
+                )
+            }
+        }),
+        // SAFETY: as above.
+        caps: unsafe { std::mem::transmute::<*const HostCaps<'_>, *const HostCaps<'static>>(caps) },
+    };
+    CURRENT.with(|slot| *slot.borrow_mut() = Some(context));
+    context
+}
+
+fn clear_context() {
+    CURRENT.with(|slot| *slot.borrow_mut() = None);
 }
 
 fn emit_progress(progress: Progress) {
-    CURRENT_SINK.with(|slot| {
-        if let Some(pointer) = *slot.borrow() {
-            // SAFETY: `WasmPlugin::call` installs this pointer for exactly the
-            // duration of the guest call and clears it afterwards; the borrow it
-            // came from outlives that call, and calls are serialized.
+    CURRENT.with(|slot| {
+        if let Some(pointer) = slot.borrow().as_ref().and_then(|context| context.sink) {
+            // SAFETY: `install_context` set this for the guest call; it is
+            // cleared before the borrow ends.
             let sink = unsafe { &*pointer };
             sink.progress(progress);
         }
     });
+}
+
+/// Run `f` with the capabilities of the current call, if there is one.
+fn with_caps_context<R>(f: impl FnOnce(&HostCaps<'_>) -> R) -> Option<R> {
+    CURRENT.with(|slot| {
+        let borrowed = slot.borrow();
+        let context = (*borrowed)?;
+        // SAFETY: `install_context` set this for the guest call.
+        Some(f(unsafe { &*context.caps }))
+    })
+}
+
+fn with_session<R>(f: impl FnOnce(&dyn kiqi_plugin::SessionRead) -> R) -> Option<R> {
+    with_caps_context(|caps| caps.session.map(f)).flatten()
+}
+
+fn with_control<R>(f: impl FnOnce(&dyn kiqi_plugin::SessionControl) -> R) -> Option<R> {
+    with_caps_context(|caps| caps.control.map(f)).flatten()
+}
+
+fn with_inject<R>(f: impl FnOnce(&dyn kiqi_plugin::InjectApi) -> R) -> Option<R> {
+    with_caps_context(|caps| caps.inject.map(f)).flatten()
+}
+
+fn with_ui<R>(f: impl FnOnce(&dyn kiqi_plugin::UiApi) -> R) -> Option<R> {
+    with_caps_context(|caps| caps.ui.map(f)).flatten()
+}
+
+/// Collapse a capability call into the ABI's `denied` on any failure.
+fn forward(result: Option<Result<(), PluginError>>) -> Result<(), Denied> {
+    match result {
+        Some(Ok(())) => Ok(()),
+        Some(Err(error)) => Err(Denied {
+            reason: error.to_string(),
+        }),
+        None => Err(denied()),
+    }
 }
 
 fn denied() -> Denied {
@@ -117,30 +175,32 @@ impl crate::kiqi::plugin::log::Host for HostState {
     }
 }
 
-/// Read-only session state is low risk, so it is granted with placeholder
-/// values for now. Wiring it to the real session is a later increment.
+/// Read-only session state, forwarded to the call's `HostCaps::session`.
 impl crate::kiqi::plugin::session_read::Host for HostState {
     fn info(&mut self) -> crate::kiqi::plugin::types::SessionInfo {
         crate::kiqi::plugin::types::SessionInfo {
             session_id: String::new(),
             run_id: String::new(),
-            cwd: String::new(),
+            cwd: std::env::current_dir()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         }
     }
     fn active_tools(&mut self) -> Vec<String> {
-        Vec::new()
+        with_session(|session| session.active_tools()).unwrap_or_default()
     }
     fn system_prompt(&mut self) -> String {
-        String::new()
+        with_session(|session| session.system_prompt()).unwrap_or_default()
     }
     fn thinking_level(&mut self) -> String {
-        String::new()
+        with_session(|session| session.thinking_level()).unwrap_or_default()
     }
-    fn cli_flag(&mut self, _name: String) -> Option<String> {
-        None
+    fn cli_flag(&mut self, name: String) -> Option<String> {
+        with_session(|session| session.cli_flag(&name)).flatten()
     }
     fn session_branch(&mut self) -> String {
-        String::new()
+        with_session(|session| session.session_branch().to_string())
+            .unwrap_or_else(|| "null".to_string())
     }
 }
 
@@ -168,34 +228,77 @@ macro_rules! deny_capability {
     };
 }
 
-deny_capability!(session_control {
-    set_session_name(name: String) -> Result<(), Denied>;
-    set_active_tools(tools: Vec<String>) -> Result<(), Denied>;
-    set_model(model: String) -> Result<(), Denied>;
-    set_thinking_level(level: String) -> Result<(), Denied>;
-    compact() -> Result<(), Denied>;
-    new_session() -> Result<(), Denied>;
-    fork() -> Result<(), Denied>;
-    navigate_tree(target: String) -> Result<(), Denied>;
-    switch_session(id: String) -> Result<(), Denied>;
-    reload() -> Result<(), Denied>;
-});
+/// Session mutations, forwarded to the call's `HostCaps::control`; a call
+/// without that capability gets `denied`.
+impl crate::kiqi::plugin::session_control::Host for HostState {
+    fn set_session_name(&mut self, name: String) -> Result<(), Denied> {
+        forward(with_control(|control| control.set_session_name(&name)))
+    }
+    fn set_active_tools(&mut self, tools: Vec<String>) -> Result<(), Denied> {
+        forward(with_control(|control| control.set_active_tools(&tools)))
+    }
+    fn set_model(&mut self, model: String) -> Result<(), Denied> {
+        forward(with_control(|control| control.set_model(&model)))
+    }
+    fn set_thinking_level(&mut self, level: String) -> Result<(), Denied> {
+        forward(with_control(|control| control.set_thinking_level(&level)))
+    }
+    fn compact(&mut self) -> Result<(), Denied> {
+        forward(with_control(|control| control.compact()))
+    }
+    fn new_session(&mut self) -> Result<(), Denied> {
+        forward(with_control(|control| control.new_session()))
+    }
+    fn fork(&mut self) -> Result<(), Denied> {
+        forward(with_control(|control| control.fork()))
+    }
+    fn navigate_tree(&mut self, target: String) -> Result<(), Denied> {
+        forward(with_control(|control| control.navigate_tree(&target)))
+    }
+    fn switch_session(&mut self, id: String) -> Result<(), Denied> {
+        forward(with_control(|control| control.switch_session(&id)))
+    }
+    fn reload(&mut self) -> Result<(), Denied> {
+        forward(with_control(|control| control.reload()))
+    }
+}
 
-deny_capability!(inject {
-    send_message(message: String) -> Result<(), Denied>;
-    send_user_message(text: String) -> Result<(), Denied>;
-    append_entry(entry: String) -> Result<(), Denied>;
-});
+/// Content injection, forwarded to the call's `HostCaps::inject`.
+impl crate::kiqi::plugin::inject::Host for HostState {
+    fn send_message(&mut self, message: String) -> Result<(), Denied> {
+        let message = serde_json::from_str(&message).unwrap_or(serde_json::Value::Null);
+        forward(with_inject(|inject| inject.send_message(&message)))
+    }
+    fn send_user_message(&mut self, text: String) -> Result<(), Denied> {
+        forward(with_inject(|inject| inject.send_user_message(&text)))
+    }
+    fn append_entry(&mut self, entry: String) -> Result<(), Denied> {
+        let entry = serde_json::from_str(&entry).unwrap_or(serde_json::Value::Null);
+        forward(with_inject(|inject| inject.append_message(&entry)))
+    }
+}
 
+/// UI, forwarded to the call's `HostCaps::ui`.
 impl crate::kiqi::plugin::ui::Host for HostState {
-    fn dialog(&mut self, _request: String) -> Result<String, Denied> {
-        Err(denied())
+    fn dialog(&mut self, request: String) -> Result<String, Denied> {
+        let request = serde_json::from_str(&request).unwrap_or(serde_json::Value::Null);
+        match with_ui(|ui| ui.dialog(&request)) {
+            Some(Ok(value)) => Ok(value.to_string()),
+            Some(Err(error)) => Err(Denied {
+                reason: error.to_string(),
+            }),
+            None => Err(denied()),
+        }
     }
-    fn set_status(&mut self, _key: String, _value: String) -> Result<(), Denied> {
-        Err(denied())
+    fn set_status(&mut self, key: String, value: String) -> Result<(), Denied> {
+        forward(with_ui(|ui| {
+            ui.set_status(&serde_json::json!({"key": key, "value": value}))
+        }))
     }
-    fn set_editor_text(&mut self, _text: String) -> Result<(), Denied> {
-        Err(denied())
+    fn set_editor_text(&mut self, text: String) -> Result<(), Denied> {
+        forward(with_ui(|ui| {
+            ui.set_editor_text(&serde_json::json!({"text": text}))
+        }))
     }
 }
 
@@ -338,7 +441,7 @@ impl PluginTrait for WasmPlugin {
         &self,
         name: &str,
         arguments: &serde_json::Value,
-        _caps: &HostCaps<'_>,
+        caps: &HostCaps<'_>,
         sink: &dyn ProgressSink,
     ) -> Result<ToolOutcome, PluginError> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -347,16 +450,13 @@ impl PluginTrait for WasmPlugin {
         };
 
         let arguments = serde_json::to_string(arguments).unwrap_or_else(|_| "null".to_string());
-        // SAFETY: the slot is cleared right after the guest call returns, so the
-        // pointer never outlives `sink`.
-        let pointer = unsafe { erase_sink_lifetime(sink) };
-        CURRENT_SINK.with(|slot| *slot.borrow_mut() = Some(pointer));
+        let _context = install_context(Some(sink), caps);
         let result =
             inner
                 .guest
                 .kiqi_plugin_plugin_api()
                 .call_call_tool(&mut inner.store, name, &arguments);
-        CURRENT_SINK.with(|slot| *slot.borrow_mut() = None);
+        clear_context();
 
         match result {
             Ok(Ok(tool_result)) => Ok(to_tool_outcome(tool_result)),
@@ -368,17 +468,19 @@ impl PluginTrait for WasmPlugin {
         }
     }
 
-    fn on_event(&self, event: &Event, _caps: &HostCaps<'_>) -> EventAction {
+    fn on_event(&self, event: &Event, caps: &HostCaps<'_>) -> EventAction {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let Some(inner) = guard.as_mut() else {
             return EventAction::Continue;
         };
         let wit = to_wit_event(event);
-        match inner
+        let _context = install_context(None, caps);
+        let result = inner
             .guest
             .kiqi_plugin_plugin_api()
-            .call_on_event(&mut inner.store, &wit)
-        {
+            .call_on_event(&mut inner.store, &wit);
+        clear_context();
+        match result {
             Ok(WitEventAction::Continue) => EventAction::Continue,
             Ok(WitEventAction::Claimed) => EventAction::Claimed,
             Ok(WitEventAction::Replace(json)) => {

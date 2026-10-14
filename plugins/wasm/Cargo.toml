@@ -5,7 +5,7 @@
 # `cargo test --workspace` would) is wrong. The host side (`kiqi-plugin-host`)
 # builds these with `--manifest-path ... --target wasm32-wasip2`.
 [workspace]
-members = ["kiqi-plugin-guest", "kiqi-conformance-guest"]
+members = ["kiqi-plugin-guest", "kiqi-conformance-guest", "kiqi-todo-guest"]
 resolver = "2"
 
 [workspace.package]
