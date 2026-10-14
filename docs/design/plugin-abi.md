@@ -477,6 +477,15 @@ built-in”那句注释本来是给**受信**的 cdylib 层写的）。
 
 `ki` **同时**装载三层并合并进同一张工具表；同名工具的归属见 §6.20（受信层可覆盖，untrusted 拒绝）。
 
+### 6.22 `/reload` 不再弄丢插件的 UI 能力
+
+`/reload` 会换掉 `ActionBridge`，但**不换** UI mailbox（它们存在 `ReloadContext` 里，就是为了跨桥存活）。
+原先重建工具适配器时给的是一个 `ui: None` 的 caps，于是重载后编译期/wasm 插件的 `ui.dialog` /
+`set_status` / `set_editor_text` 全没了（其他能力还在）。现在 `reload_caps()` 从 reload 上下文取同一组
+mailbox，并且**顺带刷新事件 sink 与全局 caps**，让重载后的 tools / events / commands / probes /
+before_agent_start 跑在同一套一致的能力上。测试：拿 `reload_caps` 发一个 dialog，断言它落到 TUI 挂着的
+那个 mailbox。
+
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
 > “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里

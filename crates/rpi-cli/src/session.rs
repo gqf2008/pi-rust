@@ -1513,18 +1513,27 @@ where
         &effective_args,
         &ctx.tool_context,
     );
+    // The rebuilt tool adapters get the session's UI mailboxes too, so a
+    // `/reload` no longer costs a compiled plugin its `ui.dialog` /
+    // `set_status` / `set_editor_text`. The mailboxes live in the reload
+    // context (not the bridge) precisely so they survive the swap, and the
+    // action bridge already exposes them — the "no accessor" note that used to
+    // be here was stale.
+    let plugin_caps = crate::plugins::reload_caps(
+        std::sync::Arc::clone(&host_for_plugins),
+        ctx.ui_dialog.clone(),
+        ctx.ext_status.clone(),
+        ctx.editor_text.clone(),
+    );
+    // Refresh the event sink and the process-wide caps with the same set, so
+    // events, commands, probes, prompt transforms and tools all run against one
+    // consistent capability set after the swap (they were otherwise still on the
+    // build-time set).
+    crate::plugins::install_compiled_event_sink(plugin_caps.clone());
     crate::plugins::merge_compiled_plugin_tools(
         &mut tools,
         &crate::plugins::compiled_plugin_hosts(),
-        &crate::plugins::owned_caps(
-            std::sync::Arc::clone(&host_for_plugins),
-            tokio::runtime::Handle::try_current().ok(),
-            // The mailboxes live inside the old bridge and ActionBridge exposes
-            // no accessor yet, so after `/reload` compiled plugins lose their UI
-            // capabilities (everything else still works). Follow-up: give
-            // ActionBridge accessors so reload keeps them.
-            None,
-        ),
+        &plugin_caps,
         &|name| tool_name_allowed(name, &effective_args),
     );
     let mut active = active_tool_names(&tools, &effective_args);

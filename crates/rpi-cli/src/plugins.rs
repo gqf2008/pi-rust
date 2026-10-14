@@ -348,6 +348,31 @@ pub fn owned_caps(
     caps
 }
 
+/// Capabilities for the compiled plugins after a `/reload`.
+///
+/// Same shape as [`owned_caps`], but taking the session's UI mailboxes
+/// explicitly. `/reload` swaps the action bridge but **not** the mailboxes (they
+/// live in the reload context so a TUI attachment and in-flight requests
+/// survive the swap), and the rebuilt tool adapters must be handed the *same*
+/// ones the TUI is attached to — otherwise a plugin that opened a dialog before
+/// the reload can never reach the user again.
+pub fn reload_caps(
+    host: std::sync::Arc<dyn rpi_extensions::RuntimeActionHost>,
+    ui_dialog: rpi_extensions::UiDialogMailbox,
+    ext_status: rpi_extensions::ExtensionStatusMailbox,
+    editor_text: rpi_extensions::EditorTextMailbox,
+) -> OwnedCaps {
+    owned_caps(
+        host,
+        tokio::runtime::Handle::try_current().ok(),
+        Some(std::sync::Arc::new(UiCaps::new(
+            ui_dialog,
+            ext_status,
+            editor_text,
+        ))),
+    )
+}
+
 /// Install the sink that fans dispatched events into the compiled plugins.
 ///
 /// `rpi-extensions` owns the dispatch funnels (the `AgentEvent` emitter,
@@ -2311,5 +2336,34 @@ mod tests {
             runtime.handle().clone(),
         );
         assert_eq!(caps.session_id().as_deref(), Some("sess-test"));
+    }
+
+    /// `/reload` must not cost a compiled plugin its UI capabilities: the caps
+    /// the rebuilt adapters get carry the very mailbox the TUI is attached to.
+    #[tokio::test]
+    async fn reload_caps_carry_the_session_ui_mailboxes() {
+        use kiqi_plugin::UiApi;
+        let ui_dialog = rpi_extensions::UiDialogMailbox::new();
+        ui_dialog.attach();
+        let caps = reload_caps(
+            std::sync::Arc::new(FakeHost::default()),
+            ui_dialog.clone(),
+            rpi_extensions::ExtensionStatusMailbox::new(),
+            rpi_extensions::EditorTextMailbox::new(),
+        );
+        let borrowed = caps.caps();
+        let ui = borrowed.ui.expect("the ui capability survives a reload");
+        // The mailbox refuses to enqueue while nothing is attached, so this also
+        // pins that the same (attached) mailbox was threaded through.
+        let opened = ui.dialog(&serde_json::json!({
+            "op": "open",
+            "requestId": "r1",
+            "title": "reload",
+        }));
+        assert!(opened.is_ok(), "the dialog opened: {opened:?}");
+        assert!(
+            ui_dialog.take_pending().is_some(),
+            "the plugin's dialog reached the session mailbox"
+        );
     }
 }

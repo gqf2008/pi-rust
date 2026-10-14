@@ -461,9 +461,10 @@ mod tests {
     #[cfg(feature = "plugin-wasm")]
     #[test]
     fn install_and_uninstall_round_trip() {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = ENV_LOCK
+        // The repo-wide env lock: `KI_AGENT_DIR` is process-global, so writing it
+        // must not overlap another test that reads env-derived state (the wasm
+        // tests resolve the plugins dir through it).
+        let _guard = crate::config::test_support::env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
