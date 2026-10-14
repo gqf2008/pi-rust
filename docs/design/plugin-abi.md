@@ -123,8 +123,10 @@ pub trait Plugin: Send + Sync {
 能力操作**必须可失败**（`result<_, denied>`）：未授权调用返回 `denied` 而不是加载失败，
 插件可优雅降级、用户中途授权无需重载。
 
-**为什么不能靠“不挂 interface”来实现未授权**：组件模型要求 world 声明的 import 在实例化时
-**全部**被满足，不能选择性不挂。所以 wasm 层的实际做法是：
+**为什么不能靠“不挂 interface”来实现未授权**：组件模型要求组件**声明的** import 在实例化时
+**全部**被满足（实测：构建出的组件会**剪掉未使用的 import**——conformance fixture 只 import 了
+`types`/`log`/`ui`/`progress`，world 里另七个 interface 根本没进组件），所以能“选择性不挂”的
+只是那些未被使用的 interface，**用到的**一个都不能缺。于是 wasm 层的实际做法是：
 
 - 宿主为**全部** import 提供实现——已授予的走真实实现，未授予的挂 **deny 桩**（每次调用回 `denied`）；
 - “缺能力 => 加载即拒”靠插件的 **manifest 声明 required 能力**，宿主在实例化前校验（fail-closed）；
@@ -228,6 +230,23 @@ wasm 层是“总是可实例化，但未授予的调用必定 `denied`” + “
 未做（后续增量）：`WasmPlugin` 实现 `kiqi_plugin::Plugin`（sync 接缝，内部
 `instantiate_async` / `call_async`）、host import 实现（`progress` 转发到 `ProgressSink`，
 其余先挂 deny 桩）、guest SDK + conformance fixture、§6.3 的门禁测试。
+
+### 6.7 已落地：guest SDK + conformance fixture
+
+`plugins/wasm/` 是**guest 侧独立 workspace**（这些 crate 必须编到 `wasm32-wasip2`，
+不能用宿主 target 构建）：
+
+- `kiqi-plugin-guest`：包 `wit_bindgen::generate!`（world `plugin`，ABI 0.2.0）并开
+  `pub_export_macro`，插件 crate 实现生成的 `Guest` 再用 `bindings::export!`；
+- `kiqi-conformance-guest`：conformance fixture（工具里 `log.write` + 两个 `progress` 块
+  + 一个必定 `denied` 的 `ui.set-status`）。
+
+`cargo build --manifest-path plugins/wasm/kiqi-conformance-guest/Cargo.toml --target wasm32-wasip2 --release`
+产出 84 KB 的 **component**，导出 `kiqi:plugin/plugin-api@0.2.0`。
+
+未做（下一步）：宿主侧的 `WasmPlugin`（`Engine` 开 `async_support` + wasmtime-wasi
+`p2::add_to_linker_async` + 为全部 import 实现 `Host` 且未授予挂 deny 桩 + `progress` 经
+线程局部 sink 转发到 `ProgressSink`），以及能构建 fixture 并加载调用的 e2e 测试。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里

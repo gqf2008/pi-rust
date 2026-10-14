@@ -31,3 +31,6 @@ target/*
 website/.rpi/*
 .git/rpi-release-helper.exe
 publish-*.log
+
+# Guest-side workspace (wasm32-wasip2) build output.
+plugins/wasm/target/

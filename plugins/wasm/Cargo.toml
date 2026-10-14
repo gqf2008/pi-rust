@@ -1,0 +1,17 @@
+# Workspace for the **guest side**: crates that compile to `wasm32-wasip2`.
+#
+# Deliberately separate from the root workspace. Guest crates link WASI imports
+# that only exist inside a component, so building them for the host target (as
+# `cargo test --workspace` would) is wrong. The host side (`kiqi-plugin-host`)
+# builds these with `--manifest-path ... --target wasm32-wasip2`.
+[workspace]
+members = ["kiqi-plugin-guest", "kiqi-conformance-guest"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["BigFish <bigfish1913@gmail.com>"]
+repository = "https://github.com/bigfish1913/pi-rust"
