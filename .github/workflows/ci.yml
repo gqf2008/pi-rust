@@ -45,6 +45,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+          # The plugin-host e2e test builds the conformance guest component.
+          targets: wasm32-wasip2
 
       - name: Check formatting
         run: cargo fmt --all -- --check

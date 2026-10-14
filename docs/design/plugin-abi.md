@@ -244,9 +244,32 @@ wasm 层是“总是可实例化，但未授予的调用必定 `denied`” + “
 `cargo build --manifest-path plugins/wasm/kiqi-conformance-guest/Cargo.toml --target wasm32-wasip2 --release`
 产出 84 KB 的 **component**，导出 `kiqi:plugin/plugin-api@0.2.0`。
 
-未做（下一步）：宿主侧的 `WasmPlugin`（`Engine` 开 `async_support` + wasmtime-wasi
-`p2::add_to_linker_async` + 为全部 import 实现 `Host` 且未授予挂 deny 桩 + `progress` 经
-线程局部 sink 转发到 `ProgressSink`），以及能构建 fixture 并加载调用的 e2e 测试。
+### 6.8 已落地：宿主 `WasmPlugin` + e2e（load / call / unload 全通）
+
+- `kiqi-plugin-host`：`Engine` **同步**（不是 async）；`Linker` 用
+  `World::add_to_linker::<HostState, HasSelf<HostState>>` + `wasmtime_wasi::p2::add_to_linker_sync`；
+  `HostState { wasi, table }` 实现**全部** `Host` trait：`log` 真写、`progress` 经**线程局部 sink**
+  转发到 `ProgressSink`、`session_read` 返空、`session_control`/`inject`/`ui`/`net_http`/`fs`/
+  `net_sockets`/`exec`/`timer` 全 **deny 桩**（每个能力调用回 `denied`）。
+- `WasmPlugin` 实现 `kiqi_plugin::Plugin`（**sync 接缝**）：`tools`/`call`/`on_event`/`shutdown`；
+  `unload()` = 调 guest `shutdown` + 释放实例（`Drop` 也调），供 `/reload` 用。
+- **修正 §6.6 的判断：不用 async。** WASI 0.2 是同步语义，`bindgen!` 生成的 guest 调用就是 sync
+  （没有 `call_*_async`），所以宿主全程同步即可，`async_support`/`add_to_linker_async`/`block_on`
+  都不需要。真需要异步的是**宿主 import 的实现**（将来），那在实现内部 blocking 即可——
+  这也正是“异步关在适配器底部”的原意。
+- e2e（`crates/kiqi-plugin-host/tests/e2e.rs`）**通过**：构建 fixture → `WasmPlugin::load` →
+  `tools` → `call`（断言回显参数、`ui=<denied>`、3 个 progress 块、guest `log` 到达宿主）
+  → 未知工具是 typed error → `unload()` 后调用报 “unloaded”。
+- CI 的 test job 加 `targets: wasm32-wasip2`。
+
+**这轮暴露的 ABI 缺口（0.2.0 不够用，下一步补）**：
+
+1. `call-tool` 只返回 string，**没有 `details`（状态）与 `is-error` 通道**——`rpi-todo`
+   靠 `ToolOutcome.details` 携带任务列表、跨 fork/switch 存活，现在表达不了。应改成结构化的
+   tool result（blocks + is-error + details JSON）。
+2. `on-event` 返回 `()`，**无法 claim / replace**（编译期 trait 的 `EventAction` 有）。
+3. `session-read` 目前返空、`HostCaps` 未接进 host import（真实 session 接入是下一增量）；
+   能力**授权（grant）**也还没做（现阶段全是 deny 桩）。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里

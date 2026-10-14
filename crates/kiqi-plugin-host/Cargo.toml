@@ -17,5 +17,6 @@ path = "src/lib.rs"
 
 [dependencies]
 kiqi-plugin = { path = "../kiqi-plugin" }
-wasmtime = { version = "49", features = ["component-model", "async"] }
+wasmtime = { version = "49", features = ["component-model"] }
+wasmtime-wasi = "49"
 serde_json = { workspace = true }
