@@ -749,10 +749,13 @@ pub async fn build(
         // Extension provider hooks (B4): plugins subscribing to the
         // BeforeProviderRequest / BeforeProviderHeaders / AfterProviderResponse
         // events observe every provider call (observer semantics — the handler
-        // ABI has no patch channel in v1). A session without provider-hook
-        // subscribers runs hook-free.
-        provider_hooks: rpi_extensions::ExtensionProviderHooks::from_session(&extension_session)
-            .map(|h| Arc::new(h) as Arc<dyn rpi_ai::ProviderHooks>),
+        // ABI has no patch channel in v1). The compiled plugins' prompt
+        // transforms are chained onto the same slot; both are skipped cleanly
+        // when nothing subscribes.
+        provider_hooks: Some(crate::plugins::compiled_prompt_hooks(
+            rpi_extensions::ExtensionProviderHooks::from_session(&extension_session)
+                .map(|h| Arc::new(h) as Arc<dyn rpi_ai::ProviderHooks>),
+        )),
     };
 
     let harness = match AgentHarness::create(options).await {
@@ -855,13 +858,30 @@ fn extension_tool_call_hook(
         let tool_name = ctx.tool_call.name.clone();
         let params = ctx.args.clone();
         Box::pin(async move {
+            // Compiled plugins' gate runs first: it is local and synchronous, so
+            // a veto arrives without opening an approval dialog. A rewrite is
+            // carried into the native dispatch so neither path sees stale args.
+            let compiled = crate::plugins::probe_tool_call(&tool_call_id, &tool_name, &params);
+            let replacement = match compiled {
+                Some(kiqi_plugin::Verdict::Block { reason }) => {
+                    return Some(rpi_agent::BeforeToolCallResult {
+                        block: true,
+                        reason: Some(reason),
+                        terminate: false,
+                        args: None,
+                    })
+                }
+                Some(kiqi_plugin::Verdict::Replace(args)) => Some(args),
+                _ => None,
+            };
+            let effective = replacement.clone().unwrap_or_else(|| params.clone());
             let reason = match session {
                 Ok(session) => {
                     rpi_extensions::dispatch_tool_call_event(
                         &session,
                         &tool_call_id,
                         &tool_name,
-                        &params,
+                        &effective,
                         &signal,
                         &ui_dialog,
                     )
@@ -869,11 +889,20 @@ fn extension_tool_call_hook(
                 }
                 Err(_) => Some("extension approval session is unavailable".to_string()),
             };
-            reason.map(|reason| rpi_agent::BeforeToolCallResult {
-                block: true,
-                reason: Some(reason),
+            if let Some(reason) = reason {
+                return Some(rpi_agent::BeforeToolCallResult {
+                    block: true,
+                    reason: Some(reason),
+                    terminate: false,
+                    args: None,
+                });
+            }
+            // A rewrite with no veto still has to reach the runtime.
+            replacement.map(|args| rpi_agent::BeforeToolCallResult {
+                block: false,
+                reason: None,
                 terminate: false,
-                args: None,
+                args: Some(args),
             })
         })
     })
@@ -1466,10 +1495,10 @@ where
         ))
         .await;
     let _ = harness
-        .set_provider_hooks(
+        .set_provider_hooks(Some(crate::plugins::compiled_prompt_hooks(
             rpi_extensions::ExtensionProviderHooks::from_session(&extension_session)
                 .map(|h| Arc::new(h) as Arc<dyn rpi_ai::ProviderHooks>),
-        )
+        )))
         .await;
 
     // Re-merge extension tools (a reloaded plugin may have added/removed a

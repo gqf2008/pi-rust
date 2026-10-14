@@ -84,7 +84,7 @@ pub use oauth::{
 };
 pub use prompt_transform::emit_before_agent_start;
 pub use provider::PluggableProvider;
-pub use provider_hooks::ExtensionProviderHooks;
+pub use provider_hooks::{before_agent_start_input, ExtensionProviderHooks};
 pub use registry::{
     assert_active, current_platform, platform_allows, BeforeAgentStartHandler, ExtensionRegistry,
     ExtensionTool, RegisteredFlag, RegisteredHandler, RegisteredOAuthProvider, RegisteredProvider,

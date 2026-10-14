@@ -238,6 +238,21 @@ fn before_agent_start_event(prompt: &str, image_count: usize, ctx: &Context) -> 
     })
 }
 
+/// The `BeforeAgentStart` payload for a compiled plugin, plus the user-prompt
+/// timestamp that keys a once-per-prompt transform.
+///
+/// One source of truth for the payload shape: the native transform and a
+/// compiled one must see the same fields. `None` when there is no user message
+/// to key on (a continuation), in which case the transform is skipped rather
+/// than applied to an unknown turn.
+pub fn before_agent_start_input(ctx: &Context) -> Option<(i64, serde_json::Value)> {
+    let (timestamp, prompt, image_count) = latest_user_prompt(&ctx.messages)?;
+    Some((
+        timestamp,
+        before_agent_start_event(&prompt, image_count, ctx),
+    ))
+}
+
 /// The host's own identity, as handed to plugins.
 ///
 /// The name is the plugin contract's constant ([`rpi_plugin_sdk::HOST_NAME`])

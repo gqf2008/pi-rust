@@ -737,6 +737,30 @@ impl PluginHost {
         self.guard_result("command", || self.plugin.run_command(name, arguments, caps))
     }
 
+    /// A gate point's verdict. A panicking plugin has no opinion rather than
+    /// blocking the action it could not judge.
+    pub fn probe(
+        &self,
+        point: &str,
+        payload: &serde_json::Value,
+        caps: &HostCaps<'_>,
+    ) -> kiqi_plugin::Verdict {
+        self.guard("probe", || self.plugin.probe(point, payload, caps))
+            .unwrap_or(kiqi_plugin::Verdict::Continue)
+    }
+
+    /// `Some(replacement)` when this plugin claims to rewrite the system prompt.
+    pub fn before_agent_start(
+        &self,
+        prompt: &serde_json::Value,
+        caps: &HostCaps<'_>,
+    ) -> Option<String> {
+        self.guard("before-agent-start", || {
+            self.plugin.before_agent_start(prompt, caps)
+        })
+        .flatten()
+    }
+
     /// `UnwindSafe` is not implemented for trait objects; a plugin owns no
     /// state the host observes through this call, so asserting it here is the
     /// intended use of the escape hatch rather than a shortcut.
@@ -755,6 +779,195 @@ impl PluginHost {
                 "plugin `{}` panicked during {what}",
                 self.id
             ))),
+        }
+    }
+}
+
+/// Run the compiled plugins' `before-tool-call` gate.
+///
+/// `Some(Block)` when a plugin vetoes, `Some(Replace)` when the last plugin to
+/// opine rewrote the arguments, `None` when everyone declined. Local and
+/// synchronous — no plugin is asked unless it declared the point — so it runs
+/// *before* the native event, whose dialog would otherwise open first.
+pub fn probe_tool_call(
+    tool_call_id: &str,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Option<kiqi_plugin::Verdict> {
+    probe_tool_call_with(
+        &compiled_plugin_hosts(),
+        &compiled_caps(),
+        tool_call_id,
+        tool_name,
+        args,
+    )
+}
+
+/// The gate itself, over an explicit host list so it can be tested without the
+/// process-wide registry.
+pub fn probe_tool_call_with(
+    hosts: &[std::sync::Arc<PluginHost>],
+    caps: &OwnedCaps,
+    tool_call_id: &str,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Option<kiqi_plugin::Verdict> {
+    let mut current = args.clone();
+    let mut replaced = false;
+    for host in hosts {
+        if !host
+            .plugin()
+            .probe_points()
+            .iter()
+            .any(|point| point == "before-tool-call")
+        {
+            continue;
+        }
+        let payload = serde_json::json!({
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "args": current.clone(),
+        });
+        match host.probe("before-tool-call", &payload, &caps.caps()) {
+            kiqi_plugin::Verdict::Block { reason } => {
+                return Some(kiqi_plugin::Verdict::Block { reason })
+            }
+            kiqi_plugin::Verdict::Replace(next) => {
+                current = next;
+                replaced = true;
+            }
+            kiqi_plugin::Verdict::Continue => {}
+        }
+    }
+    replaced.then(|| kiqi_plugin::Verdict::Replace(current))
+}
+
+/// Compiled plugins that declared `key` as a shortcut.
+pub fn shortcut_hosts(
+    hosts: &[std::sync::Arc<PluginHost>],
+    key: &str,
+) -> Vec<std::sync::Arc<PluginHost>> {
+    hosts
+        .iter()
+        .filter(|host| {
+            host.plugin()
+                .shortcuts()
+                .iter()
+                .any(|shortcut| shortcut.key == key)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Chain the compiled plugins' prompt transforms onto the native extension
+/// provider hooks.
+///
+/// The native hook runs first — it owns the `BeforeAgentStart` event and its own
+/// once-per-prompt cache — and each compiled plugin then gets a chance to
+/// replace the prompt it produced. Keyed on the latest user prompt, so a tool
+/// loop's several provider calls compute the transform once per prompt, exactly
+/// like the native slot.
+pub fn compiled_prompt_hooks(
+    inner: Option<std::sync::Arc<dyn rpi_ai::ProviderHooks>>,
+) -> std::sync::Arc<dyn rpi_ai::ProviderHooks> {
+    compiled_prompt_hooks_with(inner, compiled_plugin_hosts())
+}
+
+/// See [`compiled_prompt_hooks`]; explicit hosts so it can be tested without the
+/// process-wide registry.
+pub fn compiled_prompt_hooks_with(
+    inner: Option<std::sync::Arc<dyn rpi_ai::ProviderHooks>>,
+    hosts: Vec<std::sync::Arc<PluginHost>>,
+) -> std::sync::Arc<dyn rpi_ai::ProviderHooks> {
+    std::sync::Arc::new(CompiledPromptHooks {
+        inner,
+        hosts,
+        cache: std::sync::Mutex::new(None),
+    })
+}
+
+struct CompiledPromptHooks {
+    inner: Option<std::sync::Arc<dyn rpi_ai::ProviderHooks>>,
+    hosts: Vec<std::sync::Arc<PluginHost>>,
+    /// `Some((timestamp, Some(prompt)))` = this prompt was transformed;
+    /// `Some((timestamp, None))` = computed and everyone declined;
+    /// `None` = not computed yet. The distinction keeps handlers from re-running
+    /// just because they said no.
+    cache: std::sync::Mutex<Option<(i64, Option<String>)>>,
+}
+
+impl CompiledPromptHooks {
+    /// Compute the compiled plugins' replacement prompt, once per prompt.
+    ///
+    /// Keyed on the prompt timestamp so a tool loop's several provider calls
+    /// reuse the first answer instead of re-running side-effecting handlers —
+    /// the same guarantee the native slot makes.
+    fn compiled_transform(&self, timestamp: i64, event: &serde_json::Value) -> Option<String> {
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        if cache.as_ref().map(|(ts, _)| *ts) != Some(timestamp) {
+            let caps = compiled_caps();
+            let mut forced = None;
+            for host in &self.hosts {
+                if let Some(next) = host.before_agent_start(event, &caps.caps()) {
+                    forced = Some(next);
+                }
+            }
+            *cache = Some((timestamp, forced));
+        }
+        cache.as_ref().and_then(|(_, forced)| forced.clone())
+    }
+}
+
+impl rpi_ai::ProviderHooks for CompiledPromptHooks {
+    fn transform_context(
+        &self,
+        model: &rpi_ai::Model,
+        ctx: &rpi_ai::Context,
+    ) -> Option<rpi_ai::ContextPatch> {
+        let native = self
+            .inner
+            .as_ref()
+            .and_then(|hooks| hooks.transform_context(model, ctx));
+        let Some((timestamp, mut event)) = rpi_extensions::before_agent_start_input(ctx) else {
+            return native;
+        };
+        // The prompt a compiled transform starts from: whatever the native slot
+        // installed (or the context's own), so the two compose instead of one
+        // silently discarding the other.
+        let base = native
+            .as_ref()
+            .and_then(|patch| patch.system_prompt.clone())
+            .or_else(|| ctx.system_prompt.clone());
+        event["systemPrompt"] = serde_json::json!(base);
+
+        let compiled = self.compiled_transform(timestamp, &event);
+
+        match (native, compiled) {
+            (Some(mut patch), Some(prompt)) => {
+                patch.system_prompt = Some(prompt);
+                Some(patch)
+            }
+            (None, Some(prompt)) => Some(rpi_ai::ContextPatch {
+                system_prompt: Some(prompt),
+            }),
+            (native, None) => native,
+        }
+    }
+
+    fn before_request(
+        &self,
+        model: &rpi_ai::Model,
+        ctx: &rpi_ai::Context,
+        opts: &rpi_ai::SimpleStreamOptions,
+    ) -> Option<rpi_ai::SimpleStreamOptionsPatch> {
+        self.inner
+            .as_ref()
+            .and_then(|hooks| hooks.before_request(model, ctx, opts))
+    }
+
+    fn after_response(&self, model: &rpi_ai::Model, message: &rpi_ai::types::AssistantMessage) {
+        if let Some(hooks) = &self.inner {
+            hooks.after_response(model, message);
         }
     }
 }
@@ -1685,5 +1898,247 @@ mod tests {
             ratio < 200.0,
             "wasm tax exploded: {ratio:.1}x ({wasm_ns} vs {compiled_ns} ns/call)"
         );
+    }
+
+    /// A synthetic plugin exposing every non-tool surface, so the session wiring
+    /// can be exercised without depending on which real plugin declares what.
+    struct Surface {
+        prompt_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Plugin for Surface {
+        fn id(&self) -> &str {
+            "surface"
+        }
+
+        fn commands(&self) -> Vec<kiqi_plugin::CommandSpec> {
+            vec![kiqi_plugin::CommandSpec {
+                name: "surface".into(),
+                description: "surface command".into(),
+            }]
+        }
+
+        fn run_command(
+            &self,
+            _name: &str,
+            args: &str,
+            _caps: &HostCaps<'_>,
+        ) -> Result<String, kiqi_plugin::PluginError> {
+            Ok(format!("surface ran {args}"))
+        }
+
+        fn shortcuts(&self) -> Vec<kiqi_plugin::ShortcutSpec> {
+            vec![kiqi_plugin::ShortcutSpec {
+                key: "f8".into(),
+                description: "surface shortcut".into(),
+            }]
+        }
+
+        fn probe_points(&self) -> Vec<String> {
+            vec!["before-tool-call".into()]
+        }
+
+        fn probe(
+            &self,
+            point: &str,
+            payload: &serde_json::Value,
+            _caps: &HostCaps<'_>,
+        ) -> kiqi_plugin::Verdict {
+            assert_eq!(point, "before-tool-call");
+            let args = &payload["args"];
+            if args["block"] == serde_json::json!(true) {
+                return kiqi_plugin::Verdict::Block {
+                    reason: format!("{} is blocked", payload["toolName"].as_str().unwrap_or("?")),
+                };
+            }
+            if let Some(rewrite) = args.get("rewrite") {
+                return kiqi_plugin::Verdict::Replace(rewrite.clone());
+            }
+            kiqi_plugin::Verdict::Continue
+        }
+
+        fn before_agent_start(
+            &self,
+            prompt: &serde_json::Value,
+            _caps: &HostCaps<'_>,
+        ) -> Option<String> {
+            self.prompt_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let text = prompt["prompt"].as_str().unwrap_or("");
+            Some(format!("{text}\n[surface]"))
+        }
+    }
+
+    fn surface_host() -> (
+        std::sync::Arc<PluginHost>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let prompt_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let plugin = Box::new(Surface {
+            prompt_calls: prompt_calls.clone(),
+        });
+        (
+            std::sync::Arc::new(PluginHost::new("surface", plugin)),
+            prompt_calls,
+        )
+    }
+
+    /// The `before-tool-call` gate: block wins, a rewrite reaches the runtime,
+    /// and a plugin that did not declare the point is never asked.
+    #[test]
+    fn probe_tool_call_blocks_and_rewrites() {
+        let (host, _surface) = surface_host();
+        let caps = OwnedCaps {
+            session: None,
+            control: None,
+            inject: None,
+            ui: None,
+            log: std::sync::Arc::new(StderrLog),
+        };
+
+        let blocked = probe_tool_call_with(
+            &[host.clone()],
+            &caps,
+            "call-1",
+            "bash",
+            &serde_json::json!({ "block": true }),
+        );
+        assert_eq!(
+            blocked,
+            Some(kiqi_plugin::Verdict::Block {
+                reason: "bash is blocked".into()
+            })
+        );
+
+        let rewritten = probe_tool_call_with(
+            &[host.clone()],
+            &caps,
+            "call-2",
+            "bash",
+            &serde_json::json!({ "rewrite": { "command": "ls" } }),
+        );
+        assert_eq!(
+            rewritten,
+            Some(kiqi_plugin::Verdict::Replace(
+                serde_json::json!({ "command": "ls" })
+            ))
+        );
+
+        let untouched = probe_tool_call_with(
+            &[host],
+            &caps,
+            "call-3",
+            "bash",
+            &serde_json::json!({ "command": "ls" }),
+        );
+        assert_eq!(untouched, None);
+    }
+
+    /// The compiled prompt transform runs once per prompt, no matter how many
+    /// provider calls the run makes.
+    #[test]
+    fn compiled_prompt_transform_runs_once_per_prompt() {
+        let (host, surface) = surface_host();
+        let hooks = CompiledPromptHooks {
+            inner: None,
+            hosts: vec![host],
+            cache: std::sync::Mutex::new(None),
+        };
+        let event = serde_json::json!({ "prompt": "hello" });
+        let calls = || surface.load(std::sync::atomic::Ordering::SeqCst);
+
+        let first = hooks.compiled_transform(1, &event);
+        assert_eq!(first.as_deref(), Some("hello\n[surface]"));
+        assert_eq!(calls(), 1);
+
+        // Same prompt (a later provider call in the same run): cached.
+        assert_eq!(hooks.compiled_transform(1, &event), first);
+        assert_eq!(calls(), 1, "a run must not recompute");
+
+        // New prompt: computed again, exactly once.
+        assert_eq!(hooks.compiled_transform(2, &event), first);
+        assert_eq!(calls(), 2);
+    }
+
+    /// Shortcut routing only hands the key to plugins that declared it.
+    #[test]
+    fn shortcut_hosts_match_the_declared_key() {
+        let (host, _surface) = surface_host();
+        let hosts = vec![host];
+        assert_eq!(shortcut_hosts(&hosts, "f8").len(), 1);
+        assert!(shortcut_hosts(&hosts, "f9").is_empty());
+    }
+
+    /// The same wiring, driven through a real wasm component: the conformance
+    /// guest declares every non-tool surface, so this proves the session-level
+    /// paths reach a sandboxed plugin, not just a compiled one.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn wasm_non_tool_surfaces_reach_the_session_wiring() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = root.join("plugins/wasm/kiqi-conformance-guest/Cargo.toml");
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--manifest-path"])
+            .arg(&manifest)
+            .args(["--target", "wasm32-wasip2", "--release"])
+            .status()
+            .expect("build the conformance guest");
+        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
+        let wasm =
+            root.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm");
+        let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants(
+            "conformance",
+            &wasm,
+            kiqi_plugin::grants::Grants::default(),
+        )
+        .expect("load the conformance guest");
+        let host = std::sync::Arc::new(PluginHost::new("conformance", Box::new(plugin)));
+        let caps = OwnedCaps {
+            session: None,
+            control: None,
+            inject: None,
+            ui: None,
+            log: std::sync::Arc::new(Silent),
+        };
+
+        // `/command` reaches the plugin and its text comes back.
+        let text = host
+            .run_command("conformance", "", &caps.caps())
+            .expect("the conformance command runs");
+        assert_eq!(text, "conformance command ran");
+
+        // `f8` is routed only because the component declared it.
+        assert_eq!(shortcut_hosts(&[host.clone()], "f8").len(), 1);
+
+        // `before-tool-call` veto, decided inside the sandbox.
+        let blocked = probe_tool_call_with(
+            &[host.clone()],
+            &caps,
+            "c1",
+            "bash",
+            &serde_json::json!({ "block": true }),
+        );
+        assert_eq!(
+            blocked,
+            Some(kiqi_plugin::Verdict::Block {
+                reason: "conformance blocks this".into()
+            })
+        );
+
+        // Prompt transform, computed once per prompt.
+        let hooks = CompiledPromptHooks {
+            inner: None,
+            hosts: vec![host],
+            cache: std::sync::Mutex::new(None),
+        };
+        let event = serde_json::json!({ "prompt": "hi" });
+        let first = hooks.compiled_transform(7, &event);
+        assert!(
+            first
+                .as_deref()
+                .is_some_and(|prompt| prompt.ends_with("[conformance]")),
+            "got {first:?}"
+        );
+        assert_eq!(hooks.compiled_transform(7, &event), first);
     }
 }

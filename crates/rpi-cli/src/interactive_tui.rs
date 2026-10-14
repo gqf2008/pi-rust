@@ -454,14 +454,20 @@ fn dispatch_key_event(state: &TuiState, key: &KeyEvent, editor: &Editor) -> bool
         return false;
     };
 
-    let Ok(session) = state.extension_session.lock() else {
-        return false;
-    };
-    let Some(snapshot) = session.snapshot_arc() else {
-        return false;
-    };
-    // Nothing claimed this key (or nobody subscribes to Input) — not ours.
-    if !snapshot.has_shortcut(&name) || snapshot.handlers_for(EventTag::Input).is_empty() {
+    let snapshot = state
+        .extension_session
+        .lock()
+        .ok()
+        .and_then(|session| session.snapshot_arc());
+    let native_claims = snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.has_shortcut(&name) && !snapshot.handlers_for(EventTag::Input).is_empty()
+    });
+    // Compiled-in and wasm plugins declare their keys the same way, and the key
+    // then arrives as an `Input` event. Held as hosts so the dispatch below uses
+    // the same stateful instance that declared it.
+    let compiled = crate::plugins::shortcut_hosts(&crate::plugins::compiled_plugin_hosts(), &name);
+    // Nothing claimed this key — not ours.
+    if !native_claims && compiled.is_empty() {
         return false;
     }
     // Function keys do not insert text. Other keys belong to the draft editor
@@ -482,14 +488,30 @@ fn dispatch_key_event(state: &TuiState, key: &KeyEvent, editor: &Editor) -> bool
         "ctrl": key.modifiers.contains(KeyModifiers::CONTROL),
         "alt": key.modifiers.contains(KeyModifiers::ALT),
         "shift": key.modifiers.contains(KeyModifiers::SHIFT),
-    })
-    .to_string();
+    });
     // The handler decides whether it actually wants the key: it returns the
     // `CLAIMED` code while its feature is active and `CONTINUE` otherwise, so a
     // registered-but-disabled shortcut (push-to-talk toggled off) still lets the
     // key reach the editor normally.
-    let claimed =
-        rpi_extensions::dispatch_data_event_claiming(&snapshot, EventTag::Input, &payload);
+    let mut claimed = snapshot.as_ref().is_some_and(|snapshot| {
+        rpi_extensions::dispatch_data_event_claiming(
+            snapshot,
+            EventTag::Input,
+            &payload.to_string(),
+        )
+    });
+    if !compiled.is_empty() {
+        let caps = crate::plugins::compiled_caps();
+        let event = kiqi_plugin::Event::new(kiqi_plugin::EventTag::Input, payload);
+        for host in &compiled {
+            if !matches!(
+                host.on_event(&event, &caps.caps()),
+                kiqi_plugin::EventAction::Continue
+            ) {
+                claimed = true;
+            }
+        }
+    }
     if claimed && key.kind == KeyEventKind::Press {
         state
             .extension_claimed_keys
