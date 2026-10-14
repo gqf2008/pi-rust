@@ -353,6 +353,12 @@ pub fn owned_caps(
 /// The tag discriminant maps straight through: the two `EventTag` enums are
 /// pinned together by `event_tags_match_the_native_abi`.
 pub fn install_compiled_event_sink(caps: OwnedCaps) {
+    // Remember the same capabilities for the surfaces that run outside a tool
+    // call (commands, probes, prompt transforms): they are built here, once per
+    // session, from the live action host.
+    if let Ok(mut guard) = COMPILED_CAPS.write() {
+        *guard = Some(caps.clone());
+    }
     let hosts = compiled_plugin_hosts();
     let sink: rpi_extensions::CompiledEventSink = std::sync::Arc::new(move |tag, payload| {
         let Some(tag) = kiqi_plugin::EventTag::from_u32(tag) else {
@@ -365,6 +371,29 @@ pub fn install_compiled_event_sink(caps: OwnedCaps) {
         }
     });
     rpi_extensions::set_compiled_event_sink(sink);
+}
+
+/// The capabilities compiled plugins currently run with.
+///
+/// Written by [`install_compiled_event_sink`] (one session build) so commands,
+/// probes and prompt transforms reach the same live host the tools do. Before a
+/// session exists (a test, or `ki plugin …`) a plugin gets logging only, rather
+/// than a capability that would fail at call time.
+static COMPILED_CAPS: std::sync::RwLock<Option<OwnedCaps>> = std::sync::RwLock::new(None);
+
+/// See [`COMPILED_CAPS`]. Cloned so the caller's borrow does not hold the lock.
+pub fn compiled_caps() -> OwnedCaps {
+    COMPILED_CAPS
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_else(|| OwnedCaps {
+            session: None,
+            control: None,
+            inject: None,
+            ui: None,
+            log: std::sync::Arc::new(StderrLog),
+        })
 }
 
 /// Owners for compiled plugins start here, far above any registry id.

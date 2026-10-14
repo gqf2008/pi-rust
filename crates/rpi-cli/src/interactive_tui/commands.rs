@@ -746,4 +746,88 @@ pub(super) fn register_extension_commands(
             session: session.clone(),
         }));
     }
+    register_compiled_commands(registry);
+}
+
+/// Register the `/commands` compiled-in and wasm plugins contribute.
+///
+/// A compiled plugin's `run_command` is one synchronous call that returns the
+/// text to show, so there is no selector/editor round-trip to resume — unlike
+/// [`ExtensionCommand`], which keeps the native session alive for a dialog.
+/// Built-ins already registered win, so a plugin cannot shadow `/help`.
+pub(super) fn register_compiled_commands(registry: &mut CommandRegistry) {
+    for host in crate::plugins::compiled_plugin_hosts() {
+        for spec in host.plugin().commands() {
+            let name = if spec.name.starts_with('/') {
+                spec.name.clone()
+            } else {
+                format!("/{}", spec.name)
+            };
+            if registry.find(&name).is_some() {
+                continue;
+            }
+            registry.register(Arc::new(CompiledCommand {
+                name,
+                description: spec.description,
+                host: host.clone(),
+            }));
+        }
+    }
+}
+
+/// A slash command contributed by a compiled-in or wasm plugin.
+struct CompiledCommand {
+    name: String,
+    description: String,
+    host: std::sync::Arc<crate::plugins::PluginHost>,
+}
+
+impl SlashCommand for CompiledCommand {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description_owned(&self) -> String {
+        self.description.clone()
+    }
+
+    fn execute(&self, ctx: &CommandContext, args: &str) {
+        let caps = crate::plugins::compiled_caps();
+        let name = self.name.trim_start_matches('/');
+        match self.host.run_command(name, args, &caps.caps()) {
+            Ok(text) if !text.trim().is_empty() => add_note_message(&ctx.chat, &text),
+            Ok(_) => {}
+            Err(error) => add_error_message(&ctx.chat, &format!("/{name} failed: {error}")),
+        }
+        ctx.tui.request_render(false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A compiled-in plugin's `/command` lands in the same registry the TUI
+    /// dispatches from — rpi-todo contributes `/todos`.
+    #[test]
+    fn compiled_plugin_commands_are_registered() {
+        let mut registry = CommandRegistry::new();
+        register_compiled_commands(&mut registry);
+        let command = registry.find("/todos").expect("/todos from rpi-todo");
+        assert_eq!(command.name(), "/todos");
+        assert!(
+            !command.description_owned().is_empty(),
+            "autocomplete needs a description"
+        );
+    }
+
+    /// A plugin cannot shadow a built-in: built-ins register first and the
+    /// duplicate check keeps them, so `/help` stays the real one.
+    #[test]
+    fn compiled_commands_do_not_shadow_builtins() {
+        let mut registry = build_builtin_registry();
+        let builtin = registry.find("/help").unwrap().name().to_string();
+        register_compiled_commands(&mut registry);
+        assert_eq!(registry.find("/help").unwrap().name(), builtin);
+    }
 }
