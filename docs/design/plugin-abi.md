@@ -562,6 +562,26 @@ CLI 侧 `ki plugin grant <id> exec --command echo`、`ki plugin install … --co
 对声明齐全的组件不再有警告；测试钉住这个集合本身，加上三路新 e2e：`exec` 白名单内/外、
 `net-sockets` 走真实 loopback 回声（`sent=4 recv=ping`）与 host 不在允许列表时的 `denied`。
 
+### 6.27 修掉两个绕过：`net-http` 重定向、`fs` 符号链接
+
+实现完能力面后回头攻这两个授权面，两个都是真洞：
+
+1. **`net-http` 的重定向能绕过白名单**。原先只检查了初始 URL 的 host，而 reqwest 默认跟随重定向
+   ——一个**已授权**的主机只需回一个 302 到任意地址，请求就到了未授权的 host。现在用
+   `redirect::Policy::custom`：**每一跳的 host 都要重新过白名单**，不在列表里就 `stop`（把 3xx
+   交回插件，而不是自做主张报错）；跳数仍限 10。
+2. **`fs` 的监禁只是词法的**。绝对路径和 `..` 被拒了，但数据目录里若存在一个指向外面的符号链接
+   （`exec` 或用户留下的），`fs::read("link")` 会跟着跑出去。现在多一道
+   `symlink_checked()`：父目录 `canonicalize` 后必须仍在（规范化后的）root 内，且最后一段本身
+   不能是链接。中间目录是链接的情况也被拦。
+
+写这一步时自己的 bug 也被测试抳住了：`root.canonicalize().unwrap_or(root)` 在 data 目录尚未
+存在时会回退成**未规范化**的 root（macOS 上 `/var` vs `/private/var`），于是所有路径都被判
+“escapes”。修法是先 `create_dir_all(root)` 再规范化。
+
+测试：host crate 新增 2 个单测（词法/符号链接监禁、未授权回 `denied` 而非 `failed`）与 1 个真
+起 HTTP 服务器验重定向不被跟随的 e2e。
+
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
 > “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里

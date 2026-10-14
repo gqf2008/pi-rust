@@ -152,7 +152,7 @@ fn denied() -> CapabilityError {
 
 /// What the user authorized for one plugin, shared with the CLI through the
 /// contract crate (`kiqi-plugin`).
-pub use kiqi_plugin::grants::{ExecGrant, Grants, NetHttpGrant, NetSocketsGrant};
+pub use kiqi_plugin::grants::{allows, ExecGrant, Grants, NetHttpGrant, NetSocketsGrant};
 
 /// The user-grantable capabilities a component declares — the `kiqi:plugin/*`
 /// imports that need authorization (`net-http`, `fs`, `exec`, `net-sockets`).
@@ -372,8 +372,29 @@ impl crate::kiqi::plugin::net_http::Host for HostState {
             )));
         }
 
+        let allowed_hosts = self
+            .grants
+            .net_http
+            .as_ref()
+            .map(|grant| grant.hosts.clone())
+            .unwrap_or_default();
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            // A redirect is a second request, to a host the user may not have
+            // granted. Follow it only when that host is allow-listed too;
+            // otherwise stop and hand the 3xx back, so a granted host cannot
+            // bounce the plugin somewhere it was never allowed to go.
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= 10 {
+                    return attempt.error("too many redirects");
+                }
+                let host = attempt.url().host_str().unwrap_or_default();
+                if allows(&allowed_hosts, host) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
             .build()
             .map_err(|error| CapabilityError::Failed(error.to_string()))?;
         let method = request
@@ -461,29 +482,72 @@ impl HostState {
             .clone()
             .ok_or_else(|| CapabilityError::Failed("this plugin has no data directory".to_string()))
     }
+
+    /// Re-check a lexically-jailed path against symlinks.
+    ///
+    /// The lexical check is not a jail on its own: a symlink left in the data
+    /// directory (by `exec`, or by the user) would be followed straight out of
+    /// it. So the parent is canonicalized and must still sit inside the
+    /// canonical root, and the final component must not itself be a link.
+    fn symlink_checked(
+        &self,
+        resolved: &std::path::Path,
+        create_parents: bool,
+    ) -> Result<std::path::PathBuf, CapabilityError> {
+        let root = self.data_dir()?;
+        // Create it first: `canonicalize` needs the directory to exist, and
+        // falling back to the un-canonicalized path would compare a symlinked
+        // root (`/var` vs `/private/var` on macOS) against a canonicalized
+        // parent and reject every path.
+        std::fs::create_dir_all(&root).map_err(|error| {
+            CapabilityError::Failed(format!("create {}: {error}", root.display()))
+        })?;
+        let root = root.canonicalize().unwrap_or(root);
+        let parent = resolved.parent().unwrap_or(&root);
+        if create_parents {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                CapabilityError::Failed(format!("create {}: {error}", parent.display()))
+            })?;
+        }
+        let parent = parent.canonicalize().map_err(|error| {
+            CapabilityError::Failed(format!("resolve {}: {error}", parent.display()))
+        })?;
+        if !parent.starts_with(&root) {
+            return Err(CapabilityError::Failed(
+                "path escapes the plugin directory".to_string(),
+            ));
+        }
+        let name = resolved
+            .file_name()
+            .ok_or_else(|| CapabilityError::Failed("path has no file name".to_string()))?;
+        let target = parent.join(name);
+        if let Ok(metadata) = std::fs::symlink_metadata(&target) {
+            if metadata.file_type().is_symlink() {
+                return Err(CapabilityError::Failed(
+                    "refusing to follow a symlink inside the plugin directory".to_string(),
+                ));
+            }
+        }
+        Ok(target)
+    }
 }
 
 /// Plugin filesystem, jailed to `plugins/<id>/data/`.
 impl crate::kiqi::plugin::fs::Host for HostState {
     fn read(&mut self, rel_path: String) -> Result<Vec<u8>, CapabilityError> {
-        let path = self.fs_path(&rel_path)?;
+        let path = self.symlink_checked(&self.fs_path(&rel_path)?, false)?;
         std::fs::read(&path)
             .map_err(|error| CapabilityError::Failed(format!("read {}: {error}", path.display())))
     }
 
     fn write(&mut self, rel_path: String, contents: Vec<u8>) -> Result<(), CapabilityError> {
-        let path = self.fs_path(&rel_path)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                CapabilityError::Failed(format!("create {}: {error}", parent.display()))
-            })?;
-        }
+        let path = self.symlink_checked(&self.fs_path(&rel_path)?, true)?;
         std::fs::write(&path, contents)
             .map_err(|error| CapabilityError::Failed(format!("write {}: {error}", path.display())))
     }
 
     fn read_dir(&mut self, rel_dir: String) -> Result<Vec<String>, CapabilityError> {
-        let path = self.fs_path(&rel_dir)?;
+        let path = self.symlink_checked(&self.fs_path(&rel_dir)?, false)?;
         let entries = std::fs::read_dir(&path).map_err(|error| {
             CapabilityError::Failed(format!("read dir {}: {error}", path.display()))
         })?;
@@ -1116,5 +1180,73 @@ fn to_wit_event(event: &Event) -> WitEvent {
             kind: format!("{other:?}"),
             payload: payload_string(event),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(root: &std::path::Path) -> HostState {
+        HostState {
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+            grants: Grants {
+                fs: true,
+                ..Grants::default()
+            },
+            fs_root: Some(root.to_path_buf()),
+            sockets: std::collections::HashMap::new(),
+            next_socket: 1,
+        }
+    }
+
+    /// The jail is lexical *and* symlink-aware: `..` never resolves, and a link
+    /// that points outside is refused rather than followed.
+    #[test]
+    fn the_data_jail_refuses_traversal_and_symlinks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("data");
+        std::fs::create_dir_all(root.join("sub")).expect("data dir");
+        let outside = dir.path().join("secret.txt");
+        std::fs::write(&outside, b"secret").expect("secret");
+        let state = state(&root);
+
+        assert!(state.jail("sub/ok.txt").is_ok());
+        assert!(
+            state.jail("../secret.txt").is_err(),
+            "`..` must not resolve"
+        );
+        assert!(state.jail("/etc/passwd").is_err(), "absolute must not pass");
+
+        #[cfg(unix)]
+        {
+            // A link as the final component, and a link as a directory in the
+            // middle — the second is the one a lexical-only check would miss.
+            std::os::unix::fs::symlink(&outside, root.join("link")).expect("symlink");
+            std::os::unix::fs::symlink(dir.path(), root.join("up")).expect("symlink");
+            std::fs::create_dir_all(root.join("sub")).expect("sub");
+
+            let resolved = state.jail("link").expect("lexically inside");
+            assert!(
+                state.symlink_checked(&resolved, false).is_err(),
+                "a final-component symlink must be refused"
+            );
+            let resolved = state.jail("up/secret.txt").expect("lexically inside");
+            assert!(
+                state.symlink_checked(&resolved, false).is_err(),
+                "a symlinked parent must be refused"
+            );
+        }
+    }
+
+    /// A missing grant is `denied` (authorization), not `failed` (the op broke).
+    #[test]
+    fn fs_without_a_grant_is_denied() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = state(dir.path());
+        state.grants.fs = false;
+        let error = state.fs_path("x").expect_err("denied");
+        assert!(matches!(error, CapabilityError::Denied(_)), "got {error:?}");
     }
 }

@@ -181,7 +181,7 @@ impl Grants {
 }
 
 /// Exact match, or `*` for "any" — the one allow-list rule every policy uses.
-fn allows(list: &[String], value: &str) -> bool {
+pub fn allows(list: &[String], value: &str) -> bool {
     list.iter()
         .any(|allowed| allowed == "*" || allowed == value)
 }

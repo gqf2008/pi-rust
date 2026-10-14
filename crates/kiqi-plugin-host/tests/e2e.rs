@@ -1010,3 +1010,55 @@ fn only_enforced_capabilities_count_as_working() {
         "no-such-capability"
     ));
 }
+
+/// A granted host must not be able to bounce the request somewhere the user
+/// never granted: a redirect is followed only when its own host is listed too,
+/// otherwise the 3xx is handed back.
+#[test]
+fn net_http_does_not_follow_a_redirect_to_an_ungranted_host() {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback server");
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buffer = [0u8; 1024];
+        let _ = stream.read(&mut buffer);
+        // `example.invalid` is never allow-listed here, so the client must stop
+        // rather than connect.
+        let response = "HTTP/1.1 302 Found\r\n\
+                        Location: http://example.invalid/evil\r\n\
+                        Content-Length: 0\r\n\
+                        Connection: close\r\n\r\n";
+        let _ = stream.write_all(response.as_bytes());
+    });
+
+    let (_dir, plugin) = load_fixture_in_temp(Grants {
+        net_http: Some(NetHttpGrant {
+            hosts: vec!["127.0.0.1".to_string()],
+        }),
+        ..Grants::default()
+    });
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    let outcome = plugin
+        .call(
+            "fetch",
+            &serde_json::json!({ "url": format!("http://127.0.0.1:{port}/") }),
+            &caps,
+            &sink,
+        )
+        .expect("fetch");
+    server.join().expect("server thread");
+
+    let body = text_of(&outcome);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).expect("the capability answers JSON");
+    assert_eq!(
+        parsed["status"], 302,
+        "the redirect must not be followed: {body}"
+    );
+}
