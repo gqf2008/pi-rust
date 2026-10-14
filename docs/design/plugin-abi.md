@@ -1,6 +1,6 @@
 # 插件 ABI：从 cdylib 到 wasm 组件
 
-状态：**推迟为第一方契约；作为第三方（不受信）层推进验证** · 目标版本 `kiqi:plugin@0.4.0`
+状态：**推迟为第一方契约；作为第三方（不受信）层推进验证** · 目标版本 `kiqi:plugin@0.5.0`
 
 > **本方案不再作为第一方插件的契约。** 实测 `rpi-package` 的 18 个包后改为
 > 「Rust `trait Plugin` + cargo feature 全编译接入」，见
@@ -14,7 +14,7 @@
 > 判据是 §6.3 的 8 条门禁，而不是「迁了几个插件」。第一方**其余插件留在编译期**，
 > 只有明确需要第三方分发/沙箱的才迁。
 >
-> `plugins/kiqi-plugin.wit` 已升到 parse-validated 的 `0.4.0`（0.1.0 连 `wasm-tools component wit`
+> `plugins/kiqi-plugin.wit` 已升到 parse-validated 的 `0.5.0`（0.1.0 连 `wasm-tools component wit`
 > 都过不了：variant case 带命名/多字段是非法的）：能力面做全、每个能力独立 interface、
 > 调用一律 `result<_, denied>`、进度用 import sink、timer 由宿主驱动。
 
@@ -500,6 +500,29 @@ before_agent_start 跑在同一套一致的能力上。测试：拿 `reload_caps
 **编译期插件会收到两次同一个按键**。现在只走漏斗，按键筛选（只问声明了该键的插件）移到 sink 里，
 由 `dispatch_to_compiled()` 统一负责，并有测试分别钉住“声明了的键被问到并 claim”与“未声明的键
 根本不会被问到”。
+
+### 6.24 ABI 0.5.0：wasm 版就是 `trait Plugin` 那一份（面一一对应）
+
+需求一句话：**wasm 要一份和 `trait Plugin` 一样的契约**。逐面比对后发现四处对不上，已对齐：
+
+| `trait Plugin` | 0.4.0 的 WIT | 0.5.0 |
+|---|---|---|
+| `id()` | 缺 | **加 `id: func() -> string`**；宿主只在装载时**核对**（install 目录仍是授权键，声明不一致就报一句，不夺权） |
+| — | `init()` 多一个 | 删（组件实例化本身就是构造点） |
+| — | `on-tick()` 多一个 | 删（宿主从不驱动，4 个 guest 全是空实现） |
+| — | `timer` 能力 | 删（只为驱动 `on-tick` 而存在；`Grants.timer` 一并去掉） |
+| `EventAction` 三态 | `event-action` 三态 | **`{continue, claimed}`**（`replace` 从未被任何插件构造，且没有投递通道） |
+
+其余一一对应：`tools`↔`list-tools`、`call`↔`call-tool`、`commands`/`run_command`↔
+`list-commands`/`run-command`、`flags`↔`list-flags`、`shortcuts`↔`list-shortcuts`、
+`before_agent_start`↔`before-agent-start`、`probe_points`/`probe`↔`list-probe-points`/`probe`、
+`on_event`↔`on-event`、`shutdown`↔`shutdown`。能力导入（`log`/`session-read`/`session-control`/
+`inject`/`ui`/`progress` + `net-http`/`fs`/`net-sockets`/`exec`）是 `HostCaps` 的对应物加沙箱专有项，
+不与贡献面冲突。
+
+代价：`timer` 能力被删——它当初为“宿主驱动 tick”设计，但 trait 没有对应面、也没有任何插件在用。
+若要后台 tick，正确做法是**两边一起加**（先给 `trait Plugin` 加 `on_tick` + `HostCaps` 的 timer），
+而不是让 wasm 单方面多出一个面。
 
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里

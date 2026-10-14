@@ -1,23 +1,27 @@
 /// kiqi plugin ABI — wasm component model (WASI Preview 2 / WIT).
 ///
-/// **Proposed 0.3.0.** The 0.1.0 draft never parsed: `other(kind: string,
-/// payload: string)` used named variant fields, which WIT does not allow. This
+/// **0.5.0.** The 0.1.0 draft never parsed: `other(kind: string,
+/// payload: string)` used named variant fields, which WIT does not allow. Every
 /// version is checked with `wasm-tools component wit`.
 ///
 /// Shape decisions this version encodes:
+///   * the exported surface is exactly `kiqi_plugin::Plugin`'s: `id`, `shutdown`,
+///     `list-tools`/`call-tool`, `list-commands`/`run-command`, `list-flags`,
+///     `list-shortcuts`, `on-event`, `before-agent-start`,
+///     `list-probe-points`/`probe`. Nothing the trait has is missing, and nothing
+///     the trait lacks is invented here;
 ///   * capability calls are fallible (`result<_, capability-error>`) so a plugin still
 ///     loads when a capability is not granted and can degrade at call time;
 ///   * every capability is its own interface, so a deny stub, audit and future
 ///     tightening stay minimal and independent;
 ///   * progress is an **imported sink**, not a return value — one tool call can
 ///     emit many blocks (16/18 real plugins need stepwise output);
-///   * timers are **host-driven** (`plugin.on-tick`), because WASI Preview 2 has
-///     no OS threads to run a background loop;
 ///   * a tool returns a **structured `tool-result`** (blocks + is-error +
 ///     `details` JSON), not a bare string — `details` is how a plugin carries
 ///     state that must survive fork/switch (`rpi-todo`'s task list);
-///   * `on-event` returns an **`event-action`** (`continue`/`claimed`/`replace`)
-///     so a wasm plugin can claim or rewrite an event like a compiled one.
+///   * `on-event` returns an **`event-action`** (`continue`/`claimed`) so a wasm
+///     plugin can claim an event like a native handler's `CLAIMED`; the enum
+///     stops there because this host has no channel for a rewritten payload.
 ///
 /// The component model requires every import a component declares to be
 /// satisfied at instantiation, so the host always provides all interfaces:
@@ -25,7 +29,7 @@
 /// (A built component prunes the interfaces it does not use, so a plugin that
 /// never touches `exec` never asks for it.) "Required but not granted" is
 /// rejected before instantiation from the plugin manifest.
-package kiqi:plugin@0.4.0;
+package kiqi:plugin@0.5.0;
 
 /// Types shared across the host <-> plugin boundary.
 interface types {
@@ -156,7 +160,6 @@ interface types {
     variant event-action {
         continue,
         claimed,
-        replace(string),
     }
 }
 
@@ -251,19 +254,14 @@ interface exec {
     run: func(cmd: string, args: list<string>, cwd: option<string>) -> result<string, capability-error>;
 }
 
-/// Host-driven timer. The plugin asks the host to call `plugin.on-tick` on a
-/// period, because there are no OS threads to run its own loop.
-interface timer {
-    use types.{capability-error};
-    request-tick: func(every-ms: u32) -> result<_, capability-error>;
-}
-
 /// What a plugin contributes to the runtime.
 interface plugin-api {
     use types.{command-spec, event, event-action, flag-spec, plugin-error, shortcut-spec, tool-result, tool-spec, verdict};
 
-    /// Called once, when the plugin is instantiated and before `list-tools`.
-    init: func();
+    /// Stable identity: log prefix, config key, root of tool names. Mirrors
+    /// `kiqi_plugin::Plugin::id`. The host cross-checks it against the directory
+    /// the component was installed under (grants are keyed by directory).
+    id: func() -> string;
 
     /// Called on shutdown. Best effort; the host does not wait forever.
     shutdown: func();
@@ -277,9 +275,6 @@ interface plugin-api {
     list-shortcuts: func() -> list<shortcut-spec>;
 
     on-event: func(event: event) -> event-action;
-
-    /// Driven by the host at the period `timer.request-tick` was granted.
-    on-tick: func();
 
     /// Return a replacement system prompt, or none to leave it unchanged.
     before-agent-start: func(prompt: string) -> option<string>;
@@ -302,7 +297,6 @@ world plugin {
     import fs;
     import net-sockets;
     import exec;
-    import timer;
 
     export plugin-api;
 }

@@ -1,6 +1,6 @@
 //! Host-side backend for **wasm plugins** (the component model tier).
 //!
-//! Binds `plugins/kiqi-plugin.wit` (ABI 0.2.0) with wasmtime's `bindgen!` and
+//! Binds `plugins/kiqi-plugin.wit` (ABI 0.5.0) with wasmtime's `bindgen!` and
 //! hosts a plugin component behind the same [`kiqi_plugin::Plugin`] seam the
 //! compiled-in plugins implement.
 //!
@@ -155,14 +155,13 @@ fn denied() -> CapabilityError {
 pub use kiqi_plugin::grants::{Grants, NetHttpGrant};
 
 /// The user-grantable capabilities a component declares — the `kiqi:plugin/*`
-/// imports that need authorization (`net-http`, `fs`, `exec`, `timer`,
-/// `net-sockets`).
+/// imports that need authorization (`net-http`, `fs`, `exec`, `net-sockets`).
 ///
 /// The domain interfaces (`log`, `session-read`, …) are always available through
 /// `HostCaps` and are not part of the grant set, so they are filtered out. This
 /// is what `ki plugin install` shows the user and re-prompts about when it grows.
 pub fn declared_capabilities(wasm: &Path) -> Result<Vec<String>, String> {
-    const GRANTABLE: &[&str] = &["net-http", "fs", "exec", "timer", "net-sockets"];
+    const GRANTABLE: &[&str] = &["net-http", "fs", "exec", "net-sockets"];
     let bytes = std::fs::read(wasm).map_err(|error| format!("read {}: {error}", wasm.display()))?;
     let mut caps: Vec<String> = Vec::new();
     for payload in wasmparser::Parser::new(0).parse_all(&bytes) {
@@ -425,10 +424,6 @@ deny_capability!(exec {
     run(cmd: String, args: Vec<String>, cwd: Option<String>) -> Result<String, CapabilityError>;
 });
 
-deny_capability!(timer {
-    request_tick(every_ms: u32) -> Result<(), CapabilityError>;
-});
-
 // ---------------------------------------------------------------------------
 // WasmPlugin
 // ---------------------------------------------------------------------------
@@ -518,10 +513,17 @@ impl WasmPlugin {
         }
         let guest = World::instantiate(&mut store, &component, &linker)
             .map_err(|error| PluginError::Failed(format!("instantiate {id}: {error}")))?;
-        guest
-            .kiqi_plugin_plugin_api()
-            .call_init(&mut store)
-            .map_err(|error| PluginError::Failed(format!("{id}.init: {error}")))?;
+        // The plugin declares its own identity. The install directory stays the
+        // authorization key (grants live beside the file and were read by it), so
+        // a mismatch is reported rather than silently trusted.
+        if let Ok(declared) = guest.kiqi_plugin_plugin_api().call_id(&mut store) {
+            if !declared.is_empty() && declared != id {
+                eprintln!(
+                    "[kiqi-plugin] {id}: component declares id `{declared}`; \
+                     grants remain keyed by the install directory"
+                );
+            }
+        }
 
         Ok(Self {
             id,
@@ -763,9 +765,6 @@ impl PluginTrait for WasmPlugin {
         match result {
             Ok(WitEventAction::Continue) => EventAction::Continue,
             Ok(WitEventAction::Claimed) => EventAction::Claimed,
-            Ok(WitEventAction::Replace(json)) => {
-                EventAction::Replace(serde_json::from_str(&json).unwrap_or(serde_json::Value::Null))
-            }
             Err(trap) => {
                 eprintln!("[kiqi-plugin] {}: on-event trapped: {trap}", self.id);
                 EventAction::Continue

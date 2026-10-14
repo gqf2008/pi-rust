@@ -354,9 +354,11 @@ pub enum EventAction {
     /// Observed; pass the event on to the next plugin and to normal handling.
     Continue,
     /// Consumed: no later plugin sees it and normal handling is skipped.
+    ///
+    /// The enum stops here on purpose: it mirrors the native ABI's
+    /// `EVENT_HANDLER_CLAIMED` / `0`, and the host has no channel for a rewritten
+    /// event payload, so a `Replace` variant would be a promise nothing keeps.
     Claimed,
-    /// Handled, but replaced the payload for whatever runs next.
-    Replace(Value),
 }
 
 /// A permission gate's verdict.

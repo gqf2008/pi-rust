@@ -844,3 +844,16 @@ fn declared_capabilities_reads_the_components_imports() {
     let caps = kiqi_plugin_host::declared_capabilities(&wasm).expect("read component imports");
     assert_eq!(caps, vec!["net-http".to_string()], "got {caps:?}");
 }
+
+/// A component's self-declared `id` is reported, never trusted: the directory it
+/// was installed under stays the identity and the authorization key (grants are
+/// read from that directory).
+#[test]
+fn a_declared_id_does_not_override_the_install_directory() {
+    let plugin = WasmPlugin::load("installed-as", &fixture_wasm()).expect("load the component");
+    assert_eq!(
+        plugin.id(),
+        "installed-as",
+        "the conformance guest declares `conformance`, but the load id must win"
+    );
+}

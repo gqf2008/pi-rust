@@ -27,8 +27,6 @@ pub struct Grants {
     #[serde(default, skip_serializing_if = "is_false")]
     pub exec: bool,
     #[serde(default, skip_serializing_if = "is_false")]
-    pub timer: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
     pub net_sockets: bool,
 }
 
@@ -103,9 +101,6 @@ impl Grants {
         if self.exec {
             out.push("exec");
         }
-        if self.timer {
-            out.push("timer");
-        }
         if self.net_sockets {
             out.push("net-sockets");
         }
@@ -126,7 +121,6 @@ impl Grants {
             }
             "fs" => self.fs = true,
             "exec" => self.exec = true,
-            "timer" => self.timer = true,
             "net-sockets" => self.net_sockets = true,
             other => return Err(format!("unknown capability `{other}`")),
         }
@@ -139,7 +133,6 @@ impl Grants {
             "net-http" => self.net_http = None,
             "fs" => self.fs = false,
             "exec" => self.exec = false,
-            "timer" => self.timer = false,
             "net-sockets" => self.net_sockets = false,
             other => return Err(format!("unknown capability `{other}`")),
         }

@@ -236,7 +236,6 @@ CAPABILITIES:
     net-http      host-mediated HTTP; --host <host> (repeatable, `*` allows any)
     fs            filesystem, scoped to a plugin sandbox root
     exec          run a child process (host allow-list)
-    timer         host-driven ticks
     net-sockets   raw TCP sockets
 
 `install` copies the component to `plugins/<id>/plugin.wasm`, shows the

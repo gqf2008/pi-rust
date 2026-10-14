@@ -82,7 +82,9 @@ fn dialog(arguments: &str) -> Result<types::ToolResult, types::PluginError> {
 }
 
 impl Guest for Conformance {
-    fn init() {}
+    fn id() -> String {
+        "conformance".to_string()
+    }
 
     fn shutdown() {}
 
@@ -197,8 +199,6 @@ impl Guest for Conformance {
             _ => types::EventAction::Continue,
         }
     }
-
-    fn on_tick() {}
 
     fn before_agent_start(prompt: String) -> Option<String> {
         Some(format!("{prompt}\n[conformance]"))

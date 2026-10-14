@@ -410,7 +410,9 @@ fn configure(arguments: &str) -> types::ToolResult {
 struct LangfusePlugin;
 
 impl Guest for LangfusePlugin {
-    fn init() {}
+    fn id() -> String {
+        "rpi-langfuse".to_string()
+    }
 
     fn shutdown() {
         on_session_shutdown();
@@ -459,8 +461,6 @@ impl Guest for LangfusePlugin {
         }
         types::EventAction::Continue
     }
-
-    fn on_tick() {}
 
     fn before_agent_start(_prompt: String) -> Option<String> {
         None

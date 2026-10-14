@@ -236,7 +236,9 @@ fn restore() {
 struct TodoPlugin;
 
 impl Guest for TodoPlugin {
-    fn init() {}
+    fn id() -> String {
+        "rpi-todo".to_string()
+    }
 
     fn shutdown() {}
 
@@ -290,8 +292,6 @@ impl Guest for TodoPlugin {
         }
         types::EventAction::Continue
     }
-
-    fn on_tick() {}
 
     fn before_agent_start(_prompt: String) -> Option<String> {
         None

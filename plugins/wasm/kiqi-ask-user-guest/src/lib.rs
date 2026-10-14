@@ -433,7 +433,9 @@ fn capability_reason(error: types::CapabilityError) -> String {
 struct AskUserPlugin;
 
 impl Guest for AskUserPlugin {
-    fn init() {}
+    fn id() -> String {
+        "rpi-ask-user".to_string()
+    }
 
     fn shutdown() {}
 
@@ -510,8 +512,6 @@ impl Guest for AskUserPlugin {
     fn on_event(_event: types::Event) -> types::EventAction {
         types::EventAction::Continue
     }
-
-    fn on_tick() {}
 
     fn before_agent_start(_prompt: String) -> Option<String> {
         None

@@ -1967,7 +1967,7 @@ mod tests {
         assert!(status.success(), "is the `wasm32-wasip2` target installed?");
         let wasm_path = root.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_todo_guest.wasm");
         let wasm_plugin = kiqi_plugin_host::WasmPlugin::load_with_grants(
-            "rpi-todo-wasm",
+            "rpi-todo",
             &wasm_path,
             kiqi_plugin_host::Grants::default(),
         )
