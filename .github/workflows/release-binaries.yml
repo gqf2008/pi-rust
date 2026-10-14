@@ -107,9 +107,11 @@ jobs:
           security create-keychain -p "${keychain_password}" "${keychain}"
           security set-keychain-settings -lut 3600 "${keychain}"
           security unlock-keychain -p "${keychain_password}" "${keychain}"
+          # productsign needs the same access as codesign: the p12 carries the
+          # Developer ID *Installer* identity too, and it is imported here.
           security import "${RUNNER_TEMP}/cert.p12" -k "${keychain}" -P "${CERT_PASSWORD}" \
-            -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple:,codesign:,productsign: \
             -s -k "${keychain_password}" "${keychain}" >/dev/null
           security list-keychains -d user -s "${keychain}" $(security list-keychains -d user | tr -d '"')
 
@@ -129,6 +131,31 @@ jobs:
           xcrun stapler validate "${bin}" || true
 
           rm -f "${RUNNER_TEMP}/cert.p12" "${RUNNER_TEMP}/notarize.zip"
+
+          # A bare Mach-O cannot carry a stapled ticket, but a .pkg can - which
+          # is what makes a macOS install verifiable without asking Apple.
+          # Built here because the signing keychain is still unlocked, and the
+          # p12 also carries the Developer ID *Installer* identity.
+          version="${{ steps.version.outputs.version }}"
+          pkgroot="${RUNNER_TEMP}/pkgroot"
+          mkdir -p "${pkgroot}/usr/local/bin"
+          cp "${bin}" "${pkgroot}/usr/local/bin/ki"
+          pkg="${PWD}/ki-v${version}-${{ matrix.target }}.pkg"
+          pkgbuild --root "${pkgroot}" --identifier "la.kiqi.ki" \
+            --version "${version}" --install-location "/" \
+            "${RUNNER_TEMP}/ki-unsigned.pkg"
+          productsign \
+            --sign "Developer ID Installer: qingfeng gao (${APPLE_TEAM_ID})" \
+            --keychain "${keychain}" \
+            "${RUNNER_TEMP}/ki-unsigned.pkg" "${pkg}"
+          pkgutil --check-signature "${pkg}"
+          xcrun notarytool submit "${pkg}" \
+            --apple-id "${APPLE_ID}" --team-id "${APPLE_TEAM_ID}" \
+            --password "${APPLE_APP_PASSWORD}" --wait
+          xcrun stapler staple "${pkg}"
+          xcrun stapler validate "${pkg}"
+          shasum -a 256 "${pkg}" > "${pkg}.sha256"
+
           security delete-keychain "${keychain}" || true
 
       - name: Stage artifact
@@ -182,6 +209,8 @@ jobs:
           path: |
             ${{ steps.stage.outputs.asset }}
             ${{ steps.stage.outputs.checksum }}
+            *.pkg
+            *.pkg.sha256
           if-no-files-found: error
 
   release:

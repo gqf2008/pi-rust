@@ -1,6 +1,11 @@
 #!/bin/sh
 # Install the prebuilt `ki` binary from GitHub Releases.
 #
+# macOS also publishes a signed and notarized `ki-v<version>-<target>.pkg`
+# whose ticket is stapled, so `sudo installer -pkg <file> -target /` installs
+# `ki` to /usr/local/bin and verifies without contacting Apple. This script
+# keeps using the tarball because it does not require sudo.
+#
 #   curl -fsSL https://raw.githubusercontent.com/bigfish1913/pi-rust/main/scripts/install.sh | sh
 #
 # Options (pass after `sh -s --`, or export as env vars):

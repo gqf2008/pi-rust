@@ -3,8 +3,8 @@
     "title": "wire goal",
     "status": "active",
     "notes": "",
-    "started_at": 1791906169985,
-    "updated_at": 1791906169985,
+    "started_at": 1791909704530,
+    "updated_at": 1791909704530,
     "turns_used": 0,
     "max_turns": null,
     "deadline_ms": null
@@ -186,6 +186,16 @@
       "notes": "",
       "started_at": 1791906161808,
       "updated_at": 1791906161808,
+      "turns_used": 0,
+      "max_turns": null,
+      "deadline_ms": null
+    },
+    {
+      "title": "wire goal",
+      "status": "active",
+      "notes": "",
+      "started_at": 1791906169985,
+      "updated_at": 1791906169985,
       "turns_used": 0,
       "max_turns": null,
       "deadline_ms": null
