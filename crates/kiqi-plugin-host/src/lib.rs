@@ -353,6 +353,11 @@ impl crate::kiqi::plugin::ui::Host for HostState {
     }
 }
 
+/// Response bodies are capped. A granted — or compromised — host must not be
+/// able to make the *host* allocate without bound; a plugin that genuinely needs
+/// a larger document should stream it through `net-sockets`.
+const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Host-mediated HTTP: the request's host must be in the grant's allow-list.
 impl crate::kiqi::plugin::net_http::Host for HostState {
     fn fetch(&mut self, request: String) -> Result<String, CapabilityError> {
@@ -434,7 +439,21 @@ impl crate::kiqi::plugin::net_http::Host for HostState {
                 )
             })
             .collect();
-        let body = response.text().unwrap_or_default();
+        let body = {
+            use std::io::Read;
+            // Read one byte past the cap to tell "exactly full" from "too big".
+            let mut bytes = Vec::new();
+            response
+                .take(MAX_RESPONSE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| CapabilityError::Failed(format!("read body: {error}")))?;
+            if bytes.len() as u64 > MAX_RESPONSE_BYTES {
+                return Err(CapabilityError::Failed(format!(
+                    "response body exceeds {MAX_RESPONSE_BYTES} bytes"
+                )));
+            }
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
         Ok(serde_json::json!({"status": status, "headers": headers, "body": body}).to_string())
     }
 }

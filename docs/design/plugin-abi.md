@@ -594,6 +594,11 @@ conformance fixture 相应地多了一个 `alloc` 工具，e2e 两边都验：**
 （1 MiB）、**超过上限要 trap**（128 MiB，未真的分配）。只写“超限要 trap”是不够的——那无法区分
 “上限生效”与“分配被恒禁用”。
 
+同类的“无上限读”还差一处，一并补了：`net-http` 的响应体原先用 `response.text()` 整包读入，
+一个被授权（或被攻陷）的主机只要不停发就能把宿主内存吃干。现在封顶 **8 MiB**
+（`MAX_RESPONSE_BYTES`），超出返回 `failed` 并明说上限；e2e 用一个真发 9 MiB 的 loopback 服务验它
+（读端到上限就停，服务侧的 broken pipe 是预期内的）。
+
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
 > “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里

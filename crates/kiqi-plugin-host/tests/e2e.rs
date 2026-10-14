@@ -1113,3 +1113,62 @@ fn guest_memory_is_capped() {
         .unwrap_err();
     assert!(!over.to_string().is_empty(), "an over-cap allocation traps");
 }
+
+/// A granted host must not be able to make the *host* allocate without bound:
+/// an oversized response body is refused rather than buffered.
+#[test]
+fn net_http_refuses_an_oversized_response_body() {
+    use std::io::{Read, Write};
+
+    const BODY: usize = 9 * 1024 * 1024;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback server");
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buffer = [0u8; 1024];
+        let _ = stream.read(&mut buffer);
+        let _ = stream.write_all(
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {BODY}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        );
+        // The client stops reading at its cap, so a broken pipe here is expected.
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..(BODY / chunk.len()) {
+            if stream.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+    });
+
+    let (_dir, plugin) = load_fixture_in_temp(Grants {
+        net_http: Some(NetHttpGrant {
+            hosts: vec!["127.0.0.1".to_string()],
+        }),
+        ..Grants::default()
+    });
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    let outcome = plugin
+        .call(
+            "fetch",
+            &serde_json::json!({ "url": format!("http://127.0.0.1:{port}/") }),
+            &caps,
+            &sink,
+        )
+        .expect("fetch");
+    let _ = server.join();
+
+    assert!(
+        outcome.is_error,
+        "an oversized body is a capability failure"
+    );
+    let body = text_of(&outcome);
+    assert!(
+        body.contains("exceeds") && body.contains("bytes"),
+        "the reason must name the cap: {body}"
+    );
+}
