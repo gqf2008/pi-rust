@@ -202,6 +202,38 @@ wasm 层是“总是可实例化，但未授予的调用必定 `denied`” + “
 4. conformance fixture + 跑 §6.3 门禁；
 5. 全绿后才谈第二门语言；官方其余插件留在编译期。
 
+### 6.6 已落地：宿主绑定（crate `kiqi-plugin-host`）
+
+`crates/kiqi-plugin-host` 用 wasmtime 49 的 `bindgen!` 绑 `plugins/kiqi-plugin.wit`
+（world `plugin`），`cargo check` 通过。实测两条 wasmtime 49 的要点，写下来避免踩坑：
+
+- **`bindgen!` 不再有 `async: true` 选项**（写了会报 unknown key）。异步由 wasmtime 的 cargo
+  feature `async`（+ `component-model`）开启，生成 `instantiate_async` / `TypedFunc::call_async`；
+- 让 **WIT 函数** async（宿主 import 真异步、guest 直接 `await`）需要 feature
+  `component-model-async`。0.2.0 走 WASI 0.2 语义（WIT 函数同步、guest 用 `wasi:io/poll`
+  阻塞），宿主的 `net-http.fetch` 这类 import 实现同步（内部可 `spawn_blocking`）；
+  要改 0.3 异步语义是后续单独的决定。
+
+生成形状（“宿主侧 SDK 成熟度”的直接证据）：
+
+- 每个能力一个 `Host` trait，方法 snake_case：`log::Host::write`、`progress::Host::emit`、
+  `ui::Host::{dialog,set_status,set_editor_text}`、`session_read::Host::{info,active_tools,…}`、
+  `session_control::Host::…`、`inject::Host::…`、`net_http::Host::fetch`、`fs::Host::{read,write,read_dir}`、
+  `net_sockets::Host::{connect,send,recv,close}`、`exec::Host::run`、`timer::Host::request_tick`；
+- 导出面：`plugin.kiqi_plugin_plugin_api()` 返回 `Guest`，其上
+  `func_call_tool: TypedFunc<(&str, &str), Result<String, PluginError>>`、
+  `func_on_event: TypedFunc<(&Event,), ()>`、`func_on_tick`、`func_before_agent_start`、
+  `func_probe`、`func_list_tools/commands/flags/shortcuts`。
+
+未做（后续增量）：`WasmPlugin` 实现 `kiqi_plugin::Plugin`（sync 接缝，内部
+`instantiate_async` / `call_async`）、host import 实现（`progress` 转发到 `ProgressSink`，
+其余先挂 deny 桩）、guest SDK + conformance fixture、§6.3 的门禁测试。
+
+> 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
+> `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
+> “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里
+> 单独门控。
+
 ## 7. 待定
 
 - wasmtime 依赖很重（编译时间 + 体积）：独立 crate `kiqi-plugin-host` 还是 feature 开关？

@@ -1,0 +1,21 @@
+[package]
+publish = false
+name = "kiqi-plugin-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Host-side wasm (component model) plugin backend for kiqi"
+readme = "README.md"
+keywords = ["rpi", "kiqi", "wasm", "plugin", "component-model"]
+categories = ["development-tools"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+kiqi-plugin = { path = "../kiqi-plugin" }
+wasmtime = { version = "49", features = ["component-model", "async"] }
+serde_json = { workspace = true }
