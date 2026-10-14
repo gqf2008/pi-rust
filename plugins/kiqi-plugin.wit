@@ -1,23 +1,27 @@
 /// kiqi plugin ABI — wasm component model (WASI Preview 2 / WIT).
 ///
-/// A plugin is a wasm component exporting `tools` + `lifecycle` and optionally
-/// importing `host`. Nothing else is reachable: no filesystem, no network, no
-/// processes, unless a capability is added to this file and the host grants it.
-/// That is the whole point of moving off the cdylib C ABI.
+/// **Proposed 0.2.0.** The 0.1.0 draft never parsed: `other(kind: string,
+/// payload: string)` used named variant fields, which WIT does not allow. This
+/// version is checked with `wasm-tools component wit`.
 ///
-/// Versioning: the package version is the ABI version. The host accepts a
-/// closed range and rejects anything outside it at load time.
-package kiqi:plugin@0.1.0;
+/// Shape decisions this version encodes:
+///   * capability calls are fallible (`result<_, denied>`) so a plugin still
+///     loads when a capability is not granted and can degrade at call time;
+///   * every capability is its own interface, so a deny stub, audit and future
+///     tightening stay minimal and independent;
+///   * progress is an **imported sink**, not a return value — one tool call can
+///     emit many blocks (16/18 real plugins need stepwise output);
+///   * timers are **host-driven** (`plugin.on-tick`), because WASI Preview 2 has
+///     no OS threads to run a background loop.
+///
+/// The component model requires every import of the world to be satisfied at
+/// instantiation, so the host always provides all interfaces: granted ones with
+/// real implementations, ungranted ones with a deny stub. "Required but not
+/// granted" is rejected before instantiation from the plugin manifest.
+package kiqi:plugin@0.2.0;
 
-/// Host capabilities a plugin may import. Import only what you need; the host
-/// still decides what each import is permitted to do at runtime.
-interface host {
-    /// Structured logging. The host prefixes every line with the plugin id.
-    log: func(level: log-level, message: string);
-
-    /// Identity of the run the plugin is loaded into.
-    session-info: func() -> session-info;
-
+/// Types shared across the host <-> plugin boundary.
+interface types {
     enum log-level {
         trace,
         debug,
@@ -31,24 +35,18 @@ interface host {
         run-id: string,
         cwd: string,
     }
-}
 
-/// What a plugin contributes to the runtime.
-interface tools {
-    /// Tools this plugin provides. Called once, after `lifecycle.init`.
-    list-tools: func() -> list<tool-spec>;
-
-    /// Invoke a tool. `arguments` is the JSON object the model produced.
-    ///
-    /// Returns the tool result as text (the host may wrap it). Errors are typed
-    /// so the runtime can tell "the model asked wrong" from "we are broken".
-    call-tool: func(name: string, arguments: string) -> result<string, plugin-error>;
+    /// Why a capability call was refused: not granted, out of scope, or denied
+    /// by policy. Every capability call returns this so partial grants work.
+    record denied {
+        reason: string,
+    }
 
     record tool-spec {
         name: string,
         description: string,
-        /// JSON Schema for the parameters, serialized. Kept as a string so the
-        /// ABI does not have to model every JSON Schema construct.
+        /// JSON Schema, serialized; kept as a string so the ABI does not have to
+        /// model every JSON Schema construct.
         parameters-schema: string,
     }
 
@@ -62,38 +60,209 @@ interface tools {
         /// Anything else.
         failed(string),
     }
-}
 
-/// Lifecycle and event hooks. All hooks are optional for the plugin to
-/// implement; the host calls the ones the component exports.
-interface lifecycle {
-    /// Called once, when the plugin is instantiated and before `list-tools`.
-    init: func();
-
-    /// Called on shutdown. Best effort; the host does not wait forever.
-    shutdown: func();
-
-    /// Runtime events. Kinds the plugin does not know arrive as `other`.
-    on-event: func(event: event);
-
-    variant event {
-        session-start,
-        session-shutdown,
-        turn-start,
-        turn-end,
-        tool-call(tool-call),
-        /// Forward compatibility: never break a plugin on a new event kind.
-        other(kind: string, payload: string),
+    /// One block of partial output pushed while a tool is still running.
+    variant progress-block {
+        text(string),
+        json(string),
     }
 
     record tool-call {
         tool: string,
         arguments: string,
     }
+
+    record tool-result-event {
+        call: tool-call,
+        output: string,
+        is-error: bool,
+    }
+
+    /// Escape hatch for a tag this ABI version does not type: a new host event
+    /// kind reaches old plugins without breaking them.
+    record other-event {
+        kind: string,
+        payload: string,
+    }
+
+    record command-spec {
+        name: string,
+        description: string,
+    }
+
+    record flag-spec {
+        name: string,
+        description: string,
+    }
+
+    record shortcut-spec {
+        key: string,
+        description: string,
+    }
+
+    /// Runtime events. The tags a plugin actually needs are typed; anything else
+    /// arrives through `other` so a new host event cannot break it.
+    variant event {
+        session-start,
+        session-shutdown,
+        session-tree,
+        agent-settled,
+        before-agent-start(string),
+        before-provider-request(string),
+        message-update(string),
+        message-end(string),
+        tool-execution-start(tool-call),
+        tool-execution-end(tool-result-event),
+        other(other-event),
+    }
+
+    /// A permission gate's verdict.
+    variant verdict {
+        continue,
+        replace(string),
+        block(string),
+    }
 }
 
+/// Structured logging. Always granted; the host prefixes every line with the
+/// plugin id.
+interface log {
+    use types.{log-level};
+    write: func(level: log-level, message: string);
+}
+
+/// Read-only session state.
+interface session-read {
+    use types.{session-info};
+    info: func() -> session-info;
+    active-tools: func() -> list<string>;
+    system-prompt: func() -> string;
+    thinking-level: func() -> string;
+    cli-flag: func(name: string) -> option<string>;
+    session-branch: func() -> string;
+}
+
+/// Session mutations.
+interface session-control {
+    use types.{denied};
+    set-session-name: func(name: string) -> result<_, denied>;
+    set-active-tools: func(tools: list<string>) -> result<_, denied>;
+    set-model: func(model: string) -> result<_, denied>;
+    set-thinking-level: func(level: string) -> result<_, denied>;
+    compact: func() -> result<_, denied>;
+    new-session: func() -> result<_, denied>;
+    fork: func() -> result<_, denied>;
+    navigate-tree: func(target: string) -> result<_, denied>;
+    switch-session: func(id: string) -> result<_, denied>;
+    reload: func() -> result<_, denied>;
+}
+
+/// Inject content into the run.
+interface inject {
+    use types.{denied};
+    send-message: func(message: string) -> result<_, denied>;
+    send-user-message: func(text: string) -> result<_, denied>;
+    append-entry: func(entry: string) -> result<_, denied>;
+}
+
+/// The user-facing UI surface.
+interface ui {
+    use types.{denied};
+    dialog: func(request: string) -> result<string, denied>;
+    set-status: func(key: string, value: string) -> result<_, denied>;
+    set-editor-text: func(text: string) -> result<_, denied>;
+}
+
+/// Partial output for a running tool call. An import, not a return value, so a
+/// call can stream.
+interface progress {
+    use types.{progress-block};
+    emit: func(block: progress-block);
+}
+
+/// Host-mediated HTTP (wraps `wasi:http` plus an allow-list); not raw sockets.
+interface net-http {
+    use types.{denied};
+    /// Request and response are JSON, so the ABI does not model all of HTTP.
+    fetch: func(request: string) -> result<string, denied>;
+}
+
+/// Filesystem operations, scoped to a sandbox root the host chooses.
+interface fs {
+    use types.{denied};
+    read: func(rel-path: string) -> result<list<u8>, denied>;
+    write: func(rel-path: string, contents: list<u8>) -> result<_, denied>;
+    read-dir: func(rel-dir: string) -> result<list<string>, denied>;
+}
+
+/// Raw TCP sockets. Separate from `net-http` so it can be tightened alone.
+interface net-sockets {
+    use types.{denied};
+    connect: func(address: string) -> result<u32, denied>;
+    send: func(handle: u32, bytes: list<u8>) -> result<u64, denied>;
+    recv: func(handle: u32, max-bytes: u64) -> result<list<u8>, denied>;
+    close: func(handle: u32) -> result<_, denied>;
+}
+
+/// Run a child process. WASI has no process interface; the host implements this
+/// with a command allow-list, a cwd jail, a scrubbed env and quotas.
+interface exec {
+    use types.{denied};
+    run: func(cmd: string, args: list<string>, cwd: option<string>) -> result<string, denied>;
+}
+
+/// Host-driven timer. The plugin asks the host to call `plugin.on-tick` on a
+/// period, because there are no OS threads to run its own loop.
+interface timer {
+    use types.{denied};
+    request-tick: func(every-ms: u32) -> result<_, denied>;
+}
+
+/// What a plugin contributes to the runtime.
+interface plugin-api {
+    use types.{command-spec, event, flag-spec, plugin-error, shortcut-spec, tool-spec, verdict};
+
+    /// Called once, when the plugin is instantiated and before `list-tools`.
+    init: func();
+
+    /// Called on shutdown. Best effort; the host does not wait forever.
+    shutdown: func();
+
+    list-tools: func() -> list<tool-spec>;
+    call-tool: func(name: string, arguments: string) -> result<string, plugin-error>;
+
+    list-commands: func() -> list<command-spec>;
+    run-command: func(name: string, arguments: string) -> result<string, plugin-error>;
+    list-flags: func() -> list<flag-spec>;
+    list-shortcuts: func() -> list<shortcut-spec>;
+
+    on-event: func(event: event);
+
+    /// Driven by the host at the period `timer.request-tick` was granted.
+    on-tick: func();
+
+    /// Return a replacement system prompt, or none to leave it unchanged.
+    before-agent-start: func(prompt: string) -> option<string>;
+
+    /// Gate points this plugin wants to intervene at (e.g. `before-tool-call`).
+    list-probe-points: func() -> list<string>;
+    probe: func(point: string, payload: string) -> verdict;
+}
+
+/// A plugin imports the capabilities it declares — the host satisfies all of
+/// them, with deny stubs where not granted — and exports `plugin`.
 world plugin {
-    import host;
-    export tools;
-    export lifecycle;
+    import log;
+    import session-read;
+    import session-control;
+    import inject;
+    import ui;
+    import progress;
+    import net-http;
+    import fs;
+    import net-sockets;
+    import exec;
+    import timer;
+
+    export plugin-api;
 }
