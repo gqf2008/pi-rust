@@ -150,63 +150,9 @@ fn denied() -> CapabilityError {
     CapabilityError::Denied(NOT_GRANTED.to_string())
 }
 
-/// What the user authorized for one plugin.
-///
-/// Loaded from `$KI_AGENT_DIR/plugins/<id>/grants.json` (default
-/// `~/.ki/agent/plugins/<id>/grants.json`). A missing file grants nothing: the
-/// host never authorizes on a plugin's behalf.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct Grants {
-    /// Host-mediated HTTP, with a host allow-list.
-    #[serde(default)]
-    pub net_http: Option<NetHttpGrant>,
-    #[serde(default)]
-    pub fs: bool,
-    #[serde(default)]
-    pub exec: bool,
-    #[serde(default)]
-    pub timer: bool,
-    #[serde(default)]
-    pub net_sockets: bool,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct NetHttpGrant {
-    /// Hosts the plugin may reach; `*` allows any.
-    pub hosts: Vec<String>,
-}
-
-impl Grants {
-    /// Read the user's grants for `plugin_id`; a missing file means nothing is
-    /// granted.
-    pub fn load_for(plugin_id: &str) -> Self {
-        let Some(root) = agent_dir() else {
-            return Self::default();
-        };
-        let path = root.join("plugins").join(plugin_id).join("grants.json");
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return Self::default();
-        };
-        serde_json::from_str(&text).unwrap_or_default()
-    }
-
-    fn allows_host(&self, host: &str) -> bool {
-        self.net_http.as_ref().is_some_and(|grant| {
-            grant
-                .hosts
-                .iter()
-                .any(|allowed| allowed == "*" || allowed == host)
-        })
-    }
-}
-
-fn agent_dir() -> Option<std::path::PathBuf> {
-    if let Some(dir) = std::env::var_os("KI_AGENT_DIR") {
-        return Some(std::path::PathBuf::from(dir));
-    }
-    std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".ki").join("agent"))
-}
+/// What the user authorized for one plugin, shared with the CLI through the
+/// contract crate (`kiqi-plugin`).
+pub use kiqi_plugin::grants::{Grants, NetHttpGrant};
 
 /// State every instantiated component gets: WASI plus the resource table and
 /// the grants the guest's host imports are allowed to act on.
@@ -243,7 +189,9 @@ impl crate::kiqi::plugin::log::Host for HostState {
 impl crate::kiqi::plugin::session_read::Host for HostState {
     fn info(&mut self) -> crate::kiqi::plugin::types::SessionInfo {
         crate::kiqi::plugin::types::SessionInfo {
-            session_id: String::new(),
+            session_id: with_session(|session| session.session_id())
+                .flatten()
+                .unwrap_or_default(),
             run_id: String::new(),
             cwd: std::env::current_dir()
                 .map(|path| path.to_string_lossy().into_owned())

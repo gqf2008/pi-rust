@@ -353,6 +353,20 @@ e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许
 - 仍未做（重记为需新接缝）：`session-read.info` 的 session-id/run-id 仍返空，需要一个
   `SessionRead::session_id` 接口（不拿进程序 env 顶替）。
 
+### 6.14 已落地：授权落盘 + `ki plugin grant/revoke/list`
+
+- `Grants` 从 `kiqi-plugin-host` 移到契约 crate **`kiqi-plugin::grants`**（加 `serde` 序列化）：
+  `load_for` / `save_for` / `allows_host` / `granted` / `grant` / `revoke` / `installed_plugins`。
+  这样**宿主（强制）与 CLI（编辑）共用一份类型，且 `rpi-cli` 不会引入 wasmtime**。
+- `ki plugin list | show <id> | grant <id> <cap> [--host H]... | revoke <id> <cap>`：读写
+  `$KI_AGENT_DIR/plugins/<id>/grants.json`（默认 `~/.ki/agent/plugins/<id>/grants.json`）。
+  实测：grant → 落盘 → `list`/`show` 可见 → revoke → `{}`；未知能力/缺参 → exit 2。
+- `kiqi_plugin::SessionRead` 新增 `session_id()`（默认 `None`，不破坏既有实现）；宿主
+  `session-read.info` 的 `session-id` 走它。实现方（`ActionCaps`）暂未覆盖，所以仍可能为空，
+  但**接缝在了，且没有拿 env 顶替**。
+- 仍未做：`ki plugin install/uninstall` 本身、以及“安装/更新时列出声明 + 增量重问”的提示
+  （要有 install 才有落点）。
+
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
 > “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里

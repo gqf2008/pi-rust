@@ -35,6 +35,8 @@
 
 use serde_json::Value;
 
+pub mod grants;
+
 /// A tool the plugin contributes to the model.
 #[derive(Debug, Clone)]
 pub struct ToolSpec {
@@ -382,6 +384,13 @@ pub trait SessionRead: Send + Sync {
     fn thinking_level(&self) -> String;
     fn cli_flag(&self, name: &str) -> Option<String>;
     fn session_branch(&self) -> Value;
+
+    /// The session id, when the host knows it. Defaults to `None`, so an
+    /// implementation that cannot answer keeps compiling and a plugin reads an
+    /// empty id rather than a fabricated one.
+    fn session_id(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Mutations of session state.
