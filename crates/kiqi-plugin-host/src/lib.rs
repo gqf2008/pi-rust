@@ -33,8 +33,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use kiqi_plugin::{
-    Block, Event, EventAction, HostCaps, Plugin as PluginTrait, PluginError, Progress,
-    ProgressSink, ToolOutcome, ToolSpec,
+    Block, CommandSpec, Event, EventAction, FlagSpec, HostCaps, Plugin as PluginTrait, PluginError,
+    Progress, ProgressSink, ShortcutSpec, ToolOutcome, ToolSpec, Verdict,
 };
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
@@ -42,7 +42,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::kiqi::plugin::types::{
     ContentBlock, Denied, Event as WitEvent, EventAction as WitEventAction, LogLevel, OtherEvent,
-    ProgressBlock, ToolCall, ToolResult, ToolResultEvent,
+    ProgressBlock, ToolCall, ToolResult, ToolResultEvent, Verdict as WitVerdict,
 };
 use crate::Plugin as World;
 
@@ -462,6 +462,14 @@ struct Inner {
     guest: World,
 }
 
+/// Load-time knobs.
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    /// Bound the guest's execution. With a budget, a plugin that spins traps
+    /// instead of hanging the host; `None` leaves it unbounded.
+    pub fuel: Option<u64>,
+}
+
 /// A plugin loaded from a wasm component.
 pub struct WasmPlugin {
     id: String,
@@ -491,8 +499,25 @@ impl WasmPlugin {
         wasm: &Path,
         grants: Grants,
     ) -> Result<Self, PluginError> {
+        Self::load_with_options(id, wasm, grants, Options::default())
+    }
+
+    /// Load with explicit grants and load-time knobs.
+    pub fn load_with_options(
+        id: impl Into<String>,
+        wasm: &Path,
+        grants: Grants,
+        options: Options,
+    ) -> Result<Self, PluginError> {
         let id = id.into();
-        let engine = Engine::default();
+        let mut config = wasmtime::Config::new();
+        if options.fuel.is_some() {
+            // Metering is off unless a bound is asked for, so ordinary plugins
+            // do not pay for it.
+            config.consume_fuel(true);
+        }
+        let engine = Engine::new(&config)
+            .map_err(|error| PluginError::Failed(format!("wasmtime engine: {error}")))?;
         let component = Component::from_file(&engine, wasm)
             .map_err(|error| PluginError::Failed(format!("load {}: {error}", wasm.display())))?;
 
@@ -510,6 +535,11 @@ impl WasmPlugin {
                 grants,
             },
         );
+        if let Some(fuel) = options.fuel {
+            store.set_fuel(fuel).map_err(|error| {
+                PluginError::Failed(format!("set fuel budget for {id}: {error}"))
+            })?;
+        }
         let guest = World::instantiate(&mut store, &component, &linker)
             .map_err(|error| PluginError::Failed(format!("instantiate {id}: {error}")))?;
         guest
@@ -574,6 +604,139 @@ impl PluginTrait for WasmPlugin {
             Err(error) => {
                 eprintln!("[kiqi-plugin] {}: list-tools trapped: {error}", self.id);
                 Vec::new()
+            }
+        }
+    }
+
+    fn commands(&self) -> Vec<CommandSpec> {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.as_mut() else {
+            return Vec::new();
+        };
+        let guest = inner.guest.kiqi_plugin_plugin_api();
+        match guest.call_list_commands(&mut inner.store) {
+            Ok(specs) => specs
+                .into_iter()
+                .map(|spec| CommandSpec {
+                    name: spec.name,
+                    description: spec.description,
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn run_command(
+        &self,
+        name: &str,
+        arguments: &str,
+        caps: &HostCaps<'_>,
+    ) -> Result<String, PluginError> {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.as_mut() else {
+            return Err(PluginError::Failed(format!("{} is unloaded", self.id)));
+        };
+        let _context = install_context(None, caps);
+        let result = inner.guest.kiqi_plugin_plugin_api().call_run_command(
+            &mut inner.store,
+            name,
+            arguments,
+        );
+        clear_context();
+        match result {
+            Ok(Ok(text)) => Ok(text),
+            Ok(Err(error)) => Err(map_plugin_error(error)),
+            Err(trap) => Err(PluginError::Failed(format!(
+                "{}: command `{name}` trapped: {trap}",
+                self.id
+            ))),
+        }
+    }
+
+    fn flags(&self) -> Vec<FlagSpec> {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.as_mut() else {
+            return Vec::new();
+        };
+        let guest = inner.guest.kiqi_plugin_plugin_api();
+        match guest.call_list_flags(&mut inner.store) {
+            Ok(specs) => specs
+                .into_iter()
+                .map(|spec| FlagSpec {
+                    name: spec.name,
+                    description: spec.description,
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn shortcuts(&self) -> Vec<ShortcutSpec> {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.as_mut() else {
+            return Vec::new();
+        };
+        let guest = inner.guest.kiqi_plugin_plugin_api();
+        match guest.call_list_shortcuts(&mut inner.store) {
+            Ok(specs) => specs
+                .into_iter()
+                .map(|spec| ShortcutSpec {
+                    key: spec.key,
+                    description: spec.description,
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn before_agent_start(
+        &self,
+        prompt: &serde_json::Value,
+        caps: &HostCaps<'_>,
+    ) -> Option<String> {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let inner = guard.as_mut()?;
+        let _context = install_context(None, caps);
+        let result = inner
+            .guest
+            .kiqi_plugin_plugin_api()
+            .call_before_agent_start(&mut inner.store, &prompt.to_string());
+        clear_context();
+        result.ok().flatten()
+    }
+
+    fn probe_points(&self) -> Vec<String> {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.as_mut() else {
+            return Vec::new();
+        };
+        let guest = inner.guest.kiqi_plugin_plugin_api();
+        guest
+            .call_list_probe_points(&mut inner.store)
+            .unwrap_or_default()
+    }
+
+    fn probe(&self, point: &str, payload: &serde_json::Value, caps: &HostCaps<'_>) -> Verdict {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.as_mut() else {
+            return Verdict::Continue;
+        };
+        let _context = install_context(None, caps);
+        let result = inner.guest.kiqi_plugin_plugin_api().call_probe(
+            &mut inner.store,
+            point,
+            &payload.to_string(),
+        );
+        clear_context();
+        match result {
+            Ok(WitVerdict::Continue) => Verdict::Continue,
+            Ok(WitVerdict::Replace(json)) => {
+                Verdict::Replace(serde_json::from_str(&json).unwrap_or(serde_json::Value::Null))
+            }
+            Ok(WitVerdict::Block(reason)) => Verdict::Block { reason },
+            Err(trap) => {
+                eprintln!("[kiqi-plugin] {}: probe trapped: {trap}", self.id);
+                Verdict::Continue
             }
         }
     }

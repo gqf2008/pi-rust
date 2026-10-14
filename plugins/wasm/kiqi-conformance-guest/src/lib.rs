@@ -19,6 +19,10 @@ use kiqi_plugin_guest::bindings::kiqi::plugin::{log, net_http, progress, types, 
 
 const TOOL: &str = "conformance";
 const FETCH_TOOL: &str = "fetch";
+const DIALOG_TOOL: &str = "dialog";
+const SPIN_TOOL: &str = "spin";
+const PANIC_TOOL: &str = "panic";
+const COMMAND: &str = "conformance";
 
 /// Fetch a URL through the host's `net-http` capability. Whether it succeeds
 /// depends entirely on the user's grant; the plugin degrades either way.
@@ -46,6 +50,28 @@ fn fetch(arguments: &str) -> Result<types::ToolResult, types::PluginError> {
 
 struct Conformance;
 
+/// Ask the host UI for an answer; whether it is answered depends on the grant.
+fn dialog(arguments: &str) -> Result<types::ToolResult, types::PluginError> {
+    let request = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("request")
+                .and_then(|request| request.as_str())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| types::PluginError::InvalidArguments("request is required".to_string()))?;
+    let (text, is_error) = match ui::dialog(&request) {
+        Ok(answer) => (answer, false),
+        Err(denied) => (format!("denied:{}", denied.reason), true),
+    };
+    Ok(types::ToolResult {
+        blocks: vec![types::ContentBlock::Text(text)],
+        is_error,
+        details: "null".to_string(),
+    })
+}
+
 impl Guest for Conformance {
     fn init() {}
 
@@ -67,12 +93,41 @@ impl Guest for Conformance {
                     r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#
                         .to_string(),
             },
+            types::ToolSpec {
+                name: DIALOG_TOOL.to_string(),
+                description: "Ask the host UI a dialog (ui capability)".to_string(),
+                parameters_schema:
+                    r#"{"type":"object","properties":{"request":{"type":"string"}},"required":["request"]}"#
+                        .to_string(),
+            },
+            types::ToolSpec {
+                name: SPIN_TOOL.to_string(),
+                description: "Loop forever (isolation probe)".to_string(),
+                parameters_schema: r#"{"type":"object","properties":{}}"#.to_string(),
+            },
+            types::ToolSpec {
+                name: PANIC_TOOL.to_string(),
+                description: "Panic (isolation probe)".to_string(),
+                parameters_schema: r#"{"type":"object","properties":{}}"#.to_string(),
+            },
         ]
     }
 
     fn call_tool(name: String, arguments: String) -> Result<types::ToolResult, types::PluginError> {
+        if name == SPIN_TOOL {
+            let mut counter: u64 = 0;
+            loop {
+                counter = std::hint::black_box(counter.wrapping_add(1));
+            }
+        }
+        if name == PANIC_TOOL {
+            panic!("conformance panics on purpose");
+        }
         if name == FETCH_TOOL {
             return fetch(&arguments);
+        }
+        if name == DIALOG_TOOL {
+            return dialog(&arguments);
         }
         if name != TOOL {
             return Err(types::PluginError::UnknownTool(name));
@@ -99,19 +154,31 @@ impl Guest for Conformance {
     }
 
     fn list_commands() -> Vec<types::CommandSpec> {
-        Vec::new()
+        vec![types::CommandSpec {
+            name: COMMAND.to_string(),
+            description: "Conformance command".to_string(),
+        }]
     }
 
-    fn run_command(_name: String, _arguments: String) -> Result<String, types::PluginError> {
-        Err(types::PluginError::Failed("no commands".to_string()))
+    fn run_command(name: String, _arguments: String) -> Result<String, types::PluginError> {
+        if name != COMMAND {
+            return Err(types::PluginError::UnknownTool(name));
+        }
+        Ok("conformance command ran".to_string())
     }
 
     fn list_flags() -> Vec<types::FlagSpec> {
-        Vec::new()
+        vec![types::FlagSpec {
+            name: "conformance-flag".to_string(),
+            description: "Conformance flag".to_string(),
+        }]
     }
 
     fn list_shortcuts() -> Vec<types::ShortcutSpec> {
-        Vec::new()
+        vec![types::ShortcutSpec {
+            key: "f8".to_string(),
+            description: "Conformance shortcut".to_string(),
+        }]
     }
 
     fn on_event(event: types::Event) -> types::EventAction {
@@ -124,16 +191,20 @@ impl Guest for Conformance {
 
     fn on_tick() {}
 
-    fn before_agent_start(_prompt: String) -> Option<String> {
-        None
+    fn before_agent_start(prompt: String) -> Option<String> {
+        Some(format!("{prompt}\n[conformance]"))
     }
 
     fn list_probe_points() -> Vec<String> {
-        Vec::new()
+        vec!["before-tool-call".to_string()]
     }
 
-    fn probe(_point: String, _payload: String) -> types::Verdict {
-        types::Verdict::Continue
+    fn probe(point: String, payload: String) -> types::Verdict {
+        if point == "before-tool-call" && payload.contains("block") {
+            types::Verdict::Block("conformance blocks this".to_string())
+        } else {
+            types::Verdict::Continue
+        }
     }
 }
 

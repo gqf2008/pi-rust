@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use kiqi_plugin::{
     Block, Event, EventAction, EventTag, HostCaps, Log, LogLevel, Plugin, PluginError, Progress,
-    ProgressSink,
+    ProgressSink, Verdict,
 };
 use kiqi_plugin_host::{Grants, NetHttpGrant, WasmPlugin};
 
@@ -453,4 +453,167 @@ fn langfuse_subset_builds_a_trace_and_flushes_it_over_net_http() {
     assert!(body.contains("LLM Call"), "generation span: {body}");
     assert!(body.contains("sess-1"), "session id: {body}");
     assert!(body.contains("test-model"), "model: {body}");
+}
+
+/// A `UiApi` that records what the guest asked for and answers dialogs.
+#[derive(Default)]
+struct RecordingUi {
+    dialogs: Mutex<Vec<serde_json::Value>>,
+    statuses: Mutex<Vec<serde_json::Value>>,
+}
+
+impl kiqi_plugin::UiApi for RecordingUi {
+    fn dialog(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+        self.dialogs.lock().unwrap().push(request.clone());
+        Ok(serde_json::json!({ "answer": "42" }))
+    }
+    fn set_status(&self, update: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+        self.statuses.lock().unwrap().push(update.clone());
+        Ok(())
+    }
+    fn set_editor_text(&self, _edit: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+        Ok(())
+    }
+    fn component(
+        &self,
+        _name: &str,
+        _payload: &serde_json::Value,
+    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+        Err(kiqi_plugin::PluginError::Failed(
+            "no components here".to_string(),
+        ))
+    }
+}
+
+/// Gate §6.3.2: every contribution surface the ABI has must actually be
+/// reachable, and the host must be the one asked.
+#[test]
+fn conformance_surface_is_reachable() {
+    let wasm = fixture_wasm();
+    let plugin =
+        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    let ui = RecordingUi::default();
+    let log = NullLog;
+    let caps = HostCaps {
+        session: None,
+        control: None,
+        inject: None,
+        ui: Some(&ui),
+        log: &log,
+    };
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    // tools
+    let tools: Vec<String> = plugin.tools().into_iter().map(|tool| tool.name).collect();
+    for expected in ["conformance", "fetch", "dialog"] {
+        assert!(
+            tools.iter().any(|tool| tool == expected),
+            "tool {expected}: {tools:?}"
+        );
+    }
+
+    // commands, flags, shortcuts
+    assert_eq!(plugin.commands()[0].name, "conformance");
+    assert_eq!(
+        plugin.run_command("conformance", "", &caps).unwrap(),
+        "conformance command ran"
+    );
+    assert_eq!(plugin.flags()[0].name, "conformance-flag");
+    assert_eq!(plugin.shortcuts()[0].key, "f8");
+
+    // system-prompt transform
+    let replaced = plugin
+        .before_agent_start(&serde_json::json!("SYS"), &caps)
+        .expect("the guest replaces the prompt");
+    assert!(
+        replaced.contains("SYS") && replaced.contains("[conformance]"),
+        "got {replaced}"
+    );
+
+    // probe gate
+    assert_eq!(plugin.probe_points(), vec!["before-tool-call".to_string()]);
+    assert_eq!(
+        plugin.probe("before-tool-call", &serde_json::json!({}), &caps),
+        Verdict::Continue
+    );
+    assert!(matches!(
+        plugin.probe(
+            "before-tool-call",
+            &serde_json::json!({ "x": "block" }),
+            &caps
+        ),
+        Verdict::Block { .. }
+    ));
+
+    // ui.dialog round trip: the host really answered the guest.
+    let answer = plugin
+        .call(
+            "dialog",
+            &serde_json::json!({ "request": "pick one" }),
+            &caps,
+            &sink,
+        )
+        .expect("dialog tool");
+    assert!(!answer.is_error, "{answer:?}");
+    assert!(text_of(&answer).contains("42"), "got {}", text_of(&answer));
+    assert_eq!(ui.dialogs.lock().unwrap().len(), 1);
+
+    // With a granted UI, `ui.set-status` now succeeds instead of being denied.
+    let outcome = plugin
+        .call("conformance", &serde_json::json!({}), &caps, &sink)
+        .expect("call");
+    assert!(
+        text_of(&outcome).contains("ui=granted"),
+        "got {}",
+        text_of(&outcome)
+    );
+    assert!(!ui.statuses.lock().unwrap().is_empty());
+}
+
+/// Gate §6.3.7: a plugin that hangs or panics must be contained, not take the
+/// host down.
+#[test]
+fn a_spinning_guest_is_metered_and_a_panicking_one_traps() {
+    let wasm = fixture_wasm();
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    // A fuel budget turns an infinite loop into a trapped call, not a hang.
+    let bounded = WasmPlugin::load_with_options(
+        "conformance",
+        &wasm,
+        Grants::default(),
+        kiqi_plugin_host::Options {
+            fuel: Some(5_000_000),
+        },
+    )
+    .expect("load");
+    let spin = bounded
+        .call("spin", &serde_json::json!({}), &caps, &sink)
+        .unwrap_err();
+    assert!(!spin.to_string().is_empty(), "a metered spin traps");
+
+    // A panicking guest traps too; the call is an error, not a process abort.
+    let panicking =
+        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    let panic = panicking
+        .call("panic", &serde_json::json!({}), &caps, &sink)
+        .unwrap_err();
+    assert!(!panic.to_string().is_empty());
+
+    // The host is unaffected: another plugin still loads and lists its tools.
+    let survivor =
+        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    assert!(survivor
+        .tools()
+        .iter()
+        .any(|tool| tool.name == "conformance"));
 }

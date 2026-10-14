@@ -322,6 +322,22 @@ e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许
 这也把 §6.10 记的“能力错误只有 `denied`”从纸面变成现实痛点：flush 的网络失败也会被报成
 `denied`，语义不对（应拆 `denied` / `failed`，列为 0.4.0 待办）。
 
+### 6.12 门禁状态（§6.3 逐条）
+
+| 门禁 | 状态 |
+|---|---|
+| 1 跨平台同一份 `.wasm` | ✅ 同一 fixture 在本机 macOS 与 CI Linux 都构建+加载+跑通（与编译期版本的 golden diff 仍未做） |
+| 2 面覆盖断言 | ✅ `conformance_surface_is_reachable`：tools / commands / flags / shortcuts / before_agent_start / probe / ui.dialog / ui.set_status 全部被宿主真实触达 |
+| 3 流式进度 | ✅ conformance e2e 断言 3 个 progress 块按序到达 |
+| 4 UI 往返 | 🟡 `ui.dialog` 真往返已断言；取消/超时未测（等 `rpi-ask-user` 忠实移植） |
+| 5 拒绝双态 | ✅ 无 UI → `set_status` denied；授予 UI → granted；net-http 无 grant / 错 host → denied，匹配 → 真请求 |
+| 6 用户授权闭环 | 🟡 已有 `Grants`（缺失=拒）+ `load_with_grants`；缺 `ki plugin grant/revoke` CLI 与安装/更新“增量重问”提示 |
+| 7 隔离 | ✅ 燃料计量的死循环 → trap（不挂）；`panic!` → trap；宿主存活 |
+| 8 性能基线 | ⬜ 未测（wasm vs 编译期的 tool/事件开销） |
+
+参照集（§6.2）：`rpi-todo` ✅（真插件）、`rpi-langfuse` 子集 ✅（真实压力面）、conformance fixture ✅；
+`rpi-ask-user` 未做。
+
 > 注意：新增 `kiqi-plugin-host` 作为 workspace 成员后，`cargo test --workspace` /
 > `cargo check --workspace --all-targets` 会一并构建 wasmtime（编译时间/体积显著）。§7 里
 > “独立 crate 还是 feature 开关”的问题现在只剩后半句：是否把它从默认 workspace 构建/CI 里
