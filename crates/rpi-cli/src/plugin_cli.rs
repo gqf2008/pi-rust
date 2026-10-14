@@ -164,6 +164,13 @@ fn revoke(args: &[String]) -> i32 {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
+    if !parsed.policy.is_empty()
+        || parsed.options.cwd.is_some()
+        || parsed.options.timeout_seconds.is_some()
+    {
+        eprintln!("error: `revoke` takes no flags (it clears the whole capability)");
+        return 2;
+    }
     let mut grants = Grants::load_for(&parsed.id);
     if let Err(error) = grants.revoke(&parsed.capability) {
         eprintln!("error: {error}");
@@ -185,6 +192,23 @@ struct Target {
     policy: Vec<String>,
     /// Exec-only options (`--cwd`, `--timeout`); other capabilities reject them.
     options: GrantOptions,
+}
+
+/// Parse a `--timeout` value, enforcing the budget's bounds at the same layer
+/// `--cwd` is validated (the grants model re-checks, but a CLI error belongs
+/// here — `install` downgrades grant errors to a note, so a bad timeout must
+/// fail before it ever gets there).
+fn parse_timeout(value: &str) -> Result<u64, String> {
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|_| format!("--timeout needs seconds, got `{value}`"))?;
+    let max = kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS;
+    if seconds == 0 || seconds > max {
+        return Err(format!(
+            "--timeout must be 1..={max} seconds, got {seconds}"
+        ));
+    }
+    Ok(seconds)
 }
 
 /// `<id> <capability> [--host H | --command C | --cwd S | --timeout N]...`,
@@ -218,10 +242,10 @@ fn parse_target(args: &[String]) -> Result<Target, i32> {
                 }
             },
             "--timeout" => match iter.next() {
-                Some(value) => match value.parse::<u64>() {
+                Some(value) => match parse_timeout(value) {
                     Ok(seconds) => options.timeout_seconds = Some(seconds),
-                    Err(_) => {
-                        eprintln!("error: --timeout needs seconds, got `{value}`");
+                    Err(error) => {
+                        eprintln!("error: {error}");
                         return Err(2);
                     }
                 },
@@ -367,10 +391,10 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
                 }
             },
             "--timeout" => match iter.next() {
-                Some(value) => match value.parse::<u64>() {
+                Some(value) => match parse_timeout(value) {
                     Ok(seconds) => exec_options.timeout_seconds = Some(seconds),
-                    Err(_) => {
-                        eprintln!("error: --timeout needs seconds, got `{value}`");
+                    Err(error) => {
+                        eprintln!("error: {error}");
                         return 2;
                     }
                 },
@@ -391,7 +415,9 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
         }
     }
     let Some(wasm) = wasm else {
-        eprintln!("error: expected `ki plugin install <path.wasm> [--id <id>] [--yes] [--host <host>]...`");
+        eprintln!(
+            "error: expected `ki plugin install <path.wasm> [--id <id>] [--yes] [--host <host>]... [--command <cmd>]... [--cwd <scope>] [--timeout <seconds>]`"
+        );
         return 2;
     };
     let wasm = Path::new(&wasm);
@@ -413,6 +439,11 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
             return 1;
         }
     };
+    let exec_options_given = exec_options.cwd.is_some() || exec_options.timeout_seconds.is_some();
+    if exec_options_given && !declared.iter().any(|cap| cap == "exec") {
+        eprintln!("error: --cwd/--timeout apply to `exec`, which this component does not declare");
+        return 2;
+    }
 
     let Some(root) = resolve_root(root) else {
         eprintln!("error: cannot resolve the agent directory");
@@ -479,6 +510,20 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
                 }
             }
         }
+    }
+
+    // `--cwd`/`--timeout` only reach a *newly granted* exec; when exec was
+    // already granted, install leaves it alone and the flags would vanish
+    // silently. Say so (a component that declares no exec is a hard error,
+    // checked before the copy above).
+    if exec_options_given
+        && already.iter().any(|cap| *cap == "exec")
+        && !granted_now.iter().any(|cap| cap == "exec")
+    {
+        eprintln!(
+            "note: --cwd/--timeout were not applied — `exec` was already granted; \
+             use `ki plugin grant {id} exec ...` to change its policy"
+        );
     }
 
     println!("installed `{id}` -> {}", target.display());
@@ -607,9 +652,87 @@ mod tests {
                 "--timeout".to_string(),
                 "soon".to_string(),
             ],
+            // The budget's bounds are a parse error, on the same layer as a
+            // bad --cwd value.
+            vec![
+                "p".to_string(),
+                "exec".to_string(),
+                "--timeout".to_string(),
+                "0".to_string(),
+            ],
+            vec![
+                "p".to_string(),
+                "exec".to_string(),
+                "--timeout".to_string(),
+                "301".to_string(),
+            ],
         ] {
             assert!(parse_target(&bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// `revoke` clears a whole capability; flags would be silently ignored, so
+    /// they are a usage error instead.
+    #[test]
+    fn revoke_rejects_flags() {
+        assert_eq!(
+            run(&[
+                "revoke".into(),
+                "p".into(),
+                "exec".into(),
+                "--cwd".into(),
+                "project".into(),
+            ]),
+            2
+        );
+        assert_eq!(
+            run(&[
+                "revoke".into(),
+                "p".into(),
+                "net-http".into(),
+                "--host".into(),
+                "x".into()
+            ]),
+            2
+        );
+    }
+
+    /// `--cwd`/`--timeout` on a component that does not declare `exec` are a
+    /// hard error before anything is copied — never silently dropped.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn install_rejects_exec_flags_for_a_component_without_exec() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = workspace.join("plugins/wasm/kiqi-webfetch-guest/Cargo.toml");
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--manifest-path"])
+            .arg(&manifest)
+            .args(["--target", "wasm32-wasip2", "--release"])
+            .status()
+            .expect("build the webfetch guest");
+        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
+        let wasm =
+            workspace.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_webfetch_guest.wasm");
+
+        let agent = tempfile::tempdir().unwrap();
+        let code = install_into(
+            &[
+                wasm.display().to_string(),
+                "--id".into(),
+                "wf".into(),
+                "--yes".into(),
+                "--host".into(),
+                "example.com".into(),
+                "--cwd".into(),
+                "project".into(),
+            ],
+            Some(agent.path()),
+        );
+        assert_eq!(code, 2, "--cwd without a declared exec is an error");
+        assert!(
+            !agent.path().join("plugins/wf/plugin.wasm").exists(),
+            "nothing is installed when the flags are rejected"
+        );
     }
 
     /// Installing copies the component, grants `--yes` only what the component
