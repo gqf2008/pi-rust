@@ -280,7 +280,7 @@ impl Guest for Conformance {
                             let mut bytes = line.clone().into_bytes();
                             bytes.push(b'\n');
                             match proc::write(first, &bytes) {
-                                Ok(_) => match proc::read_line(first, 64 * 1024) {
+                                Ok(_) => match proc::read_line(first, 64 * 1024, 0) {
                                     Ok(Some(reply)) => reply,
                                     Ok(None) => "eof".to_string(),
                                     Err(error) => format!("failed:{}", capability_reason(error)),

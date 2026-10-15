@@ -289,9 +289,11 @@ interface proc {
     write: func(handle: u32, bytes: list<u8>) -> result<u64, capability-error>;
 
     /// Read one line of the child's stdout (line ending stripped). `none` means
-    /// the stream ended. Blocks until a line, EOF, or the child's budget runs
-    /// out (then `failed`). A line longer than `max-bytes` is truncated.
-    read-line: func(handle: u32, max-bytes: u64) -> result<option<string>, capability-error>;
+    /// the stream ended. Waits up to `timeout-ms` for it (`0` = until the
+    /// child's budget); a timeout is `failed`, so a plugin can enforce its own
+    /// deadline — and report one — instead of being pinned for the whole
+    /// budget. A line longer than `max-bytes` is truncated.
+    read-line: func(handle: u32, max-bytes: u64, timeout-ms: u64) -> result<option<string>, capability-error>;
 
     /// Whatever the child has written to stderr so far (never blocks).
     read-stderr: func(handle: u32, max-bytes: u64) -> result<list<u8>, capability-error>;

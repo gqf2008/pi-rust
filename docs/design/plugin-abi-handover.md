@@ -66,7 +66,7 @@
 | 契约 Rust 侧（`trait Plugin`、`Event`/`Verdict`、`grants`） | `crates/kiqi-plugin` |
 | 宿主（wasmtime，把组件包成 `trait Plugin`） | `crates/kiqi-plugin-host` |
 | 插件 SDK（WIT → Rust trait） | `plugins/wasm/kiqi-plugin-guest` |
-| 已移植插件（10） | `plugins/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode,rpi-lens,websearch,subagents,goal}-guest` |
+| 已移植插件（11） | `plugins/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode,rpi-lens,websearch,subagents,goal,codegraph}-guest` |
 | 共享逻辑（编译期与 wasm 共用） | `crates/rpi-plan-mode-core` |
 | CLI | `crates/rpi-cli/src/plugin_cli.rs`（`ki plugin …`） |
 | 会话接线（发现/注册/事件 sink/各贡献面） | `crates/rpi-cli/src/plugins.rs` |
@@ -98,7 +98,7 @@ wasm-tools component wit plugins/kiqi-plugin.wit
 ## 6. 测试与 CI
 
 ```bash
-cargo test -p kiqi-plugin-host --lib --test e2e      # 36 e2e + 5 单测
+cargo test -p kiqi-plugin-host --lib --test e2e      # 39 e2e + 5 单测
 cargo test -p rpi-plan-mode-core                      # 6
 cargo test -p rpi-lens                                # 3
 cargo test -p kiqi-plugin --lib                       # 7
@@ -119,12 +119,12 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 | `flags` 声明只有 `ki plugin show` 在读 | 取值路径是 `SessionRead::cli_flag`（通用 `--foo=bar`），声明本身是诊断用 |
 | `probe`/`shortcuts`/`before_agent_start` 无生产用户 | 会话已接线并有测试，但只有 conformance fixture 在用；移植 plan-mode/webfetch 也没用到它们 |
 | 第一方插件仍是编译期 | 设计；wasm 层面向第三方 |
-| **默认只编入无 wasm 版的插件** | `rpi-orchestrator` / `rpi-permissions` / `rpi-codegraph` 三个；有 guest 的那些（todo/lens/webfetch/websearch/subagents/goal/plan-mode/ask-user/langfuse）改为 `--features plugin-rpi-<name>` 或 `ki insmod --build`。crate/feature/cdylib 面/测试全保留，CI 跑 opt-in 配置防腐烂。注意耦合：orchestrator 的 goal 联动读 `.ki/goals.json`，只有**编译期** goal 会写 |
+| **默认只编入无 wasm 版的插件** | `rpi-orchestrator` / `rpi-permissions` 两个；有 guest 的那些（todo/lens/webfetch/websearch/subagents/goal/plan-mode/ask-user/langfuse）改为 `--features plugin-rpi-<name>` 或 `ki insmod --build`。crate/feature/cdylib 面/测试全保留，CI 跑 opt-in 配置防腐烂。注意耦合：orchestrator 的 goal 联动读 `.ki/goals.json`，只有**编译期** goal 会写 |
 | `wasmtime` 常驻 `ki` | 由 `plugin-wasm`（默认开）控制；要瘦身需单独门控 |
 | `.wasm` 无签名/摘要校验 | 见 `plugin-abi.md` §7 待定项 |
 | 装完需重启 | `compiled_plugin_hosts()` 是进程级 `OnceLock` |
 | e2e 的 `exec_does_not_hang_when_the_command_leaves_a_background_child` 在满负载并行跑时偶发超时 | 15s 的 `recv_timeout` 窗口里含 wasmtime 编译 fixture 的时间，并行构建时可能不够；单跑必过。改阈值属 `RULE_阈值变更`，未动 |
-| 不迁（裁决见 §6.31） | `rpi-permissions`（信任倒置：沙箱 guest 重写宿主权限策略，需先设计）、`rpi-codegraph`（search 要长活 stdio 句柄，同 orchestrator 类）、`rpi-orchestrator`（长生命周期编排） |
+| 不迁（裁决见 §6.31/§6.33） | `rpi-permissions`（信任倒置：沙箱 guest 重写宿主权限策略，需先设计）、`rpi-orchestrator`（调度模型错位：后台跨调用需求要宿主持调度）——~~`rpi-codegraph`~~ 已随 §6.32/§6.33 的 `proc` 迁走 |
 
 ## 8. 提交轨迹（近期，`fork/main`）
 

@@ -13,6 +13,15 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
+- **`rpi-codegraph` ported to wasm** (`plugins/wasm/kiqi-codegraph-guest`):
+  the same eight tools, with the index probe/`init`/`sync` on `exec` and the
+  per-call MCP session on `proc`. `proc.read-line` gained a `timeout-ms`
+  parameter so the port keeps the 20-second session timeout and its
+  "try `codegraph unlock`" message (the contract gap the first real consumer
+  found). It leaves the default build, which now compiles in only
+  `rpi-orchestrator` and `rpi-permissions`. Windows stays on the compiled
+  plugin: resolving npm/Scoop shims needs PowerShell, and `exec`/`proc` take
+  bare command names.
 - **`proc` (ABI 0.7.0): a child process the plugin may talk to for the length
   of one tool call** — `spawn` / `write` / `read-line` / `read-stderr` /
   `wait` / `kill`, handle-based like `net-sockets`. Its grant carries the

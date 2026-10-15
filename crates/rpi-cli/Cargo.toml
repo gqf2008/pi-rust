@@ -108,7 +108,7 @@ pkg-fmt = "zip"
 # now (`--features plugin-rpi-<name>`, or install the wasm guest with
 # `ki insmod`). The crates, their features, their cdylib faces and their tests
 # all stay; CI builds every one of them so none rots.
-default = ["clipboard", "plugin-wasm", "plugin-rpi-orchestrator", "plugin-rpi-permissions", "plugin-rpi-codegraph"]
+default = ["clipboard", "plugin-wasm", "plugin-rpi-orchestrator", "plugin-rpi-permissions"]
 # Loads `plugins/<id>/plugin.wasm` through `kiqi-plugin-host` (wasmtime). Off
 # only for builds that want the leaner binary without the wasm tier.
 plugin-wasm = ["dep:kiqi-plugin-host"]

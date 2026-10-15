@@ -790,6 +790,31 @@ guest 故意不杀，调用返回后该 pid 在 **OS 层面**查不到（断言�
 **本能力不解决** `rpi-orchestrator`：它要「调用之间还在跑」，需要宿主持调度（重新设计），
 不是给插件加一层能力能凑出来的。
 
+### 6.33 第一个真实消费者：`rpi-codegraph` 迁 wasm（并顺手修了契约缺口）
+
+`proc` 落地后立刻有了消费者。移植时发现契约少了一个参数——`read-line` 原本只受子进程预算
+（600s）约束，而 codegraph 的会话超时是 20s、且它的超时文案（“try `codegraph unlock`”）
+值得保留；同步 guest 又没法自己打断一次阻塞读。**趁 0.7.0 未发布补上
+`read-line(handle, max-bytes, timeout-ms)`**（`0` = 等到预算用尽）——第一个消费者暴露的缺口，
+如实补契约而不是让 guest 硬扛。
+
+**移植形态**（`plugins/wasm/kiqi-codegraph-guest`）：八个工具与 schema 逐条照搬；
+索引探测、`init`、`sync` 走 `exec`（一次性）；MCP 会话走 `proc`（`serve --mcp` 每次调用内起、
+会话结束即杀——与编译期版逐条对应）。五条差异写进 guest README，其中两条值得在这里点名：
+
+1. **探测 `.codegraph/` 用 `test` 命令而不是 `stat`**：guest 的 `fs` 监禁在自己的 data 目录，
+   看不见项目树。代价是 exec 白名单要多一个 `test`；没有 `test` 二进制的平台（Windows）
+   会明确失败而不是猜。
+2. **Windows 留在编译期版**：编译期版靠 PowerShell 解析 `codegraph` 的真实路径（npm/Scoop
+   shim 不解析），而 `exec`/`proc` 的契约是裸名——这条平台差异不是没做，是契约不允许。
+
+e2e 三条：八工具面与 schema 形状、**探测决策**（有/无索引两种情形，用「下一个需要授权的子命令
+是 sync 还是 init」来断言——这条断言在实现里抓到了一个真 bug：探测路径我把 `cwd` 已是 root
+这件事算重了）、以及有真 `codegraph` 时的 live 会话（没有就明示跳过）。
+
+至此默认构建只剩两个编译期插件：`rpi-orchestrator`（调度模型错位）与 `rpi-permissions`
+（信任倒置）——都不是缺能力，是 wasm 层当前形状表达不了或有设计缺口。
+
 ## 7. 待定
 
 - ~~wasmtime 依赖很重：独立 crate 还是 feature 开关？~~ → 已定：**独立 crate `kiqi-plugin-host` +

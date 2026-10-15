@@ -1233,8 +1233,7 @@ mod tests {
         // Only the plugins without a wasm port are compiled in by default; the
         // rest are opt-in features (CI builds every configuration). Each push
         // names the feature that brings the plugin back.
-        let mut expected_ids: Vec<&str> =
-            vec!["rpi-orchestrator", "rpi-permissions", "rpi-codegraph"];
+        let mut expected_ids: Vec<&str> = vec!["rpi-orchestrator", "rpi-permissions"];
         #[cfg(feature = "plugin-rpi-todo")]
         expected_ids.push("rpi-todo");
         #[cfg(feature = "plugin-rpi-lens")]
@@ -1253,6 +1252,8 @@ mod tests {
         expected_ids.push("rpi-ask-user");
         #[cfg(feature = "plugin-rpi-langfuse")]
         expected_ids.push("rpi-langfuse");
+        #[cfg(feature = "plugin-rpi-codegraph")]
+        expected_ids.push("rpi-codegraph");
         for expected in expected_ids {
             assert!(
                 ids.contains(&expected),
@@ -1277,13 +1278,7 @@ mod tests {
             .into_iter()
             .map(|t| t.name)
             .collect();
-        let mut expected_tools: Vec<&str> = vec![
-            "subagent",
-            "plan",
-            "dispatch",
-            "permissions",
-            "codegraph_search",
-        ];
+        let mut expected_tools: Vec<&str> = vec!["subagent", "plan", "dispatch", "permissions"];
         #[cfg(feature = "plugin-rpi-todo")]
         expected_tools.push("todo");
         #[cfg(feature = "plugin-rpi-lens")]
@@ -1303,6 +1298,8 @@ mod tests {
         }
         #[cfg(feature = "plugin-rpi-ask-user")]
         expected_tools.push("ask_user");
+        #[cfg(feature = "plugin-rpi-codegraph")]
+        expected_tools.push("codegraph_search");
         for expected in expected_tools {
             assert!(
                 tools.iter().any(|t| t == expected),
@@ -1422,7 +1419,7 @@ mod tests {
     fn registry_exposes_the_first_party_plugins() {
         let plugins = load_all();
         // The default build registers only the plugins without a wasm port.
-        for always in ["rpi-orchestrator", "rpi-permissions", "rpi-codegraph"] {
+        for always in ["rpi-orchestrator", "rpi-permissions"] {
             assert!(
                 plugins.iter().any(|entry| entry.id == always),
                 "{always} is compiled in by default; got {:?}",

@@ -1198,6 +1198,189 @@ fn exec_times_out_at_the_grants_budget() {
     );
 }
 
+/// `rpi-codegraph` ported to wasm: the model still sees the same eight tools
+/// with the same schemas; `init`/`sync` and the MCP session go through the
+/// host's `exec`/`proc` grants instead of spawning processes itself.
+#[test]
+fn codegraph_guest_declares_the_eight_tools() {
+    let wasm = build_guest("kiqi-codegraph-guest", "kiqi_codegraph_guest.wasm");
+    let plugin =
+        WasmPlugin::load_with_grants("rpi-codegraph", &wasm, Grants::default()).expect("load");
+    assert_eq!(plugin.id(), "rpi-codegraph");
+
+    let mut names: Vec<String> = plugin.tools().into_iter().map(|tool| tool.name).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "codegraph_callees",
+            "codegraph_callers",
+            "codegraph_explore",
+            "codegraph_files",
+            "codegraph_impact",
+            "codegraph_node",
+            "codegraph_search",
+            "codegraph_status",
+        ]
+    );
+    // Every ported schema keeps the shape the compiled plugin emitted: an
+    // object schema whose properties always include `projectPath`.
+    for spec in plugin.tools() {
+        assert_eq!(spec.parameters["type"], "object", "{}", spec.name);
+        assert!(
+            spec.parameters["properties"]["projectPath"].is_object(),
+            "{} lost its projectPath parameter",
+            spec.name
+        );
+    }
+
+    // An unknown tool is refused, not silently dispatched.
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    let unknown = plugin
+        .call("codegraph_nope", &serde_json::json!({}), &caps, &sink)
+        .unwrap_err();
+    assert!(unknown.to_string().contains("codegraph_nope"), "{unknown}");
+}
+
+/// The ported decision logic, asserted where it is observable: the guest asks
+/// `test -d .codegraph` (it cannot stat the project tree itself), so with the
+/// index present it goes straight to `sync`, and without it it tries `init`
+/// first. Granting only `test` makes each path's *next* call the error, and the
+/// error names the subcommand — which is how the test tells them apart.
+#[test]
+fn codegraph_guest_probes_the_index_then_needs_the_codegraph_grant() {
+    use kiqi_plugin_host::ExecCwd;
+    use kiqi_plugin_host::ExecGrant;
+
+    // projectPath must live inside the session's directory (the guest resolves
+    // it lexically against `info().cwd`), so the fixture project goes in a temp
+    // directory under the test's own cwd — auto-removed on drop.
+    let with_index = tempfile::Builder::new()
+        .prefix(".kq-codegraph-indexed-")
+        .tempdir_in(".")
+        .expect("temp project");
+    std::fs::create_dir_all(with_index.path().join(".codegraph")).expect("index dir");
+    let without_index = tempfile::Builder::new()
+        .prefix(".kq-codegraph-fresh-")
+        .tempdir_in(".")
+        .expect("temp project");
+
+    let grants = Grants {
+        exec: Some(ExecGrant {
+            commands: vec!["test".to_string()],
+            cwd: ExecCwd::Project,
+            ..ExecGrant::default()
+        }),
+        ..Grants::default()
+    };
+
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    for (project, expected) in [
+        (with_index.path(), "codegraph sync"),
+        (without_index.path(), "codegraph init"),
+    ] {
+        let wasm = build_guest("kiqi-codegraph-guest", "kiqi_codegraph_guest.wasm");
+        let plugin =
+            WasmPlugin::load_with_grants("rpi-codegraph", &wasm, grants.clone()).expect("load");
+        let error = plugin
+            .call(
+                "codegraph_status",
+                &serde_json::json!({ "projectPath": project.display().to_string() }),
+                &caps,
+                &sink,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !error.contains("test -d"),
+            "the probe itself must have succeeded with `test` granted: {error}"
+        );
+        assert!(
+            error.contains(expected),
+            "expected `{expected}` to be the call that needs the codegraph grant: {error}"
+        );
+        assert!(
+            error.contains("not granted"),
+            "the refusal names the missing grant: {error}"
+        );
+    }
+}
+
+/// The MCP session itself needs the real `codegraph` CLI (an npm package), so
+/// this is the repo's detect-and-return pattern: say so and skip when it is not
+/// installed, rather than pretending the protocol path was covered.
+#[test]
+fn codegraph_guest_live_session_when_asked() {
+    use kiqi_plugin_host::{ExecCwd, ExecGrant, ProcGrant};
+
+    let available = std::process::Command::new("codegraph")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !available {
+        eprintln!(
+            "skipping codegraph_guest_live_session_when_asked: no `codegraph` on PATH \
+             (npm i -g @colbymchenry/codegraph)"
+        );
+        return;
+    }
+
+    let project = tempfile::Builder::new()
+        .prefix(".kq-codegraph-live-")
+        .tempdir_in(".")
+        .expect("temp project");
+    let wasm = build_guest("kiqi-codegraph-guest", "kiqi_codegraph_guest.wasm");
+    let plugin = WasmPlugin::load_with_grants(
+        "rpi-codegraph",
+        &wasm,
+        Grants {
+            exec: Some(ExecGrant {
+                commands: vec!["test".to_string(), "codegraph".to_string()],
+                cwd: ExecCwd::Project,
+                timeout_seconds: 300,
+                ..ExecGrant::default()
+            }),
+            proc: Some(ProcGrant {
+                commands: vec!["codegraph".to_string()],
+                cwd: ExecCwd::Project,
+                ..ProcGrant::default()
+            }),
+            ..Grants::default()
+        },
+    )
+    .expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    let outcome = plugin
+        .call(
+            "codegraph_status",
+            &serde_json::json!({ "projectPath": project.path().display().to_string() }),
+            &caps,
+            &sink,
+        )
+        .expect("call");
+    assert!(!outcome.is_error, "{outcome:?}");
+    assert!(
+        !text_of(&outcome).trim().is_empty(),
+        "the MCP session answered with something"
+    );
+}
+
 /// `proc` round-trips a line through a child the guest talks to: spawn, write,
 /// read-line, wait, read-stderr, kill — every function of the interface, driven
 /// by the conformance fixture inside one tool call.

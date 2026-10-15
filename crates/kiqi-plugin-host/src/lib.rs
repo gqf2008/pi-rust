@@ -997,6 +997,7 @@ impl crate::kiqi::plugin::proc::Host for HostState {
         &mut self,
         handle: u32,
         max_bytes: u64,
+        timeout_ms: u64,
     ) -> Result<Option<String>, CapabilityError> {
         let child = self
             .procs
@@ -1010,12 +1011,19 @@ impl crate::kiqi::plugin::proc::Host for HostState {
                 "the child's time budget is spent".to_string(),
             ));
         }
-        match child.lines.recv_timeout(remaining) {
+        // The guest's own deadline may be shorter than the child's budget:
+        // `timeout_ms = 0` means "however long the budget allows", anything
+        // else caps this wait so a plugin can report its own timeout.
+        let wait = match timeout_ms {
+            0 => remaining,
+            ms => remaining.min(std::time::Duration::from_millis(ms)),
+        };
+        match child.lines.recv_timeout(wait) {
             Ok(line) => Ok(Some(truncate_chars(&line, max_bytes))),
             // The reader dropped its sender: stdout ended.
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(None),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(CapabilityError::Failed(
-                "no output within the child's time budget".to_string(),
+                "no output within the wait".to_string(),
             )),
         }
     }
