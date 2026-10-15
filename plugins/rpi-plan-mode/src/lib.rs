@@ -154,21 +154,39 @@ extern "C" fn handle_event(event: StablePluginEvent, _: *mut c_void) -> i32 {
 static HANDLES: ToolHandles<Drive> = ToolHandles::new();
 
 struct Drive {
+    tool: &'static str,
     params: Value,
     done: bool,
 }
 
-extern "C" fn execute(
+fn drive_from(tool: &'static str, params: StbString, free: Option<FreeStringFn>) -> StepHandle {
+    let text = params.to_string_lossy();
+    params.free_with(free);
+    HANDLES.insert(Drive {
+        tool,
+        params: serde_json::from_str(&text).unwrap_or(Value::Null),
+        done: false,
+    })
+}
+
+// One `execute` per tool: the ABI hands `execute` only the params, so the tool
+// identity is stamped here. Dispatching on the payload's shape instead (as
+// this did) misroutes a `plan_mode_start` call that happens to carry a `plan`
+// field — the start schema does not forbid extra properties.
+extern "C" fn execute_start(
     _: StbStringRef,
     params: StbString,
     free: Option<FreeStringFn>,
 ) -> StepHandle {
-    let text = params.to_string_lossy();
-    params.free_with(free);
-    HANDLES.insert(Drive {
-        params: serde_json::from_str(&text).unwrap_or(Value::Null),
-        done: false,
-    })
+    drive_from(START_TOOL, params, free)
+}
+
+extern "C" fn execute_complete(
+    _: StbStringRef,
+    params: StbString,
+    free: Option<FreeStringFn>,
+) -> StepHandle {
+    drive_from(PLAN_TOOL, params, free)
 }
 
 extern "C" fn poll(handle: StepHandle, _: Option<ToolPartialCb>, _: *mut c_void) -> StepResult {
@@ -191,7 +209,7 @@ extern "C" fn poll(handle: StepHandle, _: Option<ToolPartialCb>, _: *mut c_void)
         ));
     }
     drive.done = true;
-    let result = if drive.params.get("plan").is_some() {
+    let result = if drive.tool == PLAN_TOOL {
         complete_plan(&AbiHost, &drive.params)
     } else {
         start_plan(&AbiHost, &drive.params)
@@ -250,7 +268,14 @@ rpi_plugin_sdk::export_plugin!(|api| {
             r#"{{"type":"object","required":["plan"],"properties":{{"plan":{{"type":"string","minLength":1,"maxLength":{MAX_PLAN_CHARS},"description":"The complete decision-ready implementation plan in Markdown."}}}}}}"#
         )),
     });
-    let rc = register(&*schema, execute, poll, cancel, destroy, free_string);
+    let rc = register(
+        &*schema,
+        execute_complete,
+        poll,
+        cancel,
+        destroy,
+        free_string,
+    );
     drop(schema);
     if rc != 0 {
         return rc;
@@ -264,7 +289,14 @@ rpi_plugin_sdk::export_plugin!(|api| {
             r#"{"type":"object","properties":{"request":{"type":"string","description":"Optional user request to plan."}}}"#.into(),
         ),
     });
-    let start_rc = register(&*start_schema, execute, poll, cancel, destroy, free_string);
+    let start_rc = register(
+        &*start_schema,
+        execute_start,
+        poll,
+        cancel,
+        destroy,
+        free_string,
+    );
     drop(start_schema);
     if start_rc != 0 {
         return start_rc;

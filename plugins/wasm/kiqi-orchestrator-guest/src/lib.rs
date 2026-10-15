@@ -718,8 +718,12 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     let status = match proc::wait(handle, 2_000) {
         Ok(Some(code)) => code,
         Ok(None) => {
+            // stdout is at EOF, so the child has finished producing; one that
+            // lingers past the grace window (flushing its session, say) is
+            // still finished — kill the leftover and score the complete
+            // output, instead of inventing a failure exit of -1.
             let _ = proc::kill(handle);
-            -1
+            0
         }
         Err(error) => return Err(capability_reason(error)),
     };
@@ -827,72 +831,94 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
     // cannot outlive the call, so "leave them running" is not an option).
     let wave_deadline = wait_seconds.map(|secs| Instant::now() + Duration::from_secs(secs));
     let mut outputs: HashMap<u32, String> = HashMap::new();
-    loop {
-        let Some((id, handle, deadline)) = next_running() else {
+    'wave: loop {
+        // Poll every live child each round. Polling only the head of the list
+        // strands siblings: one that finishes while an earlier node is still
+        // streaming would never be read or collected, and the `waitSeconds`
+        // expiry would then kill it and mark a successfully finished node
+        // failed.
+        let batch: Vec<(String, u32, Instant)> = running()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if batch.is_empty() {
             break;
-        };
-        if Instant::now() >= deadline {
-            let _ = proc::kill(handle);
-            let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(slot) = graph.get_mut(&id) {
-                slot.status = Status::Failed;
-                slot.result = Some("timed out".into());
-            }
-            graph.propagate_skips();
-            running()
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .retain(|(node_id, _, _)| node_id != &id);
-            continue;
         }
-        match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
-            Ok(Some(line)) => {
-                let buffer = outputs.entry(handle).or_default();
-                buffer.push_str(&line);
-                buffer.push('\n');
+        for (id, handle, deadline) in batch {
+            // A sibling handled earlier in this round may already have left
+            // the list (collected at EOF, or timed out and killed).
+            if !still_running(handle) {
+                continue;
             }
-            Ok(None) => {
-                // EOF: the child is done — collect its status, run the
-                // acceptance checks, commit.
-                let exit = proc::wait(handle, 2_000)
-                    .ok()
-                    .and_then(|code| code)
-                    .unwrap_or(-1);
+            if Instant::now() >= deadline {
+                let _ = proc::kill(handle);
                 let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
                 if let Some(slot) = graph.get_mut(&id) {
-                    let output = outputs.get(&handle).cloned().unwrap_or_default();
-                    let verified = if exit == 0 {
-                        verify_node(slot)
-                    } else {
-                        Err(String::new())
-                    };
-                    match (exit, verified) {
-                        (0, Ok(())) => {
-                            slot.status = Status::Done;
-                            slot.result = Some(summarize(&truncate_output(output)));
-                        }
-                        (0, Err(problem)) => {
-                            slot.status = Status::Failed;
-                            slot.result = Some(summarize(&problem));
-                        }
-                        _ => {
-                            slot.status = Status::Failed;
-                            slot.result =
-                                Some(summarize(&format!("{output}\n[exit {exit}]")));
-                        }
-                    }
+                    slot.status = Status::Failed;
+                    slot.result = Some("timed out".into());
                 }
                 graph.propagate_skips();
                 running()
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .retain(|(node_id, _, _)| node_id != &id);
+                continue;
             }
-            Err(_) => {}
-        }
-        if wave_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            fail_remaining("the dispatch wave hit its waitSeconds bound");
-            break;
+            match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
+                Ok(Some(line)) => {
+                    let buffer = outputs.entry(handle).or_default();
+                    buffer.push_str(&line);
+                    buffer.push('\n');
+                }
+                Ok(None) => {
+                    // EOF: the child has stopped producing. Give it a short
+                    // grace to exit; one that lingers past it (flushing its
+                    // session, say) is still finished as far as this wave is
+                    // concerned, so kill the leftover and score its complete
+                    // output — a bare `-1` here used to fail finished nodes.
+                    let exit = match proc::wait(handle, 2_000) {
+                        Ok(Some(code)) => code,
+                        Ok(None) | Err(_) => {
+                            let _ = proc::kill(handle);
+                            0
+                        }
+                    };
+                    let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(slot) = graph.get_mut(&id) {
+                        let output = outputs.get(&handle).cloned().unwrap_or_default();
+                        let verified = if exit == 0 {
+                            verify_node(slot)
+                        } else {
+                            Err(String::new())
+                        };
+                        match (exit, verified) {
+                            (0, Ok(())) => {
+                                slot.status = Status::Done;
+                                slot.result = Some(summarize(&truncate_output(output)));
+                            }
+                            (0, Err(problem)) => {
+                                slot.status = Status::Failed;
+                                slot.result = Some(summarize(&problem));
+                            }
+                            _ => {
+                                slot.status = Status::Failed;
+                                slot.result =
+                                    Some(summarize(&format!("{output}\n[exit {exit}]")));
+                            }
+                        }
+                    }
+                    graph.propagate_skips();
+                    running()
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .retain(|(node_id, _, _)| node_id != &id);
+                }
+                Err(_) => {}
+            }
+            if wave_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                fail_remaining("the dispatch wave hit its waitSeconds bound");
+                break 'wave;
+            }
         }
     }
 
@@ -920,10 +946,14 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
     Ok(result_with_details(&text, graph.to_details()))
 }
 
-fn next_running() -> Option<(String, u32, Instant)> {
-    let map = running().lock().unwrap_or_else(|p| p.into_inner());
-    map.first()
-        .map(|(id, handle, deadline)| (id.clone(), *handle, *deadline))
+/// Whether `handle` is still in the running list (a sibling earlier in the
+/// same polling round may have collected or killed it already).
+fn still_running(handle: u32) -> bool {
+    running()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .any(|(_, open, _)| *open == handle)
 }
 
 /// Kill and fail whatever is still running when the wave's patience runs out.

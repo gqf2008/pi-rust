@@ -49,8 +49,9 @@ impl<'a> EventView<'a> {
         // (`rpi-extensions::translate::free_dispatched_event`): a tag listed
         // here but dispatched `empty` reads the union's `data` arm at a
         // garbage pointer (SIGBUS). `SessionTree`/`SessionBeforeTree` are
-        // no-payload today (the WIT `session-tree` variant is unit), so they
-        // must NOT appear here.
+        // no-payload today (the WIT `session-tree` variant is unit), and the
+        // TUI's `UiPromptStart`/`UiPromptEnd` are dispatched empty
+        // (`dispatch_empty_event`), so none of them may appear here.
         if !matches!(
             self.tag(),
             EventTag::SessionBeforeSwitch
@@ -67,8 +68,6 @@ impl<'a> EventView<'a> {
                 | EventTag::ThinkingLevelSelect
                 | EventTag::UserBash
                 | EventTag::Input
-                | EventTag::UiPromptStart
-                | EventTag::UiPromptEnd
                 | EventTag::EditorChange
         ) {
             return None;

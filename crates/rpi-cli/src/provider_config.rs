@@ -247,6 +247,10 @@ pub fn remove_provider(id: &str) -> Result<String, String> {
     let mut settings = crate::settings::load_settings().unwrap_or_default();
     if settings.default_provider.as_deref() == Some(id) {
         settings.default_provider = None;
+        // The saved model pointed at this provider's catalog; leaving it
+        // would let `find_model` bind the removed id to a same-named model in
+        // whatever provider happens to have one.
+        settings.default_model = None;
         let _ = crate::settings::save_settings(&settings);
     }
     Ok(format!("Removed provider \"{id}\"."))

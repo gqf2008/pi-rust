@@ -606,7 +606,13 @@ pub(crate) fn list_goals() -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 fn param_u32(params: &Value, key: &str) -> Option<u32> {
-    params.get(key).and_then(Value::as_u64).map(|v| v as u32)
+    // Clamp rather than truncate: `as u32` keeps only the low 32 bits, so
+    // maxTurns 4294967297 silently became 1 (and 4294967296 became 0, which
+    // drops the budget entirely).
+    params
+        .get(key)
+        .and_then(Value::as_u64)
+        .map(|v| v.min(u32::MAX as u64) as u32)
 }
 
 pub(crate) fn start_goal(host: &dyn GoalHost, params: &Value) -> Result<String, String> {
@@ -687,11 +693,14 @@ pub(crate) fn limit_goal(host: &dyn GoalHost, params: &Value) -> Result<String, 
     let max_turns = params
         .get("maxTurns")
         .and_then(Value::as_u64)
-        .map(|v| (v as u32).max(1));
+        .map(|v| (v.min(u32::MAX as u64) as u32).max(1));
+    // Saturating: a raw `* 60_000` overflowed i64 for large values (debug
+    // panic, release wrap), and a wrapped-negative deadline was read as
+    // "clear the budget" while the tool reported an update.
     let max_minutes = params
         .get("maxMinutes")
         .and_then(Value::as_u64)
-        .map(|v| (v as i64) * 60_000);
+        .map(|v| (v.min(i64::MAX as u64) as i64).saturating_mul(60_000));
     if max_turns.is_none() && max_minutes.is_none() {
         return Err("limit requires `maxTurns` and/or `maxMinutes`".into());
     }

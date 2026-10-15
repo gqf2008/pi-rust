@@ -815,7 +815,7 @@ e2e 三条：八工具面与 schema 形状、**探测决策**（有/无索引两
 是 sync 还是 init」来断言——这条断言在实现里抓到了一个真 bug：探测路径我把 `cwd` 已是 root
 这件事算重了）、以及有真 `codegraph` 时的 live 会话（没有就明示跳过）。
 
-### 6.35 ABI 0.7.2：`fs` 授权带 scope（补齐与 exec/proc 的不对称）
+### 6.35 `fs` 授权带 scope（**ABI 不变**，仍 0.7.1——只动授权模型与宿主，不动 WIT）（补齐与 exec/proc 的不对称）
 
 `exec`/`proc` 都有 cwd scope（plugin-data | project），`fs` 却只有 data 监禁——goal 状态落不进
 项目目录、codegraph 探测靠 `test` 命令，根源都是它。本轮补齐：`fs` 授权从裸 `true` 变为

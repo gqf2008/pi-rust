@@ -13,7 +13,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
-- **`fs` grants carry a scope (ABI 0.7.2)**: `ki plugin grant <id> fs --cwd project`
+- **`fs` grants carry a scope (grant-model change; the ABI stays 0.7.1 — no WIT change)**: `ki plugin grant <id> fs --cwd project`
   opts a plugin into reading and writing the project tree (same scope as
   `exec`/`proc`); the default stays the plugin's own data directory, and legacy
   `"fs": true` files keep working unchanged.

@@ -31,6 +31,12 @@ use crate::session::types::{Entry, EntryOrder, EntryQuery};
 /// The reserved `customType` that marks a session value entry.
 pub const VALUE_CUSTOM_TYPE: &str = "ki.value";
 
+/// The pre-rename marker (`rpi.value`): sessions written by earlier releases
+/// store their values under it, and the module's contract is that values are
+/// durable and survive recovery — so those entries are still read (anything
+/// new is written under [`VALUE_CUSTOM_TYPE`]).
+const LEGACY_VALUE_CUSTOM_TYPE: &str = "rpi.value";
+
 /// A loaded, latest-wins view of the session's values. Cheap to clone.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionValues {
@@ -41,7 +47,7 @@ impl SessionValues {
     /// Load every value from the session, resolving latest-wins and dropping
     /// tombstoned keys.
     pub async fn load(session: &Session) -> SessionResult<Self> {
-        let entries = session
+        let mut entries = session
             .find_entries(&EntryQuery {
                 entry_type: Some("custom"),
                 custom_type: Some(VALUE_CUSTOM_TYPE.to_string()),
@@ -50,6 +56,19 @@ impl SessionValues {
                 cursor: None,
             })
             .await?;
+        if entries.is_empty() {
+            // A session written before the rename carries `rpi.value`; read
+            // those too rather than silently losing the durable values.
+            entries = session
+                .find_entries(&EntryQuery {
+                    entry_type: Some("custom"),
+                    custom_type: Some(LEGACY_VALUE_CUSTOM_TYPE.to_string()),
+                    order: Some(EntryOrder::OldestFirst),
+                    limit: None,
+                    cursor: None,
+                })
+                .await?;
+        }
         Ok(Self::from_entries(&entries))
     }
 
@@ -60,7 +79,9 @@ impl SessionValues {
             let Entry::Custom(custom) = entry else {
                 continue;
             };
-            if custom.custom_type != VALUE_CUSTOM_TYPE {
+            if custom.custom_type != VALUE_CUSTOM_TYPE
+                && custom.custom_type != LEGACY_VALUE_CUSTOM_TYPE
+            {
                 continue;
             }
             let Some(data) = &custom.data else {

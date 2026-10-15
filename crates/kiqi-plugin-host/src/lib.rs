@@ -751,6 +751,14 @@ impl crate::kiqi::plugin::net_sockets::Host for HostState {
                 "net-sockets to `{host}` is not granted"
             )));
         }
+        // Bound the live handles the way `proc` bounds its children: unbounded
+        // they let a looping guest exhaust the host process's file
+        // descriptors, which breaks every other plugin's fs/exec too.
+        if self.sockets.len() >= MAX_OPEN_SOCKETS {
+            return Err(CapabilityError::Failed(format!(
+                "net-sockets: {MAX_OPEN_SOCKETS} sockets are already open on this plugin; close one first"
+            )));
+        }
         use std::net::ToSocketAddrs;
         let resolved = (host.as_str(), port)
             .to_socket_addrs()
@@ -895,15 +903,66 @@ impl crate::kiqi::plugin::proc::Host for HostState {
             .ok_or_else(|| CapabilityError::Failed("the child has no stdout pipe".to_string()))?;
         let (line_tx, line_rx) = std::sync::mpsc::sync_channel::<String>(PROC_CHANNEL_DEPTH);
         std::thread::spawn(move || {
-            use std::io::BufRead;
-            for line in std::io::BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if line_tx
-                    .send(truncate_chars(&line, PROC_LINE_CAP as u64))
-                    .is_err()
-                {
-                    break;
+            use std::io::Read;
+            // Read in chunks and frame lines by hand: `BufRead::lines()` grows
+            // its String until a newline arrives, so a newline-free stream
+            // (say, `cat /dev/zero`) would buffer without bound before the
+            // `PROC_LINE_CAP` truncation could apply. Here a line is capped as
+            // it accumulates, and only the cap is ever held in memory.
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut chunk = [0u8; 8192];
+            let mut line: Vec<u8> = Vec::new();
+            // A line longer than the cap: keep the first `PROC_LINE_CAP` bytes,
+            // report that line truncated, drop the rest up to the newline.
+            let mut discarding = false;
+            let send = |line: &mut Vec<u8>, line_tx: &std::sync::mpsc::SyncSender<String>| {
+                let text = String::from_utf8_lossy(line).into_owned();
+                line.clear();
+                line_tx
+                    .send(truncate_chars(&text, PROC_LINE_CAP as u64))
+                    .is_ok()
+            };
+            'outer: loop {
+                let read = match reader.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => read,
+                };
+                let mut start = 0;
+                for index in 0..read {
+                    if chunk[index] != b'\n' {
+                        continue;
+                    }
+                    if !discarding && !chunk[start..index].is_empty() {
+                        line.extend_from_slice(&chunk[start..index]);
+                    }
+                    // Like `lines()`, strip a trailing `\r` (CRLF endings).
+                    if line.last() == Some(&b'\r') {
+                        line.pop();
+                    }
+                    if !send(&mut line, &line_tx) {
+                        break 'outer;
+                    }
+                    discarding = false;
+                    start = index + 1;
                 }
+                if start < read {
+                    if discarding {
+                        continue;
+                    }
+                    let room = PROC_LINE_CAP.saturating_sub(line.len());
+                    let tail = &chunk[start..read];
+                    line.extend_from_slice(&tail[..tail.len().min(room)]);
+                    if tail.len() > room {
+                        // The line outgrew the cap: send what we have as a
+                        // truncated line when its newline arrives.
+                        discarding = true;
+                    }
+                }
+            }
+            // A final line without a trailing newline (an over-long final line
+            // arrives truncated by the cap, like every other over-long line).
+            if !line.is_empty() {
+                let _ = send(&mut line, &line_tx);
             }
             // Dropping `line_tx` is the EOF signal `read-line` reports as `none`.
         });
@@ -1199,6 +1258,11 @@ const PROC_STDERR_CAP: usize = 256 * 1024;
 /// from buffering the host's memory.
 const PROC_CHANNEL_DEPTH: usize = 1024;
 
+/// How many sockets one plugin may hold open at once through `net-sockets`.
+/// The map would otherwise grow without bound — nothing else reaps it — and a
+/// guest that loops `connect` would drain the host's file descriptors.
+const MAX_OPEN_SOCKETS: usize = 256;
+
 /// One child spawned through `proc`.
 ///
 /// Three helper threads keep the guest from blocking the host: stdout is framed
@@ -1488,6 +1552,10 @@ impl WasmPlugin {
                 .guest
                 .kiqi_plugin_plugin_api()
                 .call_shutdown(&mut inner.store);
+            // `shutdown` is a guest entry point like any other: a plugin may
+            // spawn through `proc` in it, and nothing else runs after this
+            // point, so reap here too — a handle's lifetime is "one call".
+            inner.store.data_mut().reap_procs();
             // `inner` drops here, releasing the store (and its memory).
         }
     }

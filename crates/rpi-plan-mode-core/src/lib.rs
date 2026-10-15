@@ -233,9 +233,12 @@ fn deactivate(host: &dyn PlanHost) -> Result<Deactivated, String> {
     if !guard.active {
         return Ok(Deactivated::Inactive);
     }
-    let restored = match guard.previous_tools.take() {
+    // Only clear `previous_tools` once the host accepted the restore: taking
+    // it first loses the captured set forever when `set_tools` fails.
+    let restored = match guard.previous_tools.clone() {
         Some(previous) => {
             set_tools(host, &previous)?;
+            guard.previous_tools = None;
             true
         }
         None => false,

@@ -20,6 +20,76 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_OUTPUT_CHARS: usize = 25_000;
 const MAX_DIAGNOSTIC_CHARS: usize = 1_000;
+/// Wall-clock bounds for the one-shot `codegraph init` / `codegraph sync`
+/// subprocesses. `Command::output()` has no timeout, and a codegraph blocked
+/// on a locked index — the state its own error text points at ("try `codegraph
+/// unlock`") — would otherwise wedge this plugin's poll thread forever: the
+/// host drives `poll` from a blocking worker that runs to completion even when
+/// the tool call is cancelled, so nothing upstream can interrupt it.
+const INIT_TIMEOUT: Duration = Duration::from_secs(300);
+const SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Run `cmd` to completion, bounded by `timeout`.
+///
+/// Replaces `Command::output()` (which has no deadline): stdout/stderr are
+/// drained by reader threads so a chatty child cannot deadlock against the
+/// deadline check, and a child that outstays `timeout` is killed and reported
+/// with the lock hint rather than blocking forever.
+fn output_with_timeout(
+    cmd: &mut Command,
+    timeout: Duration,
+    what: &str,
+) -> Result<std::process::Output, String> {
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to run {what}: {e}"))?;
+    let stdout_reader = child.stdout.take().map(|mut pipe| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|mut pipe| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{what}: wait: {error}"));
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "{what} timed out after {}s — codegraph may be waiting on its index lock (try `codegraph unlock`)",
+                timeout.as_secs()
+            ));
+        }
+        thread::sleep(POLL_INTERVAL);
+    };
+    let stdout = stdout_reader
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
 
 static HANDLES: ToolHandles<Drive> = ToolHandles::new();
 
@@ -93,15 +163,17 @@ fn ensure_initialized(root: &Path) -> Result<(), String> {
         return Ok(());
     }
     let mut cmd = resolve_codegraph_cmd()?;
-    let output = cmd
-        .args(["init"])
-        .arg(root)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("failed to run codegraph init: {e}"))?;
+    let output = output_with_timeout(
+        &mut cmd
+            .args(["init"])
+            .arg(root)
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+        INIT_TIMEOUT,
+        "codegraph init",
+    )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("codegraph init failed: {stderr}"));
@@ -112,15 +184,17 @@ fn ensure_initialized(root: &Path) -> Result<(), String> {
 /// Run `codegraph sync` to pick up any file changes since the last index.
 fn sync_index(root: &Path) -> Result<(), String> {
     let mut cmd = resolve_codegraph_cmd()?;
-    let output = cmd
-        .args(["sync"])
-        .arg(root)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("failed to run codegraph sync: {e}"))?;
+    let output = output_with_timeout(
+        &mut cmd
+            .args(["sync"])
+            .arg(root)
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+        SYNC_TIMEOUT,
+        "codegraph sync",
+    )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("codegraph sync failed: {stderr}"));

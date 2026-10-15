@@ -239,9 +239,19 @@ pub(crate) fn permissions(p: &Value) -> Result<String, String> {
                     rules.deny.push(capability.to_owned());
                 }
             }
-            save(&local, &rules)?;
+            // Write back to the file the rules came from: revoking a global
+            // rule must not leave it in force in every other project while
+            // silently copying the whole global ruleset into this project
+            // (where it would shadow all future global edits). Only when no
+            // file exists yet is the new ruleset project-local.
+            let target = if file.exists() {
+                file.clone()
+            } else {
+                local.clone()
+            };
+            save(&target, &rules)?;
             Ok(
-                json!({"action":action,"rule":capability,"effect":effect,"allowed":action=="grant"})
+                json!({"action":action,"rule":capability,"effect":effect,"allowed":action=="grant","path":target})
                     .to_string(),
             )
         }

@@ -949,7 +949,6 @@ fn free_dispatched_event(event: &StablePluginEvent) {
         | T::SessionBeforeTree
         | T::SessionTree
         | T::Context
-        | T::BeforeAgentStart
         | T::AgentStart
         | T::AgentEnd
         | T::AgentSettled
@@ -963,10 +962,12 @@ fn free_dispatched_event(event: &StablePluginEvent) {
         | T::UiPromptEnd => {
             // no payload today.
         }
-        // The B4 provider-hook observer events, and the `Input` /`EditorChange`
-        // events dispatched by the TUI, carry a generic data payload (built by
-        // `dispatch_data_event`); free the single StbString.
-        T::BeforeProviderRequest
+        // The B4 provider-hook observer events — `BeforeAgentStart` included,
+        // which is built by `dispatch_data_event` with the prompt JSON — and
+        // the `Input`/`EditorChange` events dispatched by the TUI carry a
+        // generic data payload; free the single StbString.
+        T::BeforeAgentStart
+        | T::BeforeProviderRequest
         | T::BeforeProviderHeaders
         | T::AfterProviderResponse
         | T::Input
