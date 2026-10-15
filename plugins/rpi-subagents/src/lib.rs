@@ -45,6 +45,21 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Byte-exact mirror of the wasm e2e's envelope pin
+    /// (kiqi-plugin-host/tests/e2e.rs subagents_guest_emits_the_byte_stable_
+    /// delegation_envelope): the two ends of the "byte-stable envelope" claim
+    /// are pinned to the SAME literal, so a field-order change on either side
+    /// fails here first.
+    #[test]
+    fn envelope_is_byte_stable() {
+        let value = serde_json::json!({"task":"review","maxTurns":999,"timeoutSeconds":99999});
+        assert_eq!(
+            delegate_task(&value).unwrap(),
+            r#"{"kind":"rpi-delegation","task":"review","role":"worker","maxTurns":32,"timeoutSeconds":1800,"recursive":false}"#
+        );
+    }
+
+    #[test]
     fn clamps_delegation_limits() {
         let value = serde_json::json!({"task":"review","maxTurns":999,"timeoutSeconds":99999});
         let result: Value = serde_json::from_str(&delegate_task(&value).unwrap()).unwrap();

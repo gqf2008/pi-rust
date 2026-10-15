@@ -1885,3 +1885,502 @@ fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
         .expect("plan show");
     assert!(status.contains("Do the thing"), "got {status}");
 }
+
+// ---------------------------------------------------------------------------
+// rpi-websearch: guest-side argument policy, then the grant gates the fetch.
+// ---------------------------------------------------------------------------
+
+/// `rpi-websearch` ported to wasm: the query validation is the guest's own (it
+/// runs before any fetch), and the two hosts it calls — DuckDuckGo and Wikipedia
+/// — are the user's grant's to allow. No network is touched: the guest's own
+/// argument policy answers first, and a granted-less fetch is refused by the
+/// host before a request leaves the process.
+#[test]
+fn websearch_guest_validates_in_the_guest_and_needs_the_grant() {
+    let wasm = build_guest("kiqi-websearch-guest", "kiqi_websearch_guest.wasm");
+    let plugin =
+        WasmPlugin::load_with_grants("rpi-websearch", &wasm, Grants::default()).expect("load");
+    assert_eq!(plugin.id(), "rpi-websearch");
+    assert!(
+        plugin.tools().iter().any(|tool| tool.name == "websearch"),
+        "the tool is declared: {:?}",
+        plugin.tools()
+    );
+
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    // The guest's own argument policy, before any capability call: a missing or
+    // empty query never reaches the network.
+    let missing = plugin
+        .call("websearch", &serde_json::json!({}), &caps, &sink)
+        .unwrap_err();
+    assert!(
+        missing.to_string().contains("query is required"),
+        "got {missing}"
+    );
+    let empty = plugin
+        .call(
+            "websearch",
+            &serde_json::json!({ "query": "   " }),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(
+        empty.to_string().contains("query must not be empty"),
+        "got {empty}"
+    );
+
+    // A valid query passes the guest's policy and is then the grant's to refuse.
+    let denied = plugin
+        .call(
+            "websearch",
+            &serde_json::json!({ "query": "rust" }),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(denied.to_string().contains("denied"), "got {denied}");
+
+    // A grant for some unrelated host still does not cover api.duckduckgo.com.
+    let other = WasmPlugin::load_with_grants(
+        "rpi-websearch",
+        &wasm,
+        Grants {
+            net_http: Some(NetHttpGrant {
+                hosts: vec!["example.com".into()],
+            }),
+            ..Grants::default()
+        },
+    )
+    .expect("load");
+    let wrong_host = other
+        .call(
+            "websearch",
+            &serde_json::json!({ "query": "rust" }),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(
+        wrong_host.to_string().contains("denied"),
+        "got {wrong_host}"
+    );
+}
+
+/// The parse/filter path can only run against the real endpoints (they are
+/// hardcoded, unlike webfetch's URL argument, so no local server can stand in).
+/// Opt in with `KIQI_WEBSEARCH_LIVE=1`; without it the test says so and returns
+/// rather than pretending to have covered the path.
+#[test]
+fn websearch_guest_live_search_when_asked() {
+    if std::env::var("KIQI_WEBSEARCH_LIVE").as_deref() != Ok("1") {
+        eprintln!(
+            "skipping websearch_guest_live_search_when_asked: set KIQI_WEBSEARCH_LIVE=1 to \
+             exercise the parse/filter path against the real endpoints"
+        );
+        return;
+    }
+    let wasm = build_guest("kiqi-websearch-guest", "kiqi_websearch_guest.wasm");
+    let grants = Grants {
+        net_http: Some(NetHttpGrant {
+            hosts: vec!["api.duckduckgo.com".into(), "en.wikipedia.org".into()],
+        }),
+        ..Grants::default()
+    };
+    let plugin = WasmPlugin::load_with_grants("rpi-websearch", &wasm, grants).expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    let outcome = plugin
+        .call(
+            "websearch",
+            &serde_json::json!({ "query": "rust programming language", "limit": 3 }),
+            &caps,
+            &sink,
+        )
+        .expect("call");
+    assert!(!outcome.is_error, "{outcome:?}");
+    // The trait face's shape: the block text is the result envelope JSON.
+    let envelope: serde_json::Value =
+        serde_json::from_str(&text_of(&outcome)).expect("the block text is the envelope JSON");
+    assert_eq!(envelope["query"], "rust programming language");
+    assert!(
+        envelope["count"].as_u64().unwrap_or(0) >= 1,
+        "at least one hit: {envelope}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// rpi-subagents: a pure envelope tool, no capabilities at all.
+// ---------------------------------------------------------------------------
+
+/// `rpi-subagents` ported to wasm: pure logic, no capabilities. The guest must
+/// emit the *same* delegation envelope bytes the compile-time plugin emits, so
+/// the envelope is compared field-order-and-value, byte for byte.
+#[test]
+fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
+    let wasm = build_guest("kiqi-subagents-guest", "kiqi_subagents_guest.wasm");
+    let plugin = WasmPlugin::load("rpi-subagents", &wasm).expect("load");
+    assert_eq!(plugin.id(), "rpi-subagents");
+
+    let tool = plugin
+        .tools()
+        .into_iter()
+        .find(|tool| tool.name == "delegate_task")
+        .expect("delegate_task is declared");
+    assert_eq!(
+        tool.description,
+        "Create a bounded, non-recursive subagent delegation envelope."
+    );
+
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    // Clamping and field order match the compile-time plugin exactly.
+    let outcome = plugin
+        .call(
+            "delegate_task",
+            &serde_json::json!({"task": "review", "maxTurns": 999, "timeoutSeconds": 99999}),
+            &caps,
+            &sink,
+        )
+        .expect("call delegate_task");
+    assert!(!outcome.is_error);
+    assert_eq!(
+        text_of(&outcome),
+        r#"{"kind":"rpi-delegation","task":"review","role":"worker","maxTurns":32,"timeoutSeconds":1800,"recursive":false}"#
+    );
+    assert_eq!(outcome.details, serde_json::Value::Null);
+
+    // Defaults apply when the optional fields are absent.
+    let defaults = plugin
+        .call(
+            "delegate_task",
+            &serde_json::json!({"task": "x"}),
+            &caps,
+            &sink,
+        )
+        .expect("call with defaults");
+    assert_eq!(
+        text_of(&defaults),
+        r#"{"kind":"rpi-delegation","task":"x","role":"worker","maxTurns":8,"timeoutSeconds":300,"recursive":false}"#
+    );
+
+    // A role is carried through verbatim.
+    let roled = plugin
+        .call(
+            "delegate_task",
+            &serde_json::json!({"task": "x", "role": "planner"}),
+            &caps,
+            &sink,
+        )
+        .expect("call with a role");
+    assert!(
+        text_of(&roled).contains(r#""role":"planner""#),
+        "got {}",
+        text_of(&roled)
+    );
+
+    // Both validation errors survive the port, message and all — including the
+    // lenient-parse path, where a non-object argument reads as a missing task
+    // exactly as the compile-time `kit` does (`unwrap_or(Value::Null)`).
+    let empty = plugin
+        .call(
+            "delegate_task",
+            &serde_json::json!({"task": "   "}),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(
+        empty
+            .to_string()
+            .contains("task must contain 1-20000 characters"),
+        "got {empty}"
+    );
+    let missing = plugin
+        .call("delegate_task", &serde_json::json!({}), &caps, &sink)
+        .unwrap_err();
+    assert!(
+        missing
+            .to_string()
+            .contains("missing string parameter `task`"),
+        "got {missing}"
+    );
+    let non_object = plugin
+        .call("delegate_task", &serde_json::Value::Null, &caps, &sink)
+        .unwrap_err();
+    assert!(
+        non_object
+            .to_string()
+            .contains("missing string parameter `task`"),
+        "got {non_object}"
+    );
+
+    // An undeclared tool is a typed error, not a trap.
+    let unknown = plugin
+        .call("no_such_tool", &serde_json::json!({}), &caps, &sink)
+        .unwrap_err();
+    assert!(
+        matches!(unknown, PluginError::UnknownTool(_)),
+        "got {unknown}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// rpi-goal: per-project state in the plugin data dir, inject, TurnEnd hook.
+// ---------------------------------------------------------------------------
+
+/// A host that records what the goal guest injects, so the port's
+/// `inject.append-entry` payload can be checked against `InjectApi::append_message`.
+#[derive(Default)]
+struct GoalInjectHost {
+    messages: Mutex<Vec<serde_json::Value>>,
+}
+
+impl kiqi_plugin::InjectApi for GoalInjectHost {
+    fn send_message(&self, _message: &serde_json::Value) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn send_user_message(&self, _text: &str) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn append_message(&self, message: &serde_json::Value) -> Result<(), PluginError> {
+        self.messages.lock().unwrap().push(message.clone());
+        Ok(())
+    }
+    fn append_custom_entry(
+        &self,
+        _custom_type: &str,
+        _data: &serde_json::Value,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
+/// Load the goal guest from a scratch directory, so `fs` writes into a temp data
+/// directory instead of the build output.
+fn load_goal_guest(grants: Grants) -> (tempfile::TempDir, WasmPlugin) {
+    let artifact = build_guest("kiqi-goal-guest", "kiqi_goal_guest.wasm");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wasm = dir.path().join("plugin.wasm");
+    std::fs::copy(&artifact, &wasm).expect("copy the guest next to a writable data dir");
+    let plugin = WasmPlugin::load_with_grants("rpi-goal", &wasm, grants).expect("load");
+    (dir, plugin)
+}
+
+/// `rpi-goal` ported to wasm: the `goal` tool records a per-project goal in the
+/// plugin's data directory, injects a `goal` custom message, and the `TurnEnd`
+/// hook (delivered as an untyped `other` event, kind `"TurnEnd"`) charges the
+/// turn budget and auto-pauses an exhausted goal.
+#[test]
+fn goal_guest_persists_per_project_and_charges_the_turn_budget() {
+    let (dir, plugin) = load_goal_guest(Grants {
+        fs: true,
+        ..Grants::default()
+    });
+    assert_eq!(plugin.id(), "rpi-goal");
+    assert!(plugin.tools().iter().any(|tool| tool.name == "goal"));
+    assert!(plugin
+        .commands()
+        .iter()
+        .any(|command| command.name == "goal"));
+
+    let host = GoalInjectHost::default();
+    let log = NullLog;
+    let caps = HostCaps {
+        session: None,
+        control: None,
+        inject: Some(&host),
+        ui: None,
+        log: &log,
+        cancel: None,
+    };
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    // Start a goal with a two-turn budget.
+    let started = plugin
+        .call(
+            "goal",
+            &serde_json::json!({"action": "start", "title": "Ship the goal port", "maxTurns": 2}),
+            &caps,
+            &sink,
+        )
+        .expect("start the goal");
+    assert!(
+        text_of(&started).contains("Goal started"),
+        "got {}",
+        text_of(&started)
+    );
+    // The envelope's metadata rides `tool-result.details`.
+    assert_eq!(started.details["kind"], "goal");
+    assert_eq!(started.details["action"], "start");
+    assert_eq!(started.details["active"], true);
+    assert_eq!(started.details["goal"]["title"], "Ship the goal port");
+
+    // The injection reached `InjectApi::append_message` as a bare custom
+    // message, not double-wrapped in `{"message": ...}`.
+    {
+        let messages = host.messages.lock().unwrap();
+        assert_eq!(messages.len(), 1, "one injection on start");
+        assert_eq!(messages[0]["kind"], "custom");
+        assert_eq!(messages[0]["data"]["customType"], "goal");
+    }
+
+    // The store landed in the plugin's data directory, keyed by project path.
+    let store_path = dir.path().join("data/goals.json");
+    assert!(
+        store_path.is_file(),
+        "the goal store is written into the plugin data dir"
+    );
+    let text = std::fs::read_to_string(&store_path).expect("read the store");
+    let store: serde_json::Value = serde_json::from_str(&text).expect("parse the store");
+    let map = store
+        .as_object()
+        .expect("the store is a {project: Goals} map");
+    assert_eq!(map.len(), 1, "one project key");
+    let (project, goals) = map.iter().next().unwrap();
+    // The documented key is the session cwd verbatim — pinning it to the real
+    // cwd makes a guest that keyed on a constant, its plugin dir, or a session
+    // id fail here. (Two distinct projects cannot be exercised from one test
+    // process: varying the cwd would need set_current_dir, which the repo's
+    // tests avoid for the same reason they avoid environment mutation.)
+    assert_eq!(
+        project,
+        &std::env::current_dir()
+            .expect("process cwd")
+            .to_string_lossy(),
+        "the store key is the session cwd"
+    );
+    assert_eq!(goals["active"]["title"], "Ship the goal port");
+
+    // One TurnEnd charges a turn and does not re-inject (fingerprint unchanged).
+    plugin.on_event(&Event::new(EventTag::TurnEnd, serde_json::json!({})), &caps);
+    assert_eq!(
+        host.messages.lock().unwrap().len(),
+        1,
+        "no re-injection for an unchanged goal"
+    );
+    let after_one = plugin
+        .call("goal", &serde_json::json!({"action": "show"}), &caps, &sink)
+        .expect("show after one turn");
+    assert!(
+        text_of(&after_one).contains("turns 1/2"),
+        "got {}",
+        text_of(&after_one)
+    );
+
+    // The second TurnEnd exhausts the budget: the goal auto-pauses and a notice
+    // is injected.
+    plugin.on_event(&Event::new(EventTag::TurnEnd, serde_json::json!({})), &caps);
+    {
+        let messages = host.messages.lock().unwrap();
+        assert_eq!(
+            messages.len(),
+            2,
+            "the budget notice is injected on exhaustion"
+        );
+        let notice = messages[1]["content"][0]["text"]
+            .as_str()
+            .expect("the notice has a text block");
+        assert!(notice.contains("paused"), "got {notice}");
+    }
+    let paused = plugin
+        .call("goal", &serde_json::json!({"action": "show"}), &caps, &sink)
+        .expect("show after the budget is spent");
+    assert_eq!(paused.details["goal"]["status"], "paused");
+    assert!(
+        text_of(&paused).contains("turns 2/2"),
+        "got {}",
+        text_of(&paused)
+    );
+
+    // The `/goal` command renders the same state.
+    let status = plugin
+        .run_command("goal", "status", &caps)
+        .expect("goal status");
+    assert!(status.contains("Ship the goal port"), "got {status}");
+}
+
+/// The port degrades like the compiled plugin: no `fs` grant makes the write a
+/// typed error (not a trap) while a read falls back to "no goal", and a missing
+/// injection surface is non-fatal — the goal is still recorded.
+#[test]
+fn goal_guest_denies_without_fs_and_injection_is_optional() {
+    // No fs: starting a goal cannot persist, so the action is a typed error.
+    let (_dir, plugin) = load_goal_guest(Grants::default());
+    let host = GoalInjectHost::default();
+    let log = NullLog;
+    let caps = HostCaps {
+        session: None,
+        control: None,
+        inject: Some(&host),
+        ui: None,
+        log: &log,
+        cancel: None,
+    };
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    let denied = plugin
+        .call(
+            "goal",
+            &serde_json::json!({"action": "start", "title": "nope"}),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&denied, PluginError::InvalidArguments(reason) if reason.contains("fs is not granted")),
+        "got {denied}"
+    );
+    // A read without fs degrades to "no goal" rather than failing.
+    let shown = plugin
+        .call("goal", &serde_json::json!({"action": "show"}), &caps, &sink)
+        .expect("show without fs");
+    assert!(
+        text_of(&shown).contains("No active goal"),
+        "got {}",
+        text_of(&shown)
+    );
+
+    // With fs but no injection surface, the goal is still recorded.
+    let (_dir, plugin) = load_goal_guest(Grants {
+        fs: true,
+        ..Grants::default()
+    });
+    let log = NullLog;
+    let caps = HostCaps {
+        session: None,
+        control: None,
+        inject: None,
+        ui: None,
+        log: &log,
+        cancel: None,
+    };
+    let started = plugin
+        .call(
+            "goal",
+            &serde_json::json!({"action": "start", "title": "recorded anyway"}),
+            &caps,
+            &sink,
+        )
+        .expect("start without an injection surface");
+    assert!(
+        text_of(&started).contains("Goal started"),
+        "got {}",
+        text_of(&started)
+    );
+}

@@ -82,6 +82,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiqi-goal-guest"
+version = "0.1.0"
+dependencies = [
+ "kiqi-plugin-guest",
+ "serde_json",
+]
+
+[[package]]
 name = "kiqi-langfuse-guest"
 version = "0.1.0"
 dependencies = [
@@ -114,6 +122,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiqi-subagents-guest"
+version = "0.1.0"
+dependencies = [
+ "kiqi-plugin-guest",
+ "serde_json",
+]
+
+[[package]]
 name = "kiqi-todo-guest"
 version = "0.1.0"
 dependencies = [
@@ -123,6 +139,14 @@ dependencies = [
 
 [[package]]
 name = "kiqi-webfetch-guest"
+version = "0.1.0"
+dependencies = [
+ "kiqi-plugin-guest",
+ "serde_json",
+]
+
+[[package]]
+name = "kiqi-websearch-guest"
 version = "0.1.0"
 dependencies = [
  "kiqi-plugin-guest",
