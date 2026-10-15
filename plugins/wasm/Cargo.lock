@@ -106,6 +106,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiqi-orchestrator-guest"
+version = "0.1.0"
+dependencies = [
+ "kiqi-plugin-guest",
+ "serde_json",
+]
+
+[[package]]
 name = "kiqi-plan-mode-guest"
 version = "0.1.0"
 dependencies = [

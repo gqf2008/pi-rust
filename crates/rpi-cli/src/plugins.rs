@@ -1233,7 +1233,7 @@ mod tests {
         // Only the plugins without a wasm port are compiled in by default; the
         // rest are opt-in features (CI builds every configuration). Each push
         // names the feature that brings the plugin back.
-        let mut expected_ids: Vec<&str> = vec!["rpi-orchestrator", "rpi-permissions"];
+        let mut expected_ids: Vec<&str> = vec!["rpi-permissions"];
         #[cfg(feature = "plugin-rpi-todo")]
         expected_ids.push("rpi-todo");
         #[cfg(feature = "plugin-rpi-lens")]
@@ -1254,6 +1254,8 @@ mod tests {
         expected_ids.push("rpi-langfuse");
         #[cfg(feature = "plugin-rpi-codegraph")]
         expected_ids.push("rpi-codegraph");
+        #[cfg(feature = "plugin-rpi-orchestrator")]
+        expected_ids.push("rpi-orchestrator");
         for expected in expected_ids {
             assert!(
                 ids.contains(&expected),
@@ -1278,7 +1280,13 @@ mod tests {
             .into_iter()
             .map(|t| t.name)
             .collect();
-        let mut expected_tools: Vec<&str> = vec!["subagent", "plan", "dispatch", "permissions"];
+        let mut expected_tools: Vec<&str> = vec!["permissions"];
+        #[cfg(feature = "plugin-rpi-orchestrator")]
+        {
+            expected_tools.push("subagent");
+            expected_tools.push("plan");
+            expected_tools.push("dispatch");
+        }
         #[cfg(feature = "plugin-rpi-todo")]
         expected_tools.push("todo");
         #[cfg(feature = "plugin-rpi-lens")]
@@ -1419,7 +1427,7 @@ mod tests {
     fn registry_exposes_the_first_party_plugins() {
         let plugins = load_all();
         // The default build registers only the plugins without a wasm port.
-        for always in ["rpi-orchestrator", "rpi-permissions"] {
+        for always in ["rpi-permissions"] {
             assert!(
                 plugins.iter().any(|entry| entry.id == always),
                 "{always} is compiled in by default; got {:?}",

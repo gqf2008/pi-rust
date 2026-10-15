@@ -13,6 +13,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
+- **`rpi-orchestrator` ported to wasm** (`plugins/wasm/kiqi-orchestrator-guest`):
+  the same three tools and guidance, with waves that run to completion inside
+  the dispatch call (children in parallel on `proc`; per-node timeouts enforced
+  in the guest). Semantic reductions, documented in the guest README: no
+  background waves (`waitSeconds: 0` refused), no mid-wave reshape, and the
+  child turn ceiling is not enforced (no env equivalent). It leaves the default
+  build too — which now compiles in only `rpi-permissions`.
 - **`rpi-codegraph` ported to wasm** (`plugins/wasm/kiqi-codegraph-guest`):
   the same eight tools, with the index probe/`init`/`sync` on `exec` and the
   per-call MCP session on `proc`. `proc.read-line` gained a `timeout-ms`

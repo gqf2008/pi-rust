@@ -108,7 +108,7 @@ pkg-fmt = "zip"
 # now (`--features plugin-rpi-<name>`, or install the wasm guest with
 # `ki insmod`). The crates, their features, their cdylib faces and their tests
 # all stay; CI builds every one of them so none rots.
-default = ["clipboard", "plugin-wasm", "plugin-rpi-orchestrator", "plugin-rpi-permissions"]
+default = ["clipboard", "plugin-wasm", "plugin-rpi-permissions"]
 # Loads `plugins/<id>/plugin.wasm` through `kiqi-plugin-host` (wasmtime). Off
 # only for builds that want the leaner binary without the wasm tier.
 plugin-wasm = ["dep:kiqi-plugin-host"]
@@ -126,6 +126,9 @@ plugin-rpi-goal = ["dep:rpi-goal"]
 plugin-rpi-plan-mode = ["dep:rpi-plan-mode"]
 plugin-rpi-codegraph = ["dep:rpi-codegraph"]
 plugin-rpi-ask-user = ["dep:rpi-ask-user"]
+# Not in `default` either: has a wasm port now (see `plugin-rpi-langfuse`
+# below for the same shape).
+
 # Not in `default`: the tracing tier targets a Langfuse instance, and a user who
 # wants it turns it on explicitly. Kept (and CI-checked) rather than removed so
 # the compiled path keeps compiling.

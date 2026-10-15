@@ -1381,6 +1381,192 @@ fn codegraph_guest_live_session_when_asked() {
     );
 }
 
+/// `rpi-orchestrator` ported to wasm, driven hermetically with `cat` as the
+/// child program: the task rides stdin, `cat` echoes it back, so a whole wave
+/// can complete without any real agent.
+#[test]
+fn orchestrator_guest_runs_a_wave_via_cat() {
+    use kiqi_plugin_host::ProcGrant;
+
+    let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
+    let plugin = WasmPlugin::load_with_grants(
+        "rpi-orchestrator",
+        &wasm,
+        Grants {
+            proc: Some(ProcGrant {
+                commands: vec!["cat".to_string(), "test".to_string(), "sh".to_string()],
+                cwd: kiqi_plugin_host::ExecCwd::Project,
+                ..ProcGrant::default()
+            }),
+            ..Grants::default()
+        },
+    )
+    .expect("load");
+    assert_eq!(plugin.id(), "rpi-orchestrator");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    let set = plugin
+        .call(
+            "plan",
+            &serde_json::json!({"action": "set", "nodes": [
+                {"id": "a", "task": "alpha"},
+                {"id": "b", "task": "beta", "deps": ["a"]}
+            ]}),
+            &caps,
+            &sink,
+        )
+        .expect("plan set");
+    assert!(text_of(&set).contains("0/2 done"), "{}", text_of(&set));
+
+    // First wave: only `a` is ready (`b` depends on it).
+    let wave = plugin
+        .call(
+            "dispatch",
+            &serde_json::json!({ "program": "cat" }),
+            &caps,
+            &sink,
+        )
+        .expect("dispatch");
+    assert!(
+        text_of(&wave).contains("started 1") && text_of(&wave).contains("1/2 done"),
+        "{}",
+        text_of(&wave)
+    );
+
+    // Second wave: `b` is ready now; the wave completes the plan.
+    let wave = plugin
+        .call(
+            "dispatch",
+            &serde_json::json!({ "program": "cat" }),
+            &caps,
+            &sink,
+        )
+        .expect("dispatch");
+    assert!(
+        text_of(&wave).contains("2/2 done"),
+        "the plan completed: {}",
+        text_of(&wave)
+    );
+
+    // waitSeconds:0 is refused with the wasm-tier explanation.
+    let refused = plugin
+        .call(
+            "dispatch",
+            &serde_json::json!({ "waitSeconds": 0, "program": "cat" }),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("cannot outlive this call"),
+        "{refused}"
+    );
+}
+
+/// The subagent tool drives one child via `proc` (task on stdin, EOF, collect).
+#[test]
+fn orchestrator_guest_subagent_round_trips_via_cat() {
+    use kiqi_plugin_host::ProcGrant;
+
+    let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
+    let plugin = WasmPlugin::load_with_grants(
+        "rpi-orchestrator",
+        &wasm,
+        Grants {
+            proc: Some(ProcGrant {
+                commands: vec!["cat".to_string()],
+                cwd: kiqi_plugin_host::ExecCwd::Project,
+                ..ProcGrant::default()
+            }),
+            ..Grants::default()
+        },
+    )
+    .expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    let outcome = plugin
+        .call(
+            "subagent",
+            &serde_json::json!({ "task": "hello orchestrator", "program": "cat" }),
+            &caps,
+            &sink,
+        )
+        .expect("call");
+    assert!(
+        text_of(&outcome).contains("hello orchestrator"),
+        "the child echoed the task: {}",
+        text_of(&outcome)
+    );
+
+    // Without the grant the same call is denied with the remediation.
+    let bare =
+        WasmPlugin::load_with_grants("rpi-orchestrator", &wasm, Grants::default()).expect("load");
+    let denied = bare
+        .call(
+            "subagent",
+            &serde_json::json!({ "task": "hello", "program": "cat" }),
+            &caps,
+            &sink,
+        )
+        .unwrap_err();
+    assert!(
+        denied.to_string().contains("proc is not granted"),
+        "{denied}"
+    );
+}
+
+/// A session switch clears the plan, matching the compiled plugin.
+#[test]
+fn orchestrator_guest_session_switch_clears_the_plan() {
+    let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
+    let plugin =
+        WasmPlugin::load_with_grants("rpi-orchestrator", &wasm, Grants::default()).expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    plugin
+        .before_agent_start(
+            &serde_json::json!({"sessionId": "s1", "systemPrompt": "base"}),
+            &caps,
+        )
+        .expect("event parses");
+    plugin
+        .call(
+            "plan",
+            &serde_json::json!({"action": "set", "nodes": [
+                {"id": "a", "task": "x"}
+            ]}),
+            &caps,
+            &sink,
+        )
+        .expect("plan set");
+
+    plugin
+        .before_agent_start(
+            &serde_json::json!({"sessionId": "s2", "systemPrompt": "base"}),
+            &caps,
+        )
+        .expect("event parses");
+    let shown = plugin
+        .call("plan", &serde_json::json!({"action": "show"}), &caps, &sink)
+        .expect("plan show");
+    assert!(
+        text_of(&shown).contains("plan is empty"),
+        "the session switch cleared the graph: {}",
+        text_of(&shown)
+    );
+}
+
 /// `proc` round-trips a line through a child the guest talks to: spawn, write,
 /// read-line, wait, read-stderr, kill — every function of the interface, driven
 /// by the conformance fixture inside one tool call.

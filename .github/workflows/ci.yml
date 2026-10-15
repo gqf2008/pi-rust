@@ -74,7 +74,7 @@ jobs:
       - name: Test the opt-in plugin features
         run: >
           cargo test -p rpi-cli --lib --locked
-          --features plugin-rpi-todo,plugin-rpi-lens,plugin-rpi-webfetch,plugin-rpi-websearch,plugin-rpi-subagents,plugin-rpi-goal,plugin-rpi-plan-mode,plugin-rpi-ask-user,plugin-rpi-langfuse,plugin-rpi-codegraph
+          --features plugin-rpi-todo,plugin-rpi-lens,plugin-rpi-webfetch,plugin-rpi-websearch,plugin-rpi-subagents,plugin-rpi-goal,plugin-rpi-plan-mode,plugin-rpi-ask-user,plugin-rpi-langfuse,plugin-rpi-codegraph,plugin-rpi-orchestrator
 
       # The workspace build links every plugin into `ki`, which enables each
       # plugin's `compile-time` feature and so drops its cdylib entrypoint. This
