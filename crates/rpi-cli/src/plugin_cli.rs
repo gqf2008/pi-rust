@@ -381,6 +381,8 @@ fn print_help() {
 ki plugin — manage per-plugin capability grants
 
 USAGE:
+    ki insmod <path.wasm> [flags]        (same as `ki plugin install`)
+    ki rmmod <id>                        (same as `ki plugin uninstall`)
     ki plugin list
     ki plugin show <id>
     ki plugin install <path.wasm> [--id <id>] [--yes] [--host <host>]... [--command <cmd>]...
@@ -429,6 +431,29 @@ fn approve_new_capabilities(yes: bool, interactive: bool, answer: Option<&str>) 
         return false;
     }
     matches!(answer.map(str::trim), Some("y" | "Y" | "yes"))
+}
+
+/// `ki insmod <path.wasm> [flags]` — the kernel-flavoured spelling of
+/// [`install`] (the **wasm** tier; `ki install <crate>` is the cdylib one, so
+/// the two hardly-ever-confused verbs get their own name).
+pub fn insmod(args: &[String]) -> i32 {
+    insmod_into(args, None)
+}
+
+/// [`insmod`] against an explicit agent root (the test seam).
+fn insmod_into(args: &[String], root: Option<&Path>) -> i32 {
+    install_into(args, root)
+}
+
+/// `ki rmmod <id>` — the kernel-flavoured spelling of [`uninstall`]. Moves the
+/// module's directory aside, exactly as `ki plugin uninstall` does.
+pub fn rmmod(args: &[String]) -> i32 {
+    rmmod_into(args, None)
+}
+
+/// [`rmmod`] against an explicit agent root (the test seam).
+fn rmmod_into(args: &[String], root: Option<&Path>) -> i32 {
+    uninstall_into(args, root)
 }
 
 /// `ki plugin install <path.wasm> [--id ID] [--yes] [--host H]... [--command C]... [--cwd S] [--timeout N]`
@@ -941,6 +966,71 @@ mod tests {
                     .unwrap_or(false)
             });
         assert!(moved, "uninstall keeps the files as a backup");
+    }
+
+    /// `ki insmod`/`ki rmmod` are the kernel-flavoured spellings: they must
+    /// install and uninstall exactly as `ki plugin install`/`uninstall` do, with
+    /// the same flags and the same move-aside semantics.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn insmod_and_rmmod_round_trip() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest = workspace.join("plugins/wasm/kiqi-conformance-guest/Cargo.toml");
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--manifest-path"])
+            .arg(&manifest)
+            .args(["--target", "wasm32-wasip2", "--release"])
+            .status()
+            .expect("build the conformance guest");
+        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
+        let wasm =
+            workspace.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm");
+
+        let agent = tempfile::tempdir().unwrap();
+        let root = agent.path();
+
+        let code = insmod_into(
+            &[
+                wasm.display().to_string(),
+                "--id".into(),
+                "mod".into(),
+                "--yes".into(),
+                "--host".into(),
+                "127.0.0.1".into(),
+                "--command".into(),
+                "echo".into(),
+                "--cwd".into(),
+                "project".into(),
+                "--timeout".into(),
+                "120".into(),
+            ],
+            Some(root),
+        );
+        assert_eq!(code, 0);
+        assert!(root.join("plugins/mod/plugin.wasm").is_file());
+        let grants = Grants::load_for_at(root, "mod");
+        assert!(grants.allows_command("echo"));
+        let exec = grants.exec.as_ref().expect("exec granted");
+        assert_eq!(exec.cwd, ExecCwd::Project);
+        assert_eq!(exec.timeout_seconds, 120);
+
+        let code = rmmod_into(&["mod".into()], Some(root));
+        assert_eq!(code, 0);
+        assert!(!root.join("plugins/mod").exists());
+        let moved = std::fs::read_dir(root.join("plugins"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .into_string()
+                    .map(|name| name.starts_with("mod.removed-"))
+                    .unwrap_or(false)
+            });
+        assert!(
+            moved,
+            "rmmod moves the module aside rather than deleting it"
+        );
     }
 
     /// The interactive answer path — unreachable in CI, which has no terminal —

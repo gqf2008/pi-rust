@@ -83,7 +83,8 @@ cargo build --manifest-path plugins/wasm/kiqi-webfetch-guest/Cargo.toml \
 # → plugins/wasm/target/wasm32-wasip2/release/kiqi_webfetch_guest.wasm
 
 # 安装（列出声明能力；--yes 非交互；无 tty 且无 --yes 则什么都不授）
-ki plugin install <file.wasm> --id rpi-webfetch --yes --host api.example.com
+ki insmod <file.wasm> --id rpi-webfetch --yes --host api.example.com   # = ki plugin install
+ki rmmod rpi-webfetch                                                 # = ki plugin uninstall
 ki plugin list | show <id>          # show 会列出声明面（tools/commands/flags/shortcuts/probe）
 ki plugin grant <id> exec --command echo     # 或 revoke / uninstall（uninstall 移到备份，不删）
 # exec 还能带 cwd 范围与时间预算（诊断类插件要在项目目录跑 cargo/clippy 时）：

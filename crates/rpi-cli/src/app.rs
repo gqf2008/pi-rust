@@ -152,6 +152,10 @@ async fn run_inner() -> i32 {
         Some("uninstall") => return crate::install::uninstall(&argv[1..]),
         Some("package") => return crate::packages::run(&argv[1..]),
         Some("plugin") => return crate::plugin_cli::run(&argv[1..]),
+        // Kernel-flavoured spellings for the wasm tier (`ki install`/`uninstall`
+        // are the cdylib/extension pair, a different artifact).
+        Some("insmod") => return crate::plugin_cli::insmod(&argv[1..]),
+        Some("rmmod") => return crate::plugin_cli::rmmod(&argv[1..]),
         // These historical aliases are intentionally rejected instead of
         // falling through to the prompt path.
         Some(removed @ ("pi-package" | "pi-update" | "install-pi" | "uninstall-pi")) => {

@@ -11,6 +11,14 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Added
+
+- **`ki insmod <path.wasm>` / `ki rmmod <id>`** — kernel-flavoured top-level
+  commands for the wasm tier, identical to `ki plugin install` /
+  `ki plugin uninstall` (same flags, same move-aside uninstall). They exist so
+  the wasm module verbs do not collide with `ki install`/`ki uninstall`, which
+  build and remove Rust cdylib extensions — a different artifact.
+
 ### Changed
 
 - **`rpi-langfuse` is no longer in the default build.** The tracing tier needs a
