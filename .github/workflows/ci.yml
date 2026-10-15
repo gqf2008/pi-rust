@@ -68,6 +68,12 @@ jobs:
       - name: Check workspace targets
         run: cargo check --workspace --all-targets --locked
 
+      # `plugin-rpi-langfuse` is not in `default` (the tracing tier is opt-in),
+      # so the workspace build never compiles its registration path. Build it
+      # explicitly or the feature rots unseen.
+      - name: Check the opt-in langfuse tier
+        run: cargo check -p rpi-cli --all-targets --features plugin-rpi-langfuse --locked
+
       # The workspace build links every plugin into `ki`, which enables each
       # plugin's `compile-time` feature and so drops its cdylib entrypoint. This
       # builds the plugins standalone, where that feature is off, keeping the

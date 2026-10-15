@@ -1406,23 +1406,27 @@ mod tests {
         assert_eq!(todo.plugin.commands()[0].name, "todos");
         assert!(todo.plugin.probe_points().is_empty());
 
-        // rpi-langfuse is the last package ported off the native ABI. Its three
-        // tools must be visible through the registry the same way todo's are.
-        let langfuse = plugins
-            .iter()
-            .find(|entry| entry.id == "rpi-langfuse")
-            .expect("rpi-langfuse is compiled in by the default feature");
-        let langfuse_tools = langfuse.plugin.tools();
-        let names: Vec<&str> = langfuse_tools
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect();
-        assert_eq!(
-            names,
-            vec!["langfuse_score", "langfuse_prompt", "langfuse_trace"]
-        );
-        assert!(langfuse.plugin.commands().is_empty());
-        assert!(langfuse.plugin.probe_points().is_empty());
+        // rpi-langfuse is the last package ported off the native ABI. It is not
+        // in the default build any more, so its three tools are asserted only
+        // when the feature is on (CI checks that configuration).
+        #[cfg(feature = "plugin-rpi-langfuse")]
+        {
+            let langfuse = plugins
+                .iter()
+                .find(|entry| entry.id == "rpi-langfuse")
+                .expect("the feature is on, so rpi-langfuse is registered");
+            let langfuse_tools = langfuse.plugin.tools();
+            let names: Vec<&str> = langfuse_tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect();
+            assert_eq!(
+                names,
+                vec!["langfuse_score", "langfuse_prompt", "langfuse_trace"]
+            );
+            assert!(langfuse.plugin.commands().is_empty());
+            assert!(langfuse.plugin.probe_points().is_empty());
+        }
     }
 
     /// A host that answers the two actions this test needs and refuses the

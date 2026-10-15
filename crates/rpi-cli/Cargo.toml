@@ -103,7 +103,7 @@ pkg-fmt = "tgz"
 pkg-fmt = "zip"
 
 [features]
-default = ["clipboard", "plugin-wasm", "plugin-rpi-todo", "plugin-rpi-lens", "plugin-rpi-orchestrator", "plugin-rpi-webfetch", "plugin-rpi-websearch", "plugin-rpi-subagents", "plugin-rpi-permissions", "plugin-rpi-goal", "plugin-rpi-plan-mode", "plugin-rpi-codegraph", "plugin-rpi-ask-user", "plugin-rpi-langfuse"]
+default = ["clipboard", "plugin-wasm", "plugin-rpi-todo", "plugin-rpi-lens", "plugin-rpi-orchestrator", "plugin-rpi-webfetch", "plugin-rpi-websearch", "plugin-rpi-subagents", "plugin-rpi-permissions", "plugin-rpi-goal", "plugin-rpi-plan-mode", "plugin-rpi-codegraph", "plugin-rpi-ask-user"]
 # Loads `plugins/<id>/plugin.wasm` through `kiqi-plugin-host` (wasmtime). Off
 # only for builds that want the leaner binary without the wasm tier.
 plugin-wasm = ["dep:kiqi-plugin-host"]
@@ -121,6 +121,9 @@ plugin-rpi-goal = ["dep:rpi-goal"]
 plugin-rpi-plan-mode = ["dep:rpi-plan-mode"]
 plugin-rpi-codegraph = ["dep:rpi-codegraph"]
 plugin-rpi-ask-user = ["dep:rpi-ask-user"]
+# Not in `default`: the tracing tier targets a Langfuse instance, and a user who
+# wants it turns it on explicitly. Kept (and CI-checked) rather than removed so
+# the compiled path keeps compiling.
 plugin-rpi-langfuse = ["dep:rpi-langfuse"]
 
 [dev-dependencies]

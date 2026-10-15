@@ -11,6 +11,15 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`rpi-langfuse` is no longer in the default build.** The tracing tier needs a
+  Langfuse instance and an API key pair, so it is now opt-in:
+  `cargo build --features plugin-rpi-langfuse` (or a `ki` built that way). The
+  crate, the wasm port and the feature flag all stay, and CI builds the feature
+  explicitly so the compiled path keeps compiling.
+
+
 ### Added
 
 - **`rpi-orchestrator` is compiled in** behind `plugin-rpi-orchestrator`
