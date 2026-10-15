@@ -1,6 +1,6 @@
 //! Host-side backend for **wasm plugins** (the component model tier).
 //!
-//! Binds `plugins/kiqi-plugin.wit` (ABI 0.7.0) with wasmtime's `bindgen!` and
+//! Binds `plugins/kiqi-plugin.wit` (ABI 0.7.1) with wasmtime's `bindgen!` and
 //! hosts a plugin component behind the same [`kiqi_plugin::Plugin`] seam the
 //! compiled-in plugins implement.
 //!
@@ -1061,6 +1061,15 @@ impl crate::kiqi::plugin::proc::Host for HostState {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    fn close_stdin(&mut self, handle: u32) -> Result<(), CapabilityError> {
+        // Dropping the sender ends the writer thread, which closes the pipe:
+        // the child observes EOF. Unknown handle = already closed (idempotent).
+        if let Some(child) = self.procs.get_mut(&handle) {
+            child.stdin = None;
+        }
+        Ok(())
     }
 
     fn kill(&mut self, handle: u32) -> Result<(), CapabilityError> {
