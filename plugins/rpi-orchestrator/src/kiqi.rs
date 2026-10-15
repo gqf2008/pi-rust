@@ -196,10 +196,6 @@ mod tests {
         fn log(&self, _level: LogLevel, _message: &str) {}
     }
 
-    /// `HOST_ABORT` is process-wide; the two tests that touch it must not race
-    /// (one asserts it flipped, the other resets it per run start).
-    static ABORT_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// A builder that parks until cancelled — drives the probe→Control wiring.
     fn parking_builder(
         _params: &Value,
@@ -255,7 +251,9 @@ mod tests {
     /// call unwinds the builder instead of running it to completion.
     #[test]
     fn a_cancelled_probe_unwinds_the_builder() {
-        let _guard = ABORT_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::tests::ABORT_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let log = TestLog;
         let probe = AlreadyCancelled;
         let caps = HostCaps {
@@ -286,7 +284,9 @@ mod tests {
 
     #[test]
     fn before_agent_start_leaves_the_prompt_alone_without_a_goal() {
-        let _guard = ABORT_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::tests::ABORT_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         // The test process has no KI_ORCHESTRATOR_GUIDE and no .ki/goals.json
         // in its working directory, so the guidance stays off.
         let plugin = OrchestratorPlugin::new();

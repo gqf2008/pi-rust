@@ -173,13 +173,49 @@ fn write_out(out: &mut rpi_plugin_sdk::callbacks::Output<'_>, value: Value) {
     }
 }
 
+/// The session the graph belongs to. The graph is process-wide statics (a
+/// compile-time plugin is a process singleton), and the documented contract is
+/// "the graph lives for the life of a run and is cleared when the session is
+/// switched" — so the run start tracks the event's `sessionId` and clears the
+/// state when it changes. Nothing else resets the graph.
+static LAST_SESSION_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Cancel every running node, drop the graph, and invalidate in-flight
+/// workers. Used when the session switches; the old run's children are killed
+/// rather than left to commit into a conversation that can no longer see them.
+fn clear_run_state() {
+    let controls: Vec<Control> = running()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .drain()
+        .map(|(_, control)| control)
+        .collect();
+    for control in controls {
+        control.cancel();
+    }
+    let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
+    *graph = graph::Graph::default();
+    drop(graph);
+    bump_generation();
+}
+
 /// Decide the system prompt for a run start, shared by the cdylib and
 /// compile-time faces: `Some(next)` when the guidance section was appended,
 /// `None` to leave the host's prompt alone.
 ///
-/// A new run also resets the run-wide abort: a background node started now
-/// must not be cancelled on sight by the previous run's abort.
+/// A new run also resets the run-wide abort (a background node started now
+/// must not be cancelled on sight by the previous run's abort) and clears the
+/// graph when the event's session differs from the last one seen.
 pub(crate) fn guide_for_prompt(event: &Value) -> Option<String> {
+    let session = event.get("sessionId").and_then(Value::as_str);
+    {
+        let mut last = LAST_SESSION_ID.lock().unwrap_or_else(|p| p.into_inner());
+        if last.as_deref() != session {
+            *last = session.map(str::to_string);
+            drop(last);
+            clear_run_state();
+        }
+    }
     host_abort_flag().store(false, Ordering::SeqCst);
     if !guide_enabled() {
         return None;
@@ -292,6 +328,10 @@ rpi_plugin_sdk::export_plugin!(|api| {
 mod tests {
     use super::*;
 
+    /// `HOST_ABORT` and the session tracker are process-wide; tests that touch
+    /// them must not race. Crate-visible so the `kiqi` face's tests share it.
+    pub(crate) static ABORT_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn guide_env_override_is_tri_state() {
         for value in ["1", "true", "TRUE", "yes", "on", " on "] {
@@ -303,6 +343,41 @@ mod tests {
         assert_eq!(guide_override(None), None);
         assert_eq!(guide_override(Some("")), None);
         assert_eq!(guide_override(Some("whatever")), None);
+    }
+
+    /// The documented contract: the graph is cleared when the session
+    /// switches. The run start tracks the event's `sessionId`; a change wipes
+    /// the graph (and cancels running nodes).
+    #[test]
+    fn a_session_switch_clears_the_graph() {
+        // Serializes with the other tests that touch the run-wide abort /
+        // call guide_for_prompt.
+        let _guard = ABORT_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+
+        guide_for_prompt(&serde_json::json!({"sessionId": "orch-switch-a"}));
+        {
+            let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
+            let node = crate::graph::Node::from_value(&serde_json::json!({
+                "id": "orch-switch-node", "task": "x"
+            }))
+            .unwrap();
+            graph.nodes.push(node);
+        }
+        assert!(graph_state()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get("orch-switch-node")
+            .is_some());
+
+        guide_for_prompt(&serde_json::json!({"sessionId": "orch-switch-b"}));
+        assert!(
+            graph_state()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get("orch-switch-node")
+                .is_none(),
+            "the session switch cleared the graph"
+        );
     }
 
     #[test]

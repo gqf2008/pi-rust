@@ -104,6 +104,19 @@ fn apply_update(graph: &mut Graph, params: &Value) -> Result<(), String> {
                         .to_string(),
                 );
             }
+
+            // Same rule as `Node::from_value`: duplicate edges are meaningless
+            // and would break the indegree count in `check_acyclic` (a graph
+            // that `plan set` accepts must not fail as a false "cycle" here).
+            let mut seen: Vec<String> = Vec::with_capacity(parsed.len());
+            parsed.retain(|dep| {
+                if seen.contains(dep) {
+                    false
+                } else {
+                    seen.push(dep.clone());
+                    true
+                }
+            });
             let node = graph
                 .get_mut(id)
                 .ok_or_else(|| format!("node `{id}` not found"))?;
@@ -164,6 +177,12 @@ fn cancel_node(graph: &mut Graph, id: &str) {
     if let Some(node) = graph.get_mut(id) {
         if node.status == Status::Pending {
             node.status = Status::Skipped;
+            // A skipped pending node unmeets its dependents' deps — without
+            // propagating, the branch behind it wedges every later `dispatch`
+            // with an unhelpful "blocked by unmet dependencies" that lists the
+            // dependent but not the cause. The running-commit paths propagate
+            // the same way (dispatch.rs).
+            graph.propagate_skips();
         }
     }
 }
@@ -208,6 +227,31 @@ mod tests {
         let mut g = seeded();
         apply_update(&mut g, &json!({"status": [{"id": "a", "status": "done"}]})).unwrap();
         assert_eq!(g.get("a").unwrap().status, Status::Pending);
+    }
+
+    /// Regression: `setDeps` with duplicate entries used to fail the whole
+    /// update with a false "cycle detected" (the raw duplicates broke the
+    /// indegree count). It must dedup the way `plan set` does.
+    #[test]
+    fn set_deps_deduplicates() {
+        let mut g = seeded();
+        apply_update(
+            &mut g,
+            &json!({"setDeps": [{"id": "b", "deps": ["a", "a"]}]}),
+        )
+        .expect("duplicates are deduped, not a cycle");
+        let b = g.get("b").unwrap();
+        assert_eq!(b.deps, vec!["a".to_string()]);
+    }
+
+    /// Regression: cancelling a *pending* node used to leave its dependents
+    /// pending with an unmeetable dep, wedging every later dispatch.
+    #[test]
+    fn cancelling_a_pending_node_skips_its_dependents() {
+        let mut g = seeded();
+        apply_update(&mut g, &json!({"cancel": ["a"]})).unwrap();
+        assert_eq!(g.get("a").unwrap().status, Status::Skipped);
+        assert_eq!(g.get("b").unwrap().status, Status::Skipped);
     }
 
     #[test]

@@ -170,6 +170,13 @@ pub fn run_with_exe(
         }
     }
 
+    // Reap the whole group on the normal-exit path too: a descendant that
+    // outlived the child would hold the stdout/stderr write end, `join_reader`
+    // would never see EOF, and the worker would hang here past every
+    // cancellation checkpoint. Same guard the host's exec capability runs
+    // after `child.wait()`; on an exited child this only collects the
+    // survivors.
+    kill_and_reap(&mut child);
     let status = child
         .wait()
         .map_err(|err| format!("failed to reap subagent: {err}"))?;
@@ -337,6 +344,45 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    /// Regression: on a NORMAL exit the process group was never reaped, so a
+    /// descendant that outlived the child held the stdout write end and
+    /// `join_reader` hung forever, past every cancellation checkpoint. The
+    /// post-exit reap collects the survivor; the call must return.
+    #[cfg(unix)]
+    #[test]
+    fn a_grandchild_holding_the_pipe_cannot_hang_a_normal_exit() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir();
+        let script = dir.join(format!("orch-pipe-{}.sh", std::process::id()));
+        {
+            let mut file = std::fs::File::create(&script).unwrap();
+            writeln!(file, "#!/bin/sh").unwrap();
+            writeln!(file, "sleep 30 &").unwrap();
+            writeln!(file, "echo done").unwrap();
+        }
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let script_for_child = script.clone();
+        std::thread::spawn(move || {
+            let control = Control::default();
+            let result = run_with_exe(&script_for_child, "ignored", 8, 20, None, None, &control);
+            let _ = sender.send(result);
+        });
+        let text = receiver
+            .recv_timeout(Duration::from_secs(15))
+            .expect("a normal exit must not hang on a pipe-holding grandchild");
+        assert!(text.is_ok(), "the child itself succeeded: {text:?}");
+        assert!(text.unwrap().contains("done"));
+
+        let _ = std::fs::remove_file(&script);
+    }
+
     #[test]
     fn cancellation_kills_the_whole_process_group() {
         use std::io::Write;

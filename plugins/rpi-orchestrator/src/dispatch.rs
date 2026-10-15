@@ -141,6 +141,8 @@ pub fn dispatch(
 /// drain cannot hang forever.
 fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Progress) {
     let generation = crate::current_generation();
+    let node_revision = node.revision;
+    let token = control.clone();
     std::thread::spawn(move || {
         progress(&progress_tx, &format!("[dispatch] {id} running"));
         let cleanup_id = id.clone();
@@ -166,6 +168,13 @@ fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Prog
             }
             let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
             if let Some(slot) = graph.get_mut(&id) {
+                if slot.revision != node_revision {
+                    // `removeIds` + a re-add reused the id: this worker belongs
+                    // to the removed instance, and the fresh node must not
+                    // inherit its result (the generation guard cannot see the
+                    // difference — removeIds does not bump the generation).
+                    return;
+                }
                 match (outcome, verified) {
                     (Ok(text), Ok(())) => {
                         slot.status = Status::Done;
@@ -188,6 +197,9 @@ fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Prog
             // `running` and any draining wait never returns.
             let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
             if let Some(slot) = graph.get_mut(&cleanup_id) {
+                if slot.revision != node_revision {
+                    return;
+                }
                 if slot.status == Status::Running {
                     slot.status = Status::Failed;
                     slot.result = Some("node worker panicked".into());
@@ -198,7 +210,7 @@ fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Prog
         running()
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .remove(&cleanup_id);
+            .retain(|_, control| !control.same_token_as(&token));
         progress(&progress_tx, &format!("[dispatch] {cleanup_id} finished"));
     });
 }

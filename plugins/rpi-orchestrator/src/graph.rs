@@ -61,6 +61,19 @@ pub struct Node {
     /// model. Lives on the node so a `reset` naturally re-reports it, and a fresh
     /// `plan set` that reuses an id cannot hide its result behind a stale cursor.
     pub reported: bool,
+    /// Identity of this node *instance*. `plan set` / `addNodes` / re-added
+    /// nodes mint a fresh revision, so a worker from a removed or replaced
+    /// node never commits onto a new node that reuses the id (`removeIds`
+    /// does not bump the graph generation, so the generation guard alone
+    /// cannot tell them apart).
+    pub revision: u64,
+}
+
+/// Monotonic per-node-instance identity (see [`Node::revision`]).
+fn next_revision() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::SeqCst)
 }
 
 impl Node {
@@ -125,6 +138,7 @@ impl Node {
             status: Status::Pending,
             result: None,
             reported: false,
+            revision: next_revision(),
         })
     }
 
@@ -378,6 +392,24 @@ mod tests {
             {"id": "a", "task": "x", "deps": ["ghost"]}
         ]));
         assert!(unknown.unwrap_err().contains("unknown"));
+    }
+
+    /// A re-added (or re-set) id is a NEW node instance: its revision differs,
+    /// which is what keeps a removed node's worker from committing onto it
+    /// (`removeIds` does not bump the generation, so the revision is the only
+    /// guard that tells the instances apart).
+    #[test]
+    fn a_reused_id_mints_a_fresh_revision() {
+        let g = Graph::from_nodes_value(&serde_json::json!([
+            {"id": "a", "task": "first"},
+        ]))
+        .unwrap();
+        let first = g.get("a").unwrap().revision;
+        let fresh = Graph::from_nodes_value(&serde_json::json!([
+            {"id": "a", "task": "second"},
+        ]))
+        .unwrap();
+        assert_ne!(first, fresh.get("a").unwrap().revision);
     }
 
     #[test]
