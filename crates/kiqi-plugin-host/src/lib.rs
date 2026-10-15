@@ -153,7 +153,7 @@ fn denied() -> CapabilityError {
 /// What the user authorized for one plugin, shared with the CLI through the
 /// contract crate (`kiqi-plugin`).
 pub use kiqi_plugin::grants::{
-    allows, ExecCwd, ExecGrant, Grants, NetHttpGrant, NetSocketsGrant, ProcGrant,
+    allows, ExecCwd, ExecGrant, FsGrant, Grants, NetHttpGrant, NetSocketsGrant, ProcGrant,
 };
 
 /// The user-grantable capabilities a component declares — the `kiqi:plugin/*`
@@ -491,17 +491,28 @@ impl crate::kiqi::plugin::net_http::Host for HostState {
 }
 
 impl HostState {
-    /// Resolve a guest-supplied relative path inside the plugin's data
-    /// directory, or explain why it may not.
+    /// Resolve a guest-supplied relative path inside the fs grant's scope, or
+    /// explain why it may not: `plugin-data` jails to the plugin's own data
+    /// directory, `project` to the project tree (same scope `exec`/`proc`
+    /// use).
     ///
     /// A path with any `..`, root or prefix component is refused outright, so a
     /// plugin cannot walk out of its jail — and `starts_with` is checked as well
     /// rather than relied on.
-    fn fs_path(&self, rel: &str) -> Result<std::path::PathBuf, CapabilityError> {
-        if !self.grants.fs {
+    fn fs_checked(
+        &self,
+        rel: &str,
+        create_parents: bool,
+    ) -> Result<std::path::PathBuf, CapabilityError> {
+        let Some(grant) = self.grants.fs.as_ref() else {
             return Err(CapabilityError::Denied("fs is not granted".to_string()));
-        }
-        self.jail(rel)
+        };
+        let (root, what) = match grant.scope() {
+            kiqi_plugin::grants::ExecCwd::PluginData => (self.data_dir()?, "the plugin directory"),
+            kiqi_plugin::grants::ExecCwd::Project => (self.project_dir()?, "the project directory"),
+        };
+        let resolved = jail_under(&root, rel, what)?;
+        symlink_checked_under(&root, &resolved, create_parents, what)
     }
 
     /// Resolve a relative path inside the plugin's data directory without any
@@ -704,19 +715,19 @@ fn symlink_checked_under(
 /// Plugin filesystem, jailed to `plugins/<id>/data/`.
 impl crate::kiqi::plugin::fs::Host for HostState {
     fn read(&mut self, rel_path: String) -> Result<Vec<u8>, CapabilityError> {
-        let path = self.symlink_checked(&self.fs_path(&rel_path)?, false)?;
+        let path = self.fs_checked(&rel_path, false)?;
         std::fs::read(&path)
             .map_err(|error| CapabilityError::Failed(format!("read {}: {error}", path.display())))
     }
 
     fn write(&mut self, rel_path: String, contents: Vec<u8>) -> Result<(), CapabilityError> {
-        let path = self.symlink_checked(&self.fs_path(&rel_path)?, true)?;
+        let path = self.fs_checked(&rel_path, true)?;
         std::fs::write(&path, contents)
             .map_err(|error| CapabilityError::Failed(format!("write {}: {error}", path.display())))
     }
 
     fn read_dir(&mut self, rel_dir: String) -> Result<Vec<String>, CapabilityError> {
-        let path = self.symlink_checked(&self.fs_path(&rel_dir)?, false)?;
+        let path = self.fs_checked(&rel_dir, false)?;
         let entries = std::fs::read_dir(&path).map_err(|error| {
             CapabilityError::Failed(format!("read dir {}: {error}", path.display()))
         })?;
@@ -1820,7 +1831,9 @@ mod tests {
             wasi: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
             grants: Grants {
-                fs: true,
+                fs: Some(kiqi_plugin::grants::FsGrant {
+                    cwd: kiqi_plugin::grants::ExecCwd::PluginData,
+                }),
                 ..Grants::default()
             },
             fs_root: Some(root.to_path_buf()),
@@ -1877,8 +1890,8 @@ mod tests {
     fn fs_without_a_grant_is_denied() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut state = state(dir.path());
-        state.grants.fs = false;
-        let error = state.fs_path("x").expect_err("denied");
+        state.grants.fs = None;
+        let error = state.fs_checked("x", false).expect_err("denied");
         assert!(matches!(error, CapabilityError::Denied(_)), "got {error:?}");
     }
 

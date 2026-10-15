@@ -893,7 +893,9 @@ fn call_main_tool(
 #[test]
 fn fs_is_granted_and_jailed_to_the_plugins_data_directory() {
     let (dir, plugin) = load_fixture_in_temp(Grants {
-        fs: true,
+        fs: Some(kiqi_plugin::grants::FsGrant {
+            cwd: kiqi_plugin::grants::ExecCwd::PluginData,
+        }),
         ..Grants::default()
     });
 
@@ -1564,6 +1566,51 @@ fn orchestrator_guest_session_switch_clears_the_plan() {
         text_of(&shown).contains("plan is empty"),
         "the session switch cleared the graph: {}",
         text_of(&shown)
+    );
+}
+
+/// The fs grant's scope: the default is the plugin's own data directory
+/// (unchanged), and `--cwd project` (via the CLI options) opts the guest into
+/// reading and writing the project tree.
+#[test]
+fn fs_project_scope_reads_and_writes_the_project_tree() {
+    use kiqi_plugin_host::{ExecCwd, FsGrant};
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    std::fs::write(project.path().join("notes.txt"), b"project file").expect("seed file");
+    let wasm = fixture_wasm();
+    let plugin = WasmPlugin::load_with_options(
+        "conformance",
+        &wasm,
+        Grants {
+            fs: Some(FsGrant {
+                cwd: ExecCwd::Project,
+            }),
+            ..Grants::default()
+        },
+        kiqi_plugin_host::Options {
+            project_dir: Some(project.path().to_path_buf()),
+            ..kiqi_plugin_host::Options::default()
+        },
+    )
+    .expect("load");
+
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    // The conformance tool's fs probe writes `conformance/probe.txt` then reads
+    // it back — inside the project directory when the scope is `project`.
+    let outcome = call_main_tool(&plugin, serde_json::json!({})).expect("call");
+    assert!(
+        text_of(&outcome).contains("fs=conformance"),
+        "the guest round-tripped a file through the scoped fs: {}",
+        text_of(&outcome)
+    );
+    assert!(
+        project.path().join("conformance/probe.txt").is_file(),
+        "the write landed in the project tree"
     );
 }
 
@@ -2722,7 +2769,9 @@ fn load_goal_guest(grants: Grants) -> (tempfile::TempDir, WasmPlugin) {
 #[test]
 fn goal_guest_persists_per_project_and_charges_the_turn_budget() {
     let (dir, plugin) = load_goal_guest(Grants {
-        fs: true,
+        fs: Some(kiqi_plugin::grants::FsGrant {
+            cwd: kiqi_plugin::grants::ExecCwd::PluginData,
+        }),
         ..Grants::default()
     });
     assert_eq!(plugin.id(), "rpi-goal");
@@ -2894,7 +2943,9 @@ fn goal_guest_denies_without_fs_and_injection_is_optional() {
 
     // With fs but no injection surface, the goal is still recorded.
     let (_dir, plugin) = load_goal_guest(Grants {
-        fs: true,
+        fs: Some(kiqi_plugin::grants::FsGrant {
+            cwd: kiqi_plugin::grants::ExecCwd::PluginData,
+        }),
         ..Grants::default()
     });
     let log = NullLog;

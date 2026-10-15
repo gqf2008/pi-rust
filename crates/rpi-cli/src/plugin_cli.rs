@@ -407,7 +407,8 @@ USAGE:
 
 CAPABILITIES:
     net-http      host-mediated HTTP; --host <host> (repeatable, `*` allows any)
-    fs            the plugin's own data directory (`plugins/<id>/data/`)
+    fs            file access; --cwd plugin-data|project (default plugin-data:
+                  the plugin's own data directory, or the project tree)
     exec          run a child process; --command <name> (repeatable, `*` allows any),
                   --cwd plugin-data|project (default plugin-data: where the child
                   may start — the plugin's data directory or the project
@@ -953,6 +954,29 @@ mod tests {
             ..ExecGrant::default()
         };
         assert!(exec_reset_note(&plain_old, &GrantOptions::default(), &fresh).is_none());
+    }
+
+    /// The fs scope rides the same `--cwd` flag: default stays the data jail,
+    /// `project` opts into the project tree, and the JSON round-trips.
+    #[test]
+    fn grant_fs_with_cwd_scope() {
+        let args = vec![
+            "p".to_string(),
+            "fs".to_string(),
+            "--cwd".to_string(),
+            "project".to_string(),
+        ];
+        let target = parse_target(&args).expect("parse");
+        assert_eq!(target.options.cwd, Some(ExecCwd::Project));
+
+        let mut grants = Grants::default();
+        grants
+            .grant("fs", vec![], target.options)
+            .expect("fs takes --cwd");
+        assert_eq!(
+            serde_json::to_value(&grants).unwrap()["fs"],
+            serde_json::json!({"cwd": "project"})
+        );
     }
 
     /// `revoke` clears a whole capability; flags would be silently ignored, so

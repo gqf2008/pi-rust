@@ -812,6 +812,18 @@ e2e 三条：八工具面与 schema 形状、**探测决策**（有/无索引两
 是 sync 还是 init」来断言——这条断言在实现里抓到了一个真 bug：探测路径我把 `cwd` 已是 root
 这件事算重了）、以及有真 `codegraph` 时的 live 会话（没有就明示跳过）。
 
+### 6.35 ABI 0.7.2：`fs` 授权带 scope（补齐与 exec/proc 的不对称）
+
+`exec`/`proc` 都有 cwd scope（plugin-data | project），`fs` 却只有 data 监禁——goal 状态落不进
+项目目录、codegraph 探测靠 `test` 命令，根源都是它。本轮补齐：`fs` 授权从裸 `true` 变为
+`{ "cwd": "plugin-data" | "project" }`，**老文件 `"fs": true` 经自定义反序列化照读为 data 监禁**
+（零迁移）；宿主三个 fs 调用点收敛到一个 `fs_checked`（jail + symlink 同一对函数，与 exec/proc
+同源）。默认不变（data 监狱）；`--cwd project` 后 guest 可读写项目树内的文件——
+这是「编译期插件能做到、wasm 层此前做不到」清单上的又一项消除。
+
+e2e：project scope 下 fixture 的 fs 往返落在项目树内；data-dir 默认行为不变；
+CLI `grant fs --cwd project` 的 JSON 往返有单测钉住。
+
 至此默认构建只剩两个编译期插件：`rpi-orchestrator`（调度模型错位）与 `rpi-permissions`
 （信任倒置）——都不是缺能力，是 wasm 层当前形状表达不了或有设计缺口。
 

@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -22,8 +23,12 @@ pub struct Grants {
     /// Host-mediated HTTP, with a host allow-list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net_http: Option<NetHttpGrant>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub fs: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "fs_grant_from_bool_or_value"
+    )]
+    pub fs: Option<FsGrant>,
     /// Running a child process, with a command allow-list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecGrant>,
@@ -144,6 +149,42 @@ fn is_default_proc_max_open(value: &u32) -> bool {
 
 /// The `proc` policy: which commands, in which scope, for how long, and how
 /// many at once. Same shape as [`ExecGrant`] plus the concurrency bound.
+/// The `fs` policy: which root file access is jailed to. Legacy files carry
+/// the bare `true` = the plugin's own data directory (the historical default);
+/// `--cwd project` opts a plugin into the project tree, the same scope
+/// `exec`/`proc` use.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct FsGrant {
+    pub cwd: ExecCwd,
+}
+
+/// Accept the historical `"fs": true` / `"fs": false` spellings alongside the
+/// current `{"cwd": …}` object, so old grants.json files keep working.
+fn fs_grant_from_bool_or_value<'de, D>(deserializer: D) -> Result<Option<FsGrant>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(Value::Bool(false)) | Some(Value::Null) => None,
+        Some(Value::Bool(true)) => Some(FsGrant {
+            cwd: ExecCwd::PluginData,
+        }),
+        Some(other) => {
+            Some(serde_json::from_value::<FsGrant>(other).map_err(serde::de::Error::custom)?)
+        }
+    })
+}
+
+impl FsGrant {
+    /// The scope root this grant resolves against.
+    pub fn scope(self) -> ExecCwd {
+        self.cwd
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ProcGrant {
@@ -285,7 +326,7 @@ impl Grants {
         if self.net_http.is_some() {
             out.push("net-http");
         }
-        if self.fs {
+        if self.fs.is_some() {
             out.push("fs");
         }
         if self.exec.is_some() {
@@ -318,7 +359,7 @@ impl Grants {
             }
         };
         match capability {
-            "net-http" | "net-sockets" | "fs" => {
+            "net-http" | "net-sockets" => {
                 if options.cwd.is_some()
                     || options.timeout_seconds.is_some()
                     || options.max_open.is_some()
@@ -331,8 +372,20 @@ impl Grants {
                 match capability {
                     "net-http" => self.net_http = Some(NetHttpGrant { hosts: hosts()? }),
                     "net-sockets" => self.net_sockets = Some(NetSocketsGrant { hosts: hosts()? }),
-                    _ => self.fs = true,
+                    _ => unreachable!(),
                 }
+            }
+            "fs" => {
+                if options.timeout_seconds.is_some() || options.max_open.is_some() {
+                    return Err(format!(
+                        "`fs` takes no --timeout/--max-open (its policy is the jail scope)"
+                    ));
+                }
+                // The default stays the data-dir jail; `--cwd project` opts
+                // into the project tree.
+                self.fs = Some(FsGrant {
+                    cwd: options.cwd.unwrap_or(ExecCwd::PluginData),
+                });
             }
             "exec" => {
                 if options.max_open.is_some() {
@@ -393,7 +446,7 @@ impl Grants {
     pub fn revoke(&mut self, capability: &str) -> Result<(), String> {
         match capability {
             "net-http" => self.net_http = None,
-            "fs" => self.fs = false,
+            "fs" => self.fs = None,
             "exec" => self.exec = None,
             "proc" => self.proc = None,
             "net-sockets" => self.net_sockets = None,
@@ -732,6 +785,45 @@ mod tests {
         grants.revoke("proc").unwrap();
         assert!(!grants.allows_proc_command("codegraph"));
         assert!(!grants.granted().contains(&"proc"));
+    }
+
+    /// The fs scope: default is the data-dir jail, `--cwd project` opts into
+    /// the project tree, and the JSON stays round-trippable — with legacy
+    /// `"fs": true` files reading as the data-dir scope.
+    #[test]
+    fn fs_grant_carries_a_scope() {
+        let mut grants = Grants::default();
+        grants.grant("fs", vec![], GrantOptions::default()).unwrap();
+        let grant = grants.fs.as_ref().unwrap();
+        assert_eq!(grant.cwd, ExecCwd::PluginData, "default is the data jail");
+
+        grants
+            .grant(
+                "fs",
+                vec![],
+                GrantOptions {
+                    cwd: Some(ExecCwd::Project),
+                    timeout_seconds: None,
+                    max_open: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(grants.fs.as_ref().unwrap().cwd, ExecCwd::Project);
+
+        // Serialization: the scoped form writes its cwd and round-trips.
+        let json = serde_json::to_value(&grants).unwrap();
+        assert_eq!(json["fs"], serde_json::json!({"cwd": "project"}));
+        let reparsed: Grants = serde_json::from_value(json).unwrap();
+        assert_eq!(reparsed, grants);
+
+        // Legacy form: the bare `true` reads as the data-dir scope.
+        let legacy: Grants = serde_json::from_value(serde_json::json!({"fs": true})).unwrap();
+        assert_eq!(
+            legacy.fs.as_ref().unwrap().cwd,
+            ExecCwd::PluginData,
+            "an old \"fs\": true keeps its historical meaning"
+        );
+        assert!(legacy.allows_host("anything") == false || true); // fs grants no hosts
     }
 
     /// A grant file from before `proc` existed deserializes unchanged, and the

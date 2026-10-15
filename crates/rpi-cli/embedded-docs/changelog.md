@@ -13,6 +13,10 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
+- **`fs` grants carry a scope (ABI 0.7.2)**: `ki plugin grant <id> fs --cwd project`
+  opts a plugin into reading and writing the project tree (same scope as
+  `exec`/`proc`); the default stays the plugin's own data directory, and legacy
+  `"fs": true` files keep working unchanged.
 - **`rpi-orchestrator` ported to wasm** (`plugins/wasm/kiqi-orchestrator-guest`):
   the same three tools and guidance, with waves that run to completion inside
   the dispatch call (children in parallel on `proc`; per-node timeouts enforced
