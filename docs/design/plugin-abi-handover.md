@@ -121,7 +121,7 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 | `.wasm` 无签名/摘要校验 | 见 `plugin-abi.md` §7 待定项 |
 | 装完需重启 | `compiled_plugin_hosts()` 是进程级 `OnceLock` |
 | e2e 的 `exec_does_not_hang_when_the_command_leaves_a_background_child` 在满负载并行跑时偶发超时 | 15s 的 `recv_timeout` 窗口里含 wasmtime 编译 fixture 的时间，并行构建时可能不够；单跑必过。改阈值属 `RULE_阈值变更`，未动 |
-| 未移植 | `rpi-goal`、`rpi-permissions`、`rpi-websearch`、`rpi-subagents`、`rpi-codegraph` |
+| 未移植 | `rpi-goal`、`rpi-permissions`、`rpi-websearch`、`rpi-subagents`、`rpi-codegraph`、`rpi-orchestrator`（长生命周期编排：1800s 子进程、调用间后台节点、进程组收杀——wasm 通道目前表达不了，见 `plugin-abi.md` §6.2 注记） |
 
 ## 8. 提交轨迹（近期，`fork/main`）
 

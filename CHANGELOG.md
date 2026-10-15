@@ -11,6 +11,21 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Added
+
+- **`rpi-orchestrator` is compiled in** behind `plugin-rpi-orchestrator`
+  (default on): bounded DAG subagent orchestration — `subagent` runs one task
+  in a child `ki -p --no-session` process, `plan` authors/edits the task graph,
+  `dispatch` runs the ready wave, and a goal-coupled guidance section is
+  appended to the system prompt when `/goal` is active. Ported from the
+  `rpi-package` extension with pre-fork spellings fixed
+  (`.rpi/` → `.ki/`, `RPI_MAX_TURNS_PER_RUN` → `KI_MAX_TURNS_PER_RUN`,
+  `RPI_ORCHESTRATOR_*` → `KI_ORCHESTRATOR_*`); under `ki` the old names were
+  silently inert. The harness's tool-call cancellation token now reaches
+  compiled plugins as `HostCaps::cancel`, so aborting a call winds down the
+  subagents it spawned instead of leaving them running.
+
+
 ## [0.4.1] - 2026-10-14
 
 ### Added

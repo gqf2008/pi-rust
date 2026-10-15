@@ -180,6 +180,13 @@ pub trait Plugin: Send + Sync {
 > 2026-10-15（§6.30）：`lens` 移出此名单并已移植（`plugins/wasm/kiqi-rpi-lens-guest`）。
 > 当初排除它是因为 exec 还没真实现、cwd 只能关在插件 data 目录；exec 授权带上 cwd 范围
 > 与时间预算后，“起子进程”不再是 ABI 验证之外的活。
+>
+> 2026-10-15（第二批）：`rpi-orchestrator` 从 `rpi-package` 收编为编译期插件
+> （`plugins/rpi-orchestrator`，默认 feature），但**不迁 wasm**——它是长生命周期编排：
+> 子代理是可活到 1800s 的 `ki -p` 子进程（exec 预算上限 300s）、`dispatch` 的后台节点
+> worker 要在工具调用之间持续存活（wasm guest 调用间无线程）、子进程要整组收杀
+> （wasm 没有进程组概念）。wasm 化它需要宿主先长出「会话级长生命周期子进程句柄」这类
+> 新能力，属未来的设计活；exec cwd scope（§6.30）解决的是 lens 那种有界短任务。
 
 ### 6.3 验收门禁（「验证通过」的判据）
 
