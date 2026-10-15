@@ -186,6 +186,7 @@ fn todo_guest_restores_from_the_session_branch() {
         inject: None,
         ui: None,
         log: &log,
+        cancel: None,
     };
 
     // A session (re)start restores the list from the branch through
@@ -507,6 +508,7 @@ fn conformance_surface_is_reachable() {
         inject: None,
         ui: Some(&ui),
         log: &log,
+        cancel: None,
     };
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
@@ -712,6 +714,7 @@ fn ask_user_round_trips_through_the_host_dialog() {
         inject: None,
         ui: Some(&ui),
         log: &log,
+        cancel: None,
     };
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
@@ -747,6 +750,7 @@ fn ask_user_round_trips_through_the_host_dialog() {
         inject: None,
         ui: Some(&ui),
         log: &log,
+        cancel: None,
     };
     let confirm = plugin
         .call(
@@ -779,6 +783,7 @@ fn ask_user_reports_cancellation() {
         inject: None,
         ui: Some(&ui),
         log: &log,
+        cancel: None,
     };
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
@@ -815,6 +820,7 @@ fn ask_user_honours_timeout() {
         inject: None,
         ui: Some(&ui),
         log: &log,
+        cancel: None,
     };
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
@@ -1839,6 +1845,7 @@ fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
         inject: Some(&host),
         ui: None,
         log: &log,
+        cancel: None,
     };
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),

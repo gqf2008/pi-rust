@@ -472,6 +472,18 @@ pub enum LogLevel {
     Error,
 }
 
+/// A cancellation probe, wired per call when the host can abort a running
+/// tool (the harness's `CancellationToken`, which the adapter otherwise dropped
+/// on the floor). Long-running plugins poll it and wind down their children.
+///
+/// This is deliberately a probe, not a blocking wait: a plugin decides where
+/// its checkpoints are. It is also the one part of `HostCaps` that wasm guests
+/// do not get — the ABI has no cancel channel; a guest's call is bounded by
+/// the host's own limits instead.
+pub trait CancelProbe: Send + Sync {
+    fn is_cancelled(&self) -> bool;
+}
+
 /// Everything a plugin may reach, handed in **per call**.
 ///
 /// A capability left `None` is not merely empty — the plugin has no way to
@@ -483,6 +495,8 @@ pub struct HostCaps<'a> {
     pub control: Option<&'a dyn SessionControl>,
     pub inject: Option<&'a dyn InjectApi>,
     pub ui: Option<&'a dyn UiApi>,
+    /// Set only for the duration of a tool call the host can abort.
+    pub cancel: Option<&'a dyn CancelProbe>,
     pub log: &'a dyn Log,
 }
 
@@ -495,6 +509,7 @@ impl<'a> HostCaps<'a> {
             control: None,
             inject: None,
             ui: None,
+            cancel: None,
             log,
         }
     }

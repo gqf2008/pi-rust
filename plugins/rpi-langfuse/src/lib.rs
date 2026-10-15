@@ -3254,6 +3254,7 @@ mod tests {
             control: None,
             inject: None,
             ui: Some(&ui),
+            cancel: None,
             log: &log,
         };
         let plugin = crate::kiqi::LangfusePlugin::new();

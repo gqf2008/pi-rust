@@ -20,6 +20,7 @@ members = [
     "plugins/rpi-subagents",
     "plugins/rpi-permissions",
     "plugins/rpi-lens",
+    "plugins/rpi-orchestrator",
     "plugins/rpi-webfetch",
     "plugins/rpi-websearch",
     "crates/rpi-plugin-sdk",

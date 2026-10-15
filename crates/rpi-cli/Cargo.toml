@@ -24,6 +24,7 @@ kiqi-plugin = { path = "../kiqi-plugin" }
 kiqi-plugin-host = { path = "../kiqi-plugin-host", optional = true }
 rpi-todo = { path = "../../plugins/rpi-todo", optional = true, features = ["compile-time"] }
 rpi-lens = { path = "../../plugins/rpi-lens", optional = true, features = ["compile-time"] }
+rpi-orchestrator = { path = "../../plugins/rpi-orchestrator", optional = true, features = ["compile-time"] }
 rpi-webfetch = { path = "../../plugins/rpi-webfetch", optional = true, features = ["compile-time"] }
 rpi-websearch = { path = "../../plugins/rpi-websearch", optional = true, features = ["compile-time"] }
 rpi-subagents = { path = "../../plugins/rpi-subagents", optional = true, features = ["compile-time"] }
@@ -102,7 +103,7 @@ pkg-fmt = "tgz"
 pkg-fmt = "zip"
 
 [features]
-default = ["clipboard", "plugin-wasm", "plugin-rpi-todo", "plugin-rpi-lens", "plugin-rpi-webfetch", "plugin-rpi-websearch", "plugin-rpi-subagents", "plugin-rpi-permissions", "plugin-rpi-goal", "plugin-rpi-plan-mode", "plugin-rpi-codegraph", "plugin-rpi-ask-user", "plugin-rpi-langfuse"]
+default = ["clipboard", "plugin-wasm", "plugin-rpi-todo", "plugin-rpi-lens", "plugin-rpi-orchestrator", "plugin-rpi-webfetch", "plugin-rpi-websearch", "plugin-rpi-subagents", "plugin-rpi-permissions", "plugin-rpi-goal", "plugin-rpi-plan-mode", "plugin-rpi-codegraph", "plugin-rpi-ask-user", "plugin-rpi-langfuse"]
 # Loads `plugins/<id>/plugin.wasm` through `kiqi-plugin-host` (wasmtime). Off
 # only for builds that want the leaner binary without the wasm tier.
 plugin-wasm = ["dep:kiqi-plugin-host"]
@@ -111,6 +112,7 @@ clipboard = ["dep:arboard"]
 # First-party plugins are compiled in. The cdylib channel keeps serving `ki dev`.
 plugin-rpi-todo = ["dep:rpi-todo"]
 plugin-rpi-lens = ["dep:rpi-lens"]
+plugin-rpi-orchestrator = ["dep:rpi-orchestrator"]
 plugin-rpi-webfetch = ["dep:rpi-webfetch"]
 plugin-rpi-websearch = ["dep:rpi-websearch"]
 plugin-rpi-subagents = ["dep:rpi-subagents"]

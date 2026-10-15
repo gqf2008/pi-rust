@@ -247,6 +247,11 @@ pub fn load_all() -> Vec<Registered> {
         id: "rpi-lens",
         plugin: rpi_lens::kiqi::factory(),
     });
+    #[cfg(feature = "plugin-rpi-orchestrator")]
+    plugins.push(Registered {
+        id: "rpi-orchestrator",
+        plugin: rpi_orchestrator::kiqi::factory(),
+    });
     #[cfg(feature = "plugin-rpi-webfetch")]
     plugins.push(Registered {
         id: "rpi-webfetch",
@@ -317,6 +322,7 @@ impl OwnedCaps {
             inject: self.inject.as_deref(),
             ui: self.ui.as_deref(),
             log: self.log.as_ref(),
+            cancel: None,
         }
     }
 }
@@ -623,11 +629,13 @@ impl rpi_agent::agent_tool::AgentTool for CompiledToolAdapter {
         &self,
         _tool_call_id: &str,
         params: serde_json::Value,
-        _signal: tokio_util::sync::CancellationToken,
+        signal: tokio_util::sync::CancellationToken,
         on_update: std::sync::Arc<dyn Fn(rpi_agent::types::ToolResultPartial) + Send + Sync>,
     ) -> Result<rpi_agent::types::AgentToolResult, rpi_agent::error::AgentError> {
         let sink = UpdateSink { on_update };
-        let caps = self.caps.caps();
+        let probe = HarnessCancel(signal);
+        let mut caps = self.caps.caps();
+        caps.cancel = Some(&probe);
         let outcome = self
             .host
             .call_tool(&self.name, &params, &caps, &sink)
@@ -675,6 +683,17 @@ impl rpi_agent::agent_tool::AgentTool for CompiledToolAdapter {
             details: outcome.details,
             ..Default::default()
         })
+    }
+}
+
+/// The harness's cancellation token as a [`kiqi_plugin::CancelProbe`], so a
+/// long-running plugin tool (a subagent wave) can wind down when the user
+/// aborts the call instead of leaving its children running.
+struct HarnessCancel(tokio_util::sync::CancellationToken);
+
+impl kiqi_plugin::CancelProbe for HarnessCancel {
+    fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
     }
 }
 
@@ -1204,6 +1223,7 @@ mod tests {
         for expected in [
             "rpi-todo",
             "rpi-lens",
+            "rpi-orchestrator",
             "rpi-webfetch",
             "rpi-websearch",
             "rpi-subagents",
@@ -1239,6 +1259,9 @@ mod tests {
         for expected in [
             "todo",
             "code_lens",
+            "subagent",
+            "plan",
+            "dispatch",
             "webfetch",
             "websearch",
             "delegate_task",
@@ -1535,6 +1558,7 @@ mod tests {
             inject: Some(&caps_host),
             ui: None,
             log: &silent,
+            cancel: None,
         };
 
         // The adapter really crosses the spawn/park seam.
@@ -1691,6 +1715,7 @@ mod tests {
             inject: None,
             ui: None,
             log: &silent,
+            cancel: None,
         };
         let refused = plan_host.run_command("plan", "start", &stripped).unwrap();
         assert!(

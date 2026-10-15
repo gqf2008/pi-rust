@@ -2863,6 +2863,7 @@ dependencies = [
  "rpi-harness",
  "rpi-langfuse",
  "rpi-lens",
+ "rpi-orchestrator",
  "rpi-permissions",
  "rpi-plan-mode",
  "rpi-plugin-sdk",
@@ -2964,6 +2965,17 @@ name = "rpi-lens"
 version = "0.4.1"
 dependencies = [
  "kiqi-plugin",
+ "rpi-plugin-sdk",
+ "serde_json",
+ "wait-timeout",
+]
+
+[[package]]
+name = "rpi-orchestrator"
+version = "0.4.1"
+dependencies = [
+ "kiqi-plugin",
+ "nix",
  "rpi-plugin-sdk",
  "serde_json",
  "wait-timeout",
