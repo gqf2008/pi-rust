@@ -174,7 +174,10 @@ pub trait Plugin: Send + Sync {
 过同一套一致性测试。
 
 **明确不迁**（选它们是在验证 host 的 exec/会话驱动，不是验证 ABI）：`im-message`、`voice`、
-`mcp-adapter`、`acp`、`server`、`run-stats`、`subagents`、`codegraph`、~~`lens`~~
+`mcp-adapter`、`acp`（2026-10-16 实核确认：它要独占宿主进程 stdin/stdout 并在
+SessionStart→Shutdown 间维持服务线程——见 `rpi-package/packages/rpi-acp/src/lib.rs:4-8,67-70`。
+正确形态是**宿主级功能**：让 `ki` 本体当 ACP server，而不是插件。）、`server`、`run-stats`、
+`subagents`、`codegraph`、~~`lens`~~
 （起子进程 / 长连 / 后台线程）。
 
 > 2026-10-15（§6.30）：`lens` 移出此名单并已移植（`plugins/wasm/kiqi-rpi-lens-guest`）。
