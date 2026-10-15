@@ -730,6 +730,35 @@ lens 移植验“project scope 下 `git diff --check` exit=0 / data 目录下报
 - guest 的 cwd 前缀剥离补上尾部斜杠归一（`/proj/` == `/proj`），并写明词法剥离的
   fail-safe 边界（符号链接拼写误拒时传相对路径）。
 
+### 6.31 并行可行性实核 + 三插件移植（`websearch`/`subagents`/`goal`）+ 两个不迁裁决
+
+剩余五个未移植插件各经一名分析员实核 + 交叉验证员对抗复核（10 agent），按证据裁决：
+
+**移植（3）**：
+- **`rpi-websearch`**：DDG + Wikipedia 全 keyless，`net-http` 完全覆盖（自定义 header
+  转发、8 MiB 上限）；需两个 allow-list host，单授 DDG 时 fallback 缺席按原设计降级。
+- **`rpi-subagents`**：现版本是**纯信封工具**（validate + emit，不起子进程），§6.2 当初
+  的排除理由（起子进程）对现行代码不再成立；信封字节序用编译期/宿主两端钉同一个字面量。
+- **`rpi-goal`**：`inject`/WASI 时钟/命令/8 action 全通；TurnEnd 走 untyped `other.kind`
+  （WIT 无 turn-end tag，人体工学缺口非能力缺口）。**状态取舍（已裁决并写进 README）**：
+  fs 监禁进不了项目目录，guest 把 `{projectPath: Goals}` 映射存进插件 data 目录、以
+  `info().cwd` 为键——每项目语义保留，但（a）与编译期插件互不可见、**compiled
+  orchestrator 的 goal 联动不会因 wasm goal 开启**；（b）键是路径字符串非规范化路径，
+  同目录双拼写是两个状态；（c）fs 无 rename，写非原子、撕裂半径比编译期大。若将来要
+  忠实落盘项目目录，需给 `fs` 加 `cwd` 式 scope（§6.30 的对称扩展），单独立项。
+
+**不迁（2，均为设计缺口而非一时缺失）**：
+- **`rpi-permissions`**：三重缺口（项目 fs 原子写、home 作用域 + env、projectPath 语义）
+  之外是**信任倒置**——它的职责是重写宿主工具门所消费的策略文件，让沙箱 guest 拿到这个
+  写权限等于让被监管者写监管规则。需要先设计（专用能力或宿主侧代理），不是补 scope 就能迁。
+- **`rpi-codegraph`**：`search` 要长活子进程的 stdio 流式句柄，与 orchestrator 同属
+  「会话级长生命周期句柄」类缓期能力；`init`/`sync` 一次性命令 exec（project scope）
+  倒是能跑，但缺 search 的迁移没有意义。
+
+三移植的交接细节（grant 需求、README 差异清单、e2e）见各 guest 目录；e2e +5（含
+`KIQI_WEBSEARCH_LIVE=1` 的 detect-and-return live 测试——解析/过滤路径要真网络，
+默认跳过并明说，符合「第三态显式化」）。
+
 ## 7. 待定
 
 - ~~wasmtime 依赖很重：独立 crate 还是 feature 开关？~~ → 已定：**独立 crate `kiqi-plugin-host` +

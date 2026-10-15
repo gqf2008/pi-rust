@@ -65,7 +65,7 @@
 | 契约 Rust 侧（`trait Plugin`、`Event`/`Verdict`、`grants`） | `crates/kiqi-plugin` |
 | 宿主（wasmtime，把组件包成 `trait Plugin`） | `crates/kiqi-plugin-host` |
 | 插件 SDK（WIT → Rust trait） | `plugins/wasm/kiqi-plugin-guest` |
-| 已移植插件（7） | `plugins/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode,rpi-lens}-guest` |
+| 已移植插件（10） | `plugins/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode,rpi-lens,websearch,subagents,goal}-guest` |
 | 共享逻辑（编译期与 wasm 共用） | `crates/rpi-plan-mode-core` |
 | CLI | `crates/rpi-cli/src/plugin_cli.rs`（`ki plugin …`） |
 | 会话接线（发现/注册/事件 sink/各贡献面） | `crates/rpi-cli/src/plugins.rs` |
@@ -96,7 +96,7 @@ wasm-tools component wit plugins/kiqi-plugin.wit
 ## 6. 测试与 CI
 
 ```bash
-cargo test -p kiqi-plugin-host --lib --test e2e      # 27 e2e + 5 单测
+cargo test -p kiqi-plugin-host --lib --test e2e      # 32 e2e + 5 单测
 cargo test -p rpi-plan-mode-core                      # 6
 cargo test -p rpi-lens                                # 3
 cargo test -p kiqi-plugin --lib                       # 7
@@ -121,7 +121,7 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 | `.wasm` 无签名/摘要校验 | 见 `plugin-abi.md` §7 待定项 |
 | 装完需重启 | `compiled_plugin_hosts()` 是进程级 `OnceLock` |
 | e2e 的 `exec_does_not_hang_when_the_command_leaves_a_background_child` 在满负载并行跑时偶发超时 | 15s 的 `recv_timeout` 窗口里含 wasmtime 编译 fixture 的时间，并行构建时可能不够；单跑必过。改阈值属 `RULE_阈值变更`，未动 |
-| 未移植 | `rpi-goal`、`rpi-permissions`、`rpi-websearch`、`rpi-subagents`、`rpi-codegraph`、`rpi-orchestrator`（长生命周期编排：1800s 子进程、调用间后台节点、进程组收杀——wasm 通道目前表达不了，见 `plugin-abi.md` §6.2 注记） |
+| 不迁（裁决见 §6.31） | `rpi-permissions`（信任倒置：沙箱 guest 重写宿主权限策略，需先设计）、`rpi-codegraph`（search 要长活 stdio 句柄，同 orchestrator 类）、`rpi-orchestrator`（长生命周期编排） |
 
 ## 8. 提交轨迹（近期，`fork/main`）
 
