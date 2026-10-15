@@ -45,6 +45,12 @@ impl<'a> EventView<'a> {
     }
 
     pub fn data_text(&self) -> Option<String> {
+        // NOTE: this list must agree with the host's no-payload set
+        // (`rpi-extensions::translate::free_dispatched_event`): a tag listed
+        // here but dispatched `empty` reads the union's `data` arm at a
+        // garbage pointer (SIGBUS). `SessionTree`/`SessionBeforeTree` are
+        // no-payload today (the WIT `session-tree` variant is unit), so they
+        // must NOT appear here.
         if !matches!(
             self.tag(),
             EventTag::SessionBeforeSwitch
@@ -52,8 +58,6 @@ impl<'a> EventView<'a> {
                 | EventTag::SessionBeforeFork
                 | EventTag::SessionBeforeCompact
                 | EventTag::SessionCompact
-                | EventTag::SessionBeforeTree
-                | EventTag::SessionTree
                 | EventTag::Context
                 | EventTag::BeforeProviderRequest
                 | EventTag::BeforeProviderHeaders
@@ -150,6 +154,22 @@ mod tests {
         assert!(view.data_text().is_none());
         assert!(view.tool_call().is_none());
         assert!(view.tool_result().is_none());
+    }
+
+    /// `SessionTree` is dispatched **empty** (the WIT `session-tree` variant is
+    /// unit; the host's `free_dispatched_event` files it under no-payload), so
+    /// `data_text` must not claim it — reading the union's `data` arm of an
+    /// empty event dereferences a garbage pointer (SIGBUS, not a panic).
+    #[test]
+    fn session_tree_is_no_payload_so_data_text_must_not_claim_it() {
+        for tag in [EventTag::SessionTree, EventTag::SessionBeforeTree] {
+            let raw = StablePluginEvent::empty(tag);
+            let view = unsafe { EventView::from_raw(&raw) };
+            assert!(
+                view.data_text().is_none(),
+                "{tag:?} carries no payload; data_text must return None"
+            );
+        }
     }
 
     #[test]

@@ -412,6 +412,7 @@ async fn run_inner() -> i32 {
                 initial.clone(),
                 &extra,
                 file_images.clone(),
+                &reload_context,
             )
             .await
         }
@@ -423,6 +424,7 @@ async fn run_inner() -> i32 {
                 &extra,
                 file_images.clone(),
                 Some(event_rx),
+                &reload_context,
             )
             .await
         }
@@ -505,16 +507,9 @@ async fn run_inner() -> i32 {
                     .await
                 };
 
-                if let Some(reason) = crate::session::dispatch_session_event_async(
-                    &reload_context,
-                    rpi_plugin_sdk::EventTag::SessionShutdown,
-                )
-                .await
-                {
-                    tracing::warn!(
-                        "[ki] extension vetoed SessionShutdown (ignored, closing): {reason}"
-                    );
-                }
+                // `SessionShutdown`: the headless session is over — advisory
+                // veto (warn and continue; the process is already closing).
+                crate::session::dispatch_session_shutdown_advisory(&reload_context).await;
                 code
             }
         }

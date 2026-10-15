@@ -235,6 +235,112 @@ fn todo_guest_restores_from_the_session_branch() {
     );
 }
 
+/// A `SessionRead` whose branch can be swapped mid-test, so a restore
+/// triggered by a second event can be observed against different branch data.
+struct SwappingSession {
+    branch: Mutex<serde_json::Value>,
+}
+
+impl kiqi_plugin::SessionRead for SwappingSession {
+    fn active_tools(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn system_prompt(&self) -> String {
+        String::new()
+    }
+    fn thinking_level(&self) -> String {
+        String::new()
+    }
+    fn cli_flag(&self, _name: &str) -> Option<String> {
+        None
+    }
+    fn session_branch(&self) -> serde_json::Value {
+        self.branch.lock().unwrap().clone()
+    }
+}
+
+/// `SessionTree` (the host fires it on `/tree` navigation, `/session` switch,
+/// `/import`, `/fork`, `/clone`) must restore the guest's state exactly like
+/// `SessionStart` does — otherwise a wasm todo guest keeps the PREVIOUS
+/// branch's tasks after the user moves to another branch.
+#[test]
+fn session_tree_restores_from_a_swapped_branch() {
+    fn branch_with(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "entries": [{
+                "message": {
+                    "role": "toolResult",
+                    "toolName": "todo",
+                    "details": {
+                        "todos": [{"id": 1, "text": text, "done": false}],
+                        "nextId": 2,
+                    },
+                }
+            }]
+        })
+    }
+
+    let wasm = todo_wasm();
+    let plugin = WasmPlugin::load("rpi-todo", &wasm).expect("load the todo component");
+
+    let session = SwappingSession {
+        branch: Mutex::new(branch_with("branch A todo")),
+    };
+    let log = NullLog;
+    let caps = HostCaps {
+        session: Some(&session),
+        control: None,
+        inject: None,
+        ui: None,
+        log: &log,
+        cancel: None,
+    };
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    let list_text = |plugin: &WasmPlugin| -> String {
+        let listed = plugin
+            .call("todo", &serde_json::json!({"action": "list"}), &caps, &sink)
+            .expect("list");
+        match &listed.blocks[0] {
+            Block::Text(text) => text.clone(),
+            other => panic!("unexpected block {other:?}"),
+        }
+    };
+
+    // SessionStart restores branch A.
+    let action = plugin.on_event(
+        &Event::new(EventTag::SessionStart, serde_json::Value::Null),
+        &caps,
+    );
+    assert_eq!(action, EventAction::Continue);
+    assert!(
+        list_text(&plugin).contains("branch A todo"),
+        "restore A: {}",
+        list_text(&plugin)
+    );
+
+    // The branch swaps underneath the guest (the host moved to another
+    // branch), then SessionTree arrives — the guest must re-restore from the
+    // NEW branch, not keep A's state.
+    *session.branch.lock().unwrap() = branch_with("branch B todo");
+    let action = plugin.on_event(
+        &Event::new(EventTag::SessionTree, serde_json::Value::Null),
+        &caps,
+    );
+    assert_eq!(action, EventAction::Continue);
+
+    let text = list_text(&plugin);
+    assert!(
+        text.contains("branch B todo"),
+        "SessionTree must restore the swapped-in branch: {text}"
+    );
+    assert!(
+        !text.contains("branch A todo"),
+        "the previous branch's state must be gone: {text}"
+    );
+}
+
 /// The `net-http` capability is gated by the user's grant, and the host checks
 /// the request's host against the allow-list.
 #[test]

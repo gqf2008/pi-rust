@@ -107,6 +107,7 @@ pub(super) async fn switch_to_session(
     chat: &Arc<Container>,
     state: &Arc<TuiState>,
     tool_context: &rpi_extensions::ToolCallContext,
+    reload_context: &crate::session::ReloadContext,
 ) -> bool {
     if *state.status.lock().unwrap() == RunStatus::Working {
         state.set_status(RunStatus::Aborting);
@@ -120,6 +121,10 @@ pub(super) async fn switch_to_session(
             // it was serving before this call.
             let _ =
                 crate::session::set_active_session(harness, new_session, Some(tool_context)).await;
+            // `SessionTree`: the active session moved — plugins (compiled +
+            // wasm) re-restore their state from the new branch. Fired after
+            // the swap so handlers observe the NEW session; advisory.
+            crate::session::notify_session_tree(reload_context).await;
             chat.clear();
             add_welcome_message(chat);
             render_session_history(
@@ -153,6 +158,7 @@ pub(super) async fn import_session(
     chat: &Arc<Container>,
     state: &Arc<TuiState>,
     tool_context: &rpi_extensions::ToolCallContext,
+    reload_context: &crate::session::ReloadContext,
 ) {
     use std::path::Path as FsPath;
 
@@ -178,7 +184,18 @@ pub(super) async fn import_session(
     match std::fs::copy(src, &dest) {
         Ok(_) => {
             let id = fname.strip_suffix(".jsonl").unwrap_or(fname).to_string();
-            if switch_to_session(harness, lane, &id, cwd, chat, state, tool_context).await {
+            if switch_to_session(
+                harness,
+                lane,
+                &id,
+                cwd,
+                chat,
+                state,
+                tool_context,
+                reload_context,
+            )
+            .await
+            {
                 add_note_message(chat, &format!("Imported session from {path}"));
             }
         }
@@ -192,6 +209,7 @@ pub(super) async fn fork_session(
     chat: &Arc<Container>,
     state: &Arc<TuiState>,
     tool_context: &rpi_extensions::ToolCallContext,
+    reload_context: &crate::session::ReloadContext,
 ) {
     use rpi_harness::session::jsonl::{JsonlSessionRepo, JsonlSessionRepoOptions};
     use rpi_tools::FileSystem;
@@ -241,6 +259,10 @@ pub(super) async fn fork_session(
     };
     let new_session = rpi_harness::session::session::Session::new(Arc::new(fork_storage), None);
     let _ = crate::session::set_active_session(harness, new_session, Some(tool_context)).await;
+    // `SessionTree`: the active session moved to the fresh fork — plugins
+    // (compiled + wasm) re-restore from the new (empty) branch. Fired after
+    // the swap so handlers observe the NEW session; advisory.
+    crate::session::notify_session_tree(reload_context).await;
     chat.clear();
     add_welcome_message(chat);
     render_session_history(

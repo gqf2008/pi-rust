@@ -1076,6 +1076,40 @@ pub async fn dispatch_session_event_async(
     }
 }
 
+/// Notify plugins the session moved to a different point of its tree — `/tree`
+/// navigation, `/session` switch, `/import`, `/fork`, `/clone`.
+///
+/// **No payload**, and the veto is **advisory**: the move has already happened,
+/// so a handler returning `EVENT_HANDLER_ABORT` is logged and ignored (the
+/// caller must not undo the navigation). Delivery is the same funnel as every
+/// lifecycle event — native cdylib handlers, the compiled trait face, and wasm
+/// guests in one call — so a wasm todo/plan-mode guest restores from the
+/// swapped-in branch exactly as the compiled plugins do.
+///
+/// Callers fire this only AFTER the move completed (`navigate_tree` /
+/// `set_active_session` returned), so a handler reading
+/// [`kiqi_plugin::SessionRead::session_branch`] observes the NEW branch.
+pub(crate) async fn notify_session_tree(reload_context: &ReloadContext) {
+    if let Some(reason) =
+        dispatch_session_event_async(reload_context, rpi_plugin_sdk::EventTag::SessionTree).await
+    {
+        tracing::warn!("[ki] extension vetoed SessionTree (advisory): {reason}");
+    }
+}
+
+/// Dispatch `SessionShutdown` with **advisory** veto semantics: the session is
+/// already closing, so a handler returning `EVENT_HANDLER_ABORT` is warned about
+/// and ignored. Shared by every run shape that ends a session (interactive TUI/
+/// REPL, rpc, print, json) so the warn-and-continue contract lives in one place.
+pub async fn dispatch_session_shutdown_advisory(reload_context: &ReloadContext) {
+    if let Some(reason) =
+        dispatch_session_event_async(reload_context, rpi_plugin_sdk::EventTag::SessionShutdown)
+            .await
+    {
+        tracing::warn!("[ki] extension vetoed SessionShutdown (ignored, closing): {reason}");
+    }
+}
+
 /// Join plugin teardown before unloading modules. A detached timed-out handler
 /// could still execute code in the old DLL, so it cannot safely permit a swap.
 async fn shutdown_extensions_for_reload(
@@ -3873,5 +3907,70 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// `SessionTree` fires on `/tree` navigate, `/session` switch, `/import`,
+    /// `/fork` and `/clone` so plugins (compiled + wasm) re-restore from the
+    /// swapped-in branch. The dispatch must reach handlers through the same
+    /// lifecycle funnel as `SessionStart`, and a handler's `ABORT` veto is
+    /// **advisory** — the tree move already happened, so the notification
+    /// completes instead of propagating the veto.
+    #[tokio::test]
+    async fn session_tree_notification_dispatches_and_veto_is_advisory() {
+        use std::sync::atomic::AtomicUsize;
+        extern "C" fn veto(
+            _: rpi_plugin_sdk::StablePluginEvent,
+            data: *mut std::ffi::c_void,
+        ) -> i32 {
+            unsafe { &*(data as *const AtomicUsize) }
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            rpi_plugin_sdk::EVENT_HANDLER_ABORT
+        }
+        let calls = AtomicUsize::new(0);
+        let mut registry = rpi_extensions::ExtensionRegistry::new();
+        registry.register_event_handler(
+            "vetoer".into(),
+            rpi_plugin_sdk::EventTag::SessionTree,
+            veto,
+            &calls as *const _ as *mut std::ffi::c_void,
+        );
+        let reload_context = ReloadContext {
+            extension_session: Arc::new(Mutex::new(rpi_extensions::ExtensionSession::from_parts(
+                Arc::new(registry.snapshot()),
+                rpi_extensions::PluginKeepalive::empty(),
+                Vec::new(),
+                None,
+            ))),
+            tool_context: rpi_extensions::ToolCallContext::default(),
+            action_bridge: Arc::new(Mutex::new(None)),
+            ext_status: rpi_extensions::ExtensionStatusMailbox::default(),
+            editor_text: rpi_extensions::EditorTextMailbox::default(),
+            catalog: Vec::new(),
+            providers: Vec::new(),
+            runtime: tokio::runtime::Handle::current(),
+            cwd: PathBuf::from("."),
+            project_trusted: true,
+            args: Args::default(),
+            resolved_model: rpi_ai::Model::new(
+                "test-model",
+                "test",
+                rpi_ai::types::Api::Faux,
+                "faux",
+                "",
+            ),
+            broadcast: Arc::new(rpi_agent::CollectorEmitter::new().0),
+            mailbox: rpi_extensions::ReloadMailbox::default(),
+            ui_dialog: rpi_extensions::UiDialogMailbox::default(),
+            dev_extension: None,
+        };
+
+        // Completes despite the ABORT (no panic / no veto propagation)...
+        super::notify_session_tree(&reload_context).await;
+        // ...and the handler actually ran exactly once.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "SessionTree must reach a subscribed handler exactly once"
+        );
     }
 }

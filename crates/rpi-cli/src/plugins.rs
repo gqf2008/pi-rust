@@ -1871,6 +1871,65 @@ mod tests {
         rpi_extensions::clear_compiled_event_sink();
     }
 
+    /// `SessionTree` (host emission on `/tree` navigate, `/session` switch,
+    /// `/import`, `/fork`, `/clone`) rides the same funnel as `SessionStart`:
+    /// one dispatch reaches the compiled trait face and the wasm guests (they
+    /// share the host list), so the wasm todo/plan-mode guests re-restore from
+    /// the swapped-in branch. Pins the funnel half of that contract with the
+    /// compiled rpi-todo as the plugin under test (runs where
+    /// `--features plugin-rpi-todo` builds); the emission sites are TUI
+    /// wiring, pinned by `session_tree_notification_dispatches_and_veto_is_advisory`
+    /// in `session.rs`.
+    #[cfg(feature = "plugin-rpi-todo")]
+    #[test]
+    fn session_tree_event_reaches_the_compiled_plugin() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let fake = std::sync::Arc::new(FakeHost::default());
+        let owned = OwnedCaps {
+            session: Some(
+                std::sync::Arc::new(ActionCaps::new(fake, runtime.handle().clone()))
+                    as std::sync::Arc<dyn kiqi_plugin::SessionRead>,
+            ),
+            control: None,
+            inject: None,
+            ui: None,
+            log: std::sync::Arc::new(Silent),
+        };
+        install_compiled_event_sink(owned);
+
+        // A registry with no cdylib handlers still fans SessionTree out to the
+        // compiled+wasm tier.
+        let snapshot = rpi_extensions::ExtensionRegistry::new().snapshot();
+        let native_handled =
+            rpi_extensions::dispatch_empty_event(&snapshot, rpi_plugin_sdk::EventTag::SessionTree);
+        assert!(!native_handled, "no cdylib subscribed");
+
+        // rpi-todo re-restored the task list the host served on the branch,
+        // triggered by SessionTree — through the sink, not a direct
+        // `host.on_event` call.
+        let host = PluginHost::new("rpi-todo", rpi_todo::kiqi::factory());
+        let silent = Silent;
+        let listed = host
+            .call_tool(
+                "todo",
+                &serde_json::json!({"action": "list"}),
+                &HostCaps::observer(&silent),
+                &NoProgress,
+            )
+            .unwrap();
+        let text = match &listed.blocks[0] {
+            kiqi_plugin::Block::Text(text) => text.clone(),
+            other => panic!("unexpected block {other:?}"),
+        };
+        assert!(text.contains("from the branch"), "got {text}");
+
+        rpi_extensions::clear_compiled_event_sink();
+    }
+
     /// One worker thread on purpose: parking it without `block_in_place` would
     /// leave nobody to run the spawned action, so this test hands forever if
     /// the deadlock fix regresses.

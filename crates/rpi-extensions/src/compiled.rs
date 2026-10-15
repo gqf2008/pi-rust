@@ -189,6 +189,16 @@ mod tests {
         assert_eq!(dispatch(&event), CompiledVerdict::Continue);
     }
 
+    /// `SessionTree` rides the empty-event funnel (no payload on every tier —
+    /// the WIT variant is unit), so its compiled payload must be `Null`. With
+    /// the tag wrongly claimed by `EventView::data_text` this read the union's
+    /// data arm of an empty event and crashed the host (SIGBUS).
+    #[test]
+    fn session_tree_payload_is_null_not_a_garbage_string() {
+        let event = StablePluginEvent::empty(EventTag::SessionTree);
+        assert!(event_payload(&event).is_null());
+    }
+
     /// A claim from the compiled side reaches the routing dispatcher, so a
     /// compiled plugin can consume a key exactly like a cdylib handler.
     #[test]

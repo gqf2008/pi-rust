@@ -50,101 +50,124 @@ pub fn outcome_exit_code(outcome: &HarnessRunOutcome) -> i32 {
 /// `print` mode: send the initial message (prompt text + inline `@file`
 /// expansions), then any follow-up messages, print the final assistant text,
 /// return the exit code. Mirrors TS `runPrintMode` (text).
+///
+/// On every exit path (including the early no-op and prompt-rejection returns)
+/// the run ends with a `SessionShutdown` dispatch, so plugins (compiled + wasm)
+/// release per-run resources — the wasm langfuse guest flushes its traces
+/// there. The veto is advisory; see
+/// [`crate::session::dispatch_session_shutdown_advisory`].
 pub async fn print(
     harness: &AgentHarness,
     _args: &Args,
     initial: Option<String>,
     extra_messages: &[String],
     initial_images: Vec<ImageContent>,
+    reload_context: &crate::session::ReloadContext,
 ) -> i32 {
     let lane: Arc<dyn AgentLane> = harness.lane("main");
+    // The run body resolves to its exit code on every path (`return` inside the
+    // block exits the block, not this fn), so the tail below dispatches
+    // `SessionShutdown` exactly once per run.
+    let code = async {
+        let mut last_exit = 0;
+        let mut last_msg: Option<AssistantMessage> = None;
 
-    let mut last_exit = 0;
-    let mut last_msg: Option<AssistantMessage> = None;
+        // The initial prompt (and its `@file` attachments) go in one user message;
+        // extra positionals are separate prompts (mirrors the TS loop).
+        let mut prompts: Vec<String> = Vec::new();
+        if let Some(init) = initial {
+            prompts.push(init);
+        }
+        for m in extra_messages {
+            prompts.push(m.clone());
+        }
 
-    // The initial prompt (and its `@file` attachments) go in one user message;
-    // extra positionals are separate prompts (mirrors the TS loop).
-    let mut prompts: Vec<String> = Vec::new();
-    if let Some(init) = initial {
-        prompts.push(init);
-    }
-    for m in extra_messages {
-        prompts.push(m.clone());
-    }
+        if prompts.is_empty() {
+            // Nothing to do — print mode with no prompt is a no-op success.
+            return 0;
+        }
 
-    if prompts.is_empty() {
-        // Nothing to do — print mode with no prompt is a no-op success.
-        return 0;
-    }
-
-    let mut images = initial_images;
-    for prompt in prompts {
-        match lane.prompt_text(&prompt, std::mem::take(&mut images)).await {
-            Ok(result) => {
-                last_exit = outcome_exit_code(&result.outcome);
-                match &result.outcome {
-                    HarnessRunOutcome::Completed { final_message, .. }
-                    | HarnessRunOutcome::Aborted { final_message, .. } => {
-                        last_msg = Some(final_message.clone());
-                    }
-                    HarnessRunOutcome::Failed {
-                        error,
-                        final_message,
-                        ..
-                    } => {
-                        if let Some(m) = final_message {
-                            if m.stop_reason == StopReason::Error {
-                                if let Some(em) = &m.error_message {
-                                    eprintln!("{em}");
+        let mut images = initial_images;
+        for prompt in prompts {
+            match lane.prompt_text(&prompt, std::mem::take(&mut images)).await {
+                Ok(result) => {
+                    last_exit = outcome_exit_code(&result.outcome);
+                    match &result.outcome {
+                        HarnessRunOutcome::Completed { final_message, .. }
+                        | HarnessRunOutcome::Aborted { final_message, .. } => {
+                            last_msg = Some(final_message.clone());
+                        }
+                        HarnessRunOutcome::Failed {
+                            error,
+                            final_message,
+                            ..
+                        } => {
+                            if let Some(m) = final_message {
+                                if m.stop_reason == StopReason::Error {
+                                    if let Some(em) = &m.error_message {
+                                        eprintln!("{em}");
+                                    }
                                 }
                             }
+                            eprintln!("run failed: {error:?}");
                         }
-                        eprintln!("run failed: {error:?}");
-                    }
-                    HarnessRunOutcome::Suspended { .. } => {
-                        eprintln!("run suspended (deferred) — resume is not supported in v1");
-                        last_exit = 1;
+                        HarnessRunOutcome::Suspended { .. } => {
+                            eprintln!("run suspended (deferred) — resume is not supported in v1");
+                            last_exit = 1;
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                eprintln!("prompt rejected: {e}");
-                return 1;
+                Err(e) => {
+                    eprintln!("prompt rejected: {e}");
+                    return 1;
+                }
             }
         }
-    }
 
-    // Print the final assistant text to stdout (TS: writeRawStdout text + "\n").
-    if let Some(m) = &last_msg {
-        match m.stop_reason {
-            StopReason::Error => {
-                if let Some(em) = &m.error_message {
-                    eprintln!("{em}");
+        // Print the final assistant text to stdout (TS: writeRawStdout text + "\n").
+        if let Some(m) = &last_msg {
+            match m.stop_reason {
+                StopReason::Error => {
+                    if let Some(em) = &m.error_message {
+                        eprintln!("{em}");
+                    }
+                    last_exit = 1;
                 }
-                last_exit = 1;
-            }
-            StopReason::Aborted => {
-                eprintln!("request aborted");
-                last_exit = 1;
-            }
-            _ => {
-                let text = assistant_text(m);
-                let mut out = std::io::stdout();
-                let _ = out.write_all(text.as_bytes());
-                if !text.ends_with('\n') {
-                    let _ = out.write_all(b"\n");
+                StopReason::Aborted => {
+                    eprintln!("request aborted");
+                    last_exit = 1;
                 }
-                let _ = out.flush();
+                _ => {
+                    let text = assistant_text(m);
+                    let mut out = std::io::stdout();
+                    let _ = out.write_all(text.as_bytes());
+                    if !text.ends_with('\n') {
+                        let _ = out.write_all(b"\n");
+                    }
+                    let _ = out.flush();
+                }
             }
         }
-    }
 
-    last_exit
+        last_exit
+    };
+    let code = code.await;
+    // `SessionShutdown`: the one-shot run is over — plugins release per-run
+    // resources (the wasm langfuse guest flushes its buffered traces here).
+    // Advisory veto; dispatched exactly once, on every exit path.
+    crate::session::dispatch_session_shutdown_advisory(reload_context).await;
+    code
 }
 
 /// `json` mode: emit each harness event as a JSON line on stdout, run the
 /// prompts, then emit a terminal `result` line carrying the outcome + final
 /// text. Mirrors TS `runPrintMode` (`mode === "json"`) streaming every event.
+///
+/// On every exit path (including the structured prompt-rejection error return)
+/// the run ends with a `SessionShutdown` dispatch, so plugins (compiled + wasm)
+/// release per-run resources — the wasm langfuse guest flushes its traces
+/// there. The veto is advisory; see
+/// [`crate::session::dispatch_session_shutdown_advisory`].
 pub async fn json(
     harness: &AgentHarness,
     _args: &Args,
@@ -152,113 +175,125 @@ pub async fn json(
     extra_messages: &[String],
     initial_images: Vec<ImageContent>,
     mut agent_events: Option<tokio::sync::broadcast::Receiver<AgentEvent>>,
+    reload_context: &crate::session::ReloadContext,
 ) -> i32 {
     let lane: Arc<dyn AgentLane> = harness.lane("main");
     let collected: Arc<Mutex<Vec<HarnessEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let collected_for_watch = collected.clone();
+    // The run body resolves to its exit code on every path (`return` inside the
+    // block exits the block, not this fn), so the tail below dispatches
+    // `SessionShutdown` exactly once per run.
+    let code = async {
+        // A watch captures every event (RunStart fires inline during prompt_text,
+        // before a post-call listener could attach — same reason as the M5g test).
+        let mut watch = harness.events().watch(|| ());
+        watch.start(Arc::new(move |event: &HarnessEvent| {
+            // Emit each event live as JSON, and also buffer for the final summary.
+            emit_json_event(event);
+            collected_for_watch.lock().unwrap().push(event.clone());
+        }));
+        // Keep the watch alive for the whole run. Leaking is acceptable for a
+        // single-shot CLI process (the bus outlives this scope anyway).
+        std::mem::forget(watch);
 
-    // A watch captures every event (RunStart fires inline during prompt_text,
-    // before a post-call listener could attach — same reason as the M5g test).
-    let mut watch = harness.events().watch(|| ());
-    watch.start(Arc::new(move |event: &HarnessEvent| {
-        // Emit each event live as JSON, and also buffer for the final summary.
-        emit_json_event(event);
-        collected_for_watch.lock().unwrap().push(event.clone());
-    }));
-    // Keep the watch alive for the whole run. Leaking is acceptable for a
-    // single-shot CLI process (the bus outlives this scope anyway).
-    std::mem::forget(watch);
-
-    // The harness bus carries run lifecycle events; the agent receiver carries
-    // the native fine-grained stream (turns, message deltas, and tools).
-    let (agent_done_tx, mut agent_done_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    let agent_event_task = agent_events.take().map(|mut rx| {
-        tokio::spawn(async move {
-            let done_tx = agent_done_tx;
-            loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        let terminal = event.is_terminal();
-                        emit_agent_event(&event);
-                        if terminal {
-                            let _ = done_tx.send(());
+        // The harness bus carries run lifecycle events; the agent receiver carries
+        // the native fine-grained stream (turns, message deltas, and tools).
+        let (agent_done_tx, mut agent_done_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let agent_event_task = agent_events.take().map(|mut rx| {
+            tokio::spawn(async move {
+                let done_tx = agent_done_tx;
+                loop {
+                    match rx.recv().await {
+                        Ok(event) => {
+                            let terminal = event.is_terminal();
+                            emit_agent_event(&event);
+                            if terminal {
+                                let _ = done_tx.send(());
+                            }
                         }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            })
+        });
+
+        let mut prompts: Vec<String> = Vec::new();
+        if let Some(init) = initial {
+            prompts.push(init);
+        }
+        for m in extra_messages {
+            prompts.push(m.clone());
+        }
+
+        let mut last_exit = 0;
+        let mut final_outcome: Option<HarnessRunOutcome> = None;
+
+        let mut images = initial_images;
+        for prompt in prompts {
+            match lane.prompt_text(&prompt, std::mem::take(&mut images)).await {
+                Ok(result) => {
+                    // The harness resolves after its run outcome, while the
+                    // broadcast listener may still be scheduling the terminal
+                    // AgentEnd line. Wait briefly so JSON consumers see the full
+                    // lifecycle before the final result summary. The timeout is
+                    // deliberately bounded for custom/older harness emitters.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(250),
+                        agent_done_rx.recv(),
+                    )
+                    .await;
+                    last_exit = outcome_exit_code(&result.outcome);
+                    final_outcome = Some(result.outcome);
+                }
+                Err(e) => {
+                    // Emit a structured error line + exit.
+                    let line = serde_json::json!({
+                        "type": "error",
+                        "error": e.to_string(),
+                    });
+                    println!("{line}");
+                    if let Some(task) = agent_event_task {
+                        task.abort();
+                    }
+                    return 1;
                 }
             }
-        })
-    });
+        }
 
-    let mut prompts: Vec<String> = Vec::new();
-    if let Some(init) = initial {
-        prompts.push(init);
-    }
-    for m in extra_messages {
-        prompts.push(m.clone());
-    }
-
-    let mut last_exit = 0;
-    let mut final_outcome: Option<HarnessRunOutcome> = None;
-
-    let mut images = initial_images;
-    for prompt in prompts {
-        match lane.prompt_text(&prompt, std::mem::take(&mut images)).await {
-            Ok(result) => {
-                // The harness resolves after its run outcome, while the
-                // broadcast listener may still be scheduling the terminal
-                // AgentEnd line. Wait briefly so JSON consumers see the full
-                // lifecycle before the final result summary. The timeout is
-                // deliberately bounded for custom/older harness emitters.
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_millis(250),
-                    agent_done_rx.recv(),
-                )
-                .await;
-                last_exit = outcome_exit_code(&result.outcome);
-                final_outcome = Some(result.outcome);
+        // Terminal result summary.
+        let (outcome_str, final_text) = match final_outcome {
+            Some(HarnessRunOutcome::Completed { final_message, .. }) => {
+                ("completed", Some(assistant_text(&final_message)))
             }
-            Err(e) => {
-                // Emit a structured error line + exit.
-                let line = serde_json::json!({
-                    "type": "error",
-                    "error": e.to_string(),
-                });
-                println!("{line}");
-                if let Some(task) = agent_event_task {
-                    task.abort();
-                }
-                return 1;
+            Some(HarnessRunOutcome::Aborted { final_message, .. }) => {
+                ("aborted", Some(assistant_text(&final_message)))
             }
+            Some(HarnessRunOutcome::Failed { final_message, .. }) => {
+                let t = final_message.as_ref().map(assistant_text);
+                ("failed", t)
+            }
+            Some(HarnessRunOutcome::Suspended { .. }) => ("suspended", None),
+            None => ("idle", None),
+        };
+        let result_line = serde_json::json!({
+            "type": "result",
+            "outcome": outcome_str,
+            "finalText": final_text,
+        });
+        println!("{result_line}");
+        if let Some(task) = agent_event_task {
+            task.abort();
         }
-    }
-
-    // Terminal result summary.
-    let (outcome_str, final_text) = match final_outcome {
-        Some(HarnessRunOutcome::Completed { final_message, .. }) => {
-            ("completed", Some(assistant_text(&final_message)))
-        }
-        Some(HarnessRunOutcome::Aborted { final_message, .. }) => {
-            ("aborted", Some(assistant_text(&final_message)))
-        }
-        Some(HarnessRunOutcome::Failed { final_message, .. }) => {
-            let t = final_message.as_ref().map(assistant_text);
-            ("failed", t)
-        }
-        Some(HarnessRunOutcome::Suspended { .. }) => ("suspended", None),
-        None => ("idle", None),
+        last_exit
     };
-    let result_line = serde_json::json!({
-        "type": "result",
-        "outcome": outcome_str,
-        "finalText": final_text,
-    });
-    println!("{result_line}");
-    if let Some(task) = agent_event_task {
-        task.abort();
-    }
-    last_exit
+    let code = code.await;
+    // `SessionShutdown`: the one-shot run is over — plugins release per-run
+    // resources (the wasm langfuse guest flushes its buffered traces here).
+    // Advisory veto; dispatched exactly once, on every exit path (the
+    // structured prompt-rejection return routes through this tail too).
+    crate::session::dispatch_session_shutdown_advisory(reload_context).await;
+    code
 }
 
 fn emit_agent_event(event: &AgentEvent) {
@@ -876,16 +911,7 @@ pub async fn interactive(
     // UI returns so it always runs (even on early-return paths inside the TUI).
     // A veto here is **advisory** (the session is already closing) — warn and
     // continue.
-    if let Some(reason) = crate::session::dispatch_session_event_async(
-        reload_context,
-        rpi_plugin_sdk::EventTag::SessionShutdown,
-    )
-    .await
-    {
-        tracing::warn!(
-            "[ki] extension vetoed SessionShutdown (ignored, session closing): {reason}"
-        );
-    }
+    crate::session::dispatch_session_shutdown_advisory(reload_context).await;
 
     code
 }
@@ -1559,5 +1585,130 @@ mod tests {
         assert_eq!(retry["maxRetries"], 10);
         assert_eq!(retry["delayMs"], 8_000);
         assert_eq!(retry["error"], "503 service unavailable");
+    }
+
+    /// A `ReloadContext` whose extension cell serves `registry`'s snapshot, so
+    /// a lifecycle dispatch resolves a live handler list. Everything else is
+    /// inert defaults — the one-shot modes only read the cell for the dispatch.
+    fn shutdown_test_context(
+        registry: rpi_extensions::ExtensionRegistry,
+    ) -> crate::session::ReloadContext {
+        let session = rpi_extensions::ExtensionSession::from_parts(
+            Arc::new(registry.snapshot()),
+            rpi_extensions::PluginKeepalive::empty(),
+            Vec::new(),
+            None,
+        );
+        let (emitter, _) = rpi_agent::CollectorEmitter::new();
+        crate::session::ReloadContext {
+            extension_session: Arc::new(Mutex::new(session)),
+            tool_context: rpi_extensions::ToolCallContext::default(),
+            action_bridge: Arc::new(Mutex::new(None)),
+            ext_status: rpi_extensions::ExtensionStatusMailbox::default(),
+            editor_text: rpi_extensions::EditorTextMailbox::default(),
+            catalog: Vec::new(),
+            providers: Vec::new(),
+            runtime: tokio::runtime::Handle::current(),
+            cwd: std::path::PathBuf::from("."),
+            project_trusted: true,
+            args: Args::default(),
+            resolved_model: rpi_ai::Model::new(
+                "test-model",
+                "test",
+                rpi_ai::types::Api::Faux,
+                "faux",
+                "",
+            ),
+            broadcast: Arc::new(emitter),
+            mailbox: rpi_extensions::ReloadMailbox::default(),
+            ui_dialog: rpi_extensions::UiDialogMailbox::default(),
+            dev_extension: None,
+        }
+    }
+
+    /// The one-shot modes must end a run with a `SessionShutdown` dispatch —
+    /// that is the only signal the wasm langfuse guest gets to flush its
+    /// traces (`-p` / `--mode json` never reach the TUI/rpc lifecycle).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn print_mode_dispatches_session_shutdown_to_plugins() {
+        use std::sync::atomic::AtomicUsize;
+        extern "C" fn record(
+            _: rpi_plugin_sdk::StablePluginEvent,
+            data: *mut std::ffi::c_void,
+        ) -> i32 {
+            unsafe { &*(data as *const AtomicUsize) }
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            0
+        }
+        let hits = AtomicUsize::new(0);
+        let mut registry = rpi_extensions::ExtensionRegistry::new();
+        registry.register_event_handler(
+            "recorder".into(),
+            rpi_plugin_sdk::EventTag::SessionShutdown,
+            record,
+            &hits as *const _ as *mut std::ffi::c_void,
+        );
+        let reload_context = shutdown_test_context(registry);
+
+        let (harness, _) = rpc_test_harness("done", 500.0).await;
+        let code = print(
+            &harness,
+            &Args::default(),
+            Some("hello".to_string()),
+            &[],
+            Vec::new(),
+            &reload_context,
+        )
+        .await;
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "print mode must dispatch SessionShutdown exactly once"
+        );
+    }
+
+    /// Same contract for `--mode json`: the structured error path returns
+    /// early, and it too must route through the `SessionShutdown` tail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn json_mode_dispatches_session_shutdown_to_plugins() {
+        use std::sync::atomic::AtomicUsize;
+        extern "C" fn record(
+            _: rpi_plugin_sdk::StablePluginEvent,
+            data: *mut std::ffi::c_void,
+        ) -> i32 {
+            unsafe { &*(data as *const AtomicUsize) }
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            0
+        }
+        let hits = AtomicUsize::new(0);
+        let mut registry = rpi_extensions::ExtensionRegistry::new();
+        registry.register_event_handler(
+            "recorder".into(),
+            rpi_plugin_sdk::EventTag::SessionShutdown,
+            record,
+            &hits as *const _ as *mut std::ffi::c_void,
+        );
+        let reload_context = shutdown_test_context(registry);
+
+        let (harness, _) = rpc_test_harness("done", 500.0).await;
+        let code = json(
+            &harness,
+            &Args::default(),
+            Some("hello".to_string()),
+            &[],
+            Vec::new(),
+            None,
+            &reload_context,
+        )
+        .await;
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "json mode must dispatch SessionShutdown exactly once"
+        );
     }
 }

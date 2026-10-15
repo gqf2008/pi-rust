@@ -2825,6 +2825,10 @@ pub async fn interactive_tui(
                                 &chat_container,
                                 "Moved to the selected session entry.",
                             );
+                            // `SessionTree`: the active point moved — plugins
+                            // (compiled + wasm) re-restore their state from the
+                            // new branch. Advisory; fired after the move.
+                            crate::session::notify_session_tree(reload_context).await;
                         }
                         rpi_harness::agent_harness::NavigationOutcome::Failed { error, .. } => {
                             add_error_message(&chat_container, &error.message);
@@ -2866,6 +2870,7 @@ pub async fn interactive_tui(
                     &chat_container,
                     &state,
                     &reload_context.tool_context,
+                    reload_context,
                 )
                 .await;
                 tui.request_render(false);
@@ -2879,6 +2884,7 @@ pub async fn interactive_tui(
                     &chat_container,
                     &state,
                     &reload_context.tool_context,
+                    reload_context,
                 )
                 .await;
                 tui.request_render(false);
@@ -2989,6 +2995,7 @@ pub async fn interactive_tui(
                     &chat_container,
                     &state,
                     &reload_context.tool_context,
+                    reload_context,
                 )
                 .await;
                 tui.request_render(false);
