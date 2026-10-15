@@ -1,6 +1,6 @@
 # kiqi-rpi-lens-guest
 
-`rpi-lens` ported to the kiqi wasm ABI (`kiqi:plugin@0.7.0`): the `code_lens`
+`rpi-lens` ported to the kiqi wasm ABI (`kiqi:plugin@0.7.1`): the `code_lens`
 tool runs one allowlisted local check — `git diff --check`, `cargo check`,
 `cargo fmt -- --check`, or `cargo clippy -- -D warnings` — through the host's
 `exec` capability instead of spawning the process itself.
