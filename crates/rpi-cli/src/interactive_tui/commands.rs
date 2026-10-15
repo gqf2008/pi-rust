@@ -809,6 +809,9 @@ mod tests {
 
     /// A compiled-in plugin's `/command` lands in the same registry the TUI
     /// dispatches from — rpi-todo contributes `/todos`.
+    /// Needs a compiled plugin that contributes a command; the default build
+    /// has none (they are opt-in features now, or wasm guests).
+    #[cfg(feature = "plugin-rpi-todo")]
     #[test]
     fn compiled_plugin_commands_are_registered() {
         let mut registry = CommandRegistry::new();

@@ -14,7 +14,7 @@ ask for and the tool is usable immediately:
 ```bash
 cargo build --manifest-path plugins/wasm/kiqi-subagents-guest/Cargo.toml \
     --target wasm32-wasip2 --release
-ki plugin install kiqi_subagents_guest.wasm --id rpi-subagents
+ki insmod --build plugins/wasm/kiqi-subagents-guest --id rpi-subagents --yes
 ```
 
 ## The envelope is byte-stable

@@ -656,7 +656,8 @@ pub fn print_help() {
                                 (see `ki install --help`)
   uninstall <crate>              Remove an installed Rust cdylib extension
   insmod <path.wasm>             Install a wasm plugin (capabilities and policy
-                                ride the grants; see `ki plugin --help`)
+                                ride the grants; `--build <guest-crate-dir>`
+                                compiles one first; see `ki plugin --help`)
   rmmod <id>                     Uninstall a wasm plugin (moves it aside)
   package link|list|update|unlink Manage project-local Rust extension packages
                                 (see `ki package --help`)

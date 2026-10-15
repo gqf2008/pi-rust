@@ -10,7 +10,7 @@ no sockets, so the request goes through the host capability and the **user's
 allow-list** decides where it may go:
 
 ```bash
-ki plugin install kiqi_webfetch_guest.wasm --id rpi-webfetch \
+ki insmod --build plugins/wasm/kiqi-webfetch-guest --id rpi-webfetch \
     --host api.example.com --host docs.rs
 ```
 

@@ -1168,6 +1168,9 @@ mod tests {
     /// The whole path: registry -> harness tool list -> adapter -> plugin call
     /// -> result. This is the one that proves a compiled-in plugin is usable,
     /// not merely loadable.
+    /// Uses the compiled rpi-todo to prove plugin tools reach the harness
+    /// list; runs where that plugin is built.
+    #[cfg(feature = "plugin-rpi-todo")]
     #[tokio::test]
     async fn a_compiled_plugin_tool_runs_from_the_harness_tool_list() {
         use rpi_agent::agent_tool::AgentTool;
@@ -1227,19 +1230,30 @@ mod tests {
     fn every_compiled_plugin_exposes_its_tools_and_schemas() {
         let hosts = load_hosts();
         let ids: Vec<&str> = hosts.iter().map(|h| h.id()).collect();
-        for expected in [
-            "rpi-todo",
-            "rpi-lens",
-            "rpi-orchestrator",
-            "rpi-webfetch",
-            "rpi-websearch",
-            "rpi-subagents",
-            "rpi-permissions",
-            "rpi-goal",
-            "rpi-plan-mode",
-            "rpi-codegraph",
-            "rpi-ask-user",
-        ] {
+        // Only the plugins without a wasm port are compiled in by default; the
+        // rest are opt-in features (CI builds every configuration). Each push
+        // names the feature that brings the plugin back.
+        let mut expected_ids: Vec<&str> =
+            vec!["rpi-orchestrator", "rpi-permissions", "rpi-codegraph"];
+        #[cfg(feature = "plugin-rpi-todo")]
+        expected_ids.push("rpi-todo");
+        #[cfg(feature = "plugin-rpi-lens")]
+        expected_ids.push("rpi-lens");
+        #[cfg(feature = "plugin-rpi-webfetch")]
+        expected_ids.push("rpi-webfetch");
+        #[cfg(feature = "plugin-rpi-websearch")]
+        expected_ids.push("rpi-websearch");
+        #[cfg(feature = "plugin-rpi-subagents")]
+        expected_ids.push("rpi-subagents");
+        #[cfg(feature = "plugin-rpi-goal")]
+        expected_ids.push("rpi-goal");
+        #[cfg(feature = "plugin-rpi-plan-mode")]
+        expected_ids.push("rpi-plan-mode");
+        #[cfg(feature = "plugin-rpi-ask-user")]
+        expected_ids.push("rpi-ask-user");
+        #[cfg(feature = "plugin-rpi-langfuse")]
+        expected_ids.push("rpi-langfuse");
+        for expected in expected_ids {
             assert!(
                 ids.contains(&expected),
                 "{expected} is compiled in; got {ids:?}"
@@ -1263,22 +1277,33 @@ mod tests {
             .into_iter()
             .map(|t| t.name)
             .collect();
-        for expected in [
-            "todo",
-            "code_lens",
+        let mut expected_tools: Vec<&str> = vec![
             "subagent",
             "plan",
             "dispatch",
-            "webfetch",
-            "websearch",
-            "delegate_task",
             "permissions",
-            "goal",
-            "plan_mode_complete",
-            "plan_mode_start",
             "codegraph_search",
-            "ask_user",
-        ] {
+        ];
+        #[cfg(feature = "plugin-rpi-todo")]
+        expected_tools.push("todo");
+        #[cfg(feature = "plugin-rpi-lens")]
+        expected_tools.push("code_lens");
+        #[cfg(feature = "plugin-rpi-webfetch")]
+        expected_tools.push("webfetch");
+        #[cfg(feature = "plugin-rpi-websearch")]
+        expected_tools.push("websearch");
+        #[cfg(feature = "plugin-rpi-subagents")]
+        expected_tools.push("delegate_task");
+        #[cfg(feature = "plugin-rpi-goal")]
+        expected_tools.push("goal");
+        #[cfg(feature = "plugin-rpi-plan-mode")]
+        {
+            expected_tools.push("plan_mode_complete");
+            expected_tools.push("plan_mode_start");
+        }
+        #[cfg(feature = "plugin-rpi-ask-user")]
+        expected_tools.push("ask_user");
+        for expected in expected_tools {
             assert!(
                 tools.iter().any(|t| t == expected),
                 "{expected} missing from {tools:?}"
@@ -1286,6 +1311,9 @@ mod tests {
         }
     }
 
+    /// Uses the compiled rpi-todo as the sample plugin, so it runs where that
+    /// feature is built (the default build has no compiled todo).
+    #[cfg(feature = "plugin-rpi-todo")]
     #[test]
     fn compiled_plugin_tools_reach_the_provider_facing_tool_list() {
         let hosts = load_hosts();
@@ -1393,18 +1421,31 @@ mod tests {
     #[test]
     fn registry_exposes_the_first_party_plugins() {
         let plugins = load_all();
+        // The default build registers only the plugins without a wasm port.
+        for always in ["rpi-orchestrator", "rpi-permissions", "rpi-codegraph"] {
+            assert!(
+                plugins.iter().any(|entry| entry.id == always),
+                "{always} is compiled in by default; got {:?}",
+                plugins.iter().map(|e| e.id).collect::<Vec<_>>()
+            );
+        }
+
+        #[cfg(feature = "plugin-rpi-todo")]
         let todo = plugins
             .iter()
             .find(|entry| entry.id == "rpi-todo")
-            .expect("rpi-todo is compiled in by the default feature");
+            .expect("the feature is on, so rpi-todo is registered");
 
-        let tools = todo.plugin.tools();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "todo");
-        assert!(tools[0].parameters["properties"]["action"].is_object());
+        #[cfg(feature = "plugin-rpi-todo")]
+        {
+            let tools = todo.plugin.tools();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].name, "todo");
+            assert!(tools[0].parameters["properties"]["action"].is_object());
 
-        assert_eq!(todo.plugin.commands()[0].name, "todos");
-        assert!(todo.plugin.probe_points().is_empty());
+            assert_eq!(todo.plugin.commands()[0].name, "todos");
+            assert!(todo.plugin.probe_points().is_empty());
+        }
 
         // rpi-langfuse is the last package ported off the native ABI. It is not
         // in the default build any more, so its three tools are asserted only
@@ -1638,128 +1679,146 @@ mod tests {
             "data": {"kind": "note"}
         })));
 
-        // rpi-goal is the other kind of plugin: its host access sits on the TOOL
-        // path (starting a goal injects the notice), so this proves a plugin
-        // really reaches the host through InjectApi rather than only being
-        // loadable. The assertion is on the host side - what it was handed.
-        let goal_host = PluginHost::new("rpi-goal", rpi_goal::kiqi::factory());
-        let started = goal_host
-            .call_tool(
-                "goal",
-                &serde_json::json!({"action": "start", "title": "wire goal"}),
-                &caps,
-                &NoProgress,
-            )
-            .expect("goal start runs");
-        assert!(!started.is_error, "goal start succeeded: {started:?}");
-        let injected = fake
-            .seen
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(action, _)| action == "append_entry")
-            .filter_map(|(_, args)| args.get("message").cloned())
-            .any(|message| {
-                message
-                    .get("data")
-                    .and_then(|d| d.get("customType"))
-                    .and_then(|c| c.as_str())
-                    .map(|c| c.contains("goal"))
-                    .unwrap_or(false)
-            });
-        assert!(
-            injected,
-            "starting a goal injected its notice through InjectApi; saw {:?}",
-            fake.seen.lock().unwrap()
-        );
-
-        // rpi-ask-user needs UiApi: without a granted UI it must fail rather
-        // than fabricate an answer for the model.
-        let ask_host = PluginHost::new("rpi-ask-user", rpi_ask_user::kiqi::factory());
-        let refused = ask_host
-            .call_tool(
-                "ask_user",
-                &serde_json::json!({"question": "proceed?"}),
-                &caps,
-                &NoProgress,
-            )
-            .unwrap_err();
-        assert!(
-            refused.to_string().contains("UI"),
-            "without UiApi ask_user refuses instead of answering for the user: {refused}"
-        );
-
-        // rpi-plan-mode needs SessionControl: entering plan mode swaps the tool
-        // set. Asserted on the host side - what it was asked to do.
-        let plan_host = PluginHost::new("rpi-plan-mode", rpi_plan_mode::kiqi::factory());
-        // The package keeps its state process-wide (as rpi-todo does), so a
-        // previous test may have left plan mode active; entering it again
-        // would short-circuit and swap nothing.
-        let _ = plan_host.run_command("plan", "exit", &caps);
-        plan_host.run_command("plan", "start", &caps).unwrap();
-        let swapped = fake.seen.lock().unwrap().iter().any(|(action, args)| {
-            action == "set_active_tools"
-                && args
-                    .get("tools")
-                    .and_then(|t| t.as_array())
-                    .map(|tools| !tools.is_empty())
-                    .unwrap_or(false)
-        });
-        assert!(
-            swapped,
-            "plan mode swapped the active tool set through SessionControl; host saw {:?}",
-            fake.seen
+        #[cfg(feature = "plugin-rpi-goal")]
+        {
+            // rpi-goal is the other kind of plugin: its host access sits on the TOOL
+            // path (starting a goal injects the notice), so this proves a plugin
+            // really reaches the host through InjectApi rather than only being
+            // loadable. The assertion is on the host side - what it was handed.
+            let goal_host = PluginHost::new("rpi-goal", rpi_goal::kiqi::factory());
+            let started = goal_host
+                .call_tool(
+                    "goal",
+                    &serde_json::json!({"action": "start", "title": "wire goal"}),
+                    &caps,
+                    &NoProgress,
+                )
+                .expect("goal start runs");
+            assert!(!started.is_error, "goal start succeeded: {started:?}");
+            let injected = fake
+                .seen
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|(a, _)| a.clone())
-                .collect::<Vec<_>>()
-        );
+                .filter(|(action, _)| action == "append_entry")
+                .filter_map(|(_, args)| args.get("message").cloned())
+                .any(|message| {
+                    message
+                        .get("data")
+                        .and_then(|d| d.get("customType"))
+                        .and_then(|c| c.as_str())
+                        .map(|c| c.contains("goal"))
+                        .unwrap_or(false)
+                });
+            assert!(
+                injected,
+                "starting a goal injected its notice through InjectApi; saw {:?}",
+                fake.seen.lock().unwrap()
+            );
+        }
 
-        // Without that capability it must refuse rather than half-enter. Exit
-        // first with the capabilities granted, otherwise it short-circuits on
-        // "already active" and never reaches the capability check at all.
-        plan_host.run_command("plan", "exit", &caps).unwrap();
-        let stripped = HostCaps {
-            session: None,
-            control: None,
-            inject: None,
-            ui: None,
-            log: &silent,
-            cancel: None,
-        };
-        let refused = plan_host.run_command("plan", "start", &stripped).unwrap();
-        assert!(
-            refused.contains("Unable"),
-            "without SessionControl plan mode cannot start: {refused}"
-        );
+        #[cfg(feature = "plugin-rpi-ask-user")]
+        {
+            // rpi-ask-user needs UiApi: without a granted UI it must fail rather
+            // than fabricate an answer for the model.
+            let ask_host = PluginHost::new("rpi-ask-user", rpi_ask_user::kiqi::factory());
+            let refused = ask_host
+                .call_tool(
+                    "ask_user",
+                    &serde_json::json!({"question": "proceed?"}),
+                    &caps,
+                    &NoProgress,
+                )
+                .unwrap_err();
+            assert!(
+                refused.to_string().contains("UI"),
+                "without UiApi ask_user refuses instead of answering for the user: {refused}"
+            );
+        }
 
-        // And a plugin restoring through caps gets the branch the host served,
-        // not a stub: this is the rpi-todo restore path end to end.
-        let host = PluginHost::new("rpi-todo", rpi_todo::kiqi::factory());
-        host.on_event(
-            &kiqi_plugin::Event::new(kiqi_plugin::EventTag::SessionStart, serde_json::Value::Null),
-            &caps,
-        );
-        let listed = host
-            .call_tool(
-                "todo",
-                &serde_json::json!({"action": "list"}),
+        #[cfg(feature = "plugin-rpi-plan-mode")]
+        {
+            // rpi-plan-mode needs SessionControl: entering plan mode swaps the tool
+            // set. Asserted on the host side - what it was asked to do.
+            let plan_host = PluginHost::new("rpi-plan-mode", rpi_plan_mode::kiqi::factory());
+            // The package keeps its state process-wide (as rpi-todo does), so a
+            // previous test may have left plan mode active; entering it again
+            // would short-circuit and swap nothing.
+            let _ = plan_host.run_command("plan", "exit", &caps);
+            plan_host.run_command("plan", "start", &caps).unwrap();
+            let swapped = fake.seen.lock().unwrap().iter().any(|(action, args)| {
+                action == "set_active_tools"
+                    && args
+                        .get("tools")
+                        .and_then(|t| t.as_array())
+                        .map(|tools| !tools.is_empty())
+                        .unwrap_or(false)
+            });
+            assert!(
+                swapped,
+                "plan mode swapped the active tool set through SessionControl; host saw {:?}",
+                fake.seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(a, _)| a.clone())
+                    .collect::<Vec<_>>()
+            );
+
+            // Without that capability it must refuse rather than half-enter. Exit
+            // first with the capabilities granted, otherwise it short-circuits on
+            // "already active" and never reaches the capability check at all.
+            plan_host.run_command("plan", "exit", &caps).unwrap();
+            let stripped = HostCaps {
+                session: None,
+                control: None,
+                inject: None,
+                ui: None,
+                log: &silent,
+                cancel: None,
+            };
+            let refused = plan_host.run_command("plan", "start", &stripped).unwrap();
+            assert!(
+                refused.contains("Unable"),
+                "without SessionControl plan mode cannot start: {refused}"
+            );
+        }
+
+        #[cfg(feature = "plugin-rpi-todo")]
+        {
+            // And a plugin restoring through caps gets the branch the host served,
+            // not a stub: this is the rpi-todo restore path end to end.
+            let host = PluginHost::new("rpi-todo", rpi_todo::kiqi::factory());
+            host.on_event(
+                &kiqi_plugin::Event::new(
+                    kiqi_plugin::EventTag::SessionStart,
+                    serde_json::Value::Null,
+                ),
                 &caps,
-                &NoProgress,
-            )
-            .unwrap();
-        let text = match &listed.blocks[0] {
-            kiqi_plugin::Block::Text(text) => text.clone(),
-            other => panic!("unexpected block {other:?}"),
-        };
-        assert!(text.contains("from the branch"), "got {text}");
+            );
+            let listed = host
+                .call_tool(
+                    "todo",
+                    &serde_json::json!({"action": "list"}),
+                    &caps,
+                    &NoProgress,
+                )
+                .unwrap();
+            let text = match &listed.blocks[0] {
+                kiqi_plugin::Block::Text(text) => text.clone(),
+                other => panic!("unexpected block {other:?}"),
+            };
+            assert!(text.contains("from the branch"), "got {text}");
+        }
     }
 
     /// The host-side wiring: an event dispatched through `rpi-extensions`'
     /// funnel reaches a compiled plugin's `on_event` with the session's
     /// capabilities. This is what makes a `ki` with no cdylibs still deliver
     /// events to `rpi-todo`, `rpi-langfuse`, and the rest.
+    /// Uses the compiled rpi-todo as the plugin under test, so it runs in the
+    /// configuration CI builds (`--features plugin-rpi-todo`), not the default.
+    #[cfg(feature = "plugin-rpi-todo")]
     #[test]
     fn rpi_extensions_dispatch_reaches_compiled_plugins() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1869,18 +1928,24 @@ mod tests {
         );
 
         // The process is still alive and every other plugin still works.
-        let other = load_hosts();
-        let todo = other.iter().find(|h| h.id() == "rpi-todo").unwrap();
-        assert!(todo
-            .call_tool(
-                "todo",
-                &serde_json::json!({"action": "list"}),
-                &caps,
-                &NoProgress
-            )
-            .is_ok());
+        #[cfg(feature = "plugin-rpi-todo")]
+        {
+            let other = load_hosts();
+            let todo = other.iter().find(|h| h.id() == "rpi-todo").unwrap();
+            assert!(todo
+                .call_tool(
+                    "todo",
+                    &serde_json::json!({"action": "list"}),
+                    &caps,
+                    &NoProgress
+                )
+                .is_ok());
+        }
     }
 
+    /// Drives the compiled rpi-todo through the trait; runs where that plugin
+    /// is built (the default build has no compiled plugins with tools).
+    #[cfg(feature = "plugin-rpi-todo")]
     #[test]
     fn a_registered_plugin_runs_through_the_trait_without_any_ffi() {
         let plugins = load_all();
@@ -1982,6 +2047,9 @@ mod tests {
     /// process** (never an absolute latency), so a slow or busy CI runner moves
     /// both sides together. This is a regression guard, not a benchmark.
     #[cfg(feature = "plugin-wasm")]
+    /// Compares the wasm guest against the compiled rpi-todo; the comparison
+    /// needs both, so it runs where the compiled plugin is built.
+    #[cfg(feature = "plugin-rpi-todo")]
     #[test]
     fn wasm_call_overhead_stays_within_the_compiled_paths_ballpark() {
         fn per_call_ns(iterations: u64, mut call: impl FnMut()) -> u128 {

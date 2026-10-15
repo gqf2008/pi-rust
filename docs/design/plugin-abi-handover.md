@@ -83,8 +83,8 @@ cargo build --manifest-path plugins/wasm/kiqi-webfetch-guest/Cargo.toml \
 # → plugins/wasm/target/wasm32-wasip2/release/kiqi_webfetch_guest.wasm
 
 # 安装（列出声明能力；--yes 非交互；无 tty 且无 --yes 则什么都不授）
-ki insmod <file.wasm> --id rpi-webfetch --yes --host api.example.com   # = ki plugin install
-ki rmmod rpi-webfetch                                                 # = ki plugin uninstall
+ki insmod --build plugins/wasm/kiqi-webfetch-guest --id rpi-webfetch --yes --host api.example.com
+ki rmmod rpi-webfetch                                                 # 移到备份，不删
 ki plugin list | show <id>          # show 会列出声明面（tools/commands/flags/shortcuts/probe）
 ki plugin grant <id> exec --command echo     # 或 revoke / uninstall（uninstall 移到备份，不删）
 # exec 还能带 cwd 范围与时间预算（诊断类插件要在项目目录跑 cargo/clippy 时）：
@@ -118,6 +118,7 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 | `flags` 声明只有 `ki plugin show` 在读 | 取值路径是 `SessionRead::cli_flag`（通用 `--foo=bar`），声明本身是诊断用 |
 | `probe`/`shortcuts`/`before_agent_start` 无生产用户 | 会话已接线并有测试，但只有 conformance fixture 在用；移植 plan-mode/webfetch 也没用到它们 |
 | 第一方插件仍是编译期 | 设计；wasm 层面向第三方 |
+| **默认只编入无 wasm 版的插件** | `rpi-orchestrator` / `rpi-permissions` / `rpi-codegraph` 三个；有 guest 的那些（todo/lens/webfetch/websearch/subagents/goal/plan-mode/ask-user/langfuse）改为 `--features plugin-rpi-<name>` 或 `ki insmod --build`。crate/feature/cdylib 面/测试全保留，CI 跑 opt-in 配置防腐烂。注意耦合：orchestrator 的 goal 联动读 `.ki/goals.json`，只有**编译期** goal 会写 |
 | `wasmtime` 常驻 `ki` | 由 `plugin-wasm`（默认开）控制；要瘦身需单独门控 |
 | `.wasm` 无签名/摘要校验 | 见 `plugin-abi.md` §7 待定项 |
 | 装完需重启 | `compiled_plugin_hosts()` 是进程级 `OnceLock` |

@@ -11,7 +11,7 @@ The tool cannot run anything until the user grants `exec`, and a diagnostics
 plugin wants the *project* cwd scope:
 
 ```bash
-ki plugin install kiqi_rpi_lens_guest.wasm --id rpi-lens
+ki insmod --build plugins/wasm/kiqi-rpi-lens-guest --id rpi-lens --yes
 ki plugin grant rpi-lens exec --command cargo --command git --cwd project --timeout 120
 ```
 

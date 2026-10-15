@@ -382,6 +382,7 @@ ki plugin — manage per-plugin capability grants
 
 USAGE:
     ki insmod <path.wasm> [flags]        (same as `ki plugin install`)
+    ki insmod --build <guest-crate-dir>  build a guest for wasm32-wasip2 first
     ki rmmod <id>                        (same as `ki plugin uninstall`)
     ki plugin list
     ki plugin show <id>
@@ -461,6 +462,68 @@ fn install(args: &[String]) -> i32 {
     install_into(args, None)
 }
 
+/// Build a wasm guest crate and return the component it produced.
+///
+/// The artifact path is read from cargo's own JSON output rather than guessed
+/// from the crate name (a `[lib] name = ...` or a workspace target directory
+/// would break the guess). This is the "install a guest" half of the wasm
+/// tier: with the plugins that have a guest no longer compiled in, getting one
+/// must be one command, not a remembered target path.
+fn build_guest(dir: &Path) -> Result<PathBuf, String> {
+    let manifest = dir.join("Cargo.toml");
+    if !manifest.is_file() {
+        return Err(format!("{} has no Cargo.toml", dir.display()));
+    }
+    let output = std::process::Command::new(env!("CARGO"))
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .args([
+            "--target",
+            "wasm32-wasip2",
+            "--release",
+            "--message-format=json",
+        ])
+        .output()
+        .map_err(|error| format!("run cargo for {}: {error}", dir.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "building {} failed; is the `wasm32-wasip2` target installed?\n{}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    // `cargo build --message-format=json` emits one JSON object per line; the
+    // component is the compiler-artifact whose filenames end in `.wasm`.
+    let mut artifact = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if message.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-artifact") {
+            continue;
+        }
+        if let Some(found) = message
+            .get("filenames")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|names| {
+                names
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .find(|name| name.ends_with(".wasm"))
+            })
+        {
+            artifact = Some(PathBuf::from(found));
+        }
+    }
+    artifact.ok_or_else(|| {
+        format!(
+            "{} built no .wasm component (is it a guest crate: crate-type cdylib, wasm32-wasip2?)",
+            dir.display()
+        )
+    })
+}
+
 /// [`install`] against an explicit agent root (`None` = the environment's).
 ///
 /// Taking the root as a parameter is why no test has to write `KI_AGENT_DIR`
@@ -472,6 +535,7 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
     let mut hosts: Vec<String> = Vec::new();
     let mut commands: Vec<String> = Vec::new();
     let mut exec_options = GrantOptions::default();
+    let mut build_dir: Option<String> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -494,6 +558,13 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
                 Some(value) => commands.push(value.clone()),
                 None => {
                     eprintln!("error: --command needs a value");
+                    return 2;
+                }
+            },
+            "--build" => match iter.next() {
+                Some(value) => build_dir = Some(value.clone()),
+                None => {
+                    eprintln!("error: --build needs a directory");
                     return 2;
                 }
             },
@@ -534,13 +605,28 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
             }
         }
     }
-    let Some(wasm) = wasm else {
-        eprintln!(
-            "error: expected `ki plugin install <path.wasm> [--id <id>] [--yes] [--host <host>]... [--command <cmd>]... [--cwd <scope>] [--timeout <seconds>]`"
-        );
-        return 2;
+    // `--build <dir>` builds a guest crate and installs what it produced; the
+    // positional `.wasm` path is the alternative.
+    let built;
+    let wasm: &Path = match (&build_dir, &wasm) {
+        (Some(dir), _) => match build_guest(Path::new(dir)) {
+            Ok(path) => {
+                built = path;
+                &built
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                return 1;
+            }
+        },
+        (None, Some(path)) => Path::new(path),
+        (None, None) => {
+            eprintln!(
+                "error: expected `ki insmod <path.wasm> [--id <id>] [--yes] [--host <host>]... [--command <cmd>]... [--cwd <scope>] [--timeout <seconds>]`\n       or `ki insmod --build <guest-crate-dir> [...]`"
+            );
+            return 2;
+        }
     };
-    let wasm = Path::new(&wasm);
     if !wasm.is_file() {
         eprintln!("error: {} is not a file", wasm.display());
         return 2;
@@ -1030,6 +1116,54 @@ mod tests {
         assert!(
             moved,
             "rmmod moves the module aside rather than deleting it"
+        );
+    }
+
+    /// `--build <guest-dir>` compiles the guest and installs the component
+    /// cargo reported — the one-command path back for a plugin whose compiled
+    /// version is no longer in the default build.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn insmod_builds_a_guest_and_installs_it() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let guest = workspace.join("plugins/wasm/kiqi-conformance-guest");
+        let agent = tempfile::tempdir().unwrap();
+        let root = agent.path();
+
+        let code = insmod_into(
+            &[
+                "--build".into(),
+                guest.display().to_string(),
+                "--id".into(),
+                "built".into(),
+                "--yes".into(),
+                "--host".into(),
+                "127.0.0.1".into(),
+                "--command".into(),
+                "echo".into(),
+            ],
+            Some(root),
+        );
+        assert_eq!(code, 0, "--build compiles the guest and installs it");
+        assert!(
+            root.join("plugins/built/plugin.wasm").is_file(),
+            "the component cargo built landed in the plugin store"
+        );
+        assert!(Grants::load_for_at(root, "built").allows_command("echo"));
+
+        // A directory that is not a guest crate is an error, not a silent no-op.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            insmod_into(
+                &[
+                    "--build".into(),
+                    empty.path().display().to_string(),
+                    "--id".into(),
+                    "nope".into(),
+                ],
+                Some(root),
+            ),
+            1
         );
     }
 

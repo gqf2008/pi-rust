@@ -28,7 +28,7 @@ The state store is a real write, so the tool cannot record anything without
 `fs`:
 
 ```bash
-ki plugin install kiqi_goal_guest.wasm --id rpi-goal
+ki insmod --build plugins/wasm/kiqi-goal-guest --id rpi-goal --yes
 ki plugin grant rpi-goal fs
 ```
 

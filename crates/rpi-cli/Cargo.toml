@@ -103,7 +103,12 @@ pkg-fmt = "tgz"
 pkg-fmt = "zip"
 
 [features]
-default = ["clipboard", "plugin-wasm", "plugin-rpi-todo", "plugin-rpi-lens", "plugin-rpi-orchestrator", "plugin-rpi-webfetch", "plugin-rpi-websearch", "plugin-rpi-subagents", "plugin-rpi-permissions", "plugin-rpi-goal", "plugin-rpi-plan-mode", "plugin-rpi-codegraph", "plugin-rpi-ask-user"]
+# Only the plugins without a wasm port stay compiled in by default: every
+# `plugins/rpi-*` that has a `plugins/wasm/kiqi-*-guest` counterpart is opt-in
+# now (`--features plugin-rpi-<name>`, or install the wasm guest with
+# `ki insmod`). The crates, their features, their cdylib faces and their tests
+# all stay; CI builds every one of them so none rots.
+default = ["clipboard", "plugin-wasm", "plugin-rpi-orchestrator", "plugin-rpi-permissions", "plugin-rpi-codegraph"]
 # Loads `plugins/<id>/plugin.wasm` through `kiqi-plugin-host` (wasmtime). Off
 # only for builds that want the leaner binary without the wasm tier.
 plugin-wasm = ["dep:kiqi-plugin-host"]

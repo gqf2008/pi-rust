@@ -16,7 +16,7 @@ A guest has no sockets, so both GETs go through the host capability and the
 **user's allow-list** decides which of them it may reach:
 
 ```bash
-ki plugin install kiqi_websearch_guest.wasm --id rpi-websearch \
+ki insmod --build plugins/wasm/kiqi-websearch-guest --id rpi-websearch \
     --host api.duckduckgo.com --host en.wikipedia.org
 ```
 

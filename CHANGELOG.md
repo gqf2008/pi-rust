@@ -21,6 +21,26 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **Only the plugins without a wasm port are compiled in by default.** A
+  `plugins/rpi-*` crate that has a `plugins/wasm/kiqi-*-guest` counterpart is
+  now opt-in: `--features plugin-rpi-<name>`, or install the wasm guest with
+  `ki insmod --build plugins/wasm/kiqi-<name>-guest`. Default: `rpi-orchestrator`,
+  `rpi-permissions`, `rpi-codegraph` (nothing else registered). The crates,
+  their features, their cdylib faces and their tests all stay, and CI runs the
+  opt-in configuration, so nothing rots. One coupling to know about: the
+  orchestrator's goal-linked guidance reads `.ki/goals.json`, which the
+  **compiled** `rpi-goal` writes — with that plugin opt-in, the guidance no
+  longer turns itself on (set `KI_ORCHESTRATOR_GUIDE=1` to force it, or build
+  `--features plugin-rpi-goal`).
+
+### Added
+
+- **`ki insmod --build <guest-crate-dir>`** compiles a wasm guest for
+  `wasm32-wasip2` and installs the component cargo reported — the one-command
+  way to get a plugin back now that its compiled version is opt-in.
+
+### Changed (previous)
+
 - **`rpi-langfuse` is no longer in the default build.** The tracing tier needs a
   Langfuse instance and an API key pair, so it is now opt-in:
   `cargo build --features plugin-rpi-langfuse` (or a `ki` built that way). The
