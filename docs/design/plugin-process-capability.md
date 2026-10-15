@@ -185,3 +185,23 @@ interface proc {
    该事实已写入 `AGENTS.md`（本项目没有上游）。跟踪落在本方案文件 + 提交信息上。
 
 > 批次 1 的落地范围见 §10；`AGENTS.md` 另记了本地门禁与两条插件通道的约定。
+
+## 12. 批次 3 状态（2026-10-15，进行中）
+
+**已落**：`proc.close-stdin`（ABI 0.7.1，分支 `feat/orchestrator-wasm`）——任务走 stdin 的子
+进程需要 EOF 信号；宿主实现为弃写端（写线程自然收尾），幂等。
+
+**设计已定、实现待续**（下一次会话从此继续，勿重开设计）：
+- guest `plugins/wasm/kiqi-orchestrator-guest`：图/计划/清单逻辑自带副本（lens/goal 先例）；
+- dispatch 形态 = **阻塞波**：一次调用内起齐 ready 节点（并行由 `proc` 的 max-open 承载，
+  轮询各子进程 stdout 到 EOF 后收尸提交），`waitSeconds:0` 明确报错（子进程不能跨调用存活），
+  `waitSeconds:N` 到点杀余、节点记失败；每节点 `timeout_secs` 自带期限（轮询时检查、超时杀组）；
+- `expectFile`/`verify` 走 `exec`（`test -f`/`sh -c`，README 记入 exec 白名单要求）；
+- 子代理程序默认 `ki`（PATH 解析，无 current_exe），参数 `program` 覆写 = hermetic 测试缝合点
+  （e2e 用 `cat` 回显任务）；`maxTurns` 记录不强制（env 无 proc 等价物）；
+- 指引恒注入（guest 无项目 fs、无 env——goal 联动与 KI_ORCHESTRATOR_GUIDE 均不可表达）；
+- 会话切换清图保留（before_agent_start 解析 sessionId）；
+- **默认构建翻转为仅 `rpi-permissions`**（orchestrator 移出默认），CI opt-in 清单加
+  `plugin-rpi-orchestrator`，清单测试同步门控。
+- 教训一条（写给下次）：批量编辑脚本必须逐条落盘——统一落盘 + 中途断言失败 = 静默丢整批改动
+  （本次 orchestrator guest 的 900 行工作文件就是这样丢的）。
