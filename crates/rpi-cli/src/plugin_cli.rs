@@ -345,6 +345,19 @@ fn parse_target(args: &[String]) -> Result<Target, i32> {
                     return Err(2);
                 }
             },
+            "--max-open" => match iter.next() {
+                Some(value) => match value.parse::<u32>() {
+                    Ok(n) => options.max_open = Some(n),
+                    Err(_) => {
+                        eprintln!("error: --max-open needs a number, got `{value}`");
+                        return Err(2);
+                    }
+                },
+                None => {
+                    eprintln!("error: --max-open needs a value");
+                    return Err(2);
+                }
+            },
             other if other.starts_with("--") => {
                 eprintln!("error: unknown flag `{other}`");
                 return Err(2);
@@ -399,6 +412,10 @@ CAPABILITIES:
                   --cwd plugin-data|project (default plugin-data: where the child
                   may start — the plugin's data directory or the project
                   directory), --timeout <seconds> (default 30, at most 300)
+    proc          talk to a child process for the length of one tool call
+                  (spawn/write/read-line/wait/kill); same --command/--cwd, plus
+                  --timeout <seconds> (default 600, at most 1800) and
+                  --max-open <n> (default 100)
     net-sockets   raw TCP; --host <host> (repeatable, `*` allows any)
 
 `install` copies the component to `plugins/<id>/plugin.wasm`, shows the
@@ -594,6 +611,19 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
                     return 2;
                 }
             },
+            "--max-open" => match iter.next() {
+                Some(value) => match value.parse::<u32>() {
+                    Ok(n) => exec_options.max_open = Some(n),
+                    Err(_) => {
+                        eprintln!("error: --max-open needs a number, got `{value}`");
+                        return 2;
+                    }
+                },
+                None => {
+                    eprintln!("error: --max-open needs a value");
+                    return 2;
+                }
+            },
             other if other.starts_with("--") => {
                 eprintln!("error: unknown flag `{other}`");
                 return 2;
@@ -649,9 +679,14 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
             return 1;
         }
     };
-    let exec_options_given = exec_options.cwd.is_some() || exec_options.timeout_seconds.is_some();
-    if exec_options_given && !declared.iter().any(|cap| cap == "exec") {
-        eprintln!("error: --cwd/--timeout apply to `exec`, which this component does not declare");
+    let exec_options_given = exec_options.cwd.is_some()
+        || exec_options.timeout_seconds.is_some()
+        || exec_options.max_open.is_some();
+    if exec_options_given && !declared.iter().any(|cap| cap == "exec" || cap == "proc") {
+        eprintln!(
+            "error: --cwd/--timeout/--max-open apply to `exec` and `proc`, which this component \
+             declares neither of"
+        );
         return 2;
     }
 
@@ -703,7 +738,7 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
             for cap in &new_caps {
                 // Each capability carries its own policy: hosts for the network
                 // capabilities, command names (plus --cwd/--timeout) for exec.
-                let (policy, options) = if cap.as_str() == "exec" {
+                let (policy, options) = if cap.as_str() == "exec" || cap.as_str() == "proc" {
                     (commands.clone(), exec_options.clone())
                 } else {
                     (hosts.clone(), GrantOptions::default())
@@ -909,6 +944,7 @@ mod tests {
         let kept = GrantOptions {
             cwd: Some(ExecCwd::Project),
             timeout_seconds: Some(120),
+            max_open: None,
         };
         assert!(exec_reset_note(&old, &kept, &old.clone()).is_none());
         // Nothing non-default to lose: no note.
@@ -1029,7 +1065,7 @@ mod tests {
         let grants = Grants::load_for_at(root, "conformance");
         assert_eq!(
             grants.granted(),
-            vec!["net-http", "fs", "exec", "net-sockets"]
+            vec!["net-http", "fs", "exec", "proc", "net-sockets"]
         );
         assert!(grants.allows_host("127.0.0.1"));
         assert!(grants.allows_socket_host("127.0.0.1"));

@@ -860,6 +860,7 @@ fn declared_capabilities_reads_the_components_imports() {
             "fs".to_string(),
             "net-http".to_string(),
             "net-sockets".to_string(),
+            "proc".to_string(),
         ],
         "got {caps:?}"
     );
@@ -1194,6 +1195,172 @@ fn exec_times_out_at_the_grants_budget() {
     assert!(
         elapsed < std::time::Duration::from_secs(8),
         "the 1s budget fires long before the 10s command would finish ({elapsed:?})"
+    );
+}
+
+/// `proc` round-trips a line through a child the guest talks to: spawn, write,
+/// read-line, wait, read-stderr, kill — every function of the interface, driven
+/// by the conformance fixture inside one tool call.
+#[test]
+fn proc_round_trips_a_line_through_the_host() {
+    use kiqi_plugin_host::ProcGrant;
+
+    let (dir, plugin) = load_fixture_in_temp(Grants {
+        proc: Some(ProcGrant {
+            commands: vec!["sh".to_string()],
+            ..ProcGrant::default()
+        }),
+        ..Grants::default()
+    });
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({"proc": {
+            "cmd": "sh",
+            "args": ["-c", "read line; echo \"reply:$line\""],
+            "line": "hello"
+        }}),
+    )
+    .expect("call");
+    let text = text_of(&outcome);
+    assert!(
+        text.contains("proc=spawned=1 reply=reply:hello wait=0 stderr=0"),
+        "the whole conversation happened: {text}"
+    );
+    // The child is a real process in the plugin's own data directory.
+    assert!(dir.path().join("data").is_dir());
+}
+
+/// `proc` is gated exactly like `exec`: no grant, a command outside the
+/// allow-list, and a cwd that leaves the scope are each refused.
+#[test]
+fn proc_is_gated_like_exec() {
+    use kiqi_plugin_host::ProcGrant;
+
+    let (_dir, plugin) = load_fixture_in_temp(Grants::default());
+    let denied = call_main_tool(
+        &plugin,
+        serde_json::json!({"proc": {"cmd": "sh", "args": ["-c", "true"]}}),
+    )
+    .expect("call");
+    assert!(
+        text_of(&denied).contains("proc=proc is not granted"),
+        "an ungranted proc is denied: {}",
+        text_of(&denied)
+    );
+
+    let (_dir, plugin) = load_fixture_in_temp(Grants {
+        proc: Some(ProcGrant {
+            commands: vec!["ls".to_string()],
+            ..ProcGrant::default()
+        }),
+        ..Grants::default()
+    });
+    let denied = call_main_tool(
+        &plugin,
+        serde_json::json!({"proc": {"cmd": "sh", "args": ["-c", "true"]}}),
+    )
+    .expect("call");
+    assert!(
+        text_of(&denied).contains("proc=proc of `sh` is not granted"),
+        "a command outside the allow-list is denied by name: {}",
+        text_of(&denied)
+    );
+
+    // The cwd scope is the same jail `exec` uses.
+    let (_dir, plugin) = load_fixture_in_temp(Grants {
+        proc: Some(ProcGrant {
+            commands: vec!["sh".to_string()],
+            ..ProcGrant::default()
+        }),
+        ..Grants::default()
+    });
+    let escaped = call_main_tool(
+        &plugin,
+        serde_json::json!({"proc": {"cmd": "sh", "args": ["-c", "true"], "cwd": "../outside"}}),
+    )
+    .expect("call");
+    assert!(
+        text_of(&escaped).contains("proc=failed:"),
+        "a cwd that leaves the scope is refused: {}",
+        text_of(&escaped)
+    );
+}
+
+/// The grant's `max-open` bounds how many children one call may hold.
+#[test]
+fn proc_max_open_is_enforced() {
+    use kiqi_plugin_host::ProcGrant;
+
+    let (_dir, plugin) = load_fixture_in_temp(Grants {
+        proc: Some(ProcGrant {
+            commands: vec!["sh".to_string()],
+            max_open: 1,
+            ..ProcGrant::default()
+        }),
+        ..Grants::default()
+    });
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({"proc": {
+            "cmd": "sh", "args": ["-c", "true"], "count": 2, "keep": true
+        }}),
+    )
+    .expect("call");
+    assert!(
+        text_of(&outcome)
+            .contains("proc=denied:proc already holds 1 children and the grant allows 1 at once"),
+        "the second spawn is refused with the bound in the reason: {}",
+        text_of(&outcome)
+    );
+}
+
+/// A handle lives for exactly one call: a child the guest left running (or
+/// forgot to kill) is killed — process group and all — when the call returns.
+/// Asserted on the OS, not on the host's bookkeeping: the child printed its own
+/// pid, and after the call that pid must be gone.
+#[cfg(unix)]
+#[test]
+fn proc_reaps_children_when_the_call_ends() {
+    use kiqi_plugin_host::ProcGrant;
+
+    let (_dir, plugin) = load_fixture_in_temp(Grants {
+        proc: Some(ProcGrant {
+            commands: vec!["sh".to_string()],
+            ..ProcGrant::default()
+        }),
+        ..Grants::default()
+    });
+    // The fixture reads the child's first stdout line = its pid, writes nothing
+    // useful and leaves the child sleeping (`keep`): the guest never kills it.
+    let outcome = call_main_tool(
+        &plugin,
+        serde_json::json!({"proc": {
+            "cmd": "sh",
+            "args": ["-c", "echo $$; sleep 30"],
+            "line": "ignored",
+            "keep": true
+        }}),
+    )
+    .expect("call");
+    let text = text_of(&outcome);
+    assert!(
+        text.contains("proc=spawned=1 reply=") && text.contains("wait=skipped"),
+        "the child was left running on purpose: {text}"
+    );
+    let pid: i32 = text
+        .split("reply=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|pid| pid.trim().parse().ok())
+        .unwrap_or_else(|| panic!("the child's pid did not come back: {text}"));
+
+    // The call has returned, so the host has reaped: the pid is gone (and, since
+    // the host waited on it, not even a zombie is left).
+    // SAFETY: signal 0 only probes for the process's existence.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    assert!(
+        !alive,
+        "the child ({pid}) outlived the call that spawned it: {text}"
     );
 }
 

@@ -759,6 +759,37 @@ lens 移植验“project scope 下 `git diff --check` exit=0 / data 目录下报
 `KIQI_WEBSEARCH_LIVE=1` 的 detect-and-return live 测试——解析/过滤路径要真网络，
 默认跳过并明说，符合「第三态显式化」）。
 
+### 6.32 ABI 0.7.0：`proc` —— 调用内可交互的子进程（为迁 `rpi-codegraph`）
+
+`exec` 是一次性的（跑完拿输出），表达不了「起一个服务、在它的 stdin/stdout 上做一场会话」。
+`rpi-codegraph` 正是这种：**每次调用内**起 `codegraph serve --mcp`，然后用 JSON-RPC 走
+stdin/stdout，调用结束杀掉（`plugins/rpi-codegraph/src/lib.rs:315`、`:335-346`、`:385-387`）。
+方案与取舍见 `docs/design/plugin-process-capability.md`。
+
+**接口**（新 interface `proc`，包版本 `0.6.0 → 0.7.0`，纯加法）：
+`spawn(cmd, args, cwd) -> u32` · `write(handle, bytes) -> u64` · `read-line(handle, max) -> option<string>`
+· `read-stderr(handle, max) -> list<u8>` · `wait(handle, timeout-ms) -> option<s32>` · `kill(handle)`。
+句柄是 `u32`，形状照抄 `net-sockets`（宿主持句柄，guest 只拿编号）。
+
+**一条硬规则**：句柄只活**一次工具调用**。调用返回（正常/出错/trap/取消）时，宿主对每个句柄
+杀**整个进程组**并回收。因此 guest 忘了 `kill` 或半路 trap 都不留残留——「跨调用常驻子进程」
+被有意排除在本能力之外（那是宿主拥有调度权的另一件事，见方案 §9）。
+
+**授权与强制**（新可授权能力 `proc`，策略随授权走）：`{commands, cwd, timeout-seconds, max-open}`，
+`--command`/`--cwd` 与 `exec` 同一套，`--timeout` **默认 600s、上限 1800s**（刻意不复用 `exec` 的
+30s/300s——会话不是有界一次性命令），`--max-open` 默认 100、上限 256。命令裸名 + 白名单、
+cwd 走**同一对** `jail_under`/`symlink_checked_under`（与 §6.30 同源，不再各写一份）、
+环境清空只回填 `PATH`、子进程独立进程组。三处防阻塞：stdout 行线程 + 有界 channel（聊天止于
+他自己的孩子写阻塞，不涨宿主内存）、stderr 有上限缓冲、stdin 由写线程代转（子进程不读时
+`write` 到预算即 `failed`，而不是把调用钉死）。
+
+**验收**（e2e 4 条，全绿）：往返（spawn/write/read-line/wait/read-stderr/kill 六函数全触达）、
+门禁三态（未授权 / 不在白名单 / cwd 越狱）、`max-open` 上限、以及**收尸**——子进程自报 pid、
+guest 故意不杀，调用返回后该 pid 在 **OS 层面**查不到（断言落在 `kill(pid, 0)`，不是宿主自己的账本）。
+
+**本能力不解决** `rpi-orchestrator`：它要「调用之间还在跑」，需要宿主持调度（重新设计），
+不是给插件加一层能力能凑出来的。
+
 ## 7. 待定
 
 - ~~wasmtime 依赖很重：独立 crate 还是 feature 开关？~~ → 已定：**独立 crate `kiqi-plugin-host` +

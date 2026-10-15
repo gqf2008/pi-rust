@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! `rpi-goal` ported to the wasm ABI (0.6.0).
+//! `rpi-goal` ported to the wasm ABI (0.7.0).
 //!
 //! Goal mode records one persistent, context-injected objective per project and
 //! lets the model advance it across turns: the `goal` tool (eight actions), the

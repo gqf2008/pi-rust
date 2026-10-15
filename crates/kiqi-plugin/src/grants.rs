@@ -27,6 +27,10 @@ pub struct Grants {
     /// Running a child process, with a command allow-list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecGrant>,
+    /// Interactive child processes, with a command allow-list, a cwd scope, a
+    /// per-child budget and a concurrency bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proc: Option<ProcGrant>,
     /// Raw TCP, with a host allow-list (same shape as `net-http`: the grant
     /// carries its policy, so "granted" and "to what" are one decision).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,6 +109,75 @@ pub struct ExecGrant {
     pub timeout_seconds: u64,
 }
 
+/// The default wall-clock budget for one `proc` child — long enough for an
+/// index/analysis server to do real work, and deliberately its own constant:
+/// it exceeds `exec`'s 30s/300s pair, which is the point of a separate
+/// capability (a session is not a bounded one-shot command).
+pub const PROC_TIMEOUT_DEFAULT_SECONDS: u64 = 600;
+
+/// The largest budget a `proc` grant can ask for (the orchestrator's subagent
+/// ceiling, reused so the repo has one "very long child" number).
+pub const PROC_TIMEOUT_MAX_SECONDS: u64 = 1800;
+
+/// How many children one call may hold open by default.
+pub const PROC_MAX_OPEN_DEFAULT: u32 = 100;
+
+/// The hard ceiling on `max-open` — the resource is the machine's process
+/// table, not something the sandbox can carry for the plugin.
+pub const PROC_MAX_OPEN_MAX: u32 = 256;
+
+fn default_proc_timeout() -> u64 {
+    PROC_TIMEOUT_DEFAULT_SECONDS
+}
+
+fn is_default_proc_timeout(value: &u64) -> bool {
+    *value == PROC_TIMEOUT_DEFAULT_SECONDS
+}
+
+fn default_proc_max_open() -> u32 {
+    PROC_MAX_OPEN_DEFAULT
+}
+
+fn is_default_proc_max_open(value: &u32) -> bool {
+    *value == PROC_MAX_OPEN_DEFAULT
+}
+
+/// The `proc` policy: which commands, in which scope, for how long, and how
+/// many at once. Same shape as [`ExecGrant`] plus the concurrency bound.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ProcGrant {
+    /// Command names (no path, no shell) the plugin may spawn; `*` allows any.
+    pub commands: Vec<String>,
+    /// Where a child may start — same scope rule as `exec`.
+    #[serde(default, skip_serializing_if = "ExecCwd::is_plugin_data")]
+    pub cwd: ExecCwd,
+    /// Wall-clock budget for one child; absent = the default, capped at
+    /// [`PROC_TIMEOUT_MAX_SECONDS`].
+    #[serde(
+        default = "default_proc_timeout",
+        skip_serializing_if = "is_default_proc_timeout"
+    )]
+    pub timeout_seconds: u64,
+    /// How many children one call may hold open at once.
+    #[serde(
+        default = "default_proc_max_open",
+        skip_serializing_if = "is_default_proc_max_open"
+    )]
+    pub max_open: u32,
+}
+
+impl Default for ProcGrant {
+    fn default() -> Self {
+        Self {
+            commands: Vec::new(),
+            cwd: ExecCwd::default(),
+            timeout_seconds: PROC_TIMEOUT_DEFAULT_SECONDS,
+            max_open: PROC_MAX_OPEN_DEFAULT,
+        }
+    }
+}
+
 impl Default for ExecGrant {
     fn default() -> Self {
         Self {
@@ -126,10 +199,12 @@ pub struct NetSocketsGrant {
 /// dropped flag.
 #[derive(Debug, Clone, Default)]
 pub struct GrantOptions {
-    /// `--cwd plugin-data|project` (exec only).
+    /// `--cwd plugin-data|project` (exec and proc).
     pub cwd: Option<ExecCwd>,
-    /// `--timeout <seconds>` (exec only).
+    /// `--timeout <seconds>` (exec and proc; each has its own bounds).
     pub timeout_seconds: Option<u64>,
+    /// `--max-open <n>` (proc only).
+    pub max_open: Option<u32>,
 }
 
 impl Grants {
@@ -182,6 +257,13 @@ impl Grants {
             .is_some_and(|grant| allows(&grant.hosts, host))
     }
 
+    /// True when `command` may be spawned through `proc`.
+    pub fn allows_proc_command(&self, command: &str) -> bool {
+        self.proc
+            .as_ref()
+            .is_some_and(|grant| allows(&grant.commands, command))
+    }
+
     /// True when a TCP connection to `host` is granted.
     pub fn allows_socket_host(&self, host: &str) -> bool {
         self.net_sockets
@@ -209,6 +291,9 @@ impl Grants {
         if self.exec.is_some() {
             out.push("exec");
         }
+        if self.proc.is_some() {
+            out.push("proc");
+        }
         if self.net_sockets.is_some() {
             out.push("net-sockets");
         }
@@ -234,9 +319,12 @@ impl Grants {
         };
         match capability {
             "net-http" | "net-sockets" | "fs" => {
-                if options.cwd.is_some() || options.timeout_seconds.is_some() {
+                if options.cwd.is_some()
+                    || options.timeout_seconds.is_some()
+                    || options.max_open.is_some()
+                {
                     return Err(format!(
-                        "`{capability}` takes no --cwd or --timeout (those are exec options)"
+                        "`{capability}` takes no --cwd/--timeout/--max-open (those are exec and proc options)"
                     ));
                 }
                 let hosts = || non_empty("--host (or --host '*'))");
@@ -247,6 +335,9 @@ impl Grants {
                 }
             }
             "exec" => {
+                if options.max_open.is_some() {
+                    return Err("`exec` takes no --max-open (that is a proc option)".to_string());
+                }
                 let commands = non_empty("--command (or --command '*')")?;
                 let timeout_seconds = match options.timeout_seconds {
                     None => EXEC_TIMEOUT_DEFAULT_SECONDS,
@@ -264,6 +355,35 @@ impl Grants {
                     timeout_seconds,
                 });
             }
+            "proc" => {
+                let commands = non_empty("--command (or --command '*')")?;
+                let timeout_seconds = match options.timeout_seconds {
+                    None => PROC_TIMEOUT_DEFAULT_SECONDS,
+                    Some(0) => return Err("proc --timeout must be at least 1 second".to_string()),
+                    Some(seconds) if seconds > PROC_TIMEOUT_MAX_SECONDS => {
+                        return Err(format!(
+                            "proc --timeout {seconds}s exceeds the {PROC_TIMEOUT_MAX_SECONDS}s cap"
+                        ))
+                    }
+                    Some(seconds) => seconds,
+                };
+                let max_open = match options.max_open {
+                    None => PROC_MAX_OPEN_DEFAULT,
+                    Some(0) => return Err("proc --max-open must be at least 1".to_string()),
+                    Some(n) if n > PROC_MAX_OPEN_MAX => {
+                        return Err(format!(
+                            "proc --max-open {n} exceeds the {PROC_MAX_OPEN_MAX} cap"
+                        ))
+                    }
+                    Some(n) => n,
+                };
+                self.proc = Some(ProcGrant {
+                    commands,
+                    cwd: options.cwd.unwrap_or_default(),
+                    timeout_seconds,
+                    max_open,
+                });
+            }
             other => return Err(format!("unknown capability `{other}`")),
         }
         Ok(())
@@ -275,6 +395,7 @@ impl Grants {
             "net-http" => self.net_http = None,
             "fs" => self.fs = false,
             "exec" => self.exec = None,
+            "proc" => self.proc = None,
             "net-sockets" => self.net_sockets = None,
             other => return Err(format!("unknown capability `{other}`")),
         }
@@ -458,6 +579,7 @@ mod tests {
                 GrantOptions {
                     cwd: Some(ExecCwd::Project),
                     timeout_seconds: Some(120),
+                    max_open: None,
                 },
             )
             .unwrap();
@@ -477,6 +599,7 @@ mod tests {
         let bad_timeout = |seconds: u64| GrantOptions {
             cwd: None,
             timeout_seconds: Some(seconds),
+            max_open: None,
         };
         assert!(grants
             .grant("exec", vec!["echo".to_string()], bad_timeout(0))
@@ -502,9 +625,140 @@ mod tests {
                 GrantOptions {
                     cwd: Some(ExecCwd::Project),
                     timeout_seconds: None,
+                    max_open: None,
                 },
             )
             .is_err());
+    }
+
+    /// The `proc` policy: its own defaults (600s / 100 open / plugin-data), its
+    /// own bounds, and options that belong to the other capabilities are
+    /// rejected rather than ignored.
+    #[test]
+    fn proc_grant_carries_its_own_defaults_and_bounds() {
+        let mut grants = Grants::default();
+        grants
+            .grant(
+                "proc",
+                vec!["codegraph".to_string()],
+                GrantOptions::default(),
+            )
+            .unwrap();
+        let grant = grants.proc.as_ref().unwrap();
+        assert_eq!(grant.cwd, ExecCwd::PluginData);
+        assert_eq!(grant.timeout_seconds, PROC_TIMEOUT_DEFAULT_SECONDS);
+        assert_eq!(grant.max_open, PROC_MAX_OPEN_DEFAULT);
+        assert!(grants.allows_proc_command("codegraph"));
+        assert!(!grants.allows_proc_command("rm"));
+        assert!(grants.granted().contains(&"proc"));
+
+        // Explicit options ride along.
+        grants
+            .grant(
+                "proc",
+                vec!["codegraph".to_string()],
+                GrantOptions {
+                    cwd: Some(ExecCwd::Project),
+                    timeout_seconds: Some(900),
+                    max_open: Some(8),
+                },
+            )
+            .unwrap();
+        let grant = grants.proc.as_ref().unwrap();
+        assert_eq!(grant.cwd, ExecCwd::Project);
+        assert_eq!(grant.timeout_seconds, 900);
+        assert_eq!(grant.max_open, 8);
+
+        // Bounds are enforced at grant time.
+        let bad = |seconds: u64, open: u32| GrantOptions {
+            cwd: None,
+            timeout_seconds: Some(seconds),
+            max_open: Some(open),
+        };
+        assert!(grants
+            .grant("proc", vec!["x".to_string()], bad(0, 1))
+            .is_err());
+        assert!(grants
+            .grant(
+                "proc",
+                vec!["x".to_string()],
+                bad(PROC_TIMEOUT_MAX_SECONDS + 1, 1)
+            )
+            .is_err());
+        assert!(grants
+            .grant("proc", vec!["x".to_string()], bad(60, 0))
+            .is_err());
+        assert!(grants
+            .grant(
+                "proc",
+                vec!["x".to_string()],
+                bad(60, PROC_MAX_OPEN_MAX + 1)
+            )
+            .is_err());
+        assert!(grants
+            .grant(
+                "proc",
+                vec!["x".to_string()],
+                bad(PROC_TIMEOUT_MAX_SECONDS, PROC_MAX_OPEN_MAX)
+            )
+            .is_ok());
+
+        // `--max-open` is proc's alone; the cwd/timeout pair never reaches the
+        // network capabilities or fs.
+        assert!(grants
+            .grant(
+                "exec",
+                vec!["echo".to_string()],
+                GrantOptions {
+                    cwd: None,
+                    timeout_seconds: None,
+                    max_open: Some(2),
+                },
+            )
+            .is_err());
+        assert!(grants
+            .grant(
+                "fs",
+                vec![],
+                GrantOptions {
+                    cwd: None,
+                    timeout_seconds: None,
+                    max_open: Some(2),
+                },
+            )
+            .is_err());
+
+        // Revoking takes it away again.
+        grants.revoke("proc").unwrap();
+        assert!(!grants.allows_proc_command("codegraph"));
+        assert!(!grants.granted().contains(&"proc"));
+    }
+
+    /// A grant file from before `proc` existed deserializes unchanged, and the
+    /// new defaults stay out of the serialized form.
+    #[test]
+    fn proc_grant_json_is_backward_compatible_and_minimal() {
+        let old = serde_json::json!({"exec": {"commands": ["echo"]}});
+        let grants: Grants = serde_json::from_value(old).unwrap();
+        assert!(grants.proc.is_none());
+        assert!(!grants.allows_proc_command("echo"));
+
+        let mut grants = Grants::default();
+        grants
+            .grant(
+                "proc",
+                vec!["codegraph".to_string()],
+                GrantOptions::default(),
+            )
+            .unwrap();
+        let json = serde_json::to_value(&grants).unwrap();
+        assert_eq!(
+            json["proc"],
+            serde_json::json!({"commands": ["codegraph"]}),
+            "defaults are omitted, like exec's"
+        );
+        let reparsed: Grants = serde_json::from_value(json).unwrap();
+        assert_eq!(reparsed, grants);
     }
 
     /// Grant files written before the cwd/timeout fields existed must keep
@@ -531,6 +785,7 @@ mod tests {
                 GrantOptions {
                     cwd: Some(ExecCwd::Project),
                     timeout_seconds: Some(120),
+                    max_open: None,
                 },
             )
             .unwrap();

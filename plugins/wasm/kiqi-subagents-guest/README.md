@@ -1,6 +1,6 @@
 # kiqi-subagents-guest
 
-`rpi-subagents` ported to the kiqi wasm ABI (`kiqi:plugin@0.6.0`). It registers
+`rpi-subagents` ported to the kiqi wasm ABI (`kiqi:plugin@0.7.0`). It registers
 one tool, `delegate_task`, which validates its arguments and returns a bounded,
 non-recursive **delegation envelope** — a JSON description of the work a host
 might schedule. It imports **no capability**: the whole behaviour is argument

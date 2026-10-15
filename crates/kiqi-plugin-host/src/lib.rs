@@ -1,6 +1,6 @@
 //! Host-side backend for **wasm plugins** (the component model tier).
 //!
-//! Binds `plugins/kiqi-plugin.wit` (ABI 0.6.0) with wasmtime's `bindgen!` and
+//! Binds `plugins/kiqi-plugin.wit` (ABI 0.7.0) with wasmtime's `bindgen!` and
 //! hosts a plugin component behind the same [`kiqi_plugin::Plugin`] seam the
 //! compiled-in plugins implement.
 //!
@@ -152,16 +152,19 @@ fn denied() -> CapabilityError {
 
 /// What the user authorized for one plugin, shared with the CLI through the
 /// contract crate (`kiqi-plugin`).
-pub use kiqi_plugin::grants::{allows, ExecCwd, ExecGrant, Grants, NetHttpGrant, NetSocketsGrant};
+pub use kiqi_plugin::grants::{
+    allows, ExecCwd, ExecGrant, Grants, NetHttpGrant, NetSocketsGrant, ProcGrant,
+};
 
 /// The user-grantable capabilities a component declares — the `kiqi:plugin/*`
-/// imports that need authorization (`net-http`, `fs`, `exec`, `net-sockets`).
+/// imports that need authorization (`net-http`, `fs`, `exec`, `proc`,
+/// `net-sockets`).
 ///
 /// The domain interfaces (`log`, `session-read`, …) are always available through
 /// `HostCaps` and are not part of the grant set, so they are filtered out. This
 /// is what `ki plugin install` shows the user and re-prompts about when it grows.
 pub fn declared_capabilities(wasm: &Path) -> Result<Vec<String>, String> {
-    const GRANTABLE: &[&str] = &["net-http", "fs", "exec", "net-sockets"];
+    const GRANTABLE: &[&str] = &["net-http", "fs", "exec", "proc", "net-sockets"];
     let bytes = std::fs::read(wasm).map_err(|error| format!("read {}: {error}", wasm.display()))?;
     let mut caps: Vec<String> = Vec::new();
     for payload in wasmparser::Parser::new(0).parse_all(&bytes) {
@@ -189,9 +192,9 @@ pub fn declared_capabilities(wasm: &Path) -> Result<Vec<String>, String> {
 /// [`declared_capabilities`] reports what a *component* asks for; this reports
 /// what the host can honour. `ki plugin install` names any difference, so a user
 /// is never asked to grant something that would only ever come back denied.
-/// All four grantable capabilities are enforced: `net-http`, `fs`, `exec`,
-/// `net-sockets`.
-pub const ENFORCED_CAPABILITIES: &[&str] = &["net-http", "fs", "exec", "net-sockets"];
+/// All five grantable capabilities are enforced: `net-http`, `fs`, `exec`,
+/// `proc`, `net-sockets`.
+pub const ENFORCED_CAPABILITIES: &[&str] = &["net-http", "fs", "exec", "proc", "net-sockets"];
 
 /// See [`ENFORCED_CAPABILITIES`].
 pub fn capability_is_enforced(name: &str) -> bool {
@@ -217,6 +220,12 @@ struct HostState {
     /// Raw TCP connections, keyed by the handle the guest was handed.
     sockets: std::collections::HashMap<u32, std::net::TcpStream>,
     next_socket: u32,
+    /// Interactive children (`proc`), keyed by the handle the guest was
+    /// handed. **Scoped to one tool call**: every guest-visible entry point
+    /// reaps them when it returns (see [`HostState::reap_procs`]), so nothing
+    /// survives the call that started it.
+    procs: std::collections::HashMap<u32, ProcChild>,
+    next_proc: u32,
     /// The guest's linear-memory cap, read by the store's limiter.
     limits: wasmtime::StoreLimits,
 }
@@ -502,6 +511,62 @@ impl HostState {
         jail_under(&self.data_dir()?, rel, "the plugin directory")
     }
 
+    /// Resolve the working directory `exec` and `proc` share: the grant's
+    /// scope decides the root (`plugin-data` = the plugin's sandbox,
+    /// `project` = the user's tree), and the guest-supplied path gets the same
+    /// lexical + symlink checks `fs` uses. The data directory is created on
+    /// demand — it is the plugin's own sandbox; the project directory is the
+    /// user's, so a misspelled cwd fails there instead of `mkdir -p`-ing into
+    /// it.
+    fn scoped_cwd(
+        &self,
+        scope: kiqi_plugin::grants::ExecCwd,
+        cwd: Option<String>,
+    ) -> Result<std::path::PathBuf, CapabilityError> {
+        let (root, what) = match scope {
+            kiqi_plugin::grants::ExecCwd::PluginData => (self.data_dir()?, "the plugin directory"),
+            kiqi_plugin::grants::ExecCwd::Project => (self.project_dir()?, "the project directory"),
+        };
+        let sandboxed = matches!(scope, kiqi_plugin::grants::ExecCwd::PluginData);
+        let resolved = match cwd {
+            Some(rel) => {
+                let resolved = jail_under(&root, &rel, what)?;
+                // `.`/`./`/`` resolve to the root itself: the guest picked
+                // nothing, so there is no final component to symlink-check
+                // (the parent comparison would wrongly test the root's parent
+                // against the root).
+                if resolved == root {
+                    root.clone()
+                } else if !sandboxed && !resolved.exists() {
+                    return Err(CapabilityError::Failed(format!(
+                        "cwd `{rel}` does not exist inside {what}"
+                    )));
+                } else {
+                    symlink_checked_under(&root, &resolved, sandboxed, what)?
+                }
+            }
+            None => root,
+        };
+        if sandboxed {
+            std::fs::create_dir_all(&resolved).map_err(|error| {
+                CapabilityError::Failed(format!("create {}: {error}", resolved.display()))
+            })?;
+        }
+        Ok(resolved)
+    }
+
+    /// Close every `proc` handle: kill each child's process group and reap it.
+    ///
+    /// Called at the end of every guest-visible entry point, which is what
+    /// makes a handle's lifetime "one tool call" — a guest that forgets to
+    /// `kill`, or traps mid-session, leaves nothing behind.
+    fn reap_procs(&mut self) {
+        for (_, mut child) in self.procs.drain() {
+            child.shutdown();
+        }
+        self.next_proc = 1;
+    }
+
     fn data_dir(&self) -> Result<std::path::PathBuf, CapabilityError> {
         self.fs_root
             .clone()
@@ -723,6 +788,282 @@ impl crate::kiqi::plugin::net_sockets::Host for HostState {
     }
 }
 
+/// Build the command `proc::spawn` runs: the same construction `exec` uses —
+/// scrubbed env with `PATH` back, its own process group, piped stdio.
+fn spawn_proc(
+    cmd: &str,
+    args: &[String],
+    cwd: &std::path::Path,
+) -> Result<std::process::Child, CapabilityError> {
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(cmd);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Cleared, then only `PATH` back — same rule as `exec`.
+        .env_clear();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    command
+        .spawn()
+        .map_err(|error| CapabilityError::Failed(format!("spawn `{cmd}`: {error}")))
+}
+
+/// Truncate to at most `max_bytes` on a char boundary; `0` means the host's
+/// hard cap only.
+fn truncate_chars(text: &str, max_bytes: u64) -> String {
+    if max_bytes == 0 || text.len() <= max_bytes as usize {
+        return text.to_string();
+    }
+    let mut end = max_bytes as usize;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+/// Interactive children: `spawn` / `write` / `read-line` / `read-stderr` /
+/// `wait` / `kill`.
+///
+/// Three rules shape the implementation:
+///
+/// * **Handles last one tool call.** The host reaps every child when the
+///   calling entry point returns ([`HostState::reap_procs`]), so a guest that
+///   forgets `kill` — or traps mid-session — leaks nothing.
+/// * **Every wait is deadline-checked** against the grant's per-child budget,
+///   so a silent child cannot wedge the call.
+/// * **Nothing unbounded**: channels are bounded (a chatty child blocks on its
+///   own write), lines and stderr are capped, and the number of live children
+///   is the grant's `max-open`.
+impl crate::kiqi::plugin::proc::Host for HostState {
+    fn spawn(
+        &mut self,
+        cmd: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+    ) -> Result<u32, CapabilityError> {
+        let grant = self
+            .grants
+            .proc
+            .clone()
+            .ok_or_else(|| CapabilityError::Denied("proc is not granted".to_string()))?;
+        if !kiqi_plugin::grants::allows(&grant.commands, &cmd) {
+            return Err(CapabilityError::Denied(format!(
+                "proc of `{cmd}` is not granted"
+            )));
+        }
+        if cmd.contains('/') || cmd.contains('\\') {
+            return Err(CapabilityError::Failed(format!(
+                "proc command must be a bare name, not a path: `{cmd}`"
+            )));
+        }
+        if self.procs.len() >= grant.max_open as usize {
+            return Err(CapabilityError::Denied(format!(
+                "proc already holds {} children and the grant allows {} at once",
+                self.procs.len(),
+                grant.max_open
+            )));
+        }
+        let cwd = self.scoped_cwd(grant.cwd, cwd)?;
+        let mut child = spawn_proc(&cmd, &args, &cwd)?;
+
+        // stdout → lines. A bounded channel: when the guest stops reading, the
+        // reader blocks and the child blocks on its own write.
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| CapabilityError::Failed("the child has no stdout pipe".to_string()))?;
+        let (line_tx, line_rx) = std::sync::mpsc::sync_channel::<String>(PROC_CHANNEL_DEPTH);
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if line_tx
+                    .send(truncate_chars(&line, PROC_LINE_CAP as u64))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            // Dropping `line_tx` is the EOF signal `read-line` reports as `none`.
+        });
+
+        // stderr → a capped buffer the guest polls.
+        let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        if let Some(mut stderr) = child.stderr.take() {
+            let sink = std::sync::Arc::clone(&stderr_buf);
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match stderr.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            let mut sink = sink.lock().unwrap_or_else(|p| p.into_inner());
+                            let room = PROC_STDERR_CAP.saturating_sub(sink.len());
+                            sink.extend_from_slice(&chunk[..read.min(room)]);
+                        }
+                    }
+                }
+            });
+        }
+
+        // stdin → a writer thread, so a child that stops reading makes the
+        // guest's `write` time out instead of blocking the call forever.
+        let (stdin_tx, stdin_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(PROC_CHANNEL_DEPTH);
+        let writer = child.stdin.take().map(|mut stdin| {
+            std::thread::spawn(move || {
+                use std::io::Write;
+                while let Ok(bytes) = stdin_rx.recv() {
+                    if stdin.write_all(&bytes).is_err() {
+                        break;
+                    }
+                    let _ = stdin.flush();
+                }
+            })
+        });
+        let stdin = writer.as_ref().map(|_| stdin_tx);
+
+        let deadline = std::time::Instant::now() + effective_proc_timeout(grant.timeout_seconds);
+        let handle = self.next_proc;
+        self.next_proc += 1;
+        self.procs.insert(
+            handle,
+            ProcChild {
+                child,
+                lines: line_rx,
+                stderr: stderr_buf,
+                stdin,
+                writer,
+                deadline,
+            },
+        );
+        Ok(handle)
+    }
+
+    fn write(&mut self, handle: u32, bytes: Vec<u8>) -> Result<u64, CapabilityError> {
+        let child = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| CapabilityError::Failed(format!("no open child {handle}")))?;
+        let Some(stdin) = child.stdin.as_ref() else {
+            return Err(CapabilityError::Failed(
+                "the child's stdin is closed".to_string(),
+            ));
+        };
+        let remaining = child
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(CapabilityError::Failed(
+                "the child's time budget is spent".to_string(),
+            ));
+        }
+        let len = bytes.len() as u64;
+        let deadline = std::time::Instant::now() + remaining;
+        // `SyncSender::send_timeout` is not stable yet, so this is the
+        // equivalent loop: `try_send` hands the buffer back when the queue is
+        // full, so nothing is copied per attempt.
+        let mut pending = bytes;
+        loop {
+            match stdin.try_send(pending) {
+                Ok(()) => return Ok(len),
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(CapabilityError::Failed(
+                        "the child's stdin is gone (it exited?)".to_string(),
+                    ))
+                }
+                Err(std::sync::mpsc::TrySendError::Full(returned)) => pending = returned,
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(CapabilityError::Failed(
+                    "the child is not reading its stdin (its budget ran out waiting)".to_string(),
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn read_line(
+        &mut self,
+        handle: u32,
+        max_bytes: u64,
+    ) -> Result<Option<String>, CapabilityError> {
+        let child = self
+            .procs
+            .get(&handle)
+            .ok_or_else(|| CapabilityError::Failed(format!("no open child {handle}")))?;
+        let remaining = child
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(CapabilityError::Failed(
+                "the child's time budget is spent".to_string(),
+            ));
+        }
+        match child.lines.recv_timeout(remaining) {
+            Ok(line) => Ok(Some(truncate_chars(&line, max_bytes))),
+            // The reader dropped its sender: stdout ended.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(None),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(CapabilityError::Failed(
+                "no output within the child's time budget".to_string(),
+            )),
+        }
+    }
+
+    fn read_stderr(&mut self, handle: u32, max_bytes: u64) -> Result<Vec<u8>, CapabilityError> {
+        let child = self
+            .procs
+            .get(&handle)
+            .ok_or_else(|| CapabilityError::Failed(format!("no open child {handle}")))?;
+        let sink = child.stderr.lock().unwrap_or_else(|p| p.into_inner());
+        let text = String::from_utf8_lossy(&sink).into_owned();
+        Ok(truncate_chars(&text, max_bytes).into_bytes())
+    }
+
+    fn wait(&mut self, handle: u32, timeout_ms: u64) -> Result<Option<i32>, CapabilityError> {
+        let child = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| CapabilityError::Failed(format!("no open child {handle}")))?;
+        let budget = child
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms).min(budget);
+        loop {
+            match child.child.try_wait() {
+                Ok(Some(status)) => return Ok(Some(status.code().unwrap_or(-1))),
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(CapabilityError::Failed(format!("wait on child: {error}")))
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn kill(&mut self, handle: u32) -> Result<(), CapabilityError> {
+        // Idempotent by contract: an unknown handle is already closed.
+        if let Some(mut child) = self.procs.remove(&handle) {
+            child.shutdown();
+        }
+        Ok(())
+    }
+}
+
 /// Run a child process: allow-listed bare command name, grant-scoped cwd,
 /// cleared environment, capped output, wall-clock timeout. No shell is
 /// involved, so shell metacharacters in `args` stay literal.
@@ -756,43 +1097,7 @@ impl crate::kiqi::plugin::exec::Host for HostState {
             .exec
             .as_ref()
             .expect("allows_command implies an exec grant");
-        let (root, what) = match grant.cwd {
-            kiqi_plugin::grants::ExecCwd::PluginData => (self.data_dir()?, "the plugin directory"),
-            kiqi_plugin::grants::ExecCwd::Project => (self.project_dir()?, "the project directory"),
-        };
-        // The plugin's data directory is its sandbox — creating it (or a
-        // subdir) on demand is the point. The project directory is the user's
-        // tree: a misspelled cwd must fail there, not `mkdir -p` into it (the
-        // compile-time plugin's spawn failed the same way).
-        let sandboxed = matches!(grant.cwd, kiqi_plugin::grants::ExecCwd::PluginData);
-        let cwd = match cwd {
-            // The same lexical + symlink checks as `fs`: a guest-supplied cwd
-            // must not walk out of the granted root, and a symlinked parent
-            // (a project directory is the user's tree, not a fresh jail) must
-            // not be followed out of it either.
-            Some(rel) => {
-                let resolved = jail_under(&root, &rel, what)?;
-                // `.`/`./`/`` resolve to the root itself: the guest picked
-                // nothing, so there is no final component to symlink-check
-                // (the parent comparison would wrongly test the root's
-                // parent against the root).
-                if resolved == root {
-                    root.clone()
-                } else if !sandboxed && !resolved.exists() {
-                    return Err(CapabilityError::Failed(format!(
-                        "cwd `{rel}` does not exist inside {what}"
-                    )));
-                } else {
-                    symlink_checked_under(&root, &resolved, sandboxed, what)?
-                }
-            }
-            None => root,
-        };
-        if sandboxed {
-            std::fs::create_dir_all(&cwd).map_err(|error| {
-                CapabilityError::Failed(format!("create {}: {error}", cwd.display()))
-            })?;
-        }
+        let cwd = self.scoped_cwd(grant.cwd, cwd)?;
         run_with_limits(&cmd, &args, &cwd, grant.timeout_seconds)
     }
 }
@@ -829,6 +1134,20 @@ fn split_host_port(address: &str) -> Result<(String, u16), CapabilityError> {
 /// The effective exec timeout: the grant's budget clamped to the cap. The CLI
 /// validates at grant time, so only a hand-edited `grants.json` can come in
 /// over the cap — the clamp is the last-resort guard, and it says so.
+/// The effective per-child budget for `proc`: the grant's value clamped to its
+/// own cap (600s by default, 1800s at most — deliberately independent of
+/// `exec`'s 300s, which is the point of a separate capability).
+fn effective_proc_timeout(timeout_seconds: u64) -> std::time::Duration {
+    let clamped = timeout_seconds.min(kiqi_plugin::grants::PROC_TIMEOUT_MAX_SECONDS);
+    if clamped != timeout_seconds {
+        eprintln!(
+            "[kiqi-plugin] proc grant timeout {timeout_seconds}s exceeds the {clamped}s cap; \
+             clamped (a hand-edited grants.json is the only way in past the CLI's check)"
+        );
+    }
+    std::time::Duration::from_secs(clamped)
+}
+
 fn effective_exec_timeout(timeout_seconds: u64) -> std::time::Duration {
     let clamped = timeout_seconds.min(kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS);
     if clamped != timeout_seconds {
@@ -838,6 +1157,58 @@ fn effective_exec_timeout(timeout_seconds: u64) -> std::time::Duration {
         );
     }
     std::time::Duration::from_secs(clamped)
+}
+
+/// Hard cap on one line of a child's stdout, applied by the reader thread; the
+/// guest's `max-bytes` truncates further. Bounds what a single line can cost.
+const PROC_LINE_CAP: usize = 1024 * 1024;
+
+/// How much of a child's stderr is kept for `read-stderr`.
+const PROC_STDERR_CAP: usize = 256 * 1024;
+
+/// How many lines (or stdin chunks) may sit in a child's channel before the
+/// reader/writer blocks. This is the backpressure that keeps a chatty child
+/// from buffering the host's memory.
+const PROC_CHANNEL_DEPTH: usize = 1024;
+
+/// One child spawned through `proc`.
+///
+/// Three helper threads keep the guest from blocking the host: stdout is framed
+/// into lines, stderr is collected, and stdin is written. Each channel is
+/// bounded and every wait is deadline-checked, so neither a silent child nor a
+/// child that stops reading can wedge the call.
+struct ProcChild {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+    stderr: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    stdin: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    writer: Option<std::thread::JoinHandle<()>>,
+    /// When this child's granted budget runs out.
+    deadline: std::time::Instant,
+}
+
+impl ProcChild {
+    /// Kill the child's whole process group, reap it, and stop its writers.
+    /// Idempotent: a child that already exited is simply reaped.
+    fn shutdown(&mut self) {
+        #[cfg(unix)]
+        {
+            // SAFETY: `kill` with a negative pid signals the process group the
+            // child was started in (`process_group(0)` in `spawn_proc`); ESRCH
+            // (already gone) is the common case and is ignored.
+            unsafe {
+                libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        // Dropping the sender ends the writer thread (its `write_all` fails on
+        // the closed pipe); joining keeps shutdown deterministic.
+        self.stdin = None;
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
+    }
 }
 
 /// Spawn, capture output with a byte cap, and enforce a wall-clock deadline.
@@ -1041,6 +1412,8 @@ impl WasmPlugin {
                 project_dir: options.project_dir.clone(),
                 sockets: std::collections::HashMap::new(),
                 next_socket: 1,
+                procs: std::collections::HashMap::new(),
+                next_proc: 1,
                 limits,
             },
         );
@@ -1109,7 +1482,10 @@ impl PluginTrait for WasmPlugin {
             return Vec::new();
         };
         let guest = inner.guest.kiqi_plugin_plugin_api();
-        match guest.call_list_tools(&mut inner.store) {
+        let result = guest.call_list_tools(&mut inner.store);
+        // Spawning in a metadata call is legal; nothing survives it either.
+        inner.store.data_mut().reap_procs();
+        match result {
             Ok(specs) => specs
                 .into_iter()
                 .map(|spec| ToolSpec {
@@ -1132,7 +1508,10 @@ impl PluginTrait for WasmPlugin {
             return Vec::new();
         };
         let guest = inner.guest.kiqi_plugin_plugin_api();
-        match guest.call_list_commands(&mut inner.store) {
+        let result = guest.call_list_commands(&mut inner.store);
+        // Spawning in a metadata call is legal; nothing survives it either.
+        inner.store.data_mut().reap_procs();
+        match result {
             Ok(specs) => specs
                 .into_iter()
                 .map(|spec| CommandSpec {
@@ -1161,6 +1540,8 @@ impl PluginTrait for WasmPlugin {
             arguments,
         );
         clear_context();
+        // A `proc` handle lives for this call and nothing beyond it.
+        inner.store.data_mut().reap_procs();
         match result {
             Ok(Ok(text)) => Ok(text),
             Ok(Err(error)) => Err(map_plugin_error(error)),
@@ -1177,7 +1558,10 @@ impl PluginTrait for WasmPlugin {
             return Vec::new();
         };
         let guest = inner.guest.kiqi_plugin_plugin_api();
-        match guest.call_list_flags(&mut inner.store) {
+        let result = guest.call_list_flags(&mut inner.store);
+        // Spawning in a metadata call is legal; nothing survives it either.
+        inner.store.data_mut().reap_procs();
+        match result {
             Ok(specs) => specs
                 .into_iter()
                 .map(|spec| FlagSpec {
@@ -1195,7 +1579,10 @@ impl PluginTrait for WasmPlugin {
             return Vec::new();
         };
         let guest = inner.guest.kiqi_plugin_plugin_api();
-        match guest.call_list_shortcuts(&mut inner.store) {
+        let result = guest.call_list_shortcuts(&mut inner.store);
+        // Spawning in a metadata call is legal; nothing survives it either.
+        inner.store.data_mut().reap_procs();
+        match result {
             Ok(specs) => specs
                 .into_iter()
                 .map(|spec| ShortcutSpec {
@@ -1220,6 +1607,8 @@ impl PluginTrait for WasmPlugin {
             .kiqi_plugin_plugin_api()
             .call_before_agent_start(&mut inner.store, &prompt.to_string());
         clear_context();
+        // A `proc` handle lives for this call and nothing beyond it.
+        inner.store.data_mut().reap_procs();
         result.ok().flatten()
     }
 
@@ -1229,9 +1618,10 @@ impl PluginTrait for WasmPlugin {
             return Vec::new();
         };
         let guest = inner.guest.kiqi_plugin_plugin_api();
-        guest
-            .call_list_probe_points(&mut inner.store)
-            .unwrap_or_default()
+        let points = guest.call_list_probe_points(&mut inner.store);
+        // Spawning in a metadata call is legal; nothing survives it either.
+        inner.store.data_mut().reap_procs();
+        points.unwrap_or_default()
     }
 
     fn probe(&self, point: &str, payload: &serde_json::Value, caps: &HostCaps<'_>) -> Verdict {
@@ -1246,6 +1636,8 @@ impl PluginTrait for WasmPlugin {
             &payload.to_string(),
         );
         clear_context();
+        // A `proc` handle lives for this call and nothing beyond it.
+        inner.store.data_mut().reap_procs();
         match result {
             Ok(WitVerdict::Continue) => Verdict::Continue,
             Ok(WitVerdict::Replace(json)) => {
@@ -1279,6 +1671,8 @@ impl PluginTrait for WasmPlugin {
                 .kiqi_plugin_plugin_api()
                 .call_call_tool(&mut inner.store, name, &arguments);
         clear_context();
+        // A `proc` handle lives for this call and nothing beyond it.
+        inner.store.data_mut().reap_procs();
 
         match result {
             Ok(Ok(tool_result)) => Ok(to_tool_outcome(tool_result)),
@@ -1302,6 +1696,8 @@ impl PluginTrait for WasmPlugin {
             .kiqi_plugin_plugin_api()
             .call_on_event(&mut inner.store, &wit);
         clear_context();
+        // A `proc` handle lives for this call and nothing beyond it.
+        inner.store.data_mut().reap_procs();
         match result {
             Ok(WitEventAction::Continue) => EventAction::Continue,
             Ok(WitEventAction::Claimed) => EventAction::Claimed,
@@ -1414,6 +1810,8 @@ mod tests {
             project_dir: None,
             sockets: std::collections::HashMap::new(),
             next_socket: 1,
+            procs: std::collections::HashMap::new(),
+            next_proc: 1,
             limits: wasmtime::StoreLimitsBuilder::new().build(),
         }
     }

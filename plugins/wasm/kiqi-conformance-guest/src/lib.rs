@@ -16,7 +16,7 @@
 
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
 use kiqi_plugin_guest::bindings::kiqi::plugin::{
-    exec, fs, log, net_http, net_sockets, progress, types, ui,
+    exec, fs, log, net_http, net_sockets, proc, progress, types, ui,
 };
 
 const TOOL: &str = "conformance";
@@ -75,6 +75,50 @@ fn exec_request(arguments: &str) -> Option<(String, Vec<String>, Option<String>)
         .and_then(|cwd| cwd.as_str())
         .map(str::to_string);
     Some((cmd, args, cwd))
+}
+
+/// A `proc` exercise from the tool arguments, when the caller supplied one.
+struct ProcRequest {
+    cmd: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    line: Option<String>,
+    count: usize,
+    keep: bool,
+}
+
+fn proc_request(arguments: &str) -> Option<ProcRequest> {
+    let spec = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+    let spec = spec.get("proc")?;
+    Some(ProcRequest {
+        cmd: spec.get("cmd")?.as_str()?.to_string(),
+        args: spec
+            .get("args")
+            .and_then(|args| args.as_array())
+            .map(|args| {
+                args.iter()
+                    .filter_map(|arg| arg.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        cwd: spec
+            .get("cwd")
+            .and_then(|cwd| cwd.as_str())
+            .map(str::to_string),
+        line: spec
+            .get("line")
+            .and_then(|line| line.as_str())
+            .map(str::to_string),
+        count: spec
+            .get("count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1)
+            .max(1) as usize,
+        keep: spec
+            .get("keep")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
 }
 
 /// The `address` field of the tool arguments, when the caller supplied one.
@@ -203,6 +247,76 @@ impl Guest for Conformance {
         }
 
         log::write(types::LogLevel::Info, "conformance: call-tool");
+        // `proc`: an interactive child, driven only when the caller asks for
+        // one. `{"proc": {"cmd", "args", "cwd", "line", "count", "keep"}}` —
+        // spawn `count` children, write `line` to the first and read its reply,
+        // and (unless `keep`) close them all. `keep` exists so a test can prove
+        // the host reaps at call end rather than trusting the guest to.
+        let proc_outcome = match proc_request(&arguments) {
+            None => "skipped".to_string(),
+            Some(request) => match proc::spawn(&request.cmd, &request.args, request.cwd.as_deref())
+            {
+                Ok(first) => {
+                    let mut spawned = vec![first];
+                    for _ in 1..request.count {
+                        match proc::spawn(&request.cmd, &request.args, request.cwd.as_deref()) {
+                            Ok(handle) => spawned.push(handle),
+                            // Report the refusal (the max-open path) and stop.
+                            Err(error) => {
+                                return Ok(types::ToolResult {
+                                    blocks: vec![types::ContentBlock::Text(format!(
+                                        "proc=denied:{}",
+                                        capability_reason(error)
+                                    ))],
+                                    is_error: false,
+                                    details: "null".to_string(),
+                                })
+                            }
+                        }
+                    }
+                    let reply = match &request.line {
+                        None => "no-line".to_string(),
+                        Some(line) => {
+                            let mut bytes = line.clone().into_bytes();
+                            bytes.push(b'\n');
+                            match proc::write(first, &bytes) {
+                                Ok(_) => match proc::read_line(first, 64 * 1024) {
+                                    Ok(Some(reply)) => reply,
+                                    Ok(None) => "eof".to_string(),
+                                    Err(error) => format!("failed:{}", capability_reason(error)),
+                                },
+                                Err(error) => format!("failed:{}", capability_reason(error)),
+                            }
+                        }
+                    };
+                    // Every `proc` function gets touched: `wait` and
+                    // `read-stderr` here, `kill` below (and by the host's own
+                    // end-of-call reap when `keep` is set).
+                    let (waited, stderr_len) = if request.keep {
+                        ("skipped".to_string(), 0)
+                    } else {
+                        let code = match proc::wait(first, 2_000) {
+                            Ok(Some(code)) => code.to_string(),
+                            Ok(None) => "running".to_string(),
+                            Err(error) => format!("failed:{}", capability_reason(error)),
+                        };
+                        let bytes = proc::read_stderr(first, 4096).unwrap_or_default();
+                        (code, bytes.len())
+                    };
+                    if !request.keep {
+                        for handle in &spawned {
+                            let _ = proc::kill(*handle);
+                        }
+                    }
+                    format!(
+                        "spawned={} reply={reply} wait={waited} stderr={stderr_len}",
+                        spawned.len()
+                    )
+                }
+                Err(error) => capability_reason(error),
+            },
+        };
+
         progress::emit(&types::ProgressBlock::Text("first".to_string()));
         progress::emit(&types::ProgressBlock::Json("{\"step\":2}".to_string()));
 
@@ -274,7 +388,7 @@ impl Guest for Conformance {
         progress::emit(&types::ProgressBlock::Text("last".to_string()));
         Ok(types::ToolResult {
             blocks: vec![types::ContentBlock::Text(format!(
-                "{arguments}|ui={ui}|fs={fs_outcome}|exec={exec_outcome}|socket={socket_outcome}"
+                "{arguments}|ui={ui}|fs={fs_outcome}|exec={exec_outcome}|proc={proc_outcome}|socket={socket_outcome}"
             ))],
             is_error: false,
             // `details` is how the host carries state that survives fork/switch.

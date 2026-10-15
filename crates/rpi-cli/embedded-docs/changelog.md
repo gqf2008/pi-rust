@@ -13,6 +13,19 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
+- **`proc` (ABI 0.7.0): a child process the plugin may talk to for the length
+  of one tool call** — `spawn` / `write` / `read-line` / `read-stderr` /
+  `wait` / `kill`, handle-based like `net-sockets`. Its grant carries the
+  policy (`--command`/`--cwd` as `exec`, `--timeout` default 600s / cap
+  1800s, `--max-open` default 100). Handles die with the call: the host kills
+  each child's process group and reaps it when the calling entry point
+  returns, so a guest that forgets `kill` or traps leaves nothing behind
+  (asserted on the OS, not on the host's bookkeeping). It exists to migrate
+  `rpi-codegraph`, whose search runs a per-call MCP server over stdio; it
+  deliberately does not give plugins a subprocess that outlives a call —
+  rpi-orchestrator's background model needs the host to own the scheduler,
+  which is a separate design.
+
 - **`ki insmod <path.wasm>` / `ki rmmod <id>`** — kernel-flavoured top-level
   commands for the wasm tier, identical to `ki plugin install` /
   `ki plugin uninstall` (same flags, same move-aside uninstall). They exist so

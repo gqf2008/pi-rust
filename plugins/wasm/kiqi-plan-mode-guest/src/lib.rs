@@ -1,4 +1,4 @@
-//! `rpi-plan-mode` ported to the wasm ABI (0.6.0).
+//! `rpi-plan-mode` ported to the wasm ABI (0.7.0).
 //!
 //! Plan mode is a *session* plugin: it swaps the active tool set, persists its
 //! state as a custom entry, restores it from the session branch, and can submit a

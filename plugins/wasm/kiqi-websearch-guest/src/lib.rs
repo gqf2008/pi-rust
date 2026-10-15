@@ -1,4 +1,4 @@
-//! `rpi-websearch` ported to the wasm ABI (0.6.0).
+//! `rpi-websearch` ported to the wasm ABI (0.7.0).
 //!
 //! The compile-time plugin builds a `reqwest` client and talks to two keyless
 //! HTTPS endpoints directly — the DuckDuckGo Instant Answer API (primary) and

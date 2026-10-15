@@ -31,7 +31,7 @@
 /// runtime grant check inside each implementation — there is no
 /// instantiation-time manifest rejection; `ki plugin install` is what lists
 /// declared capabilities and asks the user.
-package kiqi:plugin@0.6.0;
+package kiqi:plugin@0.7.0;
 
 /// Types shared across the host <-> plugin boundary.
 interface types {
@@ -266,6 +266,43 @@ interface exec {
     run: func(cmd: string, args: list<string>, cwd: option<string>) -> result<string, capability-error>;
 }
 
+/// A child process the guest may *talk to* — spawn, write its stdin, read a
+/// line of its stdout, wait, kill. Same enforcement as `exec` (bare command
+/// name against the grant's allow-list, the same cwd scope, a scrubbed env,
+/// the child in its own process group), plus one hard rule:
+///
+/// **A handle lives for the duration of one tool call.** When the call
+/// returns — normally, with an error, trapped, or cancelled — the host closes
+/// every handle and kills each child's whole process group. There is no
+/// cross-call lifetime: a plugin that wants a resident subprocess is out of
+/// this interface's scope, deliberately (see docs/design/plugin-process-capability.md).
+interface proc {
+    use types.{capability-error};
+
+    /// Start a child. `cwd` follows the grant's scope exactly as `exec` does.
+    /// Refused when the grant is missing, the command is not allow-listed, or
+    /// the call already holds the grant's maximum number of handles.
+    spawn: func(cmd: string, args: list<string>, cwd: option<string>) -> result<u32, capability-error>;
+
+    /// Write to the child's stdin. Returns the number of bytes accepted; the
+    /// host bounds the buffer and short writes are reported, not swallowed.
+    write: func(handle: u32, bytes: list<u8>) -> result<u64, capability-error>;
+
+    /// Read one line of the child's stdout (line ending stripped). `none` means
+    /// the stream ended. Blocks until a line, EOF, or the child's budget runs
+    /// out (then `failed`). A line longer than `max-bytes` is truncated.
+    read-line: func(handle: u32, max-bytes: u64) -> result<option<string>, capability-error>;
+
+    /// Whatever the child has written to stderr so far (never blocks).
+    read-stderr: func(handle: u32, max-bytes: u64) -> result<list<u8>, capability-error>;
+
+    /// Wait up to `timeout-ms` for the child to exit. `none` means still running.
+    wait: func(handle: u32, timeout-ms: u64) -> result<option<s32>, capability-error>;
+
+    /// Kill the child's process group and close the handle. Idempotent.
+    kill: func(handle: u32) -> result<_, capability-error>;
+}
+
 /// What a plugin contributes to the runtime.
 interface plugin-api {
     use types.{command-spec, event, event-action, flag-spec, plugin-error, shortcut-spec, tool-result, tool-spec, verdict};
@@ -309,6 +346,7 @@ world plugin {
     import fs;
     import net-sockets;
     import exec;
+    import proc;
 
     export plugin-api;
 }

@@ -1,6 +1,6 @@
 # wasm 插件层 — 交接文档
 
-> 状态：**可用**。契约 `kiqi:plugin@0.6.0`，能力全实现，限额齐全，CI 全绿。
+> 状态：**可用**。契约 `kiqi:plugin@0.7.0`，能力全实现，限额齐全，CI 全绿。
 > 分支：`fork/main`；设计细节见 `docs/design/plugin-abi.md`（§6.x 是逐轮记录）与 `docs/design/plugin-trait.md`。
 
 ## 1. 这是什么
@@ -47,6 +47,7 @@
 | `net-http` | `{hosts:[…]}` | 逐跳白名单（重定向也查）；响应体上限 **8 MiB** |
 | `fs` | `true` | 监禁在 `plugins/<id>/data/`（词法 + 符号链接两层），监禁即策略 |
 | `exec` | `{commands:[…], cwd?, timeout-seconds?}` | 裸命令名（无 shell）；cwd 随授权给范围：`plugin-data`（默认，关在 data 目录）或 `project`（关在**项目目录** = 宿主进程 cwd，`ki` 从不 chdir），词法 + 符号链接两层与 `fs` 同款；环境清空只回填 `PATH`；输出各 **256 KiB**；超时随授权（默认 **30s**、上限 **300s**，CLI 拒超、宿主兜底 clamp）；子进程独立进程组、结束即收整组 |
+| `proc` | `{commands:[…], cwd?, timeout-seconds?, max-open?}` | **调用内**可交互子进程（spawn/write/read-line/wait/kill）；命令白名单、cwd 同 exec 的 scope、`--timeout` 默认 **600s**/上限 1800s、`--max-open` 默认 **100**/上限 256；句柄只活一次调用，返回即杀组收尸 |
 | `net-sockets` | `{hosts:[…]}` | host 白名单；**宿主持 socket**，guest 只拿 `u32` 句柄 |
 
 > ⚠️ exec 的子进程**不被文件系统沙箱化**：cwd jail 约束的是“从哪起跑”，不是“能碰哪”——
@@ -97,7 +98,7 @@ wasm-tools component wit plugins/kiqi-plugin.wit
 ## 6. 测试与 CI
 
 ```bash
-cargo test -p kiqi-plugin-host --lib --test e2e      # 32 e2e + 5 单测
+cargo test -p kiqi-plugin-host --lib --test e2e      # 36 e2e + 5 单测
 cargo test -p rpi-plan-mode-core                      # 6
 cargo test -p rpi-lens                                # 3
 cargo test -p kiqi-plugin --lib                       # 7

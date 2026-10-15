@@ -1,4 +1,4 @@
-//! `rpi-subagents` ported to the wasm ABI (0.6.0).
+//! `rpi-subagents` ported to the wasm ABI (0.7.0).
 //!
 //! The plugin registers one tool, `delegate_task`, which validates its arguments
 //! and emits a bounded, non-recursive delegation envelope. That is *all* the

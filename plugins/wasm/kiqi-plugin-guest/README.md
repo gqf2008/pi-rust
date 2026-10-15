@@ -1,6 +1,6 @@
 # kiqi-plugin-guest
 
-Guest SDK for writing **kiqi wasm plugins** (component model, ABI 0.6.0).
+Guest SDK for writing **kiqi wasm plugins** (component model, ABI 0.7.0).
 
 Wraps `wit_bindgen::generate!` over
 [`plugins/kiqi-plugin.wit`](../../kiqi-plugin.wit). A plugin crate implements the

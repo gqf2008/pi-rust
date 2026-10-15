@@ -1,4 +1,4 @@
-//! `rpi-lens` ported to the wasm ABI (0.6.0).
+//! `rpi-lens` ported to the wasm ABI (0.7.0).
 //!
 //! The compile-time plugin spawns `git`/`cargo` itself with `Command`. A wasm
 //! guest has no process table of its own, so the check runs through the host's
