@@ -139,11 +139,42 @@ pub fn dispatch(
 /// commits the node's terminal state, and unregisters itself — guaranteed, even
 /// if the child logic panics, so a `dispatch` waiting for the running set to
 /// drain cannot hang forever.
+/// Unregisters a node worker from the running set on **every** exit path.
+///
+/// A `Drop` guard rather than trailing statements: an early `return` for a
+/// stale result, or a panic inside the worker, must not leave the token in the
+/// map — `wait_for_drain` returns only when the set empties, so a leaked entry
+/// hangs every later draining `dispatch` (and `plan cancel` would find the
+/// dead node's token). Drop runs on returns and unwinds alike.
+struct Unregister {
+    token: Control,
+    id: String,
+    progress_tx: Progress,
+}
+
+impl Drop for Unregister {
+    fn drop(&mut self) {
+        running()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|_, control| !control.same_token_as(&self.token));
+        progress(
+            &self.progress_tx,
+            &format!("[dispatch] {} finished", self.id),
+        );
+    }
+}
+
 fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Progress) {
     let generation = crate::current_generation();
     let node_revision = node.revision;
     let token = control.clone();
     std::thread::spawn(move || {
+        let _unregister = Unregister {
+            token: token.clone(),
+            id: id.clone(),
+            progress_tx: progress_tx.clone(),
+        };
         progress(&progress_tx, &format!("[dispatch] {id} running"));
         let cleanup_id = id.clone();
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -197,21 +228,17 @@ fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Prog
             // `running` and any draining wait never returns.
             let mut graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
             if let Some(slot) = graph.get_mut(&cleanup_id) {
-                if slot.revision != node_revision {
-                    return;
-                }
-                if slot.status == Status::Running {
+                // A reused id belongs to the fresh node instance: leave its
+                // terminal state alone. (Unregistration is the Drop guard's
+                // job, so this must not `return` out of the worker.)
+                if slot.revision == node_revision && slot.status == Status::Running {
                     slot.status = Status::Failed;
                     slot.result = Some("node worker panicked".into());
                 }
             }
             graph.propagate_skips();
         }
-        running()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .retain(|_, control| !control.same_token_as(&token));
-        progress(&progress_tx, &format!("[dispatch] {cleanup_id} finished"));
+        // Cleanup (unregister + the "finished" line) is the Drop guard's.
     });
 }
 
@@ -323,12 +350,81 @@ mod tests {
         assert!(verify_node(None, Some("false")).is_err());
     }
 
+    /// The process-wide running set is shared by every test in this binary,
+    /// and `wait_for_drain` waits for it to EMPTY — so a test that populates it
+    /// must not overlap another. Both tests that touch it take this lock.
+    static RUNNING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn wait_returns_immediately_when_nothing_runs() {
+        let _serialize = RUNNING_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Must not block when the running set is empty.
         let start = Instant::now();
         wait_for_drain(None);
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    /// The cleanup guard unregisters its own token and nothing else: a same-id
+    /// node re-dispatched while the old worker winds down must keep its entry
+    /// (the id-keyed remove this replaced would have deleted it).
+    #[test]
+    fn the_unregister_guard_removes_only_its_own_token() {
+        let _serialize = RUNNING_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let token = Control::default();
+        let other = Control::default();
+        {
+            let mut map = running().lock().unwrap_or_else(|p| p.into_inner());
+            map.clear();
+            map.insert("guard-node".to_string(), token.clone());
+            map.insert("guard-other".to_string(), other.clone());
+        }
+        drop(Unregister {
+            token: token.clone(),
+            id: "guard-node".into(),
+            progress_tx: tx,
+        });
+        let map = running().lock().unwrap_or_else(|p| p.into_inner());
+        assert!(map.get("guard-node").is_none(), "its own token is gone");
+        assert!(
+            map.get("guard-other").is_some(),
+            "another node's token stays"
+        );
+        drop(map);
+        running().lock().unwrap_or_else(|p| p.into_inner()).clear();
+    }
+
+    /// Regression for the hang class: a worker that panics must still
+    /// unregister (Drop runs on unwind), or every later draining `dispatch`
+    /// waits forever on a set that can never empty.
+    #[test]
+    fn the_unregister_guard_runs_through_a_panic() {
+        let _serialize = RUNNING_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let token = Control::default();
+        {
+            let mut map = running().lock().unwrap_or_else(|p| p.into_inner());
+            map.clear();
+            map.insert("guard-panic".to_string(), token.clone());
+        }
+        let token_for_thread = token.clone();
+        let joined = std::thread::spawn(move || {
+            let _guard = Unregister {
+                token: token_for_thread,
+                id: "guard-panic".into(),
+                progress_tx: tx,
+            };
+            panic!("node worker exploded");
+        })
+        .join();
+        assert!(joined.is_err(), "the worker thread panicked");
+        assert!(
+            running()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty(),
+            "the guard unregistered through the unwind"
+        );
     }
 
     #[test]
