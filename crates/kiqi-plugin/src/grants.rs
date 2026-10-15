@@ -288,10 +288,18 @@ pub fn allows(list: &[String], value: &str) -> bool {
         .any(|allowed| allowed == "*" || allowed == value)
 }
 
-/// The agent data directory: `$KI_AGENT_DIR`, else `$HOME/.ki/agent`.
+/// The agent data directory: `$KI_AGENT_DIR`, else the CLI's own relocation
+/// knob `$KI_CODING_AGENT_DIR` (which is what actually moves `~/.ki`), else
+/// `$HOME/.ki/agent`.
+///
+/// Reading only `KI_AGENT_DIR` — a name nothing in the tree sets — meant an
+/// isolated run (`KI_CODING_AGENT_DIR=/tmp/profile ki`) still discovered, and
+/// granted, the plugins installed in the default profile.
 pub fn agent_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("KI_AGENT_DIR") {
-        return Some(PathBuf::from(dir));
+    for var in ["KI_AGENT_DIR", "KI_CODING_AGENT_DIR"] {
+        if let Some(dir) = std::env::var_os(var) {
+            return Some(PathBuf::from(dir));
+        }
     }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ki").join("agent"))
 }
@@ -317,6 +325,18 @@ pub fn plugin_dir_at(root: &std::path::Path, plugin_id: &str) -> PathBuf {
     root.join("plugins").join(plugin_id)
 }
 
+/// The infix `ki plugin uninstall` renames a plugin directory with.
+pub const UNINSTALLED_INFIX: &str = ".removed-";
+
+/// True when a directory under `plugins/` is one `uninstall` moved aside.
+///
+/// The loader and the installer must agree: a moved-aside directory still
+/// holds its `plugin.wasm` and `grants.json`, so treating it as installed
+/// would keep loading (and granting) a plugin the user asked to remove.
+pub fn is_uninstalled_dir_name(name: &str) -> bool {
+    name.contains(UNINSTALLED_INFIX)
+}
+
 /// Plugin ids that have a directory under `plugins/`.
 pub fn installed_plugins() -> Vec<String> {
     agent_dir()
@@ -333,6 +353,7 @@ pub fn installed_plugins_at(root: &std::path::Path) -> Vec<String> {
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
         .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| !is_uninstalled_dir_name(name))
         .collect();
     ids.sort();
     ids

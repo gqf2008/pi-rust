@@ -79,6 +79,10 @@ struct UpdateCache {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct UpdateCacheFreshness {
+    /// Written as `rpi` before the fork renamed the CLI; both spellings are
+    /// read, or an existing cache fails to deserialize (and is then silently
+    /// treated as "no cache", disabling the offline path).
+    #[serde(default, alias = "rpi")]
     ki: i64,
     #[serde(default)]
     native_packages: BTreeMap<String, i64>,
@@ -592,17 +596,34 @@ fn verify_release_checksum(url: &str, archive: &Path) -> Result<(), String> {
 
 fn sha256_file(path: &Path) -> Result<String, String> {
     let path_arg = path.to_string_lossy().to_string();
-    if let Ok(digest) = run_release_tool_capture("shasum", &["-a", "256", &path_arg]) {
-        if let Some(digest) = digest.split_whitespace().next() {
-            return Ok(digest.to_ascii_lowercase());
-        }
+    #[cfg(windows)]
+    {
+        // Windows ships neither `shasum` nor `sha256sum`; without this arm the
+        // mandatory checksum step failed every Windows self-update with
+        // "could not run sha256sum". `certutil` is part of the OS and prints
+        // the digest on its own line between two headers.
+        let output = run_release_tool_capture("certutil", &["-hashfile", &path_arg, "SHA256"])?;
+        return output
+            .lines()
+            .map(str::trim)
+            .find(|line| line.len() == 64 && line.chars().all(|c| c.is_ascii_hexdigit()))
+            .map(str::to_ascii_lowercase)
+            .ok_or_else(|| "could not read the SHA-256 digest from certutil".to_string());
     }
-    let digest = run_release_tool_capture("sha256sum", &[&path_arg])?;
-    digest
-        .split_whitespace()
-        .next()
-        .map(str::to_ascii_lowercase)
-        .ok_or_else(|| "could not compute the archive checksum".to_string())
+    #[cfg(not(windows))]
+    {
+        if let Ok(digest) = run_release_tool_capture("shasum", &["-a", "256", &path_arg]) {
+            if let Some(digest) = digest.split_whitespace().next() {
+                return Ok(digest.to_ascii_lowercase());
+            }
+        }
+        let digest = run_release_tool_capture("sha256sum", &[&path_arg])?;
+        digest
+            .split_whitespace()
+            .next()
+            .map(str::to_ascii_lowercase)
+            .ok_or_else(|| "could not compute the archive checksum".to_string())
+    }
 }
 
 fn run_release_tool_capture(program: &str, args: &[&str]) -> Result<String, String> {
@@ -809,10 +830,14 @@ fn staged_pending_version(update_root: &Path) -> Option<semver::Version> {
 }
 
 fn staged_rpi_file_name() -> &'static str {
+    // The staged binary is written under the *executable* name
+    // (`bin/<COMMAND_NAME>`, see `install_release_into`), not the brand:
+    // `APP_NAME` is "kiqi" since the fork rename, so probing it found nothing
+    // and every staged update was invisible on Unix.
     if cfg!(windows) {
         "ki.exe"
     } else {
-        crate::APP_NAME
+        crate::COMMAND_NAME
     }
 }
 

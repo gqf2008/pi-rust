@@ -77,7 +77,7 @@ jobs:
           cargo build --locked \
             -p rpi-todo -p rpi-lens -p rpi-webfetch -p rpi-websearch \
             -p rpi-subagents -p rpi-permissions -p rpi-goal -p rpi-plan-mode \
-            -p rpi-codegraph -p rpi-ask-user -p rpi-langfuse
+            -p rpi-codegraph -p rpi-ask-user -p rpi-langfuse -p rpi-orchestrator
 
   # Compile the workspace on Windows. Nothing else did: the release matrix is
   # the only place that built for Windows, so a Windows-only compile error

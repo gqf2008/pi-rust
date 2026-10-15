@@ -141,6 +141,59 @@ fn declared_surfaces(plugin: &dyn kiqi_plugin::Plugin) -> String {
     out
 }
 
+/// A plugin id names a directory under `plugins/`, so it must be exactly one
+/// plain path component. Without this, `PathBuf::join` makes an absolute id
+/// replace the whole path (`--id /home/me/notes` writes there) and `..` walks
+/// out of the store (`ki plugin uninstall ..` renames the agent directory).
+fn validate_id(id: &str) -> Result<(), String> {
+    let plain = !id.is_empty()
+        && id != "."
+        && id != ".."
+        && !id.contains('/')
+        && !id.contains('\\')
+        // The uninstall marker is reserved: the loader skips any directory
+        // carrying it, so an id that contained it would install a plugin that
+        // can never load (the two ends must agree).
+        && !kiqi_plugin::grants::is_uninstalled_dir_name(id)
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'));
+    if plain {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid plugin id `{id}`: use one plain name (letters, digits, `.`, `-`, `_`, `+`)"
+        ))
+    }
+}
+
+/// The capabilities a component declares, or an error when this build has no
+/// wasm tier.
+///
+/// `kiqi-plugin-host` is an optional dependency (the `plugin-wasm` feature,
+/// which `Cargo.toml` documents as "off only for builds that want the leaner
+/// binary without the wasm tier"). Calling it ungated made that documented
+/// build fail to compile, so both entry points go through these shims.
+#[cfg(feature = "plugin-wasm")]
+fn declared_capabilities(wasm: &Path) -> Result<Vec<String>, String> {
+    kiqi_plugin_host::declared_capabilities(wasm)
+}
+
+#[cfg(not(feature = "plugin-wasm"))]
+fn declared_capabilities(_wasm: &Path) -> Result<Vec<String>, String> {
+    Err("this build has no wasm plugin tier (`plugin-wasm` is disabled)".to_string())
+}
+
+#[cfg(feature = "plugin-wasm")]
+fn capability_is_enforced(name: &str) -> bool {
+    kiqi_plugin_host::capability_is_enforced(name)
+}
+
+#[cfg(not(feature = "plugin-wasm"))]
+fn capability_is_enforced(_name: &str) -> bool {
+    false
+}
+
 fn grant(args: &[String]) -> i32 {
     let parsed = match parse_target(args) {
         Ok(parsed) => parsed,
@@ -310,6 +363,10 @@ fn parse_target(args: &[String]) -> Result<Target, i32> {
         );
         return Err(2);
     };
+    if let Err(error) = validate_id(&id) {
+        eprintln!("error: {error}");
+        return Err(2);
+    }
     Ok(Target {
         id,
         capability,
@@ -470,7 +527,11 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
             .unwrap_or("plugin")
             .to_string()
     });
-    let declared = match kiqi_plugin_host::declared_capabilities(wasm) {
+    if let Err(error) = validate_id(&id) {
+        eprintln!("error: {error}");
+        return 2;
+    }
+    let declared = match declared_capabilities(wasm) {
         Ok(caps) => caps,
         Err(error) => {
             eprintln!("error: {error}");
@@ -573,7 +634,7 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
     let unenforceable: Vec<&str> = declared
         .iter()
         .map(String::as_str)
-        .filter(|capability| !kiqi_plugin_host::capability_is_enforced(capability))
+        .filter(|capability| !capability_is_enforced(capability))
         .collect();
     if !unenforceable.is_empty() {
         println!(
@@ -612,6 +673,10 @@ fn uninstall_into(args: &[String], root: Option<&Path>) -> i32 {
         eprintln!("error: `ki plugin uninstall <id>` needs a plugin id");
         return 2;
     };
+    if let Err(error) = validate_id(id) {
+        eprintln!("error: {error}");
+        return 2;
+    }
     let Some(root) = resolve_root(root) else {
         eprintln!("error: cannot resolve the agent directory");
         return 1;

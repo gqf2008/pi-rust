@@ -31,19 +31,38 @@ fn project_root(p: &Value) -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// The project rule file: the fork's `.ki` first, the pre-fork `.pi` second.
+///
+/// An existing `.pi/permissions.json` keeps being read (and written); a new one
+/// lands where `ki` keeps its project state.
 fn local_path(p: &Value) -> PathBuf {
-    project_root(p).join(".pi").join("permissions.json")
+    let root = project_root(p);
+    for dir in [".ki", ".pi"] {
+        let candidate = root.join(dir).join("permissions.json");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    root.join(".ki").join("permissions.json")
 }
 
 fn global_path() -> PathBuf {
-    if let Some(dir) = std::env::var_os("RPI_AGENT_DIR") {
-        return PathBuf::from(dir).join("permissions.json");
+    for var in ["KI_AGENT_DIR", "KI_CODING_AGENT_DIR", "RPI_AGENT_DIR"] {
+        if let Some(dir) = std::env::var_os(var) {
+            return PathBuf::from(dir).join("permissions.json");
+        }
     }
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".pi").join("agent").join("permissions.json")
+    for dir in [".ki", ".pi"] {
+        let candidate = home.join(dir).join("agent").join("permissions.json");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    home.join(".ki").join("agent").join("permissions.json")
 }
 
 fn parse_rules(value: Value) -> Result<Rules, String> {

@@ -301,7 +301,12 @@ impl Event {
     /// `EventToolResult` fields (`tool_call_id` / `tool_name` / `result` /
     /// `is_error`), where `result` is a JSON *string* that is parsed here.
     pub fn tool_result(&self) -> Option<ToolResult> {
-        if self.tag != EventTag::ToolResult {
+        // Both tags carry a tool result, exactly as the native
+        // `rpi_plugin_sdk::EventView::tool_result` does: the host fans a
+        // finished tool call out as `ToolExecutionEnd` (the compile-time
+        // dispatcher routes that tag to the same handler), so accepting only
+        // `ToolResult` silently turned those handlers into no-ops.
+        if !matches!(self.tag, EventTag::ToolResult | EventTag::ToolExecutionEnd) {
             return None;
         }
         let get = |key: &str| self.payload.get(key);

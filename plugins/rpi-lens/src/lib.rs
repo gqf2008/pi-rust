@@ -40,6 +40,12 @@ pub(crate) fn code_lens(params: &Value) -> Result<String, String> {
     let mut child = command
         .spawn()
         .map_err(|err| format!("unable to run {program}: {err}"))?;
+    // Drain both pipes on their own threads before waiting. A check that writes
+    // more than the pipe buffer (64 KiB) otherwise blocks inside `write` while
+    // this thread sits in `wait_timeout`: the deadline fires, the child is
+    // killed, and its report is reported as a timeout instead of returned.
+    let stdout_reader = child.stdout.take().map(spawn_reader);
+    let stderr_reader = child.stderr.take().map(spawn_reader);
     if child
         .wait_timeout(Duration::from_secs(timeout))
         .map_err(|err| format!("failed while waiting for {check}: {err}"))?
@@ -49,17 +55,36 @@ pub(crate) fn code_lens(params: &Value) -> Result<String, String> {
         let _ = child.wait();
         return Err(format!("{check} timed out after {timeout}s"));
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|err| format!("failed to collect {check} output: {err}"))?;
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    let status = child
+        .wait()
+        .map_err(|err| format!("failed to collect {check} status: {err}"))?;
+    let stdout = join_reader(stdout_reader);
+    let stderr = join_reader(stderr_reader);
+    let mut text = stdout;
+    text.push_str(&stderr);
     truncate_output(&mut text);
     Ok(format!(
         "check={check} exit={}\n{}",
-        output.status.code().unwrap_or(-1),
+        status.code().unwrap_or(-1),
         text.trim()
     ))
+}
+
+/// Read one of the child's pipes to EOF on its own thread.
+fn spawn_reader<R: std::io::Read + Send + 'static>(
+    mut reader: R,
+) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = reader.read_to_end(&mut buffer);
+        String::from_utf8_lossy(&buffer).into_owned()
+    })
+}
+
+fn join_reader(reader: Option<std::thread::JoinHandle<String>>) -> String {
+    reader
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
 }
 
 /// Cap combined output at 40_000 bytes, truncating on a char boundary:

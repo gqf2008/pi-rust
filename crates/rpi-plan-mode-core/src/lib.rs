@@ -70,9 +70,26 @@ fn restore_state(host: &dyn PlanHost) {
         }
     }
     if let Some(data) = restored {
+        let active = data.get("active").and_then(Value::as_bool).unwrap_or(false);
+        // The persisted entry records the plan, not the tool set it replaced.
+        // This process rebuilt its own tool list, so capture the live set now:
+        // without it `deactivate` has nothing to put back and would report a
+        // restore it never performed. A live set that is already the planning
+        // set carries no information (and must not clear a live capture), so
+        // it is left as `None`.
+        let previous = if active {
+            current_tools(host)
+                .ok()
+                .filter(|tools| tools != &planning_tools())
+        } else {
+            None
+        };
         let mut guard = state().lock().unwrap_or_else(|p| p.into_inner());
-        guard.active = data.get("active").and_then(Value::as_bool).unwrap_or(false);
+        guard.active = active;
         guard.plan = data.get("plan").and_then(Value::as_str).map(str::to_owned);
+        if previous.is_some() {
+            guard.previous_tools = previous;
+        }
     }
 }
 
@@ -209,21 +226,42 @@ fn activate(host: &dyn PlanHost) -> Result<bool, String> {
     Ok(true)
 }
 
-fn deactivate(host: &dyn PlanHost) -> Result<bool, String> {
+fn deactivate(host: &dyn PlanHost) -> Result<Deactivated, String> {
     let mut guard = state()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !guard.active {
-        return Ok(false);
+        return Ok(Deactivated::Inactive);
     }
-    if let Some(previous) = guard.previous_tools.take() {
-        set_tools(host, &previous)?;
-    }
+    let restored = match guard.previous_tools.take() {
+        Some(previous) => {
+            set_tools(host, &previous)?;
+            true
+        }
+        None => false,
+    };
     guard.active = false;
     let plan = guard.plan.clone();
     drop(guard);
     persist_state(host, false, plan.as_deref());
-    Ok(true)
+    Ok(if restored {
+        Deactivated::Restored
+    } else {
+        Deactivated::RestoredWithoutTools
+    })
+}
+
+/// What [`deactivate`] did, so the caller's message can match reality.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Deactivated {
+    /// Plan mode was not active; nothing changed.
+    Inactive,
+    /// Plan mode ended and the replaced tool set is back.
+    Restored,
+    /// Plan mode ended, but the replaced tool set was never recorded in this
+    /// process (the session was resumed: the stored entry keeps the plan, not
+    /// the tools), so the planning set is still active.
+    RestoredWithoutTools,
 }
 
 fn plan_status() -> String {
@@ -313,8 +351,12 @@ pub fn run_command(host: &dyn PlanHost, args: &str) -> Value {
             }
         }
         "exit" | "off" => match deactivate(host) {
-            Ok(true) => "Plan mode disabled. Full tool access restored.".to_string(),
-            Ok(false) => "Plan mode is not active.".to_string(),
+            Ok(Deactivated::Restored) => {
+                "Plan mode disabled. Full tool access restored.".to_string()
+            }
+            Ok(Deactivated::RestoredWithoutTools) => "Plan mode disabled. The tool set it replaced                  was not recorded in this session, so the planning tools are still active; the                  full set comes back on a new session."
+                .to_string(),
+            Ok(Deactivated::Inactive) => "Plan mode is not active.".to_string(),
             Err(error) => format!("Unable to leave plan mode: {error}"),
         },
         _ => match activate(host) {

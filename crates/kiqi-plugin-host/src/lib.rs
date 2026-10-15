@@ -844,13 +844,36 @@ fn effective_exec_timeout(timeout_seconds: u64) -> std::time::Duration {
 ///
 /// `timeout_seconds` is the grant's budget, clamped to
 /// [`EXEC_TIMEOUT_MAX_SECONDS`](kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS).
+/// Read `reader` to the end, keeping at most `cap` bytes.
+///
+/// Stopping at the cap and closing the pipe (`.take(cap)`) hands a still-running
+/// child an EPIPE — or a SIGPIPE, which kills a C program outright — so a
+/// command that merely produced too much output died mid-run and `exec`
+/// reported a failure instead of a truncated success. Draining the rest and
+/// discarding it truncates the report without signalling the child.
+fn drain_capped(mut reader: impl std::io::Read, cap: u64) -> Vec<u8> {
+    let mut kept = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                let room = cap.saturating_sub(kept.len() as u64) as usize;
+                if room > 0 {
+                    kept.extend_from_slice(&chunk[..read.min(room)]);
+                }
+            }
+        }
+    }
+    kept
+}
+
 fn run_with_limits(
     cmd: &str,
     args: &[String],
     cwd: &std::path::Path,
     timeout_seconds: u64,
 ) -> Result<String, CapabilityError> {
-    use std::io::Read;
     use std::process::{Command, Stdio};
     const OUTPUT_CAP: u64 = 256 * 1024;
     let timeout = effective_exec_timeout(timeout_seconds);
@@ -881,16 +904,8 @@ fn run_with_limits(
         .map_err(|error| CapabilityError::Failed(format!("spawn `{cmd}`: {error}")))?;
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
-    let stdout_reader = std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = stdout.by_ref().take(OUTPUT_CAP).read_to_end(&mut buffer);
-        buffer
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = stderr.by_ref().take(OUTPUT_CAP).read_to_end(&mut buffer);
-        buffer
-    });
+    let stdout_reader = std::thread::spawn(move || drain_capped(stdout, OUTPUT_CAP));
+    let stderr_reader = std::thread::spawn(move || drain_capped(stderr, OUTPUT_CAP));
 
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {

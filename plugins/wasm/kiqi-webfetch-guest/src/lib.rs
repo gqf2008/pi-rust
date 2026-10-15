@@ -230,6 +230,11 @@ fn blocked_ip(ip: std::net::IpAddr) -> bool {
                 || v6.is_multicast()
                 || v6.is_unique_local()
                 || v6.is_unicast_link_local()
+                // See the native face: a v4-mapped literal names an IPv4
+                // address, so judge it as one.
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| blocked_ip(std::net::IpAddr::V4(v4)))
         }
     }
 }

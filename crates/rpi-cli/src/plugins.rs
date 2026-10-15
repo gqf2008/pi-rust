@@ -1136,6 +1136,13 @@ pub fn load_wasm_hosts(plugins_dir: &std::path::Path) -> Vec<PluginHost> {
         let Some(id) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
+        // `ki plugin uninstall` moves the directory aside instead of deleting
+        // it; the moved copy still holds `plugin.wasm` and `grants.json`, so
+        // loading it would keep running (and granting) a plugin the user
+        // removed.
+        if kiqi_plugin::grants::is_uninstalled_dir_name(&id) {
+            continue;
+        }
         let wasm = entry.path().join("plugin.wasm");
         if !wasm.is_file() {
             continue;

@@ -19,7 +19,7 @@ crate-type = ["cdylib", "rlib"]
 kiqi-plugin = { path = "../../crates/kiqi-plugin" }
 rpi-plugin-sdk = { path = "../../crates/rpi-plugin-sdk" }
 serde_json = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
 url = { workspace = true }
 
 [features]

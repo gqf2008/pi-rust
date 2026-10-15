@@ -65,6 +65,13 @@ fn blocked_ip(ip: IpAddr) -> bool {
                 || v6.is_multicast()
                 || v6.is_unique_local()
                 || v6.is_unicast_link_local()
+                // `::ffff:127.0.0.1` (and `::ffff:a9fe:a9fe`) reach the IPv4
+                // address through the mapped form, so judge them as IPv4:
+                // otherwise a literal that names a private address slips past
+                // every check above and reqwest connects to it.
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| blocked_ip(IpAddr::V4(v4)))
         }
     }
 }
@@ -81,7 +88,19 @@ pub(crate) fn fetch(p: &Value) -> Result<String, String> {
         .clamp(256, 50000) as usize;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        // Every hop is checked, not just the URL the caller passed: a
+        // redirect to 127.0.0.1 (or a link-local address) otherwise issues a
+        // real request into the private network before `validate` sees the
+        // final URL — a blind SSRF with side effects.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.error("too many redirects");
+            }
+            match validate(attempt.url().as_str()) {
+                Ok(_) => attempt.follow(),
+                Err(_) => attempt.stop(),
+            }
+        }))
         .user_agent("rpi-webfetch/0.1")
         .build()
         .map_err(|e| e.to_string())?;

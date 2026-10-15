@@ -9,8 +9,11 @@ echo "================================"
 
 # 配置
 export LANGFUSE_BASE_URL="https://langfuse.laofu.online"
-export LANGFUSE_PUBLIC_KEY="pk-lf-59819655-ad12-4817-b757-f4e8ba4c09b8"
-export LANGFUSE_SECRET_KEY="sk-lf-82468d6f-9840-45f6-9e8b-35f845638fa5"
+# Never hardcode instance keys here: this file is committed. Pass them in:
+#   LANGFUSE_PUBLIC_KEY=pk-lf-... LANGFUSE_SECRET_KEY=sk-lf-... ./test-integration.sh
+: "${LANGFUSE_PUBLIC_KEY:?set LANGFUSE_PUBLIC_KEY (pk-lf-...) for the target instance}"
+: "${LANGFUSE_SECRET_KEY:?set LANGFUSE_SECRET_KEY (sk-lf-...) for the target instance}"
+export LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY
 
 # 1. 测试健康检查
 echo ""

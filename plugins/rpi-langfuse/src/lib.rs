@@ -239,7 +239,9 @@ fn is_enabled() -> bool {
 /// row), so this is strictly an operator opt-in for debugging — never a
 /// user-facing channel. Use the status line for anything the user should see.
 fn debug_log(msg: &str) {
-    if std::env::var("RPI_LANGFUSE_DEBUG").ok().as_deref() == Some("1") {
+    if env_either("KI_LANGFUSE_DEBUG", "RPI_LANGFUSE_DEBUG").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
         eprintln!("[rpi-langfuse] {msg}");
     }
 }
@@ -362,23 +364,37 @@ fn load_config_file() -> Result<FileConfig, String> {
 }
 
 fn config_path() -> Result<std::path::PathBuf, String> {
-    if let Some(path) = std::env::var_os("RPI_LANGFUSE_CONFIG") {
+    if let Some(path) = env_either("KI_LANGFUSE_CONFIG", "RPI_LANGFUSE_CONFIG") {
         let path = std::path::PathBuf::from(path);
         if !path.is_absolute() {
-            return Err("RPI_LANGFUSE_CONFIG must be an absolute path".into());
+            return Err("KI_LANGFUSE_CONFIG must be an absolute path".into());
         }
         return Ok(path);
     }
-    let project = std::env::current_dir()
-        .map_err(|e| format!("resolve current directory: {e}"))?
-        .join(".rpi")
-        .join("langfuse.json");
-    if project.is_file() {
-        return Ok(project);
+    // The fork's project directory is `.ki` (`~/.ki` for global state); the
+    // pre-fork `.rpi`/pi paths are still read so an existing setup keeps
+    // working. Reading only the old ones meant a `ki` user's
+    // `.ki/langfuse.json` (or `~/.ki/agent/langfuse.json`) was never consulted
+    // and tracing stayed silently disabled.
+    let cwd = std::env::current_dir().map_err(|e| format!("resolve current directory: {e}"))?;
+    for dir in [".ki", ".rpi"] {
+        let candidate = cwd.join(dir).join("langfuse.json");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
     }
-    home_dir()
-        .map(|home| home.join(".pi").join("agent").join("langfuse.json"))
-        .ok_or_else(|| "cannot resolve home directory for ~/.pi/agent/langfuse.json".into())
+    if let Some(root) = env_either("KI_AGENT_DIR", "KI_CODING_AGENT_DIR") {
+        return Ok(std::path::PathBuf::from(root).join("langfuse.json"));
+    }
+    let home = home_dir()
+        .ok_or_else(|| "cannot resolve home directory for ~/.ki/agent/langfuse.json".to_string())?;
+    for dir in [".ki", ".pi"] {
+        let candidate = home.join(dir).join("agent").join("langfuse.json");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Ok(home.join(".ki").join("agent").join("langfuse.json"))
 }
 
 fn home_dir() -> Option<std::path::PathBuf> {
@@ -1589,19 +1605,34 @@ fn flush_ended_spans(include_open: bool, host: &dyn StatusHost) -> Result<usize,
     match flush_otlp(spans) {
         Ok(()) => host.set_status("langfuse ✓ (trace sent)"),
         Err(e) => {
+            // The failed batch stays in the store so the next flush retries it
+            // (that is the documented behaviour) — which is exactly why the
+            // cap has to run on this path too: a dead endpoint would otherwise
+            // grow the store without bound and re-POST the whole backlog with a
+            // blocking request every turn.
             host.set_status("langfuse ✗ (flush failed)");
+            let state = tracer();
+            let mut store = state.spans.lock().unwrap();
+            trim_store(&mut store);
             return Err(e);
         }
     }
     let state = tracer();
     let mut store = state.spans.lock().unwrap();
     store.retain(|rec| rec.end_ms.is_none() && !include_open);
-    // Keep the store from growing without bound when exports keep failing.
+    trim_store(&mut store);
+    Ok(sent)
+}
+
+/// Bound the span store, oldest entries first.
+///
+/// Runs on the failure path too: spans are kept for a retry, so without this a
+/// dead (or misconfigured) endpoint turns the store into an unbounded buffer.
+fn trim_store(store: &mut Vec<SpanRecord>) {
     if store.len() > 2000 {
         let drop_to = store.len() - 1000;
         store.drain(0..drop_to);
     }
-    Ok(sent)
 }
 
 /// Report a failed export.
@@ -1798,7 +1829,7 @@ fn current_session_id(payload_session_id: Option<&str>) -> String {
     session_id_from(
         payload_session_id.map(str::to_string),
         session_id_from_tool_args(),
-        non_empty_env("RPI_SESSION_ID"),
+        non_empty_env("KI_SESSION_ID").or_else(|| non_empty_env("RPI_SESSION_ID")),
     )
 }
 
@@ -1872,6 +1903,11 @@ fn process_id() -> String {
     PROCESS_ID
         .get_or_init(|| std::process::id().to_string())
         .clone()
+}
+
+/// Read the fork's `KI_*` name, falling back to the pre-fork `RPI_*` one.
+fn env_either(new: &str, old: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(new).or_else(|| std::env::var_os(old))
 }
 
 fn non_empty_env(key: &str) -> Option<String> {
@@ -3623,7 +3659,7 @@ mod tests {
     /// ```text
     /// LANGFUSE_BASE_URL=https://langfuse.laofu.online \
     /// LANGFUSE_PUBLIC_KEY=pk-lf-... LANGFUSE_SECRET_KEY=sk-lf-... \
-    /// cargo test -p rpi-langfuse -- --ignored live_otlp_round_trip --nocapture
+    /// cargo test -p rpi-langfuse live_otlp_round_trip -- --nocapture
     /// ```
     /// End-to-end test of the *plugin* itself: it drives the real event
     /// handlers with the payload shapes the host produces, then reads the
@@ -3634,12 +3670,22 @@ mod tests {
     /// ```text
     /// LANGFUSE_BASE_URL=https://langfuse.laofu.online \
     /// LANGFUSE_PUBLIC_KEY=pk-lf-... LANGFUSE_SECRET_KEY=sk-lf-... \
-    /// cargo test -p rpi-langfuse -- --ignored live_plugin_event_flow --nocapture
+    /// cargo test -p rpi-langfuse live_plugin_event_flow -- --nocapture
     /// ```
     #[test]
-    #[ignore = "live network test"]
     fn live_plugin_event_flow() {
         let _turn_guard = turn_test_lock();
+        // A live-network test cannot run everywhere, but it must not hide
+        // behind `#[ignore]` either: no CI job passes `--ignored`, so the only
+        // test that verifies the OTLP rewrite never ran. Detect and return
+        // loudly instead (the same shape the plugin-host e2e test uses).
+        if std::env::var_os("KIQI_LANGFUSE_LIVE").is_none() {
+            eprintln!(
+                "skipping live_plugin_event_flow: set KIQI_LANGFUSE_LIVE=1 (plus \
+                 LANGFUSE_BASE_URL/LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY) to run it"
+            );
+            return;
+        }
         assert!(
             load_config().is_some(),
             "set LANGFUSE_BASE_URL/PUBLIC_KEY/SECRET_KEY first"
@@ -4054,8 +4100,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "live network test"]
     fn live_otlp_round_trip() {
+        // See `live_plugin_event_flow`: detect-and-return, never `#[ignore]`.
+        if std::env::var_os("KIQI_LANGFUSE_LIVE").is_none() {
+            eprintln!(
+                "skipping live_otlp_round_trip: set KIQI_LANGFUSE_LIVE=1 (plus \
+                 LANGFUSE_BASE_URL/LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY) to run it"
+            );
+            return;
+        }
         assert!(
             load_config().is_some(),
             "set LANGFUSE_BASE_URL/PUBLIC_KEY/SECRET_KEY first"
