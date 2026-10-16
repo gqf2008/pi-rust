@@ -565,6 +565,63 @@ impl Drop for ActiveRunLease<'_> {
     }
 }
 
+/// The pre-registration window armed by a prompt or compaction call, before
+/// its `acquire_run` registers a cancellation token. `id` is a monotonic
+/// per-harness token, so the window (and any abort latched against it) is
+/// owned by exactly one call: another lane, another operation, or a later
+/// call that arms its own window can neither consume nor clear it.
+struct StartingWindow {
+    lane: String,
+    id: u64,
+}
+
+/// Arms the pre-registration window for one prompt/compaction call. Between
+/// the invocation and `acquire_run` no cancellation token exists yet, so an
+/// `abort()` landing there latches `pending_abort` against *this* window
+/// instead of being silently refused as `no_active_run` (the defect that
+/// forced every embedder to re-issue aborts on a tick). If the call exits
+/// without registering a run (early rejection or error), the guard clears only
+/// its own latch: an idle cancel must never kill the NEXT turn.
+struct StartingGuard<'a> {
+    harness: &'a AgentHarness,
+    id: u64,
+}
+
+impl StartingGuard<'_> {
+    fn new(harness: &AgentHarness) -> StartingGuard<'_> {
+        let mut inner = harness.inner.lock().unwrap();
+        let id = inner.next_window_id.wrapping_add(1);
+        inner.next_window_id = id;
+        inner.starting_window = Some(StartingWindow {
+            lane: harness.lane.clone(),
+            id,
+        });
+        StartingGuard { harness, id }
+    }
+
+    /// The token identifying this call's window; passed to `acquire_run` so it
+    /// consumes only this call's latched abort.
+    fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl Drop for StartingGuard<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.harness.inner.lock().unwrap();
+        // Only the window this guard armed, and an abort latched against it,
+        // are this call's to clear: a guard must never wipe another call's
+        // window or its latched abort (a concurrent prompt/compaction, another
+        // lane, or a later call on the same lane).
+        if inner.pending_abort == Some(self.id) {
+            inner.pending_abort = None;
+        }
+        if inner.starting_window.as_ref().map(|w| w.id) == Some(self.id) {
+            inner.starting_window = None;
+        }
+    }
+}
+
 /// A run that recovery repaired and that can be continued without the user
 /// restating their request.
 ///
@@ -634,6 +691,18 @@ struct HarnessInner {
     provider_hooks: Option<Arc<dyn rpi_ai::ProviderHooks>>,
     closed: bool,
     active_run: Option<ActiveRun>,
+    /// The call with a prompt/compaction in flight that has not reached
+    /// `acquire_run` yet (the pre-registration window). `Some` only between
+    /// the invocation and the registration / early exit; see [`StartingGuard`].
+    starting_window: Option<StartingWindow>,
+    /// Window id ([`StartingWindow::id`]) whose abort was latched during the
+    /// pre-registration window. Consumed by that window's `acquire_run` (the
+    /// run starts pre-cancelled and promptly resolves `Aborted`), or cleared
+    /// with the window when the call exits without registering, so nothing
+    /// stale can fire into a later turn.
+    pending_abort: Option<u64>,
+    /// Monotonic source of [`StartingWindow::id`].
+    next_window_id: u64,
     steering_queue: SharedMessageQueue,
     follow_up_queue: SharedMessageQueue,
     next_run_queue: SharedMessageQueue,
@@ -756,6 +825,9 @@ impl AgentHarness {
             provider_hooks: options.provider_hooks,
             closed: false,
             active_run: None,
+            starting_window: None,
+            pending_abort: None,
+            next_window_id: 0,
             steering_queue: Arc::new(Mutex::new(MessageQueue::new(options.steering_mode))),
             follow_up_queue: Arc::new(Mutex::new(MessageQueue::new(options.follow_up_mode))),
             next_run_queue: Arc::new(Mutex::new(MessageQueue::new(QueueMode::All))),
@@ -1697,6 +1769,7 @@ impl AgentHarness {
     fn acquire_run(
         &self,
         kind: OperationKind,
+        window: u64,
     ) -> HarnessResult<(String, CancellationToken, Arc<tokio::sync::Notify>)> {
         let mut inner = self.inner.lock().unwrap();
         if inner.closed {
@@ -1714,8 +1787,24 @@ impl AgentHarness {
                 ),
             ));
         }
+        // Consume the pre-registration phase owned by THIS call: only an
+        // abort latched against this window pre-cancels the run, and only this
+        // window is retired. Another call's window / latch is left untouched
+        // (e.g. a concurrent prompt on another lane, or a compaction that
+        // acquired first), so an abort can never be consumed by the wrong
+        // operation.
+        let pre_aborted = inner.pending_abort == Some(window);
+        if pre_aborted {
+            inner.pending_abort = None;
+        }
+        if inner.starting_window.as_ref().map(|w| w.id) == Some(window) {
+            inner.starting_window = None;
+        }
         let run_id = self.session.id_generator().next();
         let signal = CancellationToken::new();
+        if pre_aborted {
+            signal.cancel();
+        }
         let idle = Arc::new(tokio::sync::Notify::new());
         inner.active_run = Some(ActiveRun {
             run_id: run_id.clone(),
@@ -2923,11 +3012,15 @@ impl AgentHarness {
 
     /// The core run loop shared by all prompt overloads + skill + template.
     async fn run_core(&self, prompts: Vec<AgentMessage>) -> HarnessResult<RunResult> {
+        // Arms the pre-registration window: until `acquire_run` registers the
+        // run, `abort()` latches instead of being refused; an early exit
+        // clears the latch (see [`StartingGuard`]).
+        let window = StartingGuard::new(self);
         let mut normalized = Vec::with_capacity(prompts.len());
         for prompt in prompts {
             normalized.push(normalize_user_images(prompt).await?);
         }
-        self.run_core_with_entry(normalized, false).await
+        self.run_core_with_entry(normalized, false, window).await
     }
 
     /// Continue a run from the assistant message at the branch tip.
@@ -2936,15 +3029,20 @@ impl AgentHarness {
     /// not run. Entering the loop *from* it executes them before the next
     /// provider request instead of sending unanswered tool calls.
     async fn run_core_from_assistant(&self) -> HarnessResult<RunResult> {
-        self.run_core_with_entry(Vec::new(), true).await
+        // The deferred-resume continuation owns a window too: an abort landing
+        // between the resume call and its registration must latch, not be
+        // refused as `no_active_run`.
+        let window = StartingGuard::new(self);
+        self.run_core_with_entry(Vec::new(), true, window).await
     }
 
     async fn run_core_with_entry(
         &self,
         prompts: Vec<AgentMessage>,
         from_assistant: bool,
+        window: StartingGuard<'_>,
     ) -> HarnessResult<RunResult> {
-        let (run_id, signal, _idle) = self.acquire_run(OperationKind::Run)?;
+        let (run_id, signal, _idle) = self.acquire_run(OperationKind::Run, window.id())?;
 
         // `nextRun` messages are consumed when a new run starts, before the
         // caller's prompt. This matches pi's ordering and keeps them durable
@@ -3602,7 +3700,10 @@ impl AgentHarness {
         &self,
         custom_instructions: Option<String>,
     ) -> HarnessResult<CompactionResult> {
-        let (run_id, signal, _idle) = self.acquire_run(OperationKind::Compaction)?;
+        // Owns a pre-registration window too: an abort landing between the
+        // `/compact` call and its registration must latch, not be refused.
+        let window = StartingGuard::new(self);
+        let (run_id, signal, _idle) = self.acquire_run(OperationKind::Compaction, window.id())?;
         let _run_lease = ActiveRunLease { harness: self };
         let recovery_tools = self.get_tools().await?;
         // `true`: a run starting here retries through its own retry loop, so a
@@ -3936,9 +4037,18 @@ impl AgentLane for AgentHarness {
         }
     }
 
+    /// Abort the lane's current operation. Three cases:
+    /// - a run is active on this lane: cancel its token (unchanged behavior);
+    /// - a prompt/compaction is starting but has not registered yet: latch it —
+    ///   `acquire_run` starts that run pre-cancelled and it promptly resolves
+    ///   `Aborted`. The returned `run_id` is empty (none was minted yet);
+    /// - neither (idle): a strict error, so an idle cancel can never kill the
+    ///   NEXT turn.
     async fn abort(&self) -> HarnessResult<AbortResult> {
         let (run_id, steer, follow_up) = {
-            let inner = self.inner.lock().unwrap();
+            // `mut` for the starting-window latch; the guard is dropped before
+            // any await (the !Send guard would not cross an await point).
+            let mut inner = self.inner.lock().unwrap();
             if inner.closed {
                 return Err(HarnessError::closed());
             }
@@ -3954,10 +4064,27 @@ impl AgentLane for AgentHarness {
                     ));
                 }
                 None => {
-                    return Err(HarnessError::no_active_run(
-                        &self.lane,
-                        "No active run to abort",
-                    ));
+                    // Latch only against a window this lane owns, and only
+                    // against its own id: a foreign lane cannot reach into it,
+                    // and the id keeps the latch bound to the call that armed
+                    // the window, so no other op can consume it.
+                    let window = inner
+                        .starting_window
+                        .as_ref()
+                        .filter(|w| w.lane == self.lane)
+                        .map(|w| w.id);
+                    match window {
+                        Some(id) => {
+                            inner.pending_abort = Some(id);
+                            (String::new(), Vec::new(), Vec::new())
+                        }
+                        None => {
+                            return Err(HarnessError::no_active_run(
+                                &self.lane,
+                                "No active run to abort",
+                            ));
+                        }
+                    }
                 }
             }
         };
@@ -5085,5 +5212,234 @@ mod session_switch_tests {
                     )
             )
         }));
+    }
+}
+
+/// The pre-registration abort window ("starting" phase). White-box on purpose:
+/// the latch state is private, and its interleavings cannot be pinned
+/// deterministically from outside the crate. `tests/harness_run_e2e.rs` covers
+/// the observable end-to-end burst behavior, but because it retries the abort
+/// it cannot by itself distinguish the latch (a retried abort also lands on the
+/// registered run); these tests are the regression guard for the latch itself.
+#[cfg(test)]
+mod starting_window_tests {
+    use super::*;
+    use crate::session::memory::{InMemorySessionStorage, SystemClock};
+    use crate::session::session::DefaultIdGenerator;
+    use crate::session::types::SessionMetadata;
+    use rpi_ai::{Api, Model};
+
+    fn opts() -> AgentHarnessOptions {
+        AgentHarnessOptions {
+            model: Model::new("m", "m", Api::Faux, "faux", "http://x"),
+            thinking_level: Default::default(),
+            active_tool_names: Vec::new(),
+            tools: Vec::new(),
+            system_prompt: None,
+            resources: AgentHarnessResources::default(),
+            stream_options: Default::default(),
+            retry: RetryPolicy::default(),
+            compaction: CompactionSettings::default(),
+            steering_mode: Default::default(),
+            follow_up_mode: Default::default(),
+            tool_execution: HarnessToolExecution::default(),
+            drive: DrivingMode::default(),
+            session: Session::new(
+                Arc::new(InMemorySessionStorage::new(
+                    SessionMetadata {
+                        id: "a".into(),
+                        created_at: 0,
+                        parent_session_id: None,
+                    },
+                    Arc::new(SystemClock),
+                    Arc::new(DefaultIdGenerator::new()),
+                )),
+                None,
+            ),
+            allow_existing_session: true,
+            models: Vec::new(),
+            to_provider_messages: None,
+            entry_projectors: Default::default(),
+            agent_emitter: None,
+            before_tool_call: None,
+            after_tool_call: None,
+            transform_context: None,
+            entry_transforms: Vec::new(),
+            provider_hooks: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn abort_during_starting_window_latches_and_starts_the_run_pre_cancelled() {
+        let harness = AgentHarness::create(opts()).await.unwrap();
+
+        // The prompt arms its window (run_core does this via `StartingGuard`);
+        // no run is registered yet.
+        let guard = StartingGuard::new(&harness);
+        assert_eq!(
+            harness
+                .inner
+                .lock()
+                .unwrap()
+                .starting_window
+                .as_ref()
+                .map(|w| w.lane.as_str()),
+            Some("main")
+        );
+
+        // Abort in the window: accepted, latched, no run id minted yet.
+        let aborted = AgentLane::abort(&harness)
+            .await
+            .expect("window abort latches");
+        assert!(aborted.run_id.is_empty(), "no run has registered yet");
+        assert!(harness.inner.lock().unwrap().pending_abort.is_some());
+
+        // The prompt registers: the latch is consumed into a pre-cancelled
+        // token, so the run starts pre-aborted and promptly resolves Aborted.
+        let (_, signal, _) = harness
+            .acquire_run(OperationKind::Run, guard.id())
+            .expect("run acquires");
+        assert!(
+            signal.is_cancelled(),
+            "the latched abort must pre-cancel the run"
+        );
+        {
+            let inner = harness.inner.lock().unwrap();
+            assert!(
+                inner.pending_abort.is_none(),
+                "the latch must be consumed, not left armed"
+            );
+            assert!(inner.starting_window.is_none());
+        }
+        harness.release_run();
+        drop(guard); // no-op: the window already closed in acquire_run
+    }
+
+    #[tokio::test]
+    async fn idle_abort_is_a_strict_error_and_latches_nothing() {
+        let harness = AgentHarness::create(opts()).await.unwrap();
+
+        // Neither active nor starting: the abort must be refused...
+        let error = AgentLane::abort(&harness).await.unwrap_err();
+        assert!(
+            matches!(error, HarnessError::NoActiveRun { .. }),
+            "expected NoActiveRun, got {error:?}"
+        );
+        // ...and latch nothing: the next run starts with a live token. An idle
+        // cancel must never kill the NEXT turn.
+        let window = StartingGuard::new(&harness);
+        let (_, signal, _) = harness
+            .acquire_run(OperationKind::Run, window.id())
+            .unwrap();
+        assert!(!signal.is_cancelled());
+        harness.release_run();
+    }
+
+    #[tokio::test]
+    async fn prompt_exit_without_registering_clears_the_latch() {
+        let harness = AgentHarness::create(opts()).await.unwrap();
+
+        // The prompt latches an abort inside its window...
+        let guard = StartingGuard::new(&harness);
+        AgentLane::abort(&harness)
+            .await
+            .expect("window abort latches");
+        assert!(harness.inner.lock().unwrap().pending_abort.is_some());
+
+        // ...then ends without registering (early rejection / error): the
+        // guard must clear the latch so nothing stale can fire later.
+        drop(guard);
+        {
+            let inner = harness.inner.lock().unwrap();
+            assert!(
+                inner.pending_abort.is_none(),
+                "a stale latch survived an unregistered prompt exit"
+            );
+            assert!(inner.starting_window.is_none());
+        }
+
+        // The LATER prompt runs with a live token (the no-latch-kill invariant).
+        let window = StartingGuard::new(&harness);
+        let (_, signal, _) = harness
+            .acquire_run(OperationKind::Run, window.id())
+            .unwrap();
+        assert!(!signal.is_cancelled());
+        harness.release_run();
+    }
+
+    #[tokio::test]
+    async fn abort_from_another_lane_during_starting_is_refused() {
+        let harness = AgentHarness::create(opts()).await.unwrap();
+        harness.session().create_lane("side", None).await.unwrap();
+
+        let guard = StartingGuard::new(&harness); // "main" is starting
+
+        // A foreign lane's abort must not reach into main's window...
+        let side = harness.lane("side");
+        let error = AgentLane::abort(side.as_ref()).await.unwrap_err();
+        assert!(
+            matches!(error, HarnessError::NoActiveRun { .. }),
+            "expected NoActiveRun, got {error:?}"
+        );
+        assert!(harness.inner.lock().unwrap().pending_abort.is_none());
+
+        // ...while the starting lane's own abort still latches.
+        AgentLane::abort(&harness)
+            .await
+            .expect("own-lane abort latches");
+        assert!(harness.inner.lock().unwrap().pending_abort.is_some());
+        drop(guard);
+    }
+
+    /// Regression: the latch is bound to the window that latched it, so a
+    /// *later* window (another lane, another operation, or a later call on the
+    /// same lane) can neither consume the earlier latch nor start pre-cancelled
+    /// with it — the mis-routing that could abort the wrong run.
+    #[tokio::test]
+    async fn a_later_window_cannot_consume_an_earlier_latch() {
+        let harness = AgentHarness::create(opts()).await.unwrap();
+
+        // main is in its window and an abort latches against that window.
+        let main_window = StartingGuard::new(&harness);
+        AgentLane::abort(&harness)
+            .await
+            .expect("main's window abort latches");
+        assert_eq!(
+            harness.inner.lock().unwrap().pending_abort,
+            Some(main_window.id())
+        );
+
+        // A second call arms its own window (overwriting the single slot) and
+        // registers first: its run must start with a LIVE token...
+        let other_window = StartingGuard::new(&harness);
+        let (_, other_signal, _) = harness
+            .acquire_run(OperationKind::Run, other_window.id())
+            .unwrap();
+        assert!(
+            !other_signal.is_cancelled(),
+            "a later window must not inherit an earlier latch"
+        );
+        // ...and main's latch must survive untouched for main's own call, so
+        // dropping the foreign window cannot discard it either.
+        assert_eq!(
+            harness.inner.lock().unwrap().pending_abort,
+            Some(main_window.id())
+        );
+        harness.release_run();
+        drop(other_window);
+        assert_eq!(
+            harness.inner.lock().unwrap().pending_abort,
+            Some(main_window.id()),
+            "a foreign window's exit must not clear another window's latch"
+        );
+
+        // Only main's own registration consumes (and clears) main's latch.
+        let (_, signal, _) = harness
+            .acquire_run(OperationKind::Run, main_window.id())
+            .unwrap();
+        assert!(signal.is_cancelled(), "main's own latch pre-cancels main");
+        assert!(harness.inner.lock().unwrap().pending_abort.is_none());
+        harness.release_run();
+        drop(main_window);
     }
 }

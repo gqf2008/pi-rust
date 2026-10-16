@@ -2734,6 +2734,10 @@ async fn an_explicitly_aborted_run_is_not_resumed() {
         outcome.is_ok(),
         "an aborted run settles normally: {outcome:?}"
     );
+    assert!(matches!(
+        outcome.as_ref().unwrap().outcome,
+        HarnessRunOutcome::Aborted { .. }
+    ));
 
     let session = harness.session().clone();
     drop(harness);
@@ -4082,4 +4086,115 @@ async fn resuming_through_a_provider_without_the_capability_is_an_error() {
         format!("{error:?}").contains("no provider"),
         "the error must say which provider is missing, got {error:?}"
     );
+}
+
+/// True when an assistant message carries any non-empty text block, i.e. real
+/// answer content reached the transcript (a bare `Text("")` placeholder does
+/// not count).
+fn carries_text(message: &rpi_ai::types::AssistantMessage) -> bool {
+    message
+        .content
+        .iter()
+        .any(|block| matches!(block, rpi_ai::types::Content::Text(text) if !text.text.is_empty()))
+}
+
+/// The pre-registration abort window, end to end: an abort issued in the same
+/// burst as the prompt must abort THAT run instead of being silently refused
+/// as `no_active_run` — the harness-level defect that forced the ACP server to
+/// re-issue aborts on a tick. The bounded retry loop below only covers the
+/// test's own race: it cannot pin the interleaving, so this test asserts the
+/// observable burst behavior (the abort is deliverable, the run settles
+/// `Aborted`, nothing streams) and does NOT by itself prove the latch — a
+/// retried abort also lands on the registered run. The latch's own regression
+/// guard is the white-box `starting_window_tests` module in `agent_harness.rs`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abort_in_the_same_burst_as_the_prompt_resolves_aborted_without_streaming() {
+    let long = "the quick brown fox jumps over the lazy dog ".repeat(60);
+    let script = FauxScript::new()
+        .with_tokens_per_second(20.0)
+        .with_text(long);
+    let (collector, events) = CollectorEmitter::new();
+    let (harness, provider, _env) =
+        harness_with_options(script, RetryPolicy::default(), Some(Arc::new(collector))).await;
+
+    let run = {
+        let harness = harness.clone();
+        tokio::spawn(async move { harness.prompt_text("a long answer please", vec![]).await })
+    };
+    // Same burst: abort immediately, retrying on a bounded tick only until
+    // the abort is deliverable (starting window or registered run).
+    let mut delivered = false;
+    for _ in 0..500 {
+        if harness.lane("main").abort().await.is_ok() {
+            delivered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(delivered, "an in-burst abort must be deliverable");
+
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(10), run).await;
+    let result = settled
+        .expect("the run settles promptly instead of streaming to completion")
+        .expect("the aborted run settles normally")
+        .expect("the aborted prompt returns Ok");
+    let HarnessRunOutcome::Aborted { final_message, .. } = &result.outcome else {
+        panic!("expected Aborted, got {:?}", result.outcome);
+    };
+    // "Streams nothing (or near-nothing)": whichever side of registration the
+    // abort lands on, it arrives before the first streaming delta, so the
+    // settled message never carries the long answer. (On the registered run
+    // the stream may push one empty text placeholder before it notices.)
+    assert!(
+        !carries_text(final_message),
+        "nothing may stream into an abort issued in the burst: {final_message:?}"
+    );
+    // The single provider call is the one that reports the abort: the faux
+    // stream checks the signal before its first delta, so no turn is driven.
+    assert_eq!(
+        provider
+            .state()
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    let events = events.lock().unwrap();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AgentEvent::MessageUpdate { message, .. } if carries_text(message)
+        )),
+        "no streaming text deltas may reach an abort issued in the burst"
+    );
+}
+
+/// abb discipline: an idle abort (no prompt in flight) is a strict error and
+/// must not latch anything — the NEXT prompt completes its real turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_abort_is_refused_and_never_kills_the_next_turn() {
+    let script = FauxScript::new().with_text("steady as she goes");
+    let (harness, _provider, _env) = harness_with(script).await;
+
+    let error = harness.lane("main").abort().await.unwrap_err();
+    assert!(
+        matches!(error, rpi_harness::result::HarnessError::NoActiveRun { .. }),
+        "expected NoActiveRun, got {error:?}"
+    );
+
+    let result = harness
+        .prompt_text("say something", vec![])
+        .await
+        .expect("the next turn runs normally after an idle abort");
+    match result.outcome {
+        HarnessRunOutcome::Completed { final_message, .. } => {
+            assert!(
+                final_message.content.iter().any(|block| matches!(
+                    block,
+                    rpi_ai::types::Content::Text(text) if text.text.contains("steady")
+                )),
+                "the next turn must complete its real provider turn: {final_message:?}"
+            );
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
 }
