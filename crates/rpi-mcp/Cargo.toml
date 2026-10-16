@@ -1,0 +1,59 @@
+[package]
+publish = false
+name = "rpi-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/rpi-mcp"
+description = "Host-level MCP (Model Context Protocol) client for ki — stdio servers from settings.json, expanded into native tools"
+readme = "README.md"
+keywords = ["agent", "llm", "ai", "mcp"]
+categories = ["api-bindings", "development-tools"]
+
+[dependencies]
+rpi-ai = { workspace = true }
+rpi-agent = { workspace = true }
+# Pinned to the rmcp 1.x line (same as ABB). `default-features = false` keeps the
+# server side, macros and every transport except the stdio child-process one out
+# of the build. Bumping the minor here is a deliberate act: rmcp's typed model
+# churns across versions, which is why every wire value is marshalled through
+# `serde_json` rather than read off the typed fields.
+rmcp = { version = "1.8", default-features = false, features = [
+    "client",
+    "transport-child-process",
+] }
+# Same version line rmcp resolves (`process-wrap = "9"`, feature `tokio1`). Used
+# to wrap the child in a process group (unix) / job object (windows) so `kill`
+# reaps the whole server process tree, not just the leader.
+process-wrap = { version = "9", features = ["tokio1"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rpi-agent = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "process"] }
+tokio-util = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+# Signalling the child's process group on teardown (unix only; windows uses the
+# job object process-wrap already installs). Same version line process-wrap
+# resolves, so no second copy enters the tree.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+
+# Test fixture: a tiny line-JSON-RPC MCP server the e2e test spawns as a real
+# child process. Declared as a bin so the integration test can locate it with
+# `CARGO_BIN_EXE_ki-mcp-fake-server` — no shell/python interpreter needed, so the
+# test is offline and portable. It ships nothing: `rpi-mcp` is `publish = false`.
+[[bin]]
+name = "ki-mcp-fake-server"
+path = "tests/support/fake_server.rs"

@@ -879,6 +879,10 @@ pub async fn interactive(
     .await
     {
         eprintln!("[ki] startup vetoed by extension: {reason}");
+        // The session is built (and its MCP servers already spawned) before this
+        // veto, so the teardown advisory must still run — otherwise the servers'
+        // process trees survive with only the non-awaited `Drop` backstop.
+        crate::session::dispatch_session_shutdown_advisory(reload_context).await;
         return crate::app::EXIT_VETOED;
     }
 
@@ -1623,6 +1627,7 @@ mod tests {
             mailbox: rpi_extensions::ReloadMailbox::default(),
             ui_dialog: rpi_extensions::UiDialogMailbox::default(),
             dev_extension: None,
+            mcp: Arc::new(rpi_mcp::McpManager::empty()),
         }
     }
 

@@ -375,6 +375,24 @@ pub async fn build_with_selection(
         &plugin_caps,
         &|name| tool_name_allowed(name, args),
     );
+
+    // ---- MCP tools (host-level capability) ----
+    // Injected LAST, so an MCP tool can never silently shadow a built-in,
+    // extension or plugin tool: a name collision is skipped with a warning.
+    // `--tools`/`--exclude-tools`/`--no-tools` gate these exactly as they gate
+    // every other tool. A server that fails to start is skipped inside the
+    // manager (loudly) and simply contributes no tools — one bad server must not
+    // stop the session from building.
+    //
+    // With `--no-tools` the session exposes nothing, so don't spawn servers it
+    // could never use.
+    let mcp_manager = if args.no_tools {
+        Arc::new(rpi_mcp::McpManager::empty())
+    } else {
+        start_mcp_manager(cwd, project_trusted).await
+    };
+    merge_mcp_tools(&mut tools, &mcp_manager, args);
+
     let active = filter_active_tool_names(active_tool_names(&tools, args), args);
 
     // ---- Session storage ----
@@ -862,6 +880,7 @@ pub async fn build_with_selection(
         ui_dialog: ui_dialog_mailbox,
         ext_status: ext_status_mailbox,
         editor_text: editor_text_mailbox,
+        mcp: Arc::clone(&mcp_manager),
         dev_extension: None,
     };
 
@@ -1064,6 +1083,11 @@ pub struct ReloadContext {
     /// swapping plugin sessions; its watcher signals `mailbox` after a
     /// successful background build.
     pub dev_extension: Option<Arc<crate::dev_extension::DevExtension>>,
+    /// The session's host-level MCP servers. Held here so every teardown path
+    /// (via [`dispatch_session_shutdown_advisory`]) reaps their process trees,
+    /// and so the `Drop` of the last builder is a backstop. The tool adapters
+    /// also hold `Arc`s into it, which is why the field is an `Arc`.
+    pub mcp: Arc<rpi_mcp::McpManager>,
 }
 
 /// Dispatch a no-payload lifecycle event (e.g. `SessionStart`, `SessionShutdown`,
@@ -1128,6 +1152,10 @@ pub(crate) async fn notify_session_tree(reload_context: &ReloadContext) {
 /// and ignored. Shared by every run shape that ends a session (interactive TUI/
 /// REPL, rpc, print, json) so the warn-and-continue contract lives in one place.
 pub async fn dispatch_session_shutdown_advisory(reload_context: &ReloadContext) {
+    // MCP servers are ki's own child processes: reap them first so no teardown
+    // path can leave a process tree behind, independent of what a plugin does
+    // below. Idempotent; the `Drop` chain is the backstop.
+    reload_context.mcp.shutdown().await;
     if let Some(reason) =
         dispatch_session_event_async(reload_context, rpi_plugin_sdk::EventTag::SessionShutdown)
             .await
@@ -1596,6 +1624,11 @@ where
         &plugin_caps,
         &|name| tool_name_allowed(name, &effective_args),
     );
+    // Re-inject the host-level MCP tools. This rebuild starts from an empty set
+    // (`build_tools` + extension + compiled-plugin tools) and `set_tools`
+    // REPLACES the harness registry, so without this a `/reload` would silently
+    // drop every `{server}__{tool}` for the rest of the session.
+    merge_mcp_tools(&mut tools, &ctx.mcp, &effective_args);
     let mut active = active_tool_names(&tools, &effective_args);
     active = filter_active_tool_names(active, &effective_args);
     let _ = harness.set_tools(tools, Some(active)).await;
@@ -1999,6 +2032,29 @@ fn build_tools(ctx: &ExecutionToolContext, args: &Args) -> Vec<HarnessTool> {
     all.into_iter().map(|(_, t)| t).collect()
 }
 
+/// Append the host-level MCP tool adapters to `tools`, honoring the same name
+/// policy (`--tools`/`--exclude-tools`/`--no-tools`) and collision gate as every
+/// other tool source. Called LAST in both `build` and `/reload` so an MCP tool
+/// can never silently shadow a built-in, extension or plugin tool — a collision
+/// is skipped with a warning.
+fn merge_mcp_tools(tools: &mut Vec<HarnessTool>, mcp: &rpi_mcp::McpManager, args: &Args) {
+    let mut taken: HashSet<String> = tools
+        .iter()
+        .map(|tool| tool.tool.schema().name.clone())
+        .collect();
+    for adapter in mcp.tool_adapters() {
+        let name = adapter.schema().name.clone();
+        if !tool_name_allowed(&name, args) {
+            continue;
+        }
+        if !taken.insert(name.clone()) {
+            eprintln!("warning: MCP tool {name} collides with an existing tool; skipped");
+            continue;
+        }
+        tools.push(HarnessTool::new(adapter));
+    }
+}
+
 /// Resolve the active tool names from the constructed tools when no explicit
 /// `--tools` allowlist was given. Mirrors the TS default: all registered tools
 /// active.
@@ -2040,6 +2096,38 @@ where
         .into_iter()
         .filter(|name| tool_name_allowed(name, args))
         .collect()
+}
+
+/// Start the session's host-level MCP servers and return the manager.
+///
+/// Servers come from the global `settings.json` plus the project's; a
+/// project entry overrides a same-named global one, and the whole project block
+/// is honored only when the project is trusted (a project server spawns a
+/// process on its author's say-so). Every rejected, skipped or failed server is
+/// reported on stderr — nothing disappears silently — and a failure never stops
+/// the session from building.
+async fn start_mcp_manager(cwd: &Path, project_trusted: bool) -> Arc<rpi_mcp::McpManager> {
+    let global = crate::settings::load_settings().unwrap_or_default();
+    let (global_servers, mut issues) = rpi_mcp::parse_servers(global.mcp_servers.as_ref());
+
+    let mut project_servers = Vec::new();
+    for settings in crate::settings::load_project_settings(cwd) {
+        let (servers, project_issues) = rpi_mcp::parse_servers(settings.mcp_servers.as_ref());
+        project_servers.extend(servers);
+        issues.extend(project_issues);
+    }
+
+    let (merged, merge_issues) =
+        rpi_mcp::merge_servers(global_servers, project_servers, project_trusted);
+    issues.extend(merge_issues);
+
+    let (manager, start_issues) = rpi_mcp::McpManager::start(&merged, cwd).await;
+    issues.extend(start_issues);
+
+    for issue in &issues {
+        eprintln!("warning: mcp: {issue}");
+    }
+    Arc::new(manager)
 }
 
 /// Build the `Session` facade for the chosen selection.
@@ -3988,6 +4076,7 @@ mod tests {
             mailbox: rpi_extensions::ReloadMailbox::default(),
             ui_dialog: rpi_extensions::UiDialogMailbox::default(),
             dev_extension: None,
+            mcp: Arc::new(rpi_mcp::McpManager::empty()),
         };
 
         // Completes despite the ABORT (no panic / no veto propagation)...

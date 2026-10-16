@@ -476,6 +476,10 @@ async fn run_inner() -> i32 {
             .await;
             if let Some(reason) = veto {
                 eprintln!("[ki] startup vetoed by extension: {reason}");
+                // The MCP servers were spawned during the harness build, before
+                // this veto; reap their process trees through the same advisory
+                // path every other teardown uses.
+                crate::session::dispatch_session_shutdown_advisory(&reload_context).await;
                 EXIT_VETOED
             } else {
                 if let Some(reason) = crate::session::dispatch_session_event_async(

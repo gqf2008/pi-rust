@@ -24,6 +24,7 @@ members = [
     "plugins/rpi-webfetch",
     "plugins/rpi-websearch",
     "crates/rpi-plugin-sdk",
+    "crates/rpi-mcp",
     "crates/rpi-extensions",
     "examples/minimal",
     "examples/tools",
@@ -98,6 +99,7 @@ rpi-tui = { path = "crates/rpi-tui", version = "0.4.1" }
 
 rpi-plugin-sdk = { path = "crates/rpi-plugin-sdk", version = "0.4.1" }
 rpi-extensions = { path = "crates/rpi-extensions", version = "0.4.1" }
+rpi-mcp = { path = "crates/rpi-mcp", version = "0.4.1" }
 
 [profile.release]
 lto = "thin"

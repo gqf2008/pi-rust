@@ -235,6 +235,14 @@ pub struct Settings {
     /// `httpIdleTimeout`. ki surface: `httpIdleTimeout`.
     #[serde(default, alias = "httpIdleTimeoutMs")]
     pub http_idle_timeout: Option<serde_json::Value>,
+
+    /// Host-level MCP servers. Ki reads this block, spawns each stdio server and
+    /// expands its tools into native tools (`rpi-mcp`). Kept as raw JSON because
+    /// `Settings` has no `Serialize` — ki deliberately never writes this block
+    /// back — and because a malformed entry must be dropped with a warning
+    /// rather than failing the whole file.
+    #[serde(default)]
+    pub mcp_servers: Option<serde_json::Value>,
 }
 
 /// upstream's `terminal` settings block (`TerminalSettings`). Only the fields
@@ -738,6 +746,31 @@ mod tests {
         assert!(s.skill_dirs.is_none());
         assert!(s.prompt_dirs.is_none());
         assert!(s.extension_dirs.is_none());
+    }
+
+    /// `mcpServers` is carried through as raw JSON so `rpi-mcp` can validate it
+    /// per entry (a malformed server must not fail the whole settings file).
+    #[test]
+    fn captures_mcp_servers_block_as_raw_json() {
+        let settings = parse_settings(
+            r#"{
+                "mcpServers": {
+                    "codegraph": { "command": "codegraph", "args": ["serve", "--mcp"] },
+                    "remote": { "url": "https://example.test/mcp" }
+                },
+                "defaultProvider": "anthropic"
+            }"#,
+        )
+        .unwrap();
+        let block = settings.mcp_servers.expect("mcpServers captured");
+        assert_eq!(block["codegraph"]["command"], "codegraph");
+        assert_eq!(block["remote"]["url"], "https://example.test/mcp");
+    }
+
+    #[test]
+    fn absent_mcp_servers_block_is_none() {
+        let settings = parse_settings(r#"{ "defaultProvider": "anthropic" }"#).unwrap();
+        assert!(settings.mcp_servers.is_none());
     }
 
     #[test]
