@@ -37,13 +37,14 @@ rpi-langfuse = { path = "../../plugins/rpi-langfuse", optional = true, features 
 rpi-telemetry = { workspace = true }
 rpi-ai = { workspace = true, features = ["providers"] }
 rpi-agent = { workspace = true }
+agent-client-protocol = { workspace = true }
 rpi-tools = { workspace = true }
 rpi-harness = { workspace = true }
 rpi-tui = { workspace = true }
 rpi-plugin-sdk = { workspace = true }
 rpi-extensions = { workspace = true }
 tokio = { workspace = true, features = ["signal", "io-std", "net"] }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["compat"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
 fs2 = { workspace = true }

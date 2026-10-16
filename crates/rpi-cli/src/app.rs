@@ -136,6 +136,11 @@ async fn run_inner() -> i32 {
     // is the right level of abstraction (and matches the `match mode { .. }`
     // dispatch at the end of this function).
     match argv.first().map(String::as_str) {
+        // `ki acp serve`: a host-level ACP server that owns the process's
+        // stdio for its lifetime — intercepted here so it bypasses arg
+        // parsing, provider resolution, session build, and stdin draining
+        // entirely (same claim as `--connect`).
+        Some("acp") => return crate::acp::run(&argv[1..]).await,
         Some("auth") => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
             let dirs = crate::resource_dirs::extension_dirs(&cwd);
@@ -887,7 +892,7 @@ fn build_initial_message(
 
 /// Print a model-resolution error with env-specific guidance. Mirrors the TS
 /// auth-guidance / model-resolver error formatting (condensed to stderr lines).
-fn print_resolve_error(e: &ResolveError) {
+pub(crate) fn print_resolve_error(e: &ResolveError) {
     match e {
         ResolveError::NoApiKey { hint } => {
             eprintln!("error: {e}");

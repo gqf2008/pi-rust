@@ -53,6 +53,7 @@ url = "2"
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "process", "sync", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+agent-client-protocol = { version = "=3.3.0", features = ["stdio"] }
 async-trait = "0.1"
 futures = "0.3"
 fs2 = "0.4"

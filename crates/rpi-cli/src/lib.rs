@@ -27,6 +27,7 @@
 //! Resources load from `.ki/` and `~/.ki/agent/`; extensions are Rust
 //! `cdylib` plugins installed and developed with `ki install` / `ki dev`.
 
+pub mod acp;
 pub mod agent_session;
 pub mod app;
 pub mod args;
