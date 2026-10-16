@@ -22,6 +22,7 @@
 //!   the last `session/update` — both serialize through the outgoing actor.
 
 mod diag;
+mod dialogs;
 mod projection;
 mod sessions;
 mod zed;
@@ -158,8 +159,10 @@ pub(crate) async fn run_server(
                 // rewrites the response. Answer V1 unconditionally so a
                 // non-v1 client sees the downgrade instead of its own version
                 // echoed back. Capabilities are honest: `loadSession` is
-                // implemented (batch 2), request permission is not (a later
-                // batch), auth is ki's own config.
+                // implemented (batch 2); request permission needs no
+                // capability flag (client-side baseline — the agent simply
+                // sends `session/request_permission`), auth is ki's own
+                // config.
                 if request.protocol_version != ProtocolVersion::V1 {
                     diag::diagln!(
                         "initialize: client asked protocolVersion {:?}, answering v1",
@@ -198,8 +201,8 @@ pub(crate) async fn run_server(
         .on_receive_request(
             async move |request: NewSessionRequest,
                         responder: Responder<NewSessionResponse>,
-                        _cx: ConnectionTo<Client>| {
-                handle_session_new(&shared_new, request, responder).await;
+                        cx: ConnectionTo<Client>| {
+                handle_session_new(&shared_new, request, responder, cx).await;
                 Ok(())
             },
             agent_client_protocol::on_receive_request!(),
@@ -256,6 +259,7 @@ async fn handle_session_new(
     shared: &SharedServer,
     request: NewSessionRequest,
     responder: Responder<NewSessionResponse>,
+    cx: ConnectionTo<Client>,
 ) {
     // First-cut parameter parsing is loud, never silently ignoring (abb
     // lesson): ki's MCP runs through its own configuration.
@@ -317,7 +321,11 @@ async fn handle_session_new(
     diag::diagln!("session/new cwd={}", cwd.display());
     match factory(&cwd, params, sessions::SessionRequest::New).await {
         Ok(deps) => {
-            let session = LiveSession::new(deps);
+            let mut session = LiveSession::new(deps);
+            // The dialog pump starts with the session: a plugin can ask a
+            // permission on the very first turn, so the mailbox must be live
+            // before the session id is ever handed out.
+            session.start_dialog_pump(cx);
             let id = session.id.clone();
             diag::diagln!("session/new ok id={id}");
             shared.lock().unwrap().live = Some(session);
@@ -455,7 +463,10 @@ async fn handle_session_load(
     .await
     {
         Ok(deps) => {
-            let session = LiveSession::new(deps);
+            let mut session = LiveSession::new(deps);
+            // A loaded session can ask permissions too: same pump as a fresh
+            // one, before the replay and the response hand the id over.
+            session.start_dialog_pump(cx.clone());
             // The derived id must round-trip to what the client asked for; a
             // mismatch would leave the live session unpromptable.
             debug_assert_eq!(session.id, request.session_id);
@@ -833,6 +844,15 @@ fn handle_cancel(shared: &SharedServer, notification: CancelNotification) {
     {
         diag::diagln!("session/cancel id={}", session.id);
         session.turn.cancel();
+        // The protocol has the client answer Cancelled for in-flight
+        // permission requests after `session/cancel`; on our side the mirror
+        // obligation is that the plugin never hangs: release every open
+        // dialog in the mailbox and stop waiting on the client for them
+        // (aborting a per-dialog task drops its unanswered outbound request,
+        // which auto-sends `$/cancel_request`).
+        if let Some(dialogs) = &session.dialogs {
+            dialogs.cancel_all();
+        }
     }
 }
 
@@ -849,6 +869,10 @@ fn send_updates(cx: &ConnectionTo<Client>, session_id: &SessionId, updates: Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::v1::{
+        PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
+        RequestPermissionResponse, SelectedPermissionOutcome,
+    };
     use agent_client_protocol::schema::ProtocolVersion;
     use agent_client_protocol::ByteStreams;
     use rpi_agent::events::BroadcastEmitter;
@@ -1004,6 +1028,7 @@ mod tests {
         sessions::SessionDeps {
             harness,
             event_rx,
+            ui_dialog: None,
             reload_context: None,
         }
     }
@@ -1015,6 +1040,89 @@ mod tests {
                     as futures::future::BoxFuture<'static, Result<sessions::SessionDeps, String>>
             },
         )
+    }
+
+    /// A faux session that carries a hand-constructed dialog mailbox — the
+    /// seam dialog tests use instead of a `session::build`-ed ReloadContext.
+    fn dialog_factory(
+        text: &'static str,
+        tokens_per_second: f64,
+        mailbox: rpi_extensions::UiDialogMailbox,
+    ) -> SessionFactory {
+        Arc::new(
+            move |_cwd, _params: sessions::SessionParams, _request: sessions::SessionRequest| {
+                let mailbox = mailbox.clone();
+                Box::pin(async move {
+                    let mut deps = faux_deps(text, tokens_per_second).await;
+                    deps.ui_dialog = Some(mailbox);
+                    Ok(deps)
+                })
+                    as futures::future::BoxFuture<'static, Result<sessions::SessionDeps, String>>
+            },
+        )
+    }
+
+    /// The permission dialog the sdk's own open path accepts (two options, a
+    /// question line, a tool call id).
+    fn permission_ui() -> serde_json::Value {
+        serde_json::json!({
+            "purpose": "permission",
+            "kind": "confirm",
+            "question": "Allow this tool?",
+            "options": [
+                {"title": "允许一次", "permission": "allow_once"},
+                {"title": "拒绝", "permission": "reject_once"},
+            ],
+        })
+    }
+
+    /// Open a dialog through the plugin envelope (`op=open`), exactly as the
+    /// runtime action would.
+    fn open_dialog(mailbox: &rpi_extensions::UiDialogMailbox, request_id: &str) {
+        mailbox
+            .handle(serde_json::json!({
+                "op": "open", "requestId": request_id, "toolCallId": "call-1", "ui": permission_ui(),
+            }))
+            .expect("dialog open");
+    }
+
+    /// Poll the mailbox through the plugin envelope until the request reaches
+    /// a terminal state (`poll` reclaims terminal states, mirroring the
+    /// plugin's own loop).
+    async fn wait_for_terminal(
+        mailbox: &rpi_extensions::UiDialogMailbox,
+        request_id: &str,
+        deadline_ms: u64,
+    ) -> serde_json::Value {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(deadline_ms);
+        loop {
+            let poll = mailbox
+                .handle(serde_json::json!({ "op": "poll", "requestId": request_id }))
+                .expect("poll");
+            if poll["status"] != "pending" {
+                return poll;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "dialog {request_id} never reached a terminal state"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The next permission request the server sent (or fail loudly).
+    async fn next_permission(
+        requests: &mut tokio::sync::mpsc::UnboundedReceiver<RequestPermissionRequest>,
+    ) -> RequestPermissionRequest {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        match tokio::time::timeout_at(deadline, requests.recv()).await {
+            Ok(Some(request)) => request,
+            _ => panic!("server never sent session/request_permission"),
+        }
+    }
+
+    fn selected(option_id: &str) -> RequestPermissionOutcome {
+        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id.to_string()))
     }
 
     /// Run the server over an in-memory duplex and drive a typed client
@@ -1035,6 +1143,74 @@ mod tests {
     where
         C: AsyncFnOnce(ConnectionTo<Agent>) -> agent_client_protocol::Result<R> + Send + 'static,
     {
+        run_client_hooked(factory, updates_tx, wire_log, None, client_main).await
+    }
+
+    /// One scripted decision the test client answers a
+    /// `session/request_permission` with, in arrival order.
+    #[derive(Clone)]
+    enum Decision {
+        Answer(RequestPermissionOutcome),
+        /// Answer nothing for `window`, then answer Cancelled: the "client
+        /// never answers" world, bounded because the client's serial dispatch
+        /// loop is parked inside the handler meanwhile.
+        Stall(Duration),
+        /// Answer nothing; watch — off the dispatch loop, which is serial and
+        /// would deadlock on our own handler — for the server's
+        /// `$/cancel_request` for this request, bounded by the timeout, then
+        /// answer Cancelled. `observed` records whether the wire cancel
+        /// arrived in time.
+        AwaitPeerCancel {
+            timeout: Duration,
+            observed: Arc<std::sync::atomic::AtomicBool>,
+        },
+    }
+
+    /// The test client's face for outbound permission requests: record every
+    /// request, answer per script — or park on `release` once the script runs
+    /// dry (the "never answers, cancelled from the server side" world).
+    #[derive(Clone)]
+    struct DialogHook {
+        requests_tx: tokio::sync::mpsc::UnboundedSender<RequestPermissionRequest>,
+        decisions: Arc<std::sync::Mutex<std::collections::VecDeque<Decision>>>,
+        release: tokio_util::sync::CancellationToken,
+    }
+
+    /// A hook with an empty script plus the receiver for the requests the
+    /// server sent.
+    fn dialog_hook(
+        script: Vec<Decision>,
+    ) -> (
+        DialogHook,
+        tokio::sync::mpsc::UnboundedReceiver<RequestPermissionRequest>,
+    ) {
+        let (requests_tx, requests_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hook = DialogHook {
+            requests_tx,
+            decisions: Arc::new(std::sync::Mutex::new(script.into())),
+            release: tokio_util::sync::CancellationToken::new(),
+        };
+        (hook, requests_rx)
+    }
+
+    async fn run_client_hooked<C, R>(
+        factory: SessionFactory,
+        updates_tx: tokio::sync::mpsc::UnboundedSender<SessionNotification>,
+        wire_log: Option<Arc<std::sync::Mutex<Vec<&'static str>>>>,
+        hook: Option<DialogHook>,
+        client_main: C,
+    ) -> agent_client_protocol::Result<R>
+    where
+        C: AsyncFnOnce(ConnectionTo<Agent>) -> agent_client_protocol::Result<R> + Send + 'static,
+    {
+        let (requests_tx, decisions, release) = match &hook {
+            Some(hook) => (
+                Some(hook.requests_tx.clone()),
+                Some(Arc::clone(&hook.decisions)),
+                Some(hook.release.clone()),
+            ),
+            None => (None, None, None),
+        };
         let (client_writer, server_reader) = tokio::io::duplex(64 * 1024);
         let (server_writer, client_reader) = tokio::io::duplex(64 * 1024);
         let server_transport =
@@ -1053,6 +1229,59 @@ mod tests {
                     Ok(())
                 },
                 agent_client_protocol::on_receive_notification!(),
+            )
+            .on_receive_request(
+                async move |request: RequestPermissionRequest,
+                            responder: Responder<RequestPermissionResponse>,
+                            _cx: ConnectionTo<Agent>| {
+                    if let Some(requests_tx) = &requests_tx {
+                        let _ = requests_tx.send(request);
+                    }
+                    let decision = decisions
+                        .as_ref()
+                        .and_then(|queue| queue.lock().unwrap().pop_front());
+                    match decision {
+                        Some(Decision::Answer(outcome)) => {
+                            responder.respond(RequestPermissionResponse::new(outcome))
+                        }
+                        Some(Decision::Stall(window)) => {
+                            tokio::time::sleep(window).await;
+                            responder.respond(RequestPermissionResponse::new(
+                                RequestPermissionOutcome::Cancelled,
+                            ))
+                        }
+                        Some(Decision::AwaitPeerCancel { timeout, observed }) => {
+                            tokio::spawn(async move {
+                                let told = tokio::time::timeout(
+                                    timeout,
+                                    responder.cancellation().cancelled(),
+                                )
+                                .await
+                                .is_ok();
+                                observed.store(told, std::sync::atomic::Ordering::Release);
+                                let _ = responder.respond(RequestPermissionResponse::new(
+                                    RequestPermissionOutcome::Cancelled,
+                                ));
+                            });
+                            Ok(())
+                        }
+                        // Script exhausted but a release token exists: hold the
+                        // answer until the test lets the connection close.
+                        None if release.is_some() => {
+                            release.as_ref().unwrap().cancelled().await;
+                            responder.respond(RequestPermissionResponse::new(
+                                RequestPermissionOutcome::Cancelled,
+                            ))
+                        }
+                        // No hook at all: no permission is expected on this
+                        // connection; answering Cancelled keeps a stray one
+                        // from hanging the test.
+                        None => responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Cancelled,
+                        )),
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
             )
             .connect_with(client_transport, client_main)
             .await;
@@ -1678,6 +1907,7 @@ mod tests {
         Ok(sessions::SessionDeps {
             harness,
             event_rx,
+            ui_dialog: None,
             reload_context: None,
         })
     }
@@ -2016,5 +2246,415 @@ mod tests {
         )
         .await;
         result.expect("client failed");
+    }
+
+    // ---- e2e over duplex: session/request_permission (wave 2) ----
+
+    /// Happy path: a permission dialog rides the live session id with the
+    /// blueprint's exact shape (index option ids, original labels, title
+    /// fallback chain), the selected option routes back to the plugin as the
+    /// original title, and the session keeps prompting.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn permission_round_trip_answers_the_plugin_and_the_turn_continues() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mailbox = rpi_extensions::UiDialogMailbox::new();
+        let (hook, mut requests_rx) = dialog_hook(vec![Decision::Answer(selected("1"))]);
+        let result = run_client_hooked(
+            dialog_factory("after the dialog", 1000.0, mailbox.clone()),
+            updates_tx,
+            None,
+            Some(hook),
+            async move |cx: ConnectionTo<Agent>| {
+                let sid = init_and_new(&cx).await?;
+                open_dialog(&mailbox, "q1");
+                let request = next_permission(&mut requests_rx).await;
+                assert_eq!(
+                    request.session_id, sid,
+                    "the permission rides the live session id"
+                );
+                assert_eq!(request.tool_call.tool_call_id.to_string(), "call-1");
+                assert_eq!(
+                    request.tool_call.fields.title.as_deref(),
+                    Some("Allow this tool?")
+                );
+                assert_eq!(request.options.len(), 2);
+                assert_eq!(request.options[0].option_id.to_string(), "0");
+                assert_eq!(request.options[0].name, "允许一次");
+                assert_eq!(request.options[0].kind, PermissionOptionKind::AllowOnce);
+                assert_eq!(request.options[1].option_id.to_string(), "1");
+                assert_eq!(request.options[1].name, "拒绝");
+                assert_eq!(request.options[1].kind, PermissionOptionKind::RejectOnce);
+                let answer = wait_for_terminal(&mailbox, "q1", 3000).await;
+                assert_eq!(answer["status"], "answered");
+                assert_eq!(answer["answer"]["values"][0], "拒绝");
+                // The turn continues: the same session still prompts.
+                let response = cx
+                    .send_request(PromptRequest::new(sid, vec![ContentBlock::from("hi")]))
+                    .block_task()
+                    .await?;
+                assert_eq!(response.stop_reason, StopReason::EndTurn);
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    /// rpi-acp race property ①: generic questions (explicit or missing
+    /// purpose) are cancelled on their original request ids and never sent to
+    /// the client — ACP has no generic question UI, and its choices are never
+    /// reinterpreted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn question_purpose_is_cancelled_and_never_relabeled() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mailbox = rpi_extensions::UiDialogMailbox::new();
+        let (hook, mut requests_rx) = dialog_hook(vec![]);
+        let result = run_client_hooked(
+            dialog_factory("ok", 1000.0, mailbox.clone()),
+            updates_tx,
+            None,
+            Some(hook),
+            async move |cx: ConnectionTo<Agent>| {
+                let _sid = init_and_new(&cx).await?;
+                mailbox
+                    .handle(serde_json::json!({
+                        "op": "open", "requestId": "q1", "toolCallId": "call-1",
+                        "ui": {"purpose": "question", "question": "Pick one",
+                               "options": [{"title": "A"}, {"title": "B"}]},
+                    }))
+                    .expect("open question");
+                // And a shape with no purpose at all — the sdk's validate
+                // accepts it (the TUI renders questions), the ACP pump must
+                // not.
+                mailbox
+                    .handle(serde_json::json!({
+                        "op": "open", "requestId": "q2", "toolCallId": "call-1",
+                        "ui": {"kind": "selector", "options": [{"title": "A"}, {"title": "B"}]},
+                    }))
+                    .expect("open unpurposed");
+                let answer = wait_for_terminal(&mailbox, "q1", 3000).await;
+                assert_eq!(answer["status"], "cancelled");
+                let answer = wait_for_terminal(&mailbox, "q2", 3000).await;
+                assert_eq!(answer["status"], "cancelled");
+                // Nothing reached the client.
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                assert!(
+                    requests_rx.try_recv().is_err(),
+                    "a question must not become session/request_permission"
+                );
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    /// rpi-acp race property ② (protocol half): an unknown option id and a
+    /// bare Cancelled outcome are both treated as cancelled — never guessed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn unknown_option_id_and_client_cancel_are_treated_as_cancelled() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mailbox = rpi_extensions::UiDialogMailbox::new();
+        let (hook, mut requests_rx) = dialog_hook(vec![
+            Decision::Answer(selected("999")),
+            Decision::Answer(RequestPermissionOutcome::Cancelled),
+        ]);
+        let result = run_client_hooked(
+            dialog_factory("ok", 1000.0, mailbox.clone()),
+            updates_tx,
+            None,
+            Some(hook),
+            async move |cx: ConnectionTo<Agent>| {
+                let _sid = init_and_new(&cx).await?;
+                open_dialog(&mailbox, "q1");
+                let _request = next_permission(&mut requests_rx).await;
+                let answer = wait_for_terminal(&mailbox, "q1", 3000).await;
+                assert_eq!(answer["status"], "cancelled", "out-of-range option id");
+                open_dialog(&mailbox, "q2");
+                let _request = next_permission(&mut requests_rx).await;
+                let answer = wait_for_terminal(&mailbox, "q2", 3000).await;
+                assert_eq!(answer["status"], "cancelled", "client Cancelled outcome");
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    /// rpi-acp race property ⑤ plus the hang-risk pin: `session/cancel` while
+    /// a permission sits unanswered releases the plugin's poll immediately
+    /// (long before any client answer could arrive) and still answers the
+    /// prompt `cancelled`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn session_cancel_releases_a_never_answered_permission() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mailbox = rpi_extensions::UiDialogMailbox::new();
+        // The client stalls far longer than the cancel needs: if the poll
+        // unblocked only via a client answer, the deadline below would fire.
+        let (hook, mut requests_rx) = dialog_hook(vec![Decision::Stall(Duration::from_secs(2))]);
+        let result = run_client_hooked(
+            dialog_factory("slow enough to cancel", 10.0, mailbox.clone()),
+            updates_tx,
+            None,
+            Some(hook),
+            async move |cx: ConnectionTo<Agent>| {
+                let sid = init_and_new(&cx).await?;
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let sent = cx.send_request(PromptRequest::new(
+                    sid.clone(),
+                    vec![ContentBlock::from("go")],
+                ));
+                sent.on_receiving_result(async move |result| {
+                    let _ = tx.send(result);
+                    Ok(())
+                })?;
+                // The dialog opens mid-turn, as the plugin's runtime action
+                // would; the handler stalls on it.
+                open_dialog(&mailbox, "q1");
+                let _request = next_permission(&mut requests_rx).await;
+                cx.send_notification(CancelNotification::new(sid))?;
+                // The release must come from the server side, within a window
+                // the stall cannot explain.
+                let answer = wait_for_terminal(&mailbox, "q1", 700).await;
+                assert_eq!(answer["status"], "cancelled");
+                let response = rx
+                    .await
+                    .expect("prompt response channel")
+                    .expect("prompt failed");
+                assert_eq!(response.stop_reason, StopReason::Cancelled);
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    /// The wire half of the `session/cancel` obligation: releasing the
+    /// plugin's poll is not enough — the client's outstanding
+    /// `session/request_permission` must be told too. Aborting the per-dialog
+    /// task drops its unanswered `SentRequest`, which auto-sends
+    /// `$/cancel_request` (the only sender in this flow), so losing that
+    /// abort fails exactly here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn session_cancel_tells_the_client_over_the_wire() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mailbox = rpi_extensions::UiDialogMailbox::new();
+        let told = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (hook, mut requests_rx) = dialog_hook(vec![Decision::AwaitPeerCancel {
+            timeout: Duration::from_secs(5),
+            observed: Arc::clone(&told),
+        }]);
+        let result = run_client_hooked(
+            dialog_factory("slow enough to cancel", 10.0, mailbox.clone()),
+            updates_tx,
+            None,
+            Some(hook),
+            async move |cx: ConnectionTo<Agent>| {
+                let sid = init_and_new(&cx).await?;
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let sent = cx.send_request(PromptRequest::new(
+                    sid.clone(),
+                    vec![ContentBlock::from("go")],
+                ));
+                sent.on_receiving_result(async move |result| {
+                    let _ = tx.send(result);
+                    Ok(())
+                })?;
+                open_dialog(&mailbox, "q1");
+                let _request = next_permission(&mut requests_rx).await;
+                cx.send_notification(CancelNotification::new(sid))?;
+                // The plugin side releases, and the prompt still answers
+                // cancelled (same shape as the release pin above).
+                let answer = wait_for_terminal(&mailbox, "q1", 700).await;
+                assert_eq!(answer["status"], "cancelled");
+                let response = rx
+                    .await
+                    .expect("prompt response channel")
+                    .expect("prompt failed");
+                assert_eq!(response.stop_reason, StopReason::Cancelled);
+                // The wire observable: the client's cancellation marker for
+                // the outstanding permission flips only when the server's
+                // `$/cancel_request` arrives for it.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                while !told.load(std::sync::atomic::Ordering::Acquire) {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "session/cancel left the in-flight request_permission untold: \
+                         no $/cancel_request reached the client"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    /// EOF with a permission still unanswered: the close path detaches the
+    /// mailbox BEFORE the SessionShutdown advisory, so the plugin's poll
+    /// cannot outlive the connection.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn eof_detaches_the_mailbox_and_cancels_pending_dialogs() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mailbox = rpi_extensions::UiDialogMailbox::new();
+        let (hook, mut requests_rx) = dialog_hook(vec![]);
+        let release = hook.release.clone();
+        let session_mailbox = mailbox.clone();
+        let result = run_client_hooked(
+            dialog_factory("ok", 1000.0, mailbox.clone()),
+            updates_tx,
+            None,
+            Some(hook),
+            async move |cx: ConnectionTo<Agent>| {
+                let _sid = init_and_new(&cx).await?;
+                open_dialog(&session_mailbox, "q1");
+                let _request = next_permission(&mut requests_rx).await;
+                // Walk away with the permission unanswered.
+                release.cancel();
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+        // run_client_hooked joins the server task before returning, so the
+        // detach has already happened here.
+        let answer = wait_for_terminal(&mailbox, "q1", 3000).await;
+        assert_eq!(answer["status"], "cancelled");
+    }
+
+    /// rpi-acp race property ③: a dialog closed out from under the pump
+    /// neither blocks prompt completion nor leaves anything pending.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn closed_dialog_does_not_block_prompt_nor_leave_a_pending_request() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mailbox = rpi_extensions::UiDialogMailbox::new();
+        let (hook, mut requests_rx) = dialog_hook(vec![]);
+        let release = hook.release.clone();
+        let result = run_client_hooked(
+            dialog_factory("done", 1000.0, mailbox.clone()),
+            updates_tx,
+            None,
+            Some(hook),
+            async move |cx: ConnectionTo<Agent>| {
+                let sid = init_and_new(&cx).await?;
+                open_dialog(&mailbox, "q1");
+                let _request = next_permission(&mut requests_rx).await;
+                // The dialog closes under the still-waiting task (the
+                // TUI-reload/detach semantics).
+                mailbox.cancel("q1").expect("cancel q1");
+                release.cancel();
+                let response = cx
+                    .send_request(PromptRequest::new(sid, vec![ContentBlock::from("hi")]))
+                    .block_task()
+                    .await?;
+                assert_eq!(response.stop_reason, StopReason::EndTurn);
+                let answer = wait_for_terminal(&mailbox, "q1", 3000).await;
+                assert_eq!(answer["status"], "cancelled");
+                assert_eq!(mailbox.pending_len(), 0, "nothing may stay pending");
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    /// rpi-acp race property ④: a late answer to a closed dialog lands on the
+    /// closed request and can never answer the NEXT dialog — answers route by
+    /// the outbound request's own identity, q2 keeps its own choice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn late_answer_to_a_closed_dialog_cannot_answer_the_next_dialog() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mailbox = rpi_extensions::UiDialogMailbox::new();
+        let (hook, mut requests_rx) = dialog_hook(vec![
+            Decision::Answer(selected("0")),
+            Decision::Answer(selected("1")),
+        ]);
+        let result = run_client_hooked(
+            dialog_factory("ok", 1000.0, mailbox.clone()),
+            updates_tx,
+            None,
+            Some(hook),
+            async move |cx: ConnectionTo<Agent>| {
+                let _sid = init_and_new(&cx).await?;
+                open_dialog(&mailbox, "q1");
+                let _first = next_permission(&mut requests_rx).await;
+                // q1 closes; whether the scripted answer lands before or after
+                // the close, the terminal state is cancelled either way.
+                mailbox.cancel("q1").expect("cancel q1");
+                open_dialog(&mailbox, "q2");
+                let _second = next_permission(&mut requests_rx).await;
+                let answer = wait_for_terminal(&mailbox, "q1", 3000).await;
+                assert_eq!(answer["status"], "cancelled");
+                let answer = wait_for_terminal(&mailbox, "q2", 3000).await;
+                assert_eq!(answer["status"], "answered");
+                // q2 was answered with ITS OWN second option — a crossed
+                // routing would leave q2 pending (timeout) or mislabelled.
+                assert_eq!(answer["answer"]["values"][0], "拒绝");
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    /// The pump starts at `session/load` too: a restored session can ask
+    /// permissions on its first turn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn load_starts_the_dialog_pump_too() {
+        let tmp = tempdir("load-dialogs");
+        let fixture_id = write_fixture_session(&tmp).await;
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mailbox = rpi_extensions::UiDialogMailbox::new();
+        let (hook, mut requests_rx) = dialog_hook(vec![Decision::Answer(selected("1"))]);
+        let factory_mailbox = mailbox.clone();
+        let factory_cwd = tmp.clone();
+        let request_cwd = tmp.clone();
+        let result = run_client_hooked(
+            Arc::new(
+                move |_cwd: &std::path::Path,
+                      _params: sessions::SessionParams,
+                      request: sessions::SessionRequest| {
+                    let cwd = factory_cwd.clone();
+                    let mailbox = factory_mailbox.clone();
+                    Box::pin(async move {
+                        match request {
+                            sessions::SessionRequest::Load { id } => {
+                                let mut deps = restored_deps(&cwd, &id).await?;
+                                deps.ui_dialog = Some(mailbox);
+                                Ok(deps)
+                            }
+                            sessions::SessionRequest::New => {
+                                Err("load test: unexpected session/new".to_string())
+                            }
+                        }
+                    })
+                        as futures::future::BoxFuture<
+                            'static,
+                            Result<sessions::SessionDeps, String>,
+                        >
+                },
+            ),
+            updates_tx,
+            None,
+            Some(hook),
+            async move |cx: ConnectionTo<Agent>| {
+                init_only(&cx).await?;
+                let sid = SessionId::from(format!("ki-{fixture_id}"));
+                cx.send_request(LoadSessionRequest::new(sid, request_cwd))
+                    .block_task()
+                    .await?;
+                open_dialog(&mailbox, "q1");
+                let request = next_permission(&mut requests_rx).await;
+                assert_eq!(request.options[1].name, "拒绝");
+                let answer = wait_for_terminal(&mailbox, "q1", 3000).await;
+                assert_eq!(answer["status"], "answered");
+                assert_eq!(answer["answer"]["values"][0], "拒绝");
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

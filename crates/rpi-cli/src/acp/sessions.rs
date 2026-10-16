@@ -13,11 +13,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::v1::SessionId;
+use agent_client_protocol::{Client, ConnectionTo};
 use futures::future::BoxFuture;
 use rpi_agent::events::AgentEvent;
+use rpi_extensions::UiDialogMailbox;
 use rpi_harness::agent_harness::AgentHarness;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+
+use super::dialogs::DialogPump;
 
 /// Per-session dependencies the ACP machinery drives. The production factory
 /// assembles these through `session::build` (resolve → veto → build →
@@ -27,6 +31,10 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct SessionDeps {
     pub(crate) harness: AgentHarness,
     pub(crate) event_rx: broadcast::Receiver<AgentEvent>,
+    /// The plugin UI-dialog mailbox (runtime action 17). Production wires
+    /// `reload_context.ui_dialog.clone()`; dialog tests inject a
+    /// hand-constructed mailbox. `None` = the session cannot ask.
+    pub(crate) ui_dialog: Option<UiDialogMailbox>,
     /// Production only. Held until [`LiveSession::close`] has dispatched the
     /// `SessionShutdown` advisory, so plugin cdylibs outlive that dispatch.
     pub(crate) reload_context: Option<crate::session::ReloadContext>,
@@ -71,6 +79,11 @@ pub(crate) struct LiveSession {
     event_rx: broadcast::Receiver<AgentEvent>,
     pub(crate) turn: Arc<TurnState>,
     reload_context: Option<crate::session::ReloadContext>,
+    /// The plugin UI-dialog mailbox the session was built with.
+    ui_dialog: Option<UiDialogMailbox>,
+    /// The dialog pump started once a connection exists to carry the outbound
+    /// permission requests (`start_dialog_pump`).
+    pub(crate) dialogs: Option<Arc<DialogPump>>,
 }
 
 impl LiveSession {
@@ -88,6 +101,17 @@ impl LiveSession {
             event_rx: deps.event_rx,
             turn: Arc::new(TurnState::new()),
             reload_context: deps.reload_context,
+            ui_dialog: deps.ui_dialog,
+            dialogs: None,
+        }
+    }
+
+    /// Spawns the dialog pump when the session carries a plugin UI mailbox.
+    /// Runs at every session activation — `session/new` and `session/load`
+    /// alike, a loaded session can ask permissions too.
+    pub(crate) fn start_dialog_pump(&mut self, cx: ConnectionTo<Client>) {
+        if let Some(mailbox) = self.ui_dialog.clone() {
+            self.dialogs = Some(DialogPump::start(mailbox, cx, self.id.clone()));
         }
     }
 
@@ -97,9 +121,15 @@ impl LiveSession {
         self.event_rx.resubscribe()
     }
 
-    /// `SessionShutdown` advisory BEFORE the reload context drops: plugins
-    /// flush state there, and the cdylibs must stay mapped through dispatch.
+    /// The dialog mailbox is detached BEFORE the `SessionShutdown` advisory
+    /// (the rpc-mode EOF order): cancelled mailbox entries release the plugin
+    /// polls while the plugin runtime is still alive to observe them; the
+    /// advisory then flushes state, and only afterwards does the reload
+    /// context — and with it the cdylibs — drop.
     pub(crate) async fn close(self) {
+        if let Some(dialogs) = &self.dialogs {
+            dialogs.shutdown();
+        }
         if let Some(reload_context) = self.reload_context {
             crate::session::dispatch_session_shutdown_advisory(&reload_context).await;
             drop(reload_context);
@@ -314,6 +344,7 @@ async fn build_session(
     Ok(SessionDeps {
         harness,
         event_rx,
+        ui_dialog: Some(reload_context.ui_dialog.clone()),
         reload_context: Some(reload_context),
     })
 }
