@@ -13,6 +13,20 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
+- **`ki acp serve` — a host-level Agent Client Protocol server**: point any ACP
+  client (Zed, ABB) at `ki` as an external coding agent over stdio JSON-RPC
+  (official `agent-client-protocol` crate, pinned 3.3.0). Covers `initialize`
+  / `session/new` / `session/prompt` / `session/cancel` and `session/load`
+  replay: one live session per process, per-delta streaming of message/thought
+  chunks and tool-call progress, honest stop reasons (a failed run surfaces as
+  a JSON-RPC error; a client cancel always answers `cancelled`), restart-stable
+  session ids a later load restores with the full transcript streamed back
+  before the response, and stderr-only diagnostics (`KI_ACP_DEBUG` traces
+  method flow). Permission dialogs (`session/request_permission`) are a later
+  batch. `ki acp install-zed` / `ki acp print-zed` register ki in Zed's
+  settings.json with a comment-preserving JSONC splice (a `.ki-bak` backup is
+  kept on first change), and `ki dev acp serve` refuses loudly instead of
+  pretending the dev extension session applies.
 - **`fs` grants carry a scope (grant-model change; the ABI stays 0.7.1 — no WIT change)**: `ki plugin grant <id> fs --cwd project`
   opts a plugin into reading and writing the project tree (same scope as
   `exec`/`proc`); the default stays the plugin's own data directory, and legacy

@@ -7,12 +7,14 @@
 //! agent's last words, the same discipline as rpi-acp's `run()` tail line).
 
 /// Whether method-flow tracing is on (`KI_ACP_DEBUG` set to anything but
-/// "" / "0").
+/// "" / "0"). Read once: the gate sits on the per-event streaming path, where
+/// an `env::var` (process lock + allocation) per token delta is pure waste.
 pub(crate) fn enabled() -> bool {
-    match std::env::var("KI_ACP_DEBUG") {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| match std::env::var("KI_ACP_DEBUG") {
         Ok(value) => !value.is_empty() && value != "0",
         Err(_) => false,
-    }
+    })
 }
 
 /// The unconditional one-line shutdown record: why the server stopped and with

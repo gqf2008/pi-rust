@@ -140,7 +140,18 @@ async fn run_inner() -> i32 {
         // stdio for its lifetime — intercepted here so it bypasses arg
         // parsing, provider resolution, session build, and stdin draining
         // entirely (same claim as `--connect`).
-        Some("acp") => return crate::acp::run(&argv[1..]).await,
+        Some("acp") => {
+            // The dev wrapper (`ki dev acp serve`) would be parsed above and
+            // then silently discarded here — the dev cdylib would never load.
+            // Say so instead of pretending the session exercises dev code.
+            if dev_options.is_some() {
+                eprintln!(
+                    "error: `ki dev` does not wrap `ki acp serve`; the dev extension session is not applied here — run `ki acp serve` directly"
+                );
+                return EXIT_USAGE;
+            }
+            return crate::acp::run(&argv[1..]).await;
+        }
         Some("auth") => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
             let dirs = crate::resource_dirs::extension_dirs(&cwd);

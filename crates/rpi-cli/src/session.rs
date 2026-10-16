@@ -149,23 +149,29 @@ pub enum SessionSelection {
     Fork { source: String },
 }
 
-/// Decide the session selection from parsed args + the resolved cwd.
-pub fn select_session(args: &Args, cwd: &Path) -> SessionSelection {
-    if args.no_session {
-        return SessionSelection::Ephemeral;
-    }
-    // `--session-dir` wins; then the saved `sessionDir` (upstream's key, same
-    // format as the flag); then the built-in default. Keep this directory on
-    // restore selections too, not only on fresh sessions.
-    let dir = args
-        .session_dir
+/// The session directory a launch in `cwd` uses: `--session-dir` wins; then
+/// the saved `sessionDir` (upstream's key, same format as the flag); then the
+/// built-in default. Shared by [`select_session`] and the ACP `session/load`
+/// path, so a restore looks in the same directory a fresh session wrote to.
+pub fn resolve_session_dir(args: &Args, cwd: &Path) -> PathBuf {
+    args.session_dir
         .clone()
         .or_else(|| {
             crate::settings::load_settings()
                 .ok()
                 .and_then(|settings| settings.session_dir)
         })
-        .unwrap_or_else(|| default_session_dir(cwd));
+        .unwrap_or_else(|| default_session_dir(cwd))
+}
+
+/// Decide the session selection from parsed args + the resolved cwd.
+pub fn select_session(args: &Args, cwd: &Path) -> SessionSelection {
+    if args.no_session {
+        return SessionSelection::Ephemeral;
+    }
+    // Keep this directory on restore selections too, not only on fresh
+    // sessions.
+    let dir = resolve_session_dir(args, cwd);
     if args.continue_session || args.resume {
         return SessionSelection::Latest { dir };
     }
@@ -211,6 +217,27 @@ pub async fn build(
     args: &Args,
     cwd: &Path,
     project_trusted: bool,
+) -> Result<
+    (
+        AgentHarness,
+        tokio::sync::broadcast::Receiver<rpi_agent::AgentEvent>,
+        ReloadContext,
+    ),
+    BuildError,
+> {
+    let selection = select_session(args, cwd);
+    build_with_selection(resolved, args, cwd, project_trusted, selection).await
+}
+
+/// [`build`] with an explicit session selection — the ACP `session/load` path
+/// restores a specific ki session regardless of the parsed args (which a serve
+/// process never parses anyway).
+pub async fn build_with_selection(
+    resolved: &ResolvedModel,
+    args: &Args,
+    cwd: &Path,
+    project_trusted: bool,
+    selection: SessionSelection,
 ) -> Result<
     (
         AgentHarness,
@@ -351,7 +378,6 @@ pub async fn build(
     let active = filter_active_tool_names(active_tool_names(&tools, args), args);
 
     // ---- Session storage ----
-    let selection = select_session(args, cwd);
     let session = build_session(&selection, &cwd_str).await?;
     // Plugin tools now know which session they serve: `todo` and friends key
     // their per-session state off it. A session without an id (ephemeral) leaves
@@ -2163,7 +2189,7 @@ pub async fn list_session_metadata(
     list_session_metadata_in_dir(cwd, &dir).await
 }
 
-async fn list_session_metadata_in_dir(
+pub(crate) async fn list_session_metadata_in_dir(
     cwd: &str,
     dir: &Path,
 ) -> Result<Vec<rpi_harness::session::jsonl::JsonlSessionMetadata>, BuildError> {

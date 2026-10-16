@@ -24,15 +24,18 @@
 mod diag;
 mod projection;
 mod sessions;
+mod zed;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, CancelNotification, ContentBlock, InitializeRequest, InitializeResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionId,
-    SessionNotification, SessionUpdate, StopReason,
+    AgentCapabilities, AuthenticateRequest, AuthenticateResponse, CancelNotification, ContentBlock,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, LogoutRequest,
+    LogoutResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+    SessionId, SessionNotification, SessionUpdate, StopReason,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Error, Responder, Stdio};
 use rpi_agent::events::AgentEvent;
 use rpi_harness::agent_harness::{AgentLane, HarnessRunOutcome, RunResult};
@@ -66,25 +69,56 @@ struct ServerShared {
 
 type SharedServer = Arc<Mutex<ServerShared>>;
 
-/// `ki acp` entry. Expects exactly `["serve"]`; anything else is a usage error
-/// (exit 2). Returns the process exit code: 0 = clean client EOF, 1 = runtime
-/// failure (same values as [`crate::app::EXIT_RUNTIME`] / [`EXIT_USAGE`]).
+/// `ki acp` entry. `serve` runs the server; `install-zed` / `print-zed` are
+/// one-shots that return before the serve-only shutdown line. Returns the
+/// process exit code: 0 = success or clean client EOF, 1 = runtime failure,
+/// 2 = usage error (same values as [`crate::app::EXIT_RUNTIME`] /
+/// [`EXIT_USAGE`]).
 pub async fn run(argv: &[String]) -> i32 {
-    let (code, reason) = if argv.len() == 1 && argv[0] == "serve" {
-        match serve().await {
-            Ok(()) => (0, "client disconnected"),
-            Err(error) => {
-                eprintln!("error: acp server failed: {error}");
-                (EXIT_RUNTIME, "server error")
-            }
+    // Best-effort legacy-layout migration (flat `~/.ki` → `~/.ki/agent/`): the
+    // parsed CLI path runs it before anything reads credentials/models, but
+    // this early-dispatched subcommand bypasses that path — without it, an
+    // upgrading user's first `ki acp serve` would resolve against an unmigrated
+    // layout (and fail every session/new) until some plain `ki` run happened.
+    let _ = crate::config::migrate_legacy_layout();
+    match argv.first().map(String::as_str) {
+        Some("serve") if argv.len() == 1 => {
+            let (code, reason) = match serve().await {
+                Ok(()) => (0, "client disconnected"),
+                Err(error) => {
+                    eprintln!("error: acp server failed: {error}");
+                    (EXIT_RUNTIME, "server error")
+                }
+            };
+            diag::shutdown(reason, code);
+            code
         }
-    } else {
-        eprintln!("usage: ki acp serve");
-        (EXIT_USAGE, "usage error")
-    };
-    diag::shutdown(reason, code);
-    code
+        // One-shots: stdout/stderr are theirs alone (the serve path keeps
+        // stdout protocol-clean), and the closing stderr line from
+        // `diag::shutdown` belongs to serve only.
+        Some("install-zed") => zed::install_zed(&argv[1..]),
+        // Strict like serve: extra arguments are a usage error, never a
+        // silently ignored flag behind an exit-0 snippet.
+        Some("print-zed") if argv.len() == 1 => {
+            println!("{}", zed::Registration::detect().snippet());
+            0
+        }
+        Some("--help") | Some("help") => {
+            eprintln!("{USAGE}");
+            0
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            EXIT_USAGE
+        }
+    }
 }
+
+/// The `ki acp` subcommand list, for --help and every usage error.
+const USAGE: &str = "usage: ki acp serve
+       ki acp install-zed [--settings <FILE>] [--command <FILE>] [--dry-run]
+       ki acp print-zed
+       ki acp help";
 
 /// The production server over stdio. `normalize_offline_mode` has already run
 /// (the `app.rs` dispatcher precedes this match arm); `ki acp serve` takes no
@@ -107,6 +141,7 @@ pub(crate) async fn run_server(
     }));
 
     let shared_new = Arc::clone(&shared);
+    let shared_load = Arc::clone(&shared);
     let shared_prompt = Arc::clone(&shared);
     let shared_cancel = Arc::clone(&shared);
 
@@ -117,14 +152,46 @@ pub(crate) async fn run_server(
             async |request: InitializeRequest,
                    responder: Responder<InitializeResponse>,
                    _cx: ConnectionTo<Client>| {
-                // The crate's v1 agent guard rejects non-v1 clients before this
-                // handler runs and rewrites the response version to V1 — echo
-                // the client's version and stay out of the way. Capabilities
-                // are honest: batch 1 declares none (no load, no permissions).
+                // ki speaks v1 only, and in this crate build — the workspace
+                // does not enable `unstable_protocol_v2` — `ProtocolCompat`
+                // is a no-op: nothing validates the client's version or
+                // rewrites the response. Answer V1 unconditionally so a
+                // non-v1 client sees the downgrade instead of its own version
+                // echoed back. Capabilities are honest: `loadSession` is
+                // implemented (batch 2), request permission is not (a later
+                // batch), auth is ki's own config.
+                if request.protocol_version != ProtocolVersion::V1 {
+                    diag::diagln!(
+                        "initialize: client asked protocolVersion {:?}, answering v1",
+                        request.protocol_version
+                    );
+                }
                 responder.respond(
-                    InitializeResponse::new(request.protocol_version)
-                        .agent_capabilities(AgentCapabilities::new()),
+                    InitializeResponse::new(ProtocolVersion::V1)
+                        .agent_capabilities(AgentCapabilities::new().load_session(true)),
                 )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async |_request: AuthenticateRequest,
+                   responder: Responder<AuthenticateResponse>,
+                   _cx: ConnectionTo<Client>| {
+                // Credentials run through ki's own configuration and no ACP
+                // auth methods are advertised, so a well-behaved client never
+                // sends this; stray calls are tolerated with an empty ok
+                // (design doc §5.2, rpi-acp precedent) instead of -32601.
+                diag::diagln!("authenticate tolerated (ki has no ACP auth)");
+                responder.respond(AuthenticateResponse::new())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async |_request: LogoutRequest,
+                   responder: Responder<LogoutResponse>,
+                   _cx: ConnectionTo<Client>| {
+                diag::diagln!("logout tolerated (ki has no ACP auth)");
+                responder.respond(LogoutResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -133,6 +200,15 @@ pub(crate) async fn run_server(
                         responder: Responder<NewSessionResponse>,
                         _cx: ConnectionTo<Client>| {
                 handle_session_new(&shared_new, request, responder).await;
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: LoadSessionRequest,
+                        responder: Responder<LoadSessionResponse>,
+                        cx: ConnectionTo<Client>| {
+                handle_session_load(&shared_load, request, responder, cx).await;
                 Ok(())
             },
             agent_client_protocol::on_receive_request!(),
@@ -226,9 +302,20 @@ async fn handle_session_new(
         return;
     };
 
+    // Design doc §4.7: `systemPrompt` 收下, never silently dropped (abb
+    // lesson 7). The pinned v1 schema carries it only through `_meta`.
+    let params = match system_prompt_params(request.meta.as_ref()) {
+        Ok(params) => params,
+        Err(message) => {
+            diag::diagln!("session/new rejected: {message}");
+            let _ = responder.respond_with_error(Error::new(ERR_INVALID_PARAMS, message));
+            return;
+        }
+    };
+
     let cwd = request.cwd;
     diag::diagln!("session/new cwd={}", cwd.display());
-    match factory(&cwd).await {
+    match factory(&cwd, params, sessions::SessionRequest::New).await {
         Ok(deps) => {
             let session = LiveSession::new(deps);
             let id = session.id.clone();
@@ -240,6 +327,210 @@ async fn handle_session_new(
             diag::diagln!("session/new failed: {message}");
             let _ = responder.respond_with_error(Error::new(ERR_INTERNAL, message));
         }
+    }
+}
+
+/// `session/load`: restore a persisted ki session and stream its active
+/// branch back as `session/update`s that strictly precede the response (the
+/// agent-side obligation: "Stream the entire conversation history back to the
+/// client via notifications"; rpi-acp `protocol.rs` replays the same way under
+/// serial dispatch). Runs inline — like `session/new`, the build is the slow
+/// part and no turn can be in flight (the live check already refused that).
+async fn handle_session_load(
+    shared: &SharedServer,
+    request: LoadSessionRequest,
+    responder: Responder<LoadSessionResponse>,
+    cx: ConnectionTo<Client>,
+) {
+    // One live session per process applies to load as much as to new.
+    let factory = {
+        let state = shared.lock().unwrap();
+        if state.live.is_some() {
+            None
+        } else {
+            Some(Arc::clone(&state.factory))
+        }
+    };
+    let Some(factory) = factory else {
+        diag::diagln!("session/load rejected: a session is already live");
+        let _ = responder.respond_with_error(Error::new(
+            ERR_SERVER,
+            "ki acp serve supports one live session per process; the current session is still live",
+        ));
+        return;
+    };
+
+    // Same first-cut stance as session/new, word for word: honoring neither is
+    // possible with the harness rooted at cwd alone, and silent drops are the
+    // failure mode this layer exists to prevent (abb lesson 7).
+    if !request.mcp_servers.is_empty() {
+        diag::diagln!(
+            "session/load rejected: {} mcp_servers entries",
+            request.mcp_servers.len()
+        );
+        let _ = responder.respond_with_error(Error::new(
+            ERR_INVALID_PARAMS,
+            "ki does not accept session-level MCP servers; MCP runs through ki's own configuration",
+        ));
+        return;
+    }
+    if !request.additional_directories.is_empty() {
+        diag::diagln!(
+            "session/load rejected: {} additional_directories entries",
+            request.additional_directories.len()
+        );
+        let _ = responder.respond_with_error(Error::new(
+            ERR_INVALID_PARAMS,
+            "ki does not accept additional_directories yet; the session is rooted at cwd alone",
+        ));
+        return;
+    }
+    // Same first-cut stance as session/new, word for word: `_meta.systemPrompt`
+    // is honored ({"append": text}) or loudly refused, so a reloaded session
+    // runs the prompt its client configured instead of a silently dropped one
+    // (abb lesson 7). The factory applies it on the load path through the same
+    // `--append-system-prompt` channel as on a fresh session.
+    let params = match system_prompt_params(request.meta.as_ref()) {
+        Ok(params) => params,
+        Err(message) => {
+            diag::diagln!("session/load rejected: {message}");
+            let _ = responder.respond_with_error(Error::new(ERR_INVALID_PARAMS, message));
+            return;
+        }
+    };
+
+    // The ACP id derives from the ki session id ("ki-<uuidv7>"); anything that
+    // is not that shape is unknown. Answered BEFORE any factory call so a
+    // stray id can never materialize a session file.
+    let unknown = || {
+        Error::new(
+            ERR_INVALID_PARAMS,
+            format!("unknown sessionId {}", request.session_id),
+        )
+    };
+    let Some(ki_id) = request.session_id.0.strip_prefix("ki-").map(str::to_owned) else {
+        diag::diagln!("session/load rejected: id is not a ki- id");
+        let _ = responder.respond_with_error(unknown());
+        return;
+    };
+    if uuid::Uuid::parse_str(&ki_id).is_err() {
+        diag::diagln!("session/load rejected: id suffix is not a uuid");
+        let _ = responder.respond_with_error(unknown());
+        return;
+    }
+
+    // Restore-only existence pre-check under the request cwd (never
+    // ByExactId, which would create the missing session): the request cwd must
+    // match the session's cwd, so the sessions of other trees stay invisible.
+    let cwd = request.cwd;
+    diag::diagln!(
+        "session/load id={} cwd={}",
+        request.session_id,
+        cwd.display()
+    );
+    let found = match sessions::existing_session_id(&cwd, &ki_id).await {
+        Ok(found) => found,
+        Err(error) => {
+            diag::diagln!("session/load pre-check failed: {error}");
+            let _ = responder.respond_with_error(Error::new(ERR_INTERNAL, error));
+            return;
+        }
+    };
+    if found.is_none() {
+        diag::diagln!(
+            "session/load rejected: no session {ki_id} under {}",
+            cwd.display()
+        );
+        let _ = responder.respond_with_error(unknown());
+        return;
+    }
+
+    match factory(
+        &cwd,
+        params,
+        sessions::SessionRequest::Load {
+            id: ki_id.to_owned(),
+        },
+    )
+    .await
+    {
+        Ok(deps) => {
+            let session = LiveSession::new(deps);
+            // The derived id must round-trip to what the client asked for; a
+            // mismatch would leave the live session unpromptable.
+            debug_assert_eq!(session.id, request.session_id);
+            diag::diagln!("session/load ok id={}", session.id);
+
+            // Replay BEFORE the response, from the built harness's own session
+            // face (the factory holds the advisory lock — no second open).
+            match replay_updates(&session.harness).await {
+                Ok(updates) => {
+                    shared.lock().unwrap().live = Some(session);
+                    diag::diagln!("session/load replayed {} updates", updates.len());
+                    send_updates(&cx, &request.session_id, updates);
+                    let _ = responder.respond(LoadSessionResponse::new());
+                }
+                Err(error) => {
+                    // Built but unreadable: leaving it live would wedge the
+                    // process behind the single-live-session rule, so answer
+                    // the error and run the advisory dispatch (close()) before
+                    // the reload context — and the plugin cdylibs — drop.
+                    diag::diagln!("session/load replay failed: {error}");
+                    session.close().await;
+                    let _ = responder.respond_with_error(Error::new(
+                        ERR_INTERNAL,
+                        format!("could not replay session history: {error}"),
+                    ));
+                }
+            }
+        }
+        Err(message) => {
+            diag::diagln!("session/load failed: {message}");
+            let _ = responder.respond_with_error(Error::new(ERR_INTERNAL, message));
+        }
+    }
+}
+
+/// The persisted main-lane branch (leaf toward root, oldest first) projected
+/// into replay updates. The lane-scoped view resolves the leaf itself, so a
+/// header-only session yields an empty replay; only message entries carry
+/// updates ([`projection::replay_entry`]).
+async fn replay_updates(
+    harness: &rpi_harness::agent_harness::AgentHarness,
+) -> Result<Vec<SessionUpdate>, String> {
+    use rpi_harness::session::types::{BranchBounds, EntryOrder, EntryQuery};
+
+    let entries = harness
+        .view()
+        .find_entries_on_branch(
+            &EntryQuery {
+                order: Some(EntryOrder::OldestFirst),
+                ..Default::default()
+            },
+            &BranchBounds::default(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(entries.iter().flat_map(projection::replay_entry).collect())
+}
+
+/// Decodes `_meta.systemPrompt` (design doc §4.7). The shape ki accepts is the
+/// claude-agent-acp preset ABB sends: an object `{"append": <string>}` layering
+/// onto whatever base prompt discovery yields. An absent key means no
+/// override; any other shape is a parameter error, never a silent drop.
+fn system_prompt_params(
+    meta: Option<&agent_client_protocol::schema::v1::Meta>,
+) -> Result<sessions::SessionParams, String> {
+    let Some(value) = meta.and_then(|meta| meta.get("systemPrompt")) else {
+        return Ok(sessions::SessionParams::default());
+    };
+    match value.get("append").and_then(|append| append.as_str()) {
+        Some(text) => Ok(sessions::SessionParams {
+            system_prompt_append: Some(text.to_string()),
+        }),
+        None => Err(
+            "unsupported _meta.systemPrompt shape; ki accepts {\"append\": <string>}".to_string(),
+        ),
     }
 }
 
@@ -285,15 +576,28 @@ async fn handle_prompt(
 
     // User text = the join of the text content blocks (spec: text only in
     // batch 1); an empty join is a parameter error, not a silent no-op prompt.
+    let mut dropped_non_text = 0usize;
     let text: String = request
         .prompt
         .iter()
         .filter_map(|block| match block {
             ContentBlock::Text(text) => Some(text.text.as_str()),
-            _ => None,
+            // Image/file/audio/resource blocks have no batch-1 mapping (the
+            // harness `prompt_text` call below passes no attachments). Never
+            // silently: the model would answer the caption having never seen
+            // the payload, invisible to both ends.
+            _ => {
+                dropped_non_text += 1;
+                None
+            }
         })
         .collect::<Vec<_>>()
         .join("");
+    if dropped_non_text > 0 {
+        eprintln!(
+            "[ki acp] session/prompt: {dropped_non_text} non-text content block(s) have no batch-1 mapping and were dropped"
+        );
+    }
     if text.is_empty() {
         drop(guard);
         diag::diagln!("session/prompt rejected: no text content");
@@ -333,8 +637,12 @@ async fn drive_turn(
     cx: ConnectionTo<Client>,
     responder: Responder<PromptResponse>,
     turn: Arc<TurnState>,
-    _guard: InFlightGuard,
+    guard: InFlightGuard,
 ) -> agent_client_protocol::Result<()> {
+    // A clone survives for the decision below: a cancel landing in the gap
+    // between the flag swap and the guard drop trips this token, and the
+    // decision must see it.
+    let decision_token = token.clone();
     let prompt = prompt_cancellable(&lane, &text, token);
     tokio::pin!(prompt);
 
@@ -344,24 +652,18 @@ async fn drive_turn(
     let result: HarnessResult<RunResult> = loop {
         tokio::select! {
             biased;
-            received = async {
-                events
-                    .as_mut()
-                    .expect("drain branch guarded on events.is_some()")
-                    .recv()
-                    .await
+            stepped = async {
+                step_events(
+                    events.as_mut().expect("drain branch guarded on events.is_some()"),
+                    &cx,
+                    &session_id,
+                )
+                .await
             }, if events.is_some() => {
-                match received {
-                    Ok(event) => {
-                        send_updates(&cx, &session_id, projection::project(&event));
-                        if event.is_terminal() {
-                            terminal_seen = true;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        diag::diagln!("event stream lagged; {skipped} updates were dropped");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => events = None,
+                match stepped {
+                    Some(true) => terminal_seen = true,
+                    Some(false) => {}
+                    None => events = None,
                 }
             }
             outcome = &mut prompt => break outcome,
@@ -370,26 +672,15 @@ async fn drive_turn(
 
     // The harness resolves the prompt future before its bus delivers the
     // terminal event; drain briefly so the response never overtakes the last
-    // update (precedent: `modes.rs` print mode's bounded post-run drain).
-    if !terminal_seen {
+    // update (precedent: `modes.rs` print mode's bounded post-run drain). A
+    // harness rejection (`Err`) never started a run, so there is nothing to
+    // drain and no reason to tax the response.
+    if !terminal_seen && result.is_ok() {
         if let Some(receiver) = events.as_mut() {
             let _ = tokio::time::timeout(TERMINAL_DRAIN, async {
-                // Mirror the main loop's error handling: a Lagged error leaves
-                // the surviving buffered events receivable — possibly including
-                // the terminal one — so it must log and keep draining, not end
-                // the drain.
-                loop {
-                    match receiver.recv().await {
-                        Ok(event) => {
-                            send_updates(&cx, &session_id, projection::project(&event));
-                            if event.is_terminal() {
-                                break;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            diag::diagln!("event stream lagged; {skipped} updates were dropped");
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
+                while let Some(terminal) = step_events(receiver, &cx, &session_id).await {
+                    if terminal {
+                        break;
                     }
                 }
             })
@@ -397,19 +688,28 @@ async fn drive_turn(
         }
     }
 
-    let was_cancelled = turn.consume_cancelled();
+    // A client cancel is answered `cancelled` no matter how the turn ended —
+    // the protocol mandates it even when the cancellation causes underlying
+    // failures. Two windows must both be consulted: the flag (set any time
+    // before this line) and the token (a cancel landing in the gap between
+    // the flag swap below and the guard drop cancels the token but its flag
+    // would be wiped by the next turn's `begin`). After the guard drop a
+    // cancel is genuinely the next turn's business: the slot is free and the
+    // response is already decided.
+    let was_cancelled = turn.consume_cancelled() || decision_token.is_cancelled();
+    // Release the turn slot BEFORE answering: a client that pipelines the next
+    // prompt off this response must not hit "a prompt turn is already in
+    // flight" for a turn that has already been decided.
+    drop(guard);
     match result {
         Ok(run) => match stop_reason(&run.outcome, was_cancelled) {
-            Some(stop_reason) => {
+            Ok(stop_reason) => {
                 diag::diagln!("session/prompt id={session_id} done: {stop_reason:?}");
                 let _ = responder.respond(PromptResponse::new(stop_reason));
             }
-            None => {
+            Err(error) => {
                 // A failed run surfaces as the JSON-RPC error it is, never as a
                 // fabricated stop reason (abb lesson).
-                let HarnessRunOutcome::Failed { error, .. } = &run.outcome else {
-                    unreachable!("stop_reason returns None only for Failed");
-                };
                 diag::diagln!("session/prompt id={session_id} failed: {}", error.message);
                 let _ = responder.respond_with_error(Error::new(
                     ERR_INTERNAL,
@@ -418,12 +718,45 @@ async fn drive_turn(
             }
         },
         Err(error) => {
-            // The run never started (harness rejection).
-            diag::diagln!("session/prompt id={session_id} rejected: {error}");
-            let _ = responder.respond_with_error(Error::new(ERR_INTERNAL, error.to_string()));
+            // The run never started (harness rejection). A client cancel is
+            // still answered `cancelled` — the protocol mandates it even when
+            // the cancellation causes underlying failures — never a JSON-RPC
+            // error.
+            if was_cancelled {
+                diag::diagln!("session/prompt id={session_id} rejected after cancel");
+                let _ = responder.respond(PromptResponse::new(StopReason::Cancelled));
+            } else {
+                diag::diagln!("session/prompt id={session_id} rejected: {error}");
+                let _ = responder.respond_with_error(Error::new(ERR_INTERNAL, error.to_string()));
+            }
         }
     }
     Ok(())
+}
+
+/// Receives one event from the turn's broadcast stream and projects it.
+/// `Some(true)` = terminal event seen, `Some(false)` = non-terminal event,
+/// `None` = channel closed. A `Lagged` error is exceptional — the skipped
+/// events are silently lost to the client's transcript — so it is always
+/// reported to stderr, not only under `KI_ACP_DEBUG`; the surviving buffered
+/// events (possibly including the terminal one) stay receivable, so the
+/// caller keeps draining rather than ending on it.
+async fn step_events(
+    receiver: &mut broadcast::Receiver<AgentEvent>,
+    cx: &ConnectionTo<Client>,
+    session_id: &SessionId,
+) -> Option<bool> {
+    match receiver.recv().await {
+        Ok(event) => {
+            send_updates(cx, session_id, projection::project(&event));
+            Some(event.is_terminal())
+        }
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            eprintln!("[ki acp] event stream lagged; {skipped} updates were dropped");
+            Some(false)
+        }
+        Err(broadcast::error::RecvError::Closed) => None,
+    }
 }
 
 /// Cancellation is delivered even when the cancel fires before `prompt_text`
@@ -457,30 +790,34 @@ async fn prompt_cancellable(
     }
 }
 
-/// Outcome → stop reason. `None` = respond with an error instead (Failed
-/// without a client cancel). `Suspended` answers `end_turn`: the run parked on
-/// a provider deferred handle and ACP has no stop reason for "suspended" —
+/// Outcome → response. `Err` = respond with the JSON-RPC error instead (Failed
+/// without a client cancel) — the mapping is total, so the caller needs no
+/// `unreachable!`. `Suspended` answers `end_turn`: the run parked on a
+/// provider deferred handle and ACP has no stop reason for "suspended" —
 /// deferred resume is a batch-2+ question, so the why goes to stderr and the
 /// turn ends.
-fn stop_reason(outcome: &HarnessRunOutcome, was_cancelled: bool) -> Option<StopReason> {
+fn stop_reason(
+    outcome: &HarnessRunOutcome,
+    was_cancelled: bool,
+) -> Result<StopReason, &rpi_harness::session::types::OperationError> {
     // A client cancel is answered `cancelled` no matter how the run then
     // ended: the protocol mandates it "even if the cancellation causes
     // exceptions in underlying operations", and abb checks the flag before
     // provider failure — the client's own cancel must never come back as a
     // JSON-RPC error.
     if was_cancelled {
-        return Some(StopReason::Cancelled);
+        return Ok(StopReason::Cancelled);
     }
     match outcome {
-        HarnessRunOutcome::Failed { .. } => None,
-        HarnessRunOutcome::Aborted { .. } => Some(StopReason::Cancelled),
+        HarnessRunOutcome::Failed { error, .. } => Err(error),
+        HarnessRunOutcome::Aborted { .. } => Ok(StopReason::Cancelled),
         HarnessRunOutcome::Suspended { .. } => {
             eprintln!(
                 "[ki acp] run suspended on a deferred handle; ending the turn (deferred resume is a later batch)"
             );
-            Some(StopReason::EndTurn)
+            Ok(StopReason::EndTurn)
         }
-        HarnessRunOutcome::Completed { .. } => Some(StopReason::EndTurn),
+        HarnessRunOutcome::Completed { .. } => Ok(StopReason::EndTurn),
     }
 }
 
@@ -563,18 +900,52 @@ mod tests {
             final_message: None,
         };
 
-        assert_eq!(stop_reason(&completed, false), Some(StopReason::EndTurn));
+        assert_eq!(stop_reason(&completed, false), Ok(StopReason::EndTurn));
         // ACP requires `cancelled` after a client cancel, completed-or-not.
-        assert_eq!(stop_reason(&completed, true), Some(StopReason::Cancelled));
-        assert_eq!(stop_reason(&aborted, false), Some(StopReason::Cancelled));
-        assert_eq!(stop_reason(&aborted, true), Some(StopReason::Cancelled));
-        assert_eq!(stop_reason(&suspended, false), Some(StopReason::EndTurn));
+        assert_eq!(stop_reason(&completed, true), Ok(StopReason::Cancelled));
+        assert_eq!(stop_reason(&aborted, false), Ok(StopReason::Cancelled));
+        assert_eq!(stop_reason(&aborted, true), Ok(StopReason::Cancelled));
+        assert_eq!(stop_reason(&suspended, false), Ok(StopReason::EndTurn));
         // Failed is never a stop reason on its own — it becomes the JSON-RPC
         // error…
-        assert_eq!(stop_reason(&failed, false), None);
+        assert_eq!(
+            stop_reason(&failed, false).err().map(|e| e.code.clone()),
+            Some("boom".into())
+        );
         // …but a client cancel is answered `cancelled` even when the
         // cancellation is what tore the run into a failure (protocol MUST).
-        assert_eq!(stop_reason(&failed, true), Some(StopReason::Cancelled));
+        assert_eq!(stop_reason(&failed, true), Ok(StopReason::Cancelled));
+    }
+
+    // ---- unit: _meta.systemPrompt parsing (design doc §4.7) ----
+
+    #[test]
+    fn system_prompt_params_shapes() {
+        use agent_client_protocol::schema::v1::Meta;
+        // Absent _meta / absent key → no override.
+        assert!(system_prompt_params(None)
+            .unwrap()
+            .system_prompt_append
+            .is_none());
+        assert!(system_prompt_params(Some(&Meta::new()))
+            .unwrap()
+            .system_prompt_append
+            .is_none());
+        // The claude preset ABB sends: {"append": text}.
+        let mut meta = Meta::new();
+        meta.insert(
+            "systemPrompt".into(),
+            serde_json::json!({"append": "be terse"}),
+        );
+        let params = system_prompt_params(Some(&meta)).unwrap();
+        assert_eq!(params.system_prompt_append.as_deref(), Some("be terse"));
+        // Any other shape is a loud parameter error, never a silent drop.
+        let mut meta = Meta::new();
+        meta.insert("systemPrompt".into(), serde_json::json!("bare string"));
+        assert!(system_prompt_params(Some(&meta)).is_err());
+        let mut meta = Meta::new();
+        meta.insert("systemPrompt".into(), serde_json::json!({"preset": "x"}));
+        assert!(system_prompt_params(Some(&meta)).is_err());
     }
 
     // ---- unit: TurnState + InFlightGuard ----
@@ -638,18 +1009,27 @@ mod tests {
     }
 
     fn faux_factory(text: &'static str, tokens_per_second: f64) -> SessionFactory {
-        Arc::new(move |_cwd| {
-            Box::pin(async move { Ok(faux_deps(text, tokens_per_second).await) })
-                as futures::future::BoxFuture<'static, Result<sessions::SessionDeps, String>>
-        })
+        Arc::new(
+            move |_cwd, _params: sessions::SessionParams, _request: sessions::SessionRequest| {
+                Box::pin(async move { Ok(faux_deps(text, tokens_per_second).await) })
+                    as futures::future::BoxFuture<'static, Result<sessions::SessionDeps, String>>
+            },
+        )
     }
 
     /// Run the server over an in-memory duplex and drive a typed client
     /// against it. The client's `session/update` notifications go to
     /// `updates_tx`; the server must shut down cleanly after the client leaves.
+    /// `wire_log` (when given) records `"update"` per notification at dispatch;
+    /// pair it with an `on_receiving_result` callback logging `"response"` —
+    /// the crate runs that callback before dispatching later inbound frames,
+    /// so an `"update"` logged after `"response"` means the server really did
+    /// send the update after (or as) the response: the overtaking the drain
+    /// exists to prevent.
     async fn run_client<C, R>(
         factory: SessionFactory,
         updates_tx: tokio::sync::mpsc::UnboundedSender<SessionNotification>,
+        wire_log: Option<Arc<std::sync::Mutex<Vec<&'static str>>>>,
         client_main: C,
     ) -> agent_client_protocol::Result<R>
     where
@@ -666,6 +1046,9 @@ mod tests {
             .builder()
             .on_receive_notification(
                 async move |notification: SessionNotification, _cx: ConnectionTo<Agent>| {
+                    if let Some(log) = &wire_log {
+                        log.lock().unwrap().push("update");
+                    }
                     let _ = updates_tx.send(notification);
                     Ok(())
                 },
@@ -674,8 +1057,8 @@ mod tests {
             .connect_with(client_transport, client_main)
             .await;
         // The client transport dropped with its connection; the server sees
-        // EOF, runs teardown (turn grace + SessionShutdown), and must land on
-        // the clean path.
+        // EOF and must land on the clean teardown path (spawned turns die
+        // with the connection's task actor; SessionShutdown advisory runs).
         let server_result = tokio::time::timeout(Duration::from_secs(10), server)
             .await
             .expect("server did not stop after client eof")
@@ -736,24 +1119,91 @@ mod tests {
     async fn happy_path_streams_chunks_and_answers_end_turn() {
         const SCRIPT: &str = "hello from faux";
         let (updates_tx, updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Order-sensitive capture: the crate runs an `on_receiving_result`
+        // callback before dispatching later inbound frames, so an "update"
+        // logged after "response" is an update the server really sent at/after
+        // the response — the overtaking the post-run drain exists to prevent.
+        let wire_log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::default();
+        let log_updates = Arc::clone(&wire_log);
+        let log_response = Arc::clone(&wire_log);
         let result = run_client(
             faux_factory(SCRIPT, 1000.0),
             updates_tx,
+            Some(log_updates),
             async move |cx: ConnectionTo<Agent>| {
                 let sid = init_and_new(&cx).await?;
-                let response = cx
-                    .send_request(PromptRequest::new(
-                        sid.clone(),
-                        vec![ContentBlock::from("hi")],
-                    ))
-                    .block_task()
-                    .await?;
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let sent = cx.send_request(PromptRequest::new(
+                    sid.clone(),
+                    vec![ContentBlock::from("hi")],
+                ));
+                sent.on_receiving_result(async move |result| {
+                    if result.is_ok() {
+                        log_response.lock().unwrap().push("response");
+                    }
+                    let _ = tx.send(result);
+                    Ok(())
+                })?;
+                let response = rx
+                    .await
+                    .expect("prompt response channel")
+                    .expect("prompt failed");
                 assert_eq!(response.stop_reason, StopReason::EndTurn);
-                // Updates precede the response on the wire; the client only
-                // dispatches the already-received notifications asynchronously,
-                // so wait for the full script on the channel.
                 let text = wait_for_text(updates_rx, SCRIPT).await;
                 assert_eq!(text, SCRIPT);
+                let order = wire_log.lock().unwrap().clone();
+                let response_pos = order
+                    .iter()
+                    .position(|entry| *entry == "response")
+                    .expect("response logged");
+                assert!(
+                    order[..response_pos].contains(&"update"),
+                    "chunks must stream before the response: {order:?}"
+                );
+                assert!(
+                    !order[response_pos + 1..].contains(&"update"),
+                    "no chunk may overtake the response: {order:?}"
+                );
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn client_eof_mid_turn_shuts_down_cleanly() {
+        // The teardown path both code comments lean on: the client vanishes
+        // while a turn is still streaming. The spawned drive_turn dies with
+        // the connection's task actor (the InFlightGuard with it, releasing
+        // the turn slot), and run_client's server join asserts the server
+        // still lands on the clean path (SessionShutdown included) instead of
+        // hanging or erroring.
+        const SCRIPT: &str = "a considerably longer faux script that streams for a while";
+        let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = run_client(
+            faux_factory(SCRIPT, 10.0),
+            updates_tx,
+            None,
+            async move |cx: ConnectionTo<Agent>| {
+                let sid = init_and_new(&cx).await?;
+                cx.send_request(PromptRequest::new(sid, vec![ContentBlock::from("go")]))
+                    .on_receiving_result(async |_result| Ok(()))?;
+                // Leave while the run is visibly mid-stream: the response was
+                // never received, the turn is still emitting updates.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                let mut saw_chunk = false;
+                while !saw_chunk {
+                    let Ok(Some(notification)) =
+                        tokio::time::timeout_at(deadline, updates_rx.recv()).await
+                    else {
+                        break;
+                    };
+                    if matches!(notification.update, SessionUpdate::AgentMessageChunk(_)) {
+                        saw_chunk = true;
+                    }
+                }
+                assert!(saw_chunk, "run never streamed before the client left");
                 Ok(())
             },
         )
@@ -768,6 +1218,7 @@ mod tests {
         let result = run_client(
             faux_factory(SCRIPT, 20.0),
             updates_tx,
+            None,
             async move |cx: ConnectionTo<Agent>| {
                 let sid = init_and_new(&cx).await?;
                 let (tx, rx) = tokio::sync::oneshot::channel();
@@ -811,6 +1262,7 @@ mod tests {
         let result = run_client(
             faux_factory(SCRIPT, 20.0),
             updates_tx,
+            None,
             async move |cx: ConnectionTo<Agent>| {
                 let sid = init_and_new(&cx).await?;
                 let (tx, rx) = tokio::sync::oneshot::channel();
@@ -864,6 +1316,7 @@ mod tests {
         let result = run_client(
             faux_factory("untouched", 1000.0),
             updates_tx,
+            None,
             async move |cx: ConnectionTo<Agent>| {
                 let sid = init_and_new(&cx).await?;
                 // Cancel with nothing in flight: absorbed, must not poison the
@@ -888,6 +1341,7 @@ mod tests {
         let result = run_client(
             faux_factory("still streaming the response", 20.0),
             updates_tx,
+            None,
             async move |cx: ConnectionTo<Agent>| {
                 let sid = init_and_new(&cx).await?;
                 let (tx, rx) = tokio::sync::oneshot::channel();
@@ -925,6 +1379,7 @@ mod tests {
         let result = run_client(
             faux_factory("ok", 1000.0),
             updates_tx,
+            None,
             async move |cx: ConnectionTo<Agent>| {
                 let _sid = init_and_new(&cx).await?;
                 let second = cx
@@ -947,6 +1402,7 @@ mod tests {
         let result = run_client(
             faux_factory("ok", 1000.0),
             updates_tx,
+            None,
             async move |cx: ConnectionTo<Agent>| {
                 // mcp_servers non-empty → invalid params, before any session.
                 let rejected =
@@ -984,6 +1440,577 @@ mod tests {
                     .await;
                 let error = orphan.expect_err("prompt without a session should fail");
                 assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stray_authenticate_and_logout_are_tolerated() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = run_client(
+            faux_factory("ok", 1000.0),
+            updates_tx,
+            None,
+            async move |cx: ConnectionTo<Agent>| {
+                // ki advertises no ACP auth methods, so a well-behaved client
+                // never sends these — but a stray call must answer {} (design
+                // doc §5.2, rpi-acp precedent), not method-not-found.
+                cx.send_request(AuthenticateRequest::new("oki"))
+                    .block_task()
+                    .await?;
+                cx.send_request(LogoutRequest::new()).block_task().await?;
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn unsupported_system_prompt_meta_shape_is_rejected() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = run_client(
+            faux_factory("ok", 1000.0),
+            updates_tx,
+            None,
+            async move |cx: ConnectionTo<Agent>| {
+                let mut meta = agent_client_protocol::schema::v1::Meta::new();
+                meta.insert(
+                    "systemPrompt".into(),
+                    serde_json::json!("a shape ki does not speak"),
+                );
+                let rejected = cx
+                    .send_request(NewSessionRequest::new(std::env::temp_dir()).meta(meta))
+                    .block_task()
+                    .await;
+                let error = rejected.expect_err("unsupported shape should be refused");
+                assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
+                assert!(error.message.contains("append"));
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    // ---- e2e over duplex: session/load ----
+
+    /// A unique per-process scratch dir (parallel test binaries must not share
+    /// leftovers).
+    fn tempdir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ki-acp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// initialize only (no session/new); pins that `loadSession` is advertised.
+    async fn init_only(cx: &ConnectionTo<Agent>) -> agent_client_protocol::Result<()> {
+        let init = cx
+            .send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+        assert_eq!(init.protocol_version, ProtocolVersion::V1);
+        assert!(
+            init.agent_capabilities.load_session,
+            "initialize must advertise loadSession once session/load exists"
+        );
+        Ok(())
+    }
+
+    fn fixture_user(text: &str) -> rpi_agent::message::AgentMessage {
+        rpi_agent::message::AgentMessage::User(rpi_ai::types::UserMessage {
+            role: rpi_ai::types::UserRole,
+            content: rpi_ai::types::UserContent::Text(text.to_string()),
+            timestamp: 0,
+        })
+    }
+
+    fn fixture_assistant(content: Vec<rpi_ai::types::Content>) -> rpi_agent::message::AgentMessage {
+        use rpi_ai::types::{Api, AssistantMessage};
+        let mut message = AssistantMessage::empty(Api::Faux, "faux", "faux-1", 0);
+        message.content = content;
+        rpi_agent::message::AgentMessage::Assistant(Box::new(message))
+    }
+
+    fn fixture_assistant_text(text: &str) -> rpi_agent::message::AgentMessage {
+        fixture_assistant(vec![rpi_ai::types::Content::text(text)])
+    }
+
+    fn fixture_tool_result(tool_call_id: &str) -> rpi_agent::message::AgentMessage {
+        use rpi_ai::types::ToolResultMessage;
+        rpi_agent::message::AgentMessage::ToolResult(Box::new(ToolResultMessage {
+            role: rpi_ai::types::ToolResultRole,
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: "bash".to_string(),
+            content: vec![rpi_ai::types::Content::text("did the thing")],
+            details: None,
+            usage: None,
+            added_tool_names: Vec::new(),
+            is_error: false,
+            timestamp: 0,
+        }))
+    }
+
+    /// A two-branch fixture session under `<cwd>/.ki/sessions`: main runs
+    /// user → (thought+text+toolcall) → toolResult → "done"; a discarded
+    /// sibling branch hangs off the root with "wrong branch". Returns the ki
+    /// session id.
+    async fn write_fixture_session(cwd: &std::path::Path) -> String {
+        use rpi_harness::session::jsonl::{
+            JsonlSessionCreateOptions, JsonlSessionRepo, JsonlSessionRepoOptions,
+        };
+        use rpi_harness::session::memory::SystemClock;
+        use rpi_harness::session::session::DefaultIdGenerator;
+        use rpi_harness::session::types::SessionStorage;
+        use rpi_harness::session::Session;
+        use rpi_tools::{FileSystem, OsExecutionEnv};
+
+        let dir = crate::session::default_session_dir(cwd);
+        std::fs::create_dir_all(&dir).unwrap();
+        let env = Arc::new(OsExecutionEnv::with_cwd(cwd.to_path_buf()));
+        let fs: Arc<dyn FileSystem> = env.clone();
+        let repo = JsonlSessionRepo::with_env_cwd(JsonlSessionRepoOptions {
+            fs: fs.clone(),
+            sessions_root: dir.to_string_lossy().into_owned(),
+            clock: Arc::new(SystemClock),
+            ids: Arc::new(DefaultIdGenerator::new()),
+        });
+        let opts = JsonlSessionCreateOptions {
+            id: None,
+            parent_session_id: None,
+            cwd: cwd.to_string_lossy().into_owned(),
+            metadata: None,
+        };
+        let storage = repo.create_typed(&opts).await.expect("fixture create");
+        let session = Session::new(Arc::new(storage) as Arc<dyn SessionStorage>, None);
+        let id = session.storage().metadata().id;
+
+        let main = session.view("main");
+        let root = main
+            .append_message(fixture_user("hello"))
+            .await
+            .expect("root append");
+        // Discarded sibling: created on its own lane off the root, so the
+        // main-lane branch walk never reaches it.
+        session
+            .create_lane("side", Some(&root))
+            .await
+            .expect("side lane");
+        session
+            .view("side")
+            .append_message(fixture_assistant_text("wrong branch"))
+            .await
+            .expect("discarded append");
+        // Active branch: thought → text → tool call, result, final text.
+        main.append_message(fixture_assistant(vec![
+            rpi_ai::types::Content::thinking("pondering"),
+            rpi_ai::types::Content::text("plan: "),
+            rpi_ai::types::Content::tool_call("t1", "bash", serde_json::json!({"cmd": "ls"})),
+        ]))
+        .await
+        .expect("turn append");
+        main.append_message(fixture_tool_result("t1"))
+            .await
+            .expect("result append");
+        main.append_message(fixture_assistant_text("done"))
+            .await
+            .expect("done append");
+        id
+    }
+
+    /// The restore half of the production load path, without `session::build`:
+    /// open the fixture's JSONL storage, wrap it in the `Session` facade, and
+    /// build the harness with `allow_existing_session` (salvage/rebuild runs
+    /// BEFORE any replay reads the tree).
+    async fn restored_deps(
+        cwd: &std::path::Path,
+        id: &str,
+    ) -> Result<sessions::SessionDeps, String> {
+        use rpi_harness::session::jsonl::{
+            JsonlSessionListOptions, JsonlSessionRepo, JsonlSessionRepoOptions,
+        };
+        use rpi_harness::session::memory::SystemClock;
+        use rpi_harness::session::session::DefaultIdGenerator;
+        use rpi_harness::session::types::SessionStorage;
+        use rpi_harness::session::Session;
+        use rpi_tools::{FileSystem, OsExecutionEnv};
+
+        let dir = crate::session::default_session_dir(cwd);
+        let env = Arc::new(OsExecutionEnv::with_cwd(cwd.to_path_buf()));
+        let fs: Arc<dyn FileSystem> = env.clone();
+        let repo = JsonlSessionRepo::with_env_cwd(JsonlSessionRepoOptions {
+            fs: fs.clone(),
+            sessions_root: dir.to_string_lossy().into_owned(),
+            clock: Arc::new(SystemClock),
+            ids: Arc::new(DefaultIdGenerator::new()),
+        });
+        let metas = repo
+            .list_typed(&JsonlSessionListOptions::default())
+            .await
+            .map_err(|error| error.to_string())?;
+        let meta = metas
+            .iter()
+            .find(|meta| meta.id == id)
+            .ok_or_else(|| format!("fixture session {id} vanished"))?;
+        let storage = repo
+            .open_by_jsonl_metadata(meta)
+            .await
+            .map_err(|error| error.to_string())?;
+        let session = Session::new(Arc::new(storage) as Arc<dyn SessionStorage>, None);
+
+        let provider = FauxProvider::new(FauxScript::new().with_text("post-load"));
+        let (broadcast, event_rx) = BroadcastEmitter::new(256);
+        let options = AgentHarnessOptions {
+            model: provider.default_model().clone(),
+            models: vec![provider.clone()],
+            agent_emitter: Some(Arc::new(broadcast)),
+            allow_existing_session: true,
+            session,
+            ..Default::default()
+        };
+        let harness = AgentHarness::create(options)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(sessions::SessionDeps {
+            harness,
+            event_rx,
+            reload_context: None,
+        })
+    }
+
+    /// A factory whose every call fails loudly: rejected loads must be
+    /// answered before it ever runs.
+    fn refusing_factory() -> SessionFactory {
+        Arc::new(
+            |_cwd: &std::path::Path,
+             _params: sessions::SessionParams,
+             _request: sessions::SessionRequest| {
+                Box::pin(async { Err("factory must not run for a rejected load".to_string()) })
+                    as futures::future::BoxFuture<'static, Result<sessions::SessionDeps, String>>
+            },
+        )
+    }
+
+    /// Collect `want` update notifications (or whatever arrives before the
+    /// deadline).
+    async fn drain_updates(updates: &mut Updates, want: usize) -> Vec<SessionNotification> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut got = Vec::new();
+        while got.len() < want {
+            let Ok(Some(notification)) = tokio::time::timeout_at(deadline, updates.recv()).await
+            else {
+                break;
+            };
+            got.push(notification);
+        }
+        got
+    }
+
+    /// Recursive sorted listing, so "storage unchanged" is checkable.
+    fn dir_snapshot(root: &std::path::Path) -> Vec<String> {
+        let mut paths = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    paths.push(path.display().to_string());
+                }
+            }
+        }
+        paths.sort();
+        paths
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn load_streams_the_active_branch_before_the_response() {
+        let tmp = tempdir("load-replay");
+        let fixture_id = write_fixture_session(&tmp).await;
+        let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let factory_cwd = tmp.clone();
+        let request_cwd = tmp.clone();
+        let result = run_client(
+            Arc::new(
+                move |_cwd: &std::path::Path,
+                      _params: sessions::SessionParams,
+                      request: sessions::SessionRequest| {
+                    let cwd = factory_cwd.clone();
+                    Box::pin(async move {
+                        match request {
+                            sessions::SessionRequest::Load { id } => restored_deps(&cwd, &id).await,
+                            sessions::SessionRequest::New => {
+                                Err("load test: unexpected session/new".to_string())
+                            }
+                        }
+                    })
+                        as futures::future::BoxFuture<
+                            'static,
+                            Result<sessions::SessionDeps, String>,
+                        >
+                },
+            ),
+            updates_tx,
+            None,
+            async move |cx: ConnectionTo<Agent>| {
+                init_only(&cx).await?;
+                // The ACP id derives from the ki session id.
+                let sid = SessionId::from(format!("ki-{fixture_id}"));
+                // Updates MUST precede the response (agent obligation); they
+                // serialize through the same outgoing actor, so by the time
+                // the response resolves they are already buffered client-side.
+                let response = cx
+                    .send_request(LoadSessionRequest::new(sid, request_cwd))
+                    .block_task()
+                    .await?;
+                assert!(response.modes.is_none(), "ki has no session modes");
+
+                // user chunk, thought, agent text, tool call, completed
+                // update, final agent text — strictly the active branch.
+                let updates = drain_updates(&mut updates_rx, 6).await;
+                assert_eq!(
+                    updates.len(),
+                    6,
+                    "expected exactly the six active-branch updates"
+                );
+                // Explicit indices: zip's one-ahead pull would swallow the
+                // ToolCall at [3] and shift every later assertion.
+                for (index, want) in ["hello", "pondering", "plan: "].iter().enumerate() {
+                    let (agent_client_protocol::schema::v1::SessionUpdate::UserMessageChunk(chunk)
+                    | agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(
+                        chunk,
+                    )
+                    | agent_client_protocol::schema::v1::SessionUpdate::AgentThoughtChunk(
+                        chunk,
+                    )) = &updates[index].update
+                    else {
+                        panic!(
+                            "expected a chunk at [{index}], got {:?}",
+                            updates[index].update
+                        );
+                    };
+                    let agent_client_protocol::schema::v1::ContentBlock::Text(text) =
+                        &chunk.content
+                    else {
+                        panic!("expected text content");
+                    };
+                    assert_eq!(text.text, *want);
+                }
+                match &updates[3].update {
+                    agent_client_protocol::schema::v1::SessionUpdate::ToolCall(call) => {
+                        assert_eq!(call.tool_call_id, "t1".into());
+                        assert_eq!(
+                            call.kind,
+                            agent_client_protocol::schema::v1::ToolKind::Execute
+                        );
+                    }
+                    other => panic!("expected tool call, got {other:?}"),
+                }
+                match &updates[4].update {
+                    agent_client_protocol::schema::v1::SessionUpdate::ToolCallUpdate(update) => {
+                        assert_eq!(update.tool_call_id, "t1".into());
+                        assert_eq!(
+                            update.fields.status,
+                            Some(agent_client_protocol::schema::v1::ToolCallStatus::Completed)
+                        );
+                    }
+                    other => panic!("expected tool call update, got {other:?}"),
+                }
+                // And nothing else: no "wrong branch" replay, no trailing
+                // updates from the faux provider (the load path never runs a
+                // turn) — the six collected are exactly six.
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                while let Ok(notification) = updates_rx.try_recv() {
+                    panic!("unexpected extra update: {:?}", notification.update);
+                }
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn load_rejects_unknown_ids_without_touching_storage_or_the_factory() {
+        let tmp = tempdir("load-unknown");
+        let sessions_dir = crate::session::default_session_dir(&tmp);
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let before = dir_snapshot(&sessions_dir);
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let request_cwd = tmp.clone();
+        let result = run_client(
+            refusing_factory(),
+            updates_tx,
+            None,
+            async move |cx: ConnectionTo<Agent>| {
+                init_only(&cx).await?;
+                // Well-formed but unknown: restore-only semantics answer
+                // "unknown sessionId", never create.
+                let unknown = SessionId::from(format!("ki-{}", uuid::Uuid::new_v4()));
+                let error = cx
+                    .send_request(LoadSessionRequest::new(unknown, request_cwd.clone()))
+                    .block_task()
+                    .await
+                    .expect_err("unknown id must fail");
+                assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
+                assert!(error.message.contains("unknown sessionId"));
+                // Malformed shapes: no ki- prefix, ki- with a non-uuid tail.
+                for bad in ["not-ki", "ki-not-a-uuid"] {
+                    let error = cx
+                        .send_request(LoadSessionRequest::new(
+                            SessionId::from(bad),
+                            request_cwd.clone(),
+                        ))
+                        .block_task()
+                        .await
+                        .expect_err("malformed id must fail");
+                    assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
+                    let message = error.message;
+                    assert!(message.contains("unknown sessionId"), "{message}");
+                }
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+        assert_eq!(
+            dir_snapshot(&sessions_dir),
+            before,
+            "a failed load must not create any session file"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn load_while_a_session_is_live_is_refused_and_leaves_it_working() {
+        let tmp = tempdir("load-live");
+        let fixture_id = write_fixture_session(&tmp).await;
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let request_cwd = tmp.clone();
+        let result = run_client(
+            faux_factory("ok", 1000.0),
+            updates_tx,
+            None,
+            async move |cx: ConnectionTo<Agent>| {
+                init_only(&cx).await?;
+                let live = cx
+                    .send_request(NewSessionRequest::new(request_cwd.clone()))
+                    .block_task()
+                    .await?;
+                let error = cx
+                    .send_request(LoadSessionRequest::new(
+                        SessionId::from(format!("ki-{fixture_id}")),
+                        request_cwd.clone(),
+                    ))
+                    .block_task()
+                    .await
+                    .expect_err("load while live must be refused");
+                assert_eq!(i32::from(error.code), ERR_SERVER);
+                assert!(error.message.contains("one live session per process"));
+                // The live session is untouched and still prompts.
+                let response = cx
+                    .send_request(PromptRequest::new(
+                        live.session_id,
+                        vec![ContentBlock::from("hi")],
+                    ))
+                    .block_task()
+                    .await?;
+                assert_eq!(response.stop_reason, StopReason::EndTurn);
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn load_rejects_session_level_mcp_and_additional_directories() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = run_client(
+            refusing_factory(),
+            updates_tx,
+            None,
+            async move |cx: ConnectionTo<Agent>| {
+                init_only(&cx).await?;
+                let sid = SessionId::from(format!("ki-{}", uuid::Uuid::new_v4()));
+                let error = cx
+                    .send_request(
+                        LoadSessionRequest::new(sid.clone(), std::env::temp_dir()).mcp_servers(
+                            vec![agent_client_protocol::schema::v1::McpServer::Stdio(
+                                agent_client_protocol::schema::v1::McpServerStdio::new(
+                                    "test",
+                                    "/bin/true",
+                                ),
+                            )],
+                        ),
+                    )
+                    .block_task()
+                    .await
+                    .expect_err("mcp_servers on load must be refused");
+                assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
+                assert!(error
+                    .message
+                    .contains("MCP runs through ki's own configuration"));
+                let error = cx
+                    .send_request(
+                        LoadSessionRequest::new(sid, std::env::temp_dir()).additional_directories(
+                            vec![std::env::temp_dir().join("ki-acp-load-additional-root")],
+                        ),
+                    )
+                    .block_task()
+                    .await
+                    .expect_err("additional_directories on load must be refused");
+                assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
+                assert!(error
+                    .message
+                    .contains("does not accept additional_directories yet"));
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    /// Same first-cut stance as session/new (abb lesson 7): an unsupported
+    /// `_meta.systemPrompt` shape is a loud -32602 on load too — never a
+    /// silently dropped prompt behind a successful restore.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn unsupported_system_prompt_meta_shape_on_load_is_rejected() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = run_client(
+            refusing_factory(),
+            updates_tx,
+            None,
+            async move |cx: ConnectionTo<Agent>| {
+                init_only(&cx).await?;
+                let mut meta = agent_client_protocol::schema::v1::Meta::new();
+                meta.insert(
+                    "systemPrompt".into(),
+                    serde_json::json!("a shape ki does not speak"),
+                );
+                let error = cx
+                    .send_request(
+                        LoadSessionRequest::new(
+                            SessionId::from(format!("ki-{}", uuid::Uuid::new_v4())),
+                            std::env::temp_dir(),
+                        )
+                        .meta(meta),
+                    )
+                    .block_task()
+                    .await
+                    .expect_err("unsupported meta shape on load must be refused");
+                assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
+                assert!(error.message.contains("append"), "{error}");
                 Ok(())
             },
         )
