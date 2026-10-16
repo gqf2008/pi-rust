@@ -259,3 +259,35 @@ future 先于 close 回调被 drop，机制移除、注释修正）。
 
 **遗留到批次 2**：`session/request_permission`（UiDialogMailbox 桥）、`session/load`
 回放、zed 注册；**批次 3**：ABB 客户端实测（§7 六点对表 + V1 握手裁决）。
+
+## 13. 批次 2 状态（2026-10-16，wave 1 完成；wave 2 进行中）
+
+提交 `9422100`（`feat/acp-serve-batch2` 分支，已 ff-合入 main）。同树并行完成了一轮
+`/code-review max` 清扫（15 项修复一并入库）。门禁：workspace 1932 通过/0 失败、
+features 门 571 通过、fmt/文档快照干净；acp 套件 53 个测试。
+
+**session/load**（侦察两项关键事实落地）：ACP id 改为 `ki-<uuidv7>` 从 ki 会话 id 派生
+（零持久化、重启稳定）；恢复只走 **ById 语义 + 存在性预检**——`ByExactId` 缺席会新建
+空会话（`session.rs:2069-2081`），禁用于 load；`AgentHarness::create` 先完成中断抢救
+再回放；活动分支最旧优先回放（仅 message 条目；压缩条目客户端侧损失已注明）；load
+尊重 settings `sessionDir`（`resolve_session_dir` 抽取）；`_meta.systemPrompt` 与
+session/new 同款收下或 -32602。
+
+**zed 注册**：`ki acp install-zed`/`print-zed` one-shot；**审查头号战果**——从 rpi-acp
+原样继承的 splice 缺陷（分隔符逗号落入尾注释 → 整个 settings.json 不可解析，两种损坏
+形状都经独立编译复现）重写为注释/字符串感知的 `live_tail` 扫描（无注释文档字节不变）；
+macOS settings 路径按 Zed 文档修正为 `~/.config/zed/`（rpi-acp 的 Application Support
+路径是错的）。
+
+**新待定（harness 层，独立设计活）**：
+- `abort()` 在 run 注册前（`acquire_run` 之前）的拒绝被静默丢弃——ACP 层只能以 100ms
+  tick 重发兜底，modes.rs 同型单次 abort 同样会丢；深层修法在 harness 置 pending-abort
+  标志、`acquire_run` 时检查，让所有嵌入方免于各自补丁；
+- TurnState 与 harness `acquire_run` 双份「单运行」不变量会漂移——根因是 harness 不暴露
+  per-run 取消句柄。
+
+**wave 2（`session/request_permission`）方向已定**：mailbox 是纯轮询模型且阻塞发生在
+插件 runtime action 内部（`drive_turn` 无感）→ 每会话一个 dialog pump 任务
+（`take_pending` → permission 形状经 `cx.send_request(...).block_task()` 往返 →
+`respond`/`cancel` 回 mailbox；`purpose=question` 一律取消回原 id、永不重标）；
+`session/cancel` 与 EOF 路径必达 `cancel_all`/`detach`（否则插件 poll 挂死，测试钉死）。
