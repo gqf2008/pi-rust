@@ -24,12 +24,24 @@ const FAKE_SERVER: &str = env!("CARGO_BIN_EXE_ki-mcp-fake-server");
 /// Build one stdio server config through the public parser, so the tests also
 /// exercise the config path they depend on.
 fn stdio_server(name: &str, args: Vec<String>, timeout_secs: u64, enabled: bool) -> ServerConfig {
+    stdio_server_with(name, args, timeout_secs, enabled, &[])
+}
+
+/// Same, plus config-driven resource subscriptions (`mcpServers.<n>.subscribe`).
+fn stdio_server_with(
+    name: &str,
+    args: Vec<String>,
+    timeout_secs: u64,
+    enabled: bool,
+    subscribe: &[&str],
+) -> ServerConfig {
     let value = json!({
         name: {
             "command": FAKE_SERVER,
             "args": args,
             "enabled": enabled,
             "timeoutSeconds": timeout_secs,
+            "subscribe": subscribe,
         }
     });
     let (servers, issues) = parse_servers(Some(&value));
@@ -83,6 +95,30 @@ fn process_alive(pid: u32) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+/// Count `--record` lines carrying both `method` and `uri`. The fake server
+/// writes one JSON object per observed request/notification.
+fn count_recorded(record: &Path, method: &str, uri: &str) -> usize {
+    std::fs::read_to_string(record)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(method) && line.contains(uri))
+        .count()
+}
+
+/// Poll until `f` yields Some, panicking past the deadline (the notifications
+/// arrive on rmcp's dispatch task, so every assertion here is a bounded wait,
+/// never an immediate read).
+fn wait_for<T>(seconds: u64, what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    loop {
+        if let Some(value) = f() {
+            return value;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// Poll until `pid` is gone, panicking if it survives the deadline.
@@ -427,4 +463,540 @@ async fn http_server_is_parsed_but_skipped_in_this_build() {
         "expected an http-skip notice, got {issues:?}"
     );
     manager.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// batch 2: resources, subscriptions, notices
+// ---------------------------------------------------------------------------
+
+const RESOURCES_ARGS: &[&str] = &["--resources"];
+
+/// A resources-mode server exposing the read tool plus its discovery text.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_tool_is_emitted_only_for_servers_advertising_resources() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (manager, issues) = McpManager::start(
+        &[stdio_server(
+            "docs",
+            RESOURCES_ARGS.iter().map(|s| s.to_string()).collect(),
+            10,
+            true,
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+
+    let adapters = manager.tool_adapters();
+    // Six tools + poke + one read tool per resource server.
+    assert_eq!(
+        adapters.len(),
+        8,
+        "got {:?}",
+        adapters
+            .iter()
+            .map(|a| a.schema().name.clone())
+            .collect::<Vec<_>>()
+    );
+    let read = find(&adapters, "docs__read_resource");
+    let description = read.schema().description.clone();
+    assert!(
+        description.contains("file:///docs/a.md"),
+        "got {description:?}"
+    );
+    assert!(
+        description.contains("file:///docs/{path}"),
+        "got {description:?}"
+    );
+
+    // A tools-only server (the batch-1 fake without --resources) adds no read
+    // tool — the batch-1 tests pin that count at 6 for exactly this reason.
+    manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_tool_maps_text_and_images_and_bounds_oversized_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (manager, issues) = McpManager::start(
+        &[stdio_server(
+            "docs",
+            RESOURCES_ARGS.iter().map(|s| s.to_string()).collect(),
+            10,
+            true,
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    let adapters = manager.tool_adapters();
+    let read = find(&adapters, "docs__read_resource");
+
+    // Text maps to text.
+    let text = call(read, json!({ "uri": "file:///docs/a.md" }))
+        .await
+        .unwrap();
+    assert_eq!(text_of(&text), "doc-a body");
+
+    // An image blob maps to a native image block (same policy as tool results).
+    let image = call(read, json!({ "uri": "file:///docs/pic.png" }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        image.content.first(),
+        Some(TextContentOrImage::Image(_))
+    ));
+
+    // Oversized text is bounded with the truncation marker, never inlined whole.
+    let big = call(read, json!({ "uri": "file:///docs/big.txt" }))
+        .await
+        .unwrap();
+    let big_text = text_of(&big);
+    assert!(
+        big_text.ends_with("\n[truncated]"),
+        "got {} chars",
+        big_text.len()
+    );
+    assert!(big_text.len() < 30_000, "got {} chars", big_text.len());
+
+    // An unknown uri is a tool error, not a silent success.
+    let missing = call(read, json!({ "uri": "file:///nope" }))
+        .await
+        .expect_err("unknown resource must error");
+    assert!(missing.to_string().contains("unknown resource"));
+
+    // A malformed argument is rejected locally.
+    let bad = call(read, json!({}))
+        .await
+        .expect_err("missing uri must error");
+    assert!(bad.to_string().contains("uri"));
+
+    manager.shutdown().await;
+}
+
+/// The adapter semantic: a live subscription means an identical subscribe never
+/// reaches the wire twice, and delivery keeps working afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_subscribe_reuses_the_active_remote_subscription() {
+    let tmp = tempfile::tempdir().unwrap();
+    let record = tmp.path().join("record.log");
+    let (manager, issues) = McpManager::start(
+        &[stdio_server_with(
+            "docs",
+            vec![
+                "--resources".to_string(),
+                "--reject-duplicate-subscribe".to_string(),
+                "--record".to_string(),
+                record.to_string_lossy().into_owned(),
+            ],
+            10,
+            true,
+            &["mem://alpha"],
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+
+    // The config-driven subscribe put exactly one RPC on the wire.
+    assert_eq!(
+        count_recorded(&record, "resources/subscribe", "mem://alpha"),
+        1
+    );
+
+    // A duplicate-rejecting server: a second subscribe on the live transport
+    // must NOT be sent (it would be rejected) and must not lose the mark.
+    manager
+        .subscribe("docs", "mem://alpha")
+        .await
+        .expect("repeated subscribe must be a local no-op");
+    assert_eq!(
+        count_recorded(&record, "resources/subscribe", "mem://alpha"),
+        1
+    );
+
+    // Delivery still works after the repeated subscribe.
+    let adapters = manager.tool_adapters();
+    call(
+        find(&adapters, "docs__poke"),
+        json!({ "uri": "mem://alpha" }),
+    )
+    .await
+    .unwrap();
+    let batch = wait_for(5, "the alpha notice", || {
+        let batch = manager.take_notices();
+        let hit = batch.notices.iter().any(|n| n.uri == "mem://alpha");
+        hit.then_some(batch)
+    });
+    assert!(
+        batch
+            .notices
+            .iter()
+            .any(|n| n.server == "docs" && n.uri == "mem://alpha"),
+        "delivery broke after a repeated subscribe: {batch:?}"
+    );
+
+    manager.shutdown().await;
+}
+
+/// Mark-before-RPC: the fake server pushes the update BEFORE replying to the
+/// subscribe, so the only way the notice can exist is a lifetime installed
+/// ahead of the RPC.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_pushed_during_the_subscribe_handshake_is_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (manager, issues) = McpManager::start(
+        &[stdio_server_with(
+            "docs",
+            ["--resources".to_string(), "--subscribe-notify".to_string()].to_vec(),
+            10,
+            true,
+            &["mem://alpha"],
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    // The notice arrives on rmcp's dispatch task, which may still be draining
+    // when start() returns — wait for it, bounded.
+    let batch = wait_for(5, "the racing first update", || {
+        let batch = manager.take_notices();
+        (!batch.is_empty()).then_some(batch)
+    });
+    assert_eq!(
+        batch.notices,
+        vec![rpi_mcp::McpNotice {
+            server: "docs".into(),
+            uri: "mem://alpha".into()
+        }],
+        "the racing first update was dropped — the mark must precede the RPC"
+    );
+    manager.shutdown().await;
+}
+
+/// The mailbox end to end: three updates for one uri land as ONE coalesced
+/// notice whose suppressed counter reports the two folded events.
+#[tokio::test(flavor = "multi_thread")]
+async fn notifications_coalesce_and_count_suppressed_updates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (manager, issues) = McpManager::start(
+        &[stdio_server_with(
+            "docs",
+            ["--resources".to_string(), "--subscribe-notify".to_string()].to_vec(),
+            10,
+            true,
+            &["mem://alpha"],
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    // Drain the handshake-race notice first — waiting for it, since dispatch
+    // may still be in flight when start() returns.
+    let handshake = wait_for(5, "the handshake notice", || {
+        let batch = manager.take_notices();
+        (!batch.is_empty()).then_some(batch)
+    });
+    assert_eq!(handshake.notices.len(), 1);
+
+    let adapters = manager.tool_adapters();
+    call(
+        find(&adapters, "docs__poke"),
+        json!({ "uri": "mem://alpha", "times": 3 }),
+    )
+    .await
+    .unwrap();
+    // rmcp dispatches every notification in its OWN spawned task (rmcp's
+    // `spawn_service_task`), so the poke reply does NOT order the three
+    // updates behind it — a fixed sleep here would be load-bearing and flake
+    // under load. Poll until all three have landed instead: the first creates
+    // the notice, the next two fold into it (suppressed reaches 2). Each take
+    // resets the mailbox, so accumulate across polls.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut notices: Vec<rpi_mcp::McpNotice> = Vec::new();
+    let mut suppressed = 0u64;
+    while suppressed < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the three updates (suppressed={suppressed})"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+        let batch = manager.take_notices();
+        for notice in batch.notices {
+            if !notices.contains(&notice) {
+                notices.push(notice);
+            }
+        }
+        suppressed += batch.suppressed;
+    }
+    assert_eq!(notices.len(), 1, "updates must coalesce: {notices:?}");
+    assert_eq!(notices[0].server, "docs");
+    assert_eq!(notices[0].uri, "mem://alpha");
+    let batch = rpi_mcp::McpNoticeBatch {
+        notices,
+        suppressed,
+    };
+    assert_eq!(batch.suppressed, 2, "two folded events must be counted");
+    let text = rpi_mcp::notice_entry_text(&batch);
+    assert!(text.contains("- docs: mem://alpha"), "got {text:?}");
+    assert!(text.contains("(2 update(s) suppressed)"), "got {text:?}");
+
+    manager.shutdown().await;
+}
+
+/// Rotation purge: a notice queued under the CURRENT lifetime is destroyed by
+/// the very re-subscribe that rotates it. (Removing the purge from
+/// `ServerHandle::rotate_lifetime` fails this test — the purge is the only
+/// observable effect of the rotation on ki's side.)
+#[tokio::test(flavor = "multi_thread")]
+async fn resubscribe_purges_the_queued_stale_notice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (manager, issues) = McpManager::start(
+        &[stdio_server_with(
+            "docs",
+            ["--resources".to_string(), "--subscribe-notify".to_string()].to_vec(),
+            10,
+            true,
+            &["mem://alpha"],
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    // Drain the handshake-race notice first (waiting for it, since dispatch
+    // may still be in flight when start() returns).
+    let _ = wait_for(5, "the handshake notice", || {
+        let batch = manager.take_notices();
+        (!batch.is_empty()).then_some(batch)
+    });
+    // Queue a fresh notice and CONFIRM it is pending — peek, not take: taking
+    // it would empty the very queue the rotation is supposed to purge.
+    let adapters = manager.tool_adapters();
+    call(
+        find(&adapters, "docs__poke"),
+        json!({ "uri": "mem://alpha" }),
+    )
+    .await
+    .unwrap();
+    wait_for(5, "the poked notice to queue", || {
+        (manager.pending_notice_count() >= 1).then_some(())
+    });
+    // Re-subscribe the SAME uri: already-subscribed, so no second RPC goes
+    // out — but the delivery lifetime rotates and the uri's queue purges.
+    manager
+        .subscribe("docs", "mem://alpha")
+        .await
+        .expect("re-subscribe succeeds");
+    let batch = manager.take_notices();
+    assert!(
+        batch.is_empty(),
+        "the pre-rotation notice must be purged, not delivered: {batch:?}"
+    );
+    assert_eq!(
+        manager.pending_notice_count(),
+        0,
+        "the mailbox must be empty after the rotation purge"
+    );
+
+    manager.shutdown().await;
+}
+
+/// Invalidate-then-send: local delivery stops at once even though the fake
+/// server REJECTS the unsubscribe — and the retired transport reconnects,
+/// restoring the surviving subscription exactly once, leaving the rejected uri
+/// freely re-subscribable.
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_unsubscribe_stops_delivery_but_stays_resubscribable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let record = tmp.path().join("record.log");
+    let (manager, issues) = McpManager::start(
+        &[stdio_server_with(
+            "docs",
+            [
+                "--resources".to_string(),
+                "--reject-unsubscribe".to_string(),
+                "--record".to_string(),
+                record.to_string_lossy().into_owned(),
+            ]
+            .to_vec(),
+            10,
+            true,
+            &["mem://alpha", "mem://beta"],
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    let adapters = manager.tool_adapters();
+
+    // Unsubscribe beta: always reported unsubscribed, delivery stops even
+    // though the server rejects the RPC (which retires the transport).
+    manager
+        .unsubscribe("docs", "mem://beta")
+        .await
+        .expect("unsubscribe reports unsubscribed");
+    // Any in-flight beta update from before (or from the still-registered
+    // remote side) must be dropped, never delivered.
+    call(
+        find(&adapters, "docs__poke"),
+        json!({ "uri": "mem://beta" }),
+    )
+    .await
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let batch = manager.take_notices();
+    assert!(
+        !batch.notices.iter().any(|n| n.uri == "mem://beta"),
+        "delivery must stop after unsubscribe: {batch:?}"
+    );
+
+    // The poke call above reconnected (the rejected unsubscribe retired the
+    // transport) and restored the SURVIVING subscription exactly once.
+    assert_eq!(
+        count_recorded(&record, "resources/subscribe", "mem://alpha"),
+        2,
+        "restore must send exactly one subscribe for alpha"
+    );
+    assert_eq!(
+        count_recorded(&record, "resources/subscribe", "mem://beta"),
+        1,
+        "the unsubscribed uri must not be restored"
+    );
+    assert_eq!(
+        count_recorded(&record, "resources/unsubscribe", "mem://beta"),
+        1
+    );
+
+    // Alpha still delivers; beta is freely re-subscribable.
+    call(
+        find(&adapters, "docs__poke"),
+        json!({ "uri": "mem://alpha" }),
+    )
+    .await
+    .unwrap();
+    wait_for(5, "the alpha notice", || {
+        let batch = manager.take_notices();
+        let hit = batch.notices.iter().any(|n| n.uri == "mem://alpha");
+        hit.then_some(batch)
+    });
+    manager
+        .subscribe("docs", "mem://beta")
+        .await
+        .expect("beta must be re-subscribable");
+    assert_eq!(
+        count_recorded(&record, "resources/subscribe", "mem://beta"),
+        2
+    );
+
+    manager.shutdown().await;
+}
+
+/// The retired adapter's recovery semantic: a dead connection never loses a
+/// subscription — the fresh transport restores it (sorted, once per uri), and
+/// updates flow again.
+#[tokio::test(flavor = "multi_thread")]
+async fn reconnect_restores_subscriptions_and_delivery_survives() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pidfile: PathBuf = tmp.path().join("server.pids");
+    let record = tmp.path().join("record.log");
+    let (manager, issues) = McpManager::start(
+        &[stdio_server_with(
+            "docs",
+            [
+                "--resources".to_string(),
+                "--pidfile".to_string(),
+                pidfile.to_string_lossy().into_owned(),
+                "--record".to_string(),
+                record.to_string_lossy().into_owned(),
+            ]
+            .to_vec(),
+            10,
+            true,
+            &["mem://alpha", "mem://beta"],
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    let adapters = manager.tool_adapters();
+    call(find(&adapters, "docs__echo"), json!({ "text": "up" }))
+        .await
+        .unwrap();
+
+    // Kill the server out from under ki, then let the next call reconnect.
+    let old_pid = read_pidfile(&pidfile)
+        .into_iter()
+        .find(|(l, _)| l == "SELF")
+        .unwrap()
+        .1;
+    let _ = std::process::Command::new("kill")
+        .arg(old_pid.to_string())
+        .status();
+    assert_process_gone(old_pid, "killed server process");
+    call(find(&adapters, "docs__echo"), json!({ "text": "back" }))
+        .await
+        .unwrap();
+
+    // Exactly one restore RPC per subscribed uri on the fresh connection.
+    assert_eq!(
+        count_recorded(&record, "resources/subscribe", "mem://alpha"),
+        2
+    );
+    assert_eq!(
+        count_recorded(&record, "resources/subscribe", "mem://beta"),
+        2
+    );
+
+    // Delivery works across the reconnect.
+    call(
+        find(&adapters, "docs__poke"),
+        json!({ "uri": "mem://alpha" }),
+    )
+    .await
+    .unwrap();
+    let batch = wait_for(5, "the alpha notice after reconnect", || {
+        let batch = manager.take_notices();
+        let hit = batch.notices.iter().any(|n| n.uri == "mem://alpha");
+        hit.then_some(batch)
+    });
+    assert_eq!(batch.notices[0].server, "docs");
+
+    manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn subscribed_resources_shutdown_still_reaps_the_whole_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pidfile: PathBuf = tmp.path().join("server.pids");
+    let (manager, issues) = McpManager::start(
+        &[stdio_server_with(
+            "treed",
+            [
+                "--resources".to_string(),
+                "--child".to_string(),
+                "--pidfile".to_string(),
+                pidfile.to_string_lossy().into_owned(),
+            ]
+            .to_vec(),
+            10,
+            true,
+            &["mem://alpha"],
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    let adapters = manager.tool_adapters();
+    call(find(&adapters, "treed__echo"), json!({ "text": "up" }))
+        .await
+        .unwrap();
+
+    let pids = read_pidfile(&pidfile);
+    let self_pid = pids.iter().find(|(l, _)| l == "SELF").unwrap().1;
+    let child_pid = pids.iter().find(|(l, _)| l == "CHILD").unwrap().1;
+    assert!(process_alive(self_pid), "server should be running");
+    assert!(process_alive(child_pid), "grandchild should be running");
+
+    manager.shutdown().await;
+    assert_process_gone(self_pid, "server process");
+    assert_process_gone(child_pid, "server grandchild");
 }

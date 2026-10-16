@@ -1525,8 +1525,19 @@ pub async fn interactive_tui(
         let state_drain = state.clone();
         let chat_drain = chat_container.clone();
         let lane_drain = lane.clone();
+        let harness_drain = harness.clone();
+        let mcp_drain = Arc::clone(&reload_context.mcp);
         Some(tokio::spawn(async move {
-            drain_agent_events(rx, tui_drain, state_drain, chat_drain, lane_drain).await;
+            drain_agent_events(
+                rx,
+                tui_drain,
+                state_drain,
+                chat_drain,
+                lane_drain,
+                harness_drain,
+                mcp_drain,
+            )
+            .await;
         }))
     } else {
         None

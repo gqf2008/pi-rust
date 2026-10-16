@@ -7,6 +7,15 @@
 //! tool, a crashing handshake, a repeated pagination cursor, a grandchild
 //! process to prove the whole tree is reaped).
 //!
+//! With `--resources` it also speaks the resource half of the protocol:
+//! `resources/list` | `read` | `subscribe` | `unsubscribe`, a `poke` tool that
+//! emits `notifications/resources/updated`, and the subscribe failure modes
+//! the subscription tests need (mirroring the retired adapter's fake server):
+//!   --subscribe-notify             push a notification BEFORE replying to a
+//!                                  subscribe (the racing-update scenario)
+//!   --reject-duplicate-subscribe   a second subscribe for the same uri errors
+//!   --reject-unsubscribe           every unsubscribe errors
+//!
 //! Extra args beyond the protocol:
 //!   --name <n>          label (informational)
 //!   --pidfile <path>    write this process's pid, and `CHILD <pid>` for a
@@ -16,11 +25,15 @@
 //!   --repeat-cursor     always answer with the same nextCursor (a broken server)
 //!   --crash-on-init     exit(1) as soon as initialize arrives
 //!   --stderr-msg <s>    print s to stderr once at startup
-//!   --record <path>     append every `hang` tool call and every
-//!                       `notifications/cancelled` to <path>
+//!   --record <path>     append `hang` tool calls, `notifications/cancelled`
+//!                       and every `resources/*` request to <path>
+//!   --notify-uri <uri>  emit notifications/resources/updated for <uri> from a
+//!                       background thread every 150ms (for update races)
 
+use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
@@ -60,6 +73,22 @@ fn main() {
         .unwrap_or(1);
     let repeat_cursor = flag("--repeat-cursor");
     let record_path: Option<String> = opt("--record");
+    let resources_mode = flag("--resources");
+    let subscribe_notify = flag("--subscribe-notify");
+    let reject_duplicate_subscribe = flag("--reject-duplicate-subscribe");
+    let reject_unsubscribe = flag("--reject-unsubscribe");
+    // Subscriptions this process remembers (only needed by the
+    // duplicate-rejecting mode; a fresh process forgets everything, which is
+    // exactly what the restore tests rely on).
+    let subscribed: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+
+    // A background notifier: one update every 150ms until the process exits.
+    if let Some(uri) = opt("--notify-uri") {
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            send_notification(&uri);
+        });
+    }
 
     let stdin = std::io::stdin();
     let mut line = String::new();
@@ -80,7 +109,7 @@ fn main() {
                 if crash_on_init {
                     std::process::exit(1);
                 }
-                reply(id, initialize_result());
+                reply(id, initialize_result(resources_mode));
             }
             "notifications/initialized" => {} // a notification: never answered
             "tools/list" => {
@@ -89,7 +118,10 @@ fn main() {
                     .and_then(|p| p.get("cursor"))
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                reply(id, tools_list(pages, repeat_cursor, cursor.as_deref()));
+                reply(
+                    id,
+                    tools_list(pages, repeat_cursor, cursor.as_deref(), resources_mode),
+                );
             }
             "tools/call" => {
                 let name = message
@@ -117,12 +149,92 @@ fn main() {
                         .unwrap_or(30);
                     std::thread::sleep(std::time::Duration::from_secs(seconds));
                 }
+                if name == "poke" {
+                    // Emit the update(s) first, then answer — the client's
+                    // dispatch may see the notification before the response.
+                    let uri = arguments
+                        .get("uri")
+                        .and_then(Value::as_str)
+                        .unwrap_or("file:///docs/a.md")
+                        .to_string();
+                    let times = arguments.get("times").and_then(Value::as_u64).unwrap_or(1);
+                    for _ in 0..times {
+                        send_notification(&uri);
+                    }
+                }
                 reply(id, call_tool(name, &arguments));
+            }
+            "resources/list" => {
+                if !resources_mode {
+                    reply_error(id, -32601, "resources not supported");
+                    continue;
+                }
+                reply(id, json!({ "resources": resource_list() }));
+            }
+            "resources/templates/list" => {
+                if !resources_mode {
+                    reply_error(id, -32601, "resources not supported");
+                    continue;
+                }
+                reply(id, json!({ "resourceTemplates": resource_templates() }));
+            }
+            "resources/read" => {
+                let uri = message
+                    .get("params")
+                    .and_then(|p| p.get("uri"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                match read_resource(&uri) {
+                    Some(contents) => reply(id, json!({ "contents": [contents] })),
+                    None => reply_error(id, -32602, &format!("unknown resource: {uri}")),
+                }
+            }
+            "resources/subscribe" => {
+                let uri = message
+                    .get("params")
+                    .and_then(|p| p.get("uri"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                record(&record_path, &message);
+                // The racing-update scenario: the update leaves BEFORE the
+                // subscribe response, so the client must already accept it.
+                if subscribe_notify {
+                    send_notification(&uri);
+                }
+                let mut known = subscribed.lock().unwrap();
+                if reject_duplicate_subscribe && !known.insert(uri.clone()) {
+                    reply_error(id, -32603, &format!("already subscribed: {uri}"));
+                } else {
+                    reply(id, json!({}));
+                }
+            }
+            "resources/unsubscribe" => {
+                record(&record_path, &message);
+                if reject_unsubscribe {
+                    reply_error(id, -32603, "unsubscribe rejected");
+                } else {
+                    subscribed
+                        .lock()
+                        .unwrap()
+                        .remove(message["params"]["uri"].as_str().unwrap_or(""));
+                    reply(id, json!({}));
+                }
             }
             "notifications/cancelled" => record(&record_path, &message),
             _ => reply_error(id, -32601, &format!("method not found: {method}")),
         }
     }
+}
+
+/// Push one `notifications/resources/updated` onto stdout.
+fn send_notification(uri: &str) {
+    write_line(&json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/resources/updated",
+        "params": { "uri": uri }
+    }));
 }
 
 /// Append one received message to the `--record` file (a test observation log).
@@ -137,16 +249,20 @@ fn record(path: &Option<String>, message: &Value) {
     }
 }
 
-fn initialize_result() -> Value {
+fn initialize_result(resources_mode: bool) -> Value {
+    let mut capabilities = json!({ "tools": {} });
+    if resources_mode {
+        capabilities["resources"] = json!({ "subscribe": true });
+    }
     json!({
         "protocolVersion": "2025-06-18",
-        "capabilities": { "tools": {} },
+        "capabilities": capabilities,
         "serverInfo": { "name": "ki-mcp-fake-server", "version": "0.1.0" }
     })
 }
 
-fn all_tools() -> Vec<Value> {
-    vec![
+fn all_tools(resources_mode: bool) -> Vec<Value> {
+    let mut tools = vec![
         json!({
             "name": "echo",
             "description": "Echo the `text` argument back",
@@ -181,14 +297,35 @@ fn all_tools() -> Vec<Value> {
             "description": "Never answer",
             "inputSchema": { "type": "object" }
         }),
-    ]
+    ];
+    if resources_mode {
+        // The model-side trigger for notifications/resources/updated.
+        tools.push(json!({
+            "name": "poke",
+            "description": "Emit `times` notifications/resources/updated for `uri`",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uri": { "type": "string" },
+                    "times": { "type": "integer" }
+                },
+                "required": ["uri"]
+            }
+        }));
+    }
+    tools
 }
 
-fn tools_list(pages: usize, repeat_cursor: bool, cursor: Option<&str>) -> Value {
+fn tools_list(
+    pages: usize,
+    repeat_cursor: bool,
+    cursor: Option<&str>,
+    resources_mode: bool,
+) -> Value {
     if repeat_cursor {
-        return json!({ "tools": [all_tools()[0].clone()], "nextCursor": "same" });
+        return json!({ "tools": [all_tools(resources_mode)[0].clone()], "nextCursor": "same" });
     }
-    let tools = all_tools();
+    let tools = all_tools(resources_mode);
     if pages <= 1 {
         return json!({ "tools": tools });
     }
@@ -211,6 +348,57 @@ fn tools_list(pages: usize, repeat_cursor: bool, cursor: Option<&str>) -> Value 
     result
 }
 
+fn resource_list() -> Vec<Value> {
+    vec![
+        json!({
+            "uri": "file:///docs/a.md",
+            "name": "a",
+            "description": "first doc",
+            "mimeType": "text/markdown"
+        }),
+        json!({
+            "uri": "file:///docs/pic.png",
+            "name": "pic",
+            "description": "an image resource",
+            "mimeType": "image/png"
+        }),
+        json!({
+            "uri": "file:///docs/big.txt",
+            "name": "big",
+            "description": "larger than any read bound",
+            "mimeType": "text/plain"
+        }),
+    ]
+}
+
+fn resource_templates() -> Vec<Value> {
+    vec![json!({
+        "uriTemplate": "file:///docs/{path}",
+        "name": "docs",
+        "description": "a doc by path",
+        "mimeType": "text/markdown"
+    })]
+}
+
+fn read_resource(uri: &str) -> Option<Value> {
+    match uri {
+        "file:///docs/a.md" => Some(json!({
+            "uri": uri, "mimeType": "text/markdown", "text": "doc-a body"
+        })),
+        "file:///docs/pic.png" => Some(json!({
+            "uri": uri, "mimeType": "image/png", "blob": "aGVsbG8="
+        })),
+        "file:///docs/big.txt" => Some(json!({
+            "uri": uri, "mimeType": "text/plain", "text": "x".repeat(30_000)
+        })),
+        other if other.starts_with("file:///docs/") => Some(json!({
+            "uri": other, "mimeType": "text/markdown",
+            "text": format!("body of {other}")
+        })),
+        _ => None,
+    }
+}
+
 fn call_tool(name: &str, arguments: &Value) -> Value {
     match name {
         "echo" => {
@@ -220,6 +408,7 @@ fn call_tool(name: &str, arguments: &Value) -> Value {
                 .unwrap_or("(no text)");
             json!({ "content": [{ "type": "text", "text": text }] })
         }
+        "poke" => json!({ "content": [{ "type": "text", "text": "poked" }] }),
         "fail" => json!({
             "content": [{ "type": "text", "text": "tool exploded on purpose" }],
             "isError": true

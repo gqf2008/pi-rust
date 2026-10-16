@@ -5,20 +5,30 @@
 //! with the session, and each discovered tool is expanded into a native ki tool
 //! named `{server}__{tool}` so the model sees it directly.
 //!
-//! Batch 1 is stdio only. The pieces:
+//! The pieces:
 //! * [`config`] — the `mcpServers` shape (reused from the retired adapter),
 //!   validation, and global/project merge;
-//! * [`manager`] — connect, handshake, enumerate tools, and reap the process
-//!   tree on shutdown;
-//! * [`tool`] — the `AgentTool` adapter and MCP content → ki content mapping.
+//! * [`manager`] — connect, handshake, enumerate tools and resources, run the
+//!   resource-subscription lifecycle, and reap the process tree on shutdown;
+//! * [`tool`] — the `AgentTool` adapters (one per discovered tool, plus one
+//!   `{server}__read_resource` per server advertising resources) and MCP
+//!   content → ki content mapping;
+//! * [`notice`] — the bounded, coalescing mailbox behind the light-notice
+//!   product semantic: a `notifications/resources/updated` delivers a
+//!   (server, uri) notice, never an automatic content read.
 //!
 //! Nothing is written to stdout from this crate; diagnostics go to stderr.
 
 pub mod config;
 pub mod manager;
+mod notice;
 mod tool;
 
 pub use config::{
     merge_servers, parse_servers, HttpTransport, ServerConfig, StdioTransport, Transport,
 };
-pub use manager::McpManager;
+pub use manager::{McpManager, READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR};
+pub use notice::{
+    notice_entry_text, notice_message, McpNotice, McpNoticeBatch, McpNoticeMailbox,
+    NOTICE_CUSTOM_TYPE,
+};

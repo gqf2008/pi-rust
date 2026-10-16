@@ -1152,6 +1152,14 @@ pub(crate) async fn notify_session_tree(reload_context: &ReloadContext) {
 /// and ignored. Shared by every run shape that ends a session (interactive TUI/
 /// REPL, rpc, print, json) so the warn-and-continue contract lives in one place.
 pub async fn dispatch_session_shutdown_advisory(reload_context: &ReloadContext) {
+    // Take the raced notices BEFORE shutdown: `McpManager::shutdown` purges
+    // every queued notice (`clear_subscriptions` runs before the connection
+    // closes, and once the subscription map is cleared the update path can no
+    // longer repopulate), so a flush after it would be empty by construction.
+    // The notices have nowhere else to go — the transcript is closed — so
+    // surface them on stderr instead of dropping them silently (a print-mode
+    // notice would otherwise sit forever).
+    flush_mcp_notices_to_stderr(&reload_context.mcp);
     // MCP servers are ki's own child processes: reap them first so no teardown
     // path can leave a process tree behind, independent of what a plugin does
     // below. Idempotent; the `Drop` chain is the backstop.
@@ -2042,6 +2050,7 @@ fn merge_mcp_tools(tools: &mut Vec<HarnessTool>, mcp: &rpi_mcp::McpManager, args
         .iter()
         .map(|tool| tool.tool.schema().name.clone())
         .collect();
+    let mut allowed = HashSet::new();
     for adapter in mcp.tool_adapters() {
         let name = adapter.schema().name.clone();
         if !tool_name_allowed(&name, args) {
@@ -2051,8 +2060,141 @@ fn merge_mcp_tools(tools: &mut Vec<HarnessTool>, mcp: &rpi_mcp::McpManager, args
             eprintln!("warning: MCP tool {name} collides with an existing tool; skipped");
             continue;
         }
+        allowed.insert(name);
         tools.push(HarnessTool::new(adapter));
     }
+    // The boundary refresh (`drain_mcp_boundary`) consults these so a
+    // list_changed-triggered re-merge can never resurrect a name the policy
+    // excluded here at build time, and so the replace removes exactly the
+    // names MCP actually injected (a collision winner that merely LOOKS
+    // MCP-shaped stays untouched).
+    mcp.record_allowed_tools(allowed.clone());
+    mcp.record_injected_tools(allowed);
+}
+
+/// Deliver MCP resource-update notices at a session boundary and refresh the
+/// MCP tool slice when a server sent `list_changed`.
+///
+/// Called ONLY at the mode boundaries (run tail, between runs, command
+/// dispatch when no run is active, AgentEnd, drive-turn edges) — never mid-run,
+/// because the appended entry would splice between the live run's entries. The
+/// notice is ONE batched custom entry (the goal-guest injection precedent); it
+/// becomes a user message on the next context build. Reading the resource is
+/// on demand (`{server}__read_resource`) — the notice never carries content.
+pub(crate) async fn drain_mcp_boundary(harness: &AgentHarness, mcp: &rpi_mcp::McpManager) {
+    let batch = mcp.take_notices();
+    if !batch.is_empty() {
+        let message = rpi_mcp::notice_message(&batch);
+        if let Err(error) = harness.session().append_message(message).await {
+            eprintln!("warning: mcp: could not record resource notice: {error}");
+        }
+    }
+    // A `tools/list_changed` / `resources/list_changed` refreshes the cached
+    // lists; a changed set is swapped into the harness with a narrow slice
+    // replace (not a full `set_tools` from scratch) so everything non-MCP —
+    // and each tool's active/inactive state — is preserved untouched.
+    if mcp.refresh_if_stale().await {
+        replace_mcp_tools(harness, mcp).await;
+    }
+}
+
+/// Replace exactly the MCP-contributed tools in the harness registry.
+///
+/// Chosen over re-running the whole reload-style merge because the boundary
+/// callers hold no `Args` and must not disturb the rest of the registry (or the
+/// user's per-tool active state from `set_active_tools`). MCP-ownership is
+/// decided by the names MCP actually injected ([`McpManager::injected_tools`],
+/// falling back to the [`McpManager::owns_tool_name`] prefix before the first
+/// merge) — the prefix alone would also remove a non-MCP tool that won a
+/// build-time name collision against a server's namespace. The fresh set is
+/// gated by the recorded build-time policy ([`McpManager::tool_allowed`]) and
+/// the collision gate; active state is preserved per name, with genuinely new
+/// MCP names starting active.
+async fn replace_mcp_tools(harness: &AgentHarness, mcp: &rpi_mcp::McpManager) {
+    // `get_active_tools`/`set_active_tools` live on the lane trait; the tool
+    // registry itself is inherent to the harness.
+    let lane = harness.lane("main");
+    let current = match harness.get_tools().await {
+        Ok(tools) => tools,
+        Err(error) => {
+            eprintln!("warning: mcp: could not read the tool registry: {error}");
+            return;
+        }
+    };
+    let active_before: HashSet<String> = match lane.get_active_tools().await {
+        Ok(names) => names.into_iter().collect(),
+        Err(error) => {
+            eprintln!("warning: mcp: could not read the active tools: {error}");
+            return;
+        }
+    };
+    // Removal boundary: the names MCP actually injected, not the `{server}__`
+    // prefix — a non-MCP tool that won a build-time collision against that
+    // namespace must pass through untouched.
+    let injected = mcp.injected_tools();
+    let is_mcp_owned = |name: &str| match &injected {
+        Some(names) => names.contains(name),
+        None => mcp.owns_tool_name(name),
+    };
+    let previous_mcp: HashSet<String> = current
+        .iter()
+        .map(|tool| tool.tool.schema().name.clone())
+        .filter(|name| is_mcp_owned(name))
+        .collect();
+    // Non-MCP tools pass through untouched, in their original order.
+    let mut tools: Vec<HarnessTool> = current
+        .into_iter()
+        .filter(|tool| !is_mcp_owned(&tool.tool.schema().name))
+        .collect();
+    let mut taken: HashSet<String> = tools
+        .iter()
+        .map(|tool| tool.tool.schema().name.clone())
+        .collect();
+    let mut injected_now: HashSet<String> = HashSet::new();
+    for adapter in mcp.tool_adapters() {
+        let name = adapter.schema().name.clone();
+        if !mcp.tool_allowed(&name) {
+            continue;
+        }
+        if !taken.insert(name.clone()) {
+            eprintln!("warning: MCP tool {name} collides with an existing tool; skipped");
+            continue;
+        }
+        injected_now.insert(name);
+        tools.push(HarnessTool::new(adapter));
+    }
+    // Active state: every surviving tool keeps whatever the user last set
+    // (including an MCP tool deactivated via `set_active_tools`); a genuinely
+    // NEW MCP name (freshly injected, not present before the replace) starts
+    // active — the build default.
+    let active: Vec<String> = tools
+        .iter()
+        .map(|tool| tool.tool.schema().name.clone())
+        .filter(|name| {
+            active_before.contains(name)
+                || (injected_now.contains(name) && !previous_mcp.contains(name))
+        })
+        .collect();
+    if let Err(error) = harness.set_tools(tools, Some(active)).await {
+        eprintln!("warning: mcp: could not install the refreshed MCP tools: {error}");
+        return;
+    }
+    // Record only on success, so the registry and the recorded set stay in
+    // sync for the next boundary.
+    mcp.record_injected_tools(injected_now);
+}
+
+/// Anything still pending at teardown goes to stderr — a print-mode notice
+/// would otherwise sit in the mailbox forever. Called from the shutdown
+/// advisory BEFORE `McpManager::shutdown`: shutdown purges the mailbox, so a
+/// flush after it would be empty by construction.
+pub(crate) fn flush_mcp_notices_to_stderr(mcp: &rpi_mcp::McpManager) {
+    let batch = mcp.take_notices();
+    if batch.is_empty() {
+        return;
+    }
+    eprintln!("warning: mcp: undelivered resource notices at teardown:");
+    eprintln!("{}", rpi_mcp::notice_entry_text(&batch));
 }
 
 /// Resolve the active tool names from the constructed tools when no explicit

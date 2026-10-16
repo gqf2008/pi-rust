@@ -89,6 +89,9 @@ pub async fn print(
 
         let mut images = initial_images;
         for prompt in prompts {
+            // Between runs is a safe boundary: drain MCP resource notices into
+            // the transcript so the NEXT prompt's context build includes them.
+            crate::session::drain_mcp_boundary(&harness, &reload_context.mcp).await;
             match lane.prompt_text(&prompt, std::mem::take(&mut images)).await {
                 Ok(result) => {
                     last_exit = outcome_exit_code(&result.outcome);
@@ -123,6 +126,10 @@ pub async fn print(
                 }
             }
         }
+        // Tail boundary: whatever arrived during the last run lands in the
+        // transcript (a resumed session sees it); the shutdown advisory below
+        // flushes anything later to stderr.
+        crate::session::drain_mcp_boundary(&harness, &reload_context.mcp).await;
 
         // Print the final assistant text to stdout (TS: writeRawStdout text + "\n").
         if let Some(m) = &last_msg {
@@ -231,6 +238,9 @@ pub async fn json(
 
         let mut images = initial_images;
         for prompt in prompts {
+            // Between runs is a safe boundary: drain MCP resource notices into
+            // the transcript so the NEXT prompt's context build includes them.
+            crate::session::drain_mcp_boundary(&harness, &reload_context.mcp).await;
             match lane.prompt_text(&prompt, std::mem::take(&mut images)).await {
                 Ok(result) => {
                     // The harness resolves after its run outcome, while the
@@ -262,6 +272,10 @@ pub async fn json(
         }
 
         // Terminal result summary.
+        // Tail boundary first: whatever arrived during the last run lands in
+        // the transcript; the shutdown advisory below flushes anything later
+        // (post-terminal-event stragglers) to stderr.
+        crate::session::drain_mcp_boundary(&harness, &reload_context.mcp).await;
         let (outcome_str, final_text) = match final_outcome {
             Some(HarnessRunOutcome::Completed { final_message, .. }) => {
                 ("completed", Some(assistant_text(&final_message)))
@@ -322,12 +336,14 @@ pub async fn rpc(
     mut agent_events: Option<tokio::sync::broadcast::Receiver<AgentEvent>>,
     model_catalog: Vec<rpi_ai::Model>,
     ui_dialog: rpi_extensions::UiDialogMailbox,
+    mcp: Arc<rpi_mcp::McpManager>,
 ) -> i32 {
     rpc_with_io(
         harness,
         agent_events.take(),
         model_catalog,
         ui_dialog,
+        mcp,
         tokio::io::BufReader::new(tokio::io::stdin()),
         std::io::stdout(),
     )
@@ -339,6 +355,7 @@ async fn rpc_with_io<R, W>(
     mut agent_events: Option<tokio::sync::broadcast::Receiver<AgentEvent>>,
     model_catalog: Vec<rpi_ai::Model>,
     ui_dialog: rpi_extensions::UiDialogMailbox,
+    mcp: Arc<rpi_mcp::McpManager>,
     input: R,
     output: W,
 ) -> i32
@@ -482,6 +499,13 @@ where
             .unwrap_or("")
             .to_string();
 
+        // Between-commands boundary — only when no run is active: draining
+        // mid-run would splice a transcript entry between the live run's
+        // entries (the TUI defers appends to AgentEnd for the same reason).
+        if !run_active.load(std::sync::atomic::Ordering::Acquire) {
+            crate::session::drain_mcp_boundary(harness, &mcp).await;
+        }
+
         match kind.as_str() {
             "ui_dialog_response" => {
                 let request_id = msg
@@ -548,6 +572,8 @@ where
                 let out_task = stdout.clone();
                 let active_task = Arc::clone(&run_active);
                 let mailbox_task = ui_dialog.clone();
+                let harness_task = harness.clone();
+                let mcp_task = Arc::clone(&mcp);
                 let id_task = id.clone();
                 let flush_events = event_flush.clone();
                 run_task = Some(tokio::spawn(async move {
@@ -570,6 +596,9 @@ where
                     write_line(&out_task, &response.to_json()).await;
                     // A finished/aborted run leaves no dialog outstanding.
                     mailbox_task.cancel_all();
+                    // Run-tail boundary: notices from the run land in the
+                    // transcript now, so the NEXT prompt's run includes them.
+                    crate::session::drain_mcp_boundary(&harness_task, &mcp_task).await;
                     active_task.store(false, std::sync::atomic::Ordering::Release);
                 }));
                 continue;
@@ -1110,6 +1139,7 @@ mod tests {
                 None,
                 vec![],
                 ui,
+                Arc::new(rpi_mcp::McpManager::empty()),
                 tokio::io::BufReader::new(input),
                 captured,
             )
@@ -1160,6 +1190,7 @@ mod tests {
             Some(rx),
             vec![],
             rpi_extensions::UiDialogMailbox::new(),
+            Arc::new(rpi_mcp::McpManager::empty()),
             tokio::io::BufReader::new(&b""[..]),
             output.clone(),
         )
@@ -1268,6 +1299,7 @@ mod tests {
             Some(events),
             vec![],
             rpi_extensions::UiDialogMailbox::new(),
+            Arc::new(rpi_mcp::McpManager::empty()),
             tokio::io::BufReader::new(
                 &b"{\"type\":\"prompt\",\"id\":1,\"content\":\"test\"}\n"[..],
             ),
@@ -1317,6 +1349,7 @@ mod tests {
                 None,
                 vec![],
                 ui.clone(),
+                Arc::new(rpi_mcp::McpManager::empty()),
                 tokio::io::BufReader::new(input),
                 BrokenOutput,
             ),

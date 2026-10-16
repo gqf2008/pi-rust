@@ -23,7 +23,10 @@ use rpi_ai::types::{ImageContent, ImageContentType, Schema, Tool};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::manager::{call_tool, CallError, DiscoveredTool, ServerHandle};
+use crate::manager::{
+    call_tool, read_resource, CallError, DiscoveredTool, ServerHandle, MAX_RESOURCE_TEXT,
+    READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR,
+};
 
 /// An `AgentTool` backed by one tool on one MCP server.
 pub(crate) struct McpToolAdapter {
@@ -203,9 +206,184 @@ fn type_name(value: &Value) -> &'static str {
     }
 }
 
+/// An `AgentTool` reading one resource on one MCP server — the on-demand read
+/// behind the light-notice product semantic: a `notifications/resources/updated`
+/// notice NEVER auto-reads; the model (or the host) reads here when it wants
+/// the content.
+pub(crate) struct McpResourceToolAdapter {
+    handle: Arc<ServerHandle>,
+    schema: Tool,
+}
+
+impl McpResourceToolAdapter {
+    /// `description` carries the server's resource + template list (refreshed
+    /// on `resources/list_changed` by the boundary re-merge).
+    pub(crate) fn new(handle: Arc<ServerHandle>, description: String) -> Self {
+        let name = format!(
+            "{}{TOOL_NAME_SEPARATOR}{READ_RESOURCE_SUFFIX}",
+            handle.server_name()
+        );
+        Self {
+            schema: Tool {
+                name,
+                description,
+                parameters: Schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "uri": { "type": "string", "description": "The uri of the resource to read" }
+                    },
+                    "required": ["uri"]
+                })),
+                constrained_sampling: None,
+            },
+            handle,
+        }
+    }
+}
+
+#[async_trait]
+impl AgentTool for McpResourceToolAdapter {
+    fn schema(&self) -> &Tool {
+        &self.schema
+    }
+
+    fn label(&self) -> &str {
+        &self.schema.name
+    }
+
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        params: Value,
+        signal: CancellationToken,
+        _on_update: Arc<dyn Fn(ToolResultPartial) + Send + Sync>,
+    ) -> Result<AgentToolResult, AgentError> {
+        if signal.is_cancelled() {
+            return Err(AgentError::Abort);
+        }
+        let uri = match params.get("uri").and_then(Value::as_str) {
+            Some(uri) if !uri.trim().is_empty() => uri.to_string(),
+            _ => {
+                return Err(AgentError::Tool(format!(
+                    "{} expects a non-empty string `uri` argument",
+                    self.schema.name
+                )))
+            }
+        };
+        let value = read_resource(&self.handle, &uri, &signal).await;
+        let value = match value {
+            Ok(value) => value,
+            Err(CallError::Cancelled) => return Err(AgentError::Abort),
+            Err(CallError::Failed(message)) => {
+                return Err(AgentError::Tool(format!("{}: {message}", self.schema.name)))
+            }
+        };
+        map_resource_result(&self.schema.name, &value)
+    }
+}
+
+/// Push one text block against the read result's remaining text budget,
+/// truncating at it with the same char-boundary-safe marker as
+/// [`bound_resource_text`](crate::manager). The budget makes the WHOLE read —
+/// not each block — respect `MAX_RESOURCE_TEXT`, as upstream's flattened
+/// `resource_text` did.
+fn push_bounded_text(content: &mut Vec<TextContentOrImage>, mut body: String, budget: &mut usize) {
+    if body.len() > *budget {
+        let mut end = *budget;
+        while end > 0 && !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        body.truncate(end);
+        body.push_str("\n[truncated]");
+        *budget = 0;
+    } else {
+        *budget -= body.len();
+    }
+    content.push(TextContentOrImage::text(body));
+}
+
+/// Map a serialized `ReadResourceResult` into content blocks — the same
+/// text/image/other policy as [`map_result`] applied to resource contents —
+/// bounding the whole read's text at [`MAX_RESOURCE_TEXT`](crate::manager) with
+/// the truncation marker (the adapter's read bound; a blob must not reach the
+/// model whole).
+///
+/// When a read returns several contents, each is preceded by a `{uri}:` line so
+/// the model can tell them apart; a single-content read is just the body.
+fn map_resource_result(_qualified: &str, value: &Value) -> Result<AgentToolResult, AgentError> {
+    let empty = Vec::new();
+    let items = value
+        .get("contents")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    if items.is_empty() {
+        return Ok(AgentToolResult {
+            content: vec![TextContentOrImage::text("(no content returned)")],
+            details: Value::Null,
+            usage: None,
+            added_tool_names: Vec::new(),
+            terminate: false,
+        });
+    }
+    let multiple = items.len() > 1;
+    let mut content = Vec::new();
+    // The whole flattened read is bounded once at MAX_RESOURCE_TEXT (upstream's
+    // `resource_text` -> `bound_resource_text` shape), so a multi-content read
+    // can never hand the model more than the cap regardless of the content
+    // count. Image blobs carry no text budget (the native-image mapping below
+    // inlines pixels, not text).
+    let mut budget = MAX_RESOURCE_TEXT;
+    for item in items {
+        if budget == 0 {
+            break;
+        }
+        let uri = item.get("uri").and_then(Value::as_str).unwrap_or("");
+        let mime = item.get("mimeType").and_then(Value::as_str);
+        if multiple {
+            content.push(TextContentOrImage::text(format!("{uri}:")));
+        }
+        if let Some(text) = item.get("text").and_then(Value::as_str) {
+            push_bounded_text(&mut content, text.to_string(), &mut budget);
+        } else if let Some(blob) = item.get("blob").and_then(Value::as_str) {
+            if mime.is_some_and(|mime| mime.starts_with("image/")) {
+                // Same native-image mapping a tool result gets.
+                content.push(TextContentOrImage::Image(ImageContent {
+                    kind: ImageContentType,
+                    data: blob.to_string(),
+                    mime_type: mime.expect("checked starts_with above").to_string(),
+                }));
+            } else {
+                push_bounded_text(
+                    &mut content,
+                    format!(
+                        "[blob, {} base64 chars{}]",
+                        blob.len(),
+                        mime.map(|mime| format!(", {mime}")).unwrap_or_default()
+                    ),
+                    &mut budget,
+                );
+            }
+        } else {
+            push_bounded_text(
+                &mut content,
+                serde_json::to_string(item).unwrap_or_else(|_| "<unserializable>".into()),
+                &mut budget,
+            );
+        }
+    }
+    Ok(AgentToolResult {
+        content,
+        details: Value::Null,
+        usage: None,
+        added_tool_names: Vec::new(),
+        terminate: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manager::MAX_RESOURCE_TEXT;
     use serde_json::json;
 
     #[test]
@@ -291,5 +469,85 @@ mod tests {
     fn empty_successful_result_is_not_an_empty_message() {
         let result = map_result("srv__empty", &json!({ "content": [] })).unwrap();
         assert_eq!(result.content.len(), 1);
+    }
+
+    #[test]
+    fn resource_text_maps_to_text_and_oversize_is_bounded() {
+        let result = map_resource_result(
+            "srv__read_resource",
+            &json!({ "contents": [{ "uri": "file:///a.md", "mimeType": "text/markdown", "text": "hello doc" }] }),
+        )
+        .unwrap();
+        assert_eq!(result.content.len(), 1);
+        assert_eq!(flatten_text(&result.content), "hello doc");
+
+        let huge = "x".repeat(MAX_RESOURCE_TEXT + 100);
+        let result = map_resource_result(
+            "srv__read_resource",
+            &json!({ "contents": [{ "uri": "file:///big.txt", "text": huge }] }),
+        )
+        .unwrap();
+        let text = flatten_text(&result.content);
+        assert!(text.ends_with("\n[truncated]"));
+        assert!(text.len() < MAX_RESOURCE_TEXT + 100);
+    }
+
+    #[test]
+    fn image_blob_maps_to_a_native_image_other_blobs_are_described() {
+        let result = map_resource_result(
+            "srv__read_resource",
+            &json!({ "contents": [
+                { "uri": "file:///pic.png", "mimeType": "image/png", "blob": "AAAA" },
+                { "uri": "file:///data.bin", "mimeType": "application/octet-stream", "blob": "QUJD" }
+            ] }),
+        )
+        .unwrap();
+        let blocks = &result.content;
+        // Provenance line + image for the first, provenance + descriptor for the second.
+        assert_eq!(blocks.len(), 4, "got {blocks:?}");
+        assert!(
+            matches!(&blocks[1], TextContentOrImage::Image(image) if image.data == "AAAA" && image.mime_type == "image/png")
+        );
+        let text = flatten_text(blocks);
+        assert!(
+            text.contains("[blob, 4 base64 chars, application/octet-stream]"),
+            "got {text:?}"
+        );
+    }
+
+    #[test]
+    fn single_content_read_has_no_uri_echo_and_empty_read_says_so() {
+        let single = map_resource_result(
+            "srv__read_resource",
+            &json!({ "contents": [{ "uri": "file:///a.md", "text": "body" }] }),
+        )
+        .unwrap();
+        assert_eq!(flatten_text(&single.content), "body");
+
+        let empty = map_resource_result("srv__read_resource", &json!({ "contents": [] })).unwrap();
+        assert_eq!(flatten_text(&empty.content), "(no content returned)");
+    }
+
+    #[test]
+    fn multi_content_read_is_bounded_whole_not_per_block() {
+        // Upstream bounds the FLATTENED read once at MAX_RESOURCE_TEXT; two
+        // ~15k blocks must therefore deliver ~20k total, not ~30k.
+        let chunk = "x".repeat(15_000);
+        let result = map_resource_result(
+            "srv__read_resource",
+            &json!({ "contents": [
+                { "uri": "file:///a", "text": chunk },
+                { "uri": "file:///b", "text": chunk }
+            ] }),
+        )
+        .unwrap();
+        let text = flatten_text(&result.content);
+        assert!(
+            text.len() < 2 * 15_000,
+            "the whole read must be bounded, not each block: {} chars",
+            text.len()
+        );
+        assert!(text.starts_with("file:///a:"));
+        assert!(text.ends_with("\n[truncated]"));
     }
 }

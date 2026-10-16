@@ -58,6 +58,11 @@ pub struct ServerConfig {
     pub transport: Transport,
     pub enabled: bool,
     pub timeout: Duration,
+    /// Resource uris ki subscribes to right after the handshake. There is no
+    /// model verb for subscribing (batch-2 stance): subscriptions are
+    /// host/config-driven, and the restore-on-reconnect machinery keeps them
+    /// alive for the session.
+    pub subscribe: Vec<String>,
 }
 
 /// The raw entry as it appears in `mcpServers.<name>`. Every field is optional
@@ -82,14 +87,18 @@ struct RawServer {
     enabled: Option<bool>,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+    #[serde(default)]
+    subscribe: Option<Vec<String>>,
 }
 
-/// A server name must be non-empty ASCII `[A-Za-z0-9_-]` — it is not only an
-/// identifier but the namespace half of every tool it contributes
-/// (`{name}__{tool}`), so anything else would make the expanded names
-/// ambiguous.
+/// A server name must be non-empty ASCII `[A-Za-z0-9_-]` WITHOUT the tool-name
+/// separator — it is not only an identifier but the namespace half of every
+/// tool it contributes (`{name}__{tool}`, parsed by splitting on the FIRST
+/// `__`), so a name containing `__` itself would make the expanded names
+/// ambiguous: server `a__b` contributing tool `t` would parse as server `a`.
 pub fn valid_server_name(name: &str) -> bool {
     !name.is_empty()
+        && !name.contains(crate::manager::TOOL_NAME_SEPARATOR)
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -121,7 +130,10 @@ pub fn parse_servers(raw: Option<&serde_json::Value>) -> (Vec<ServerConfig>, Vec
 
 fn parse_one(name: &str, entry: &serde_json::Value) -> Result<ServerConfig, String> {
     if !valid_server_name(name) {
-        return Err("invalid server name (allowed: [A-Za-z0-9_-], non-empty)".to_string());
+        return Err(format!(
+            "invalid server name (allowed: [A-Za-z0-9_-], non-empty, no {:?})",
+            crate::manager::TOOL_NAME_SEPARATOR
+        ));
     }
     let raw: RawServer = serde_json::from_value(entry.clone())
         .map_err(|error| format!("invalid server definition: {error}"))?;
@@ -163,11 +175,25 @@ fn parse_one(name: &str, entry: &serde_json::Value) -> Result<ServerConfig, Stri
         })
     };
 
+    // `subscribe` uris are wire values sent verbatim in `resources/subscribe`;
+    // an empty string would put a malformed request on the wire.
+    let mut subscribe = Vec::new();
+    if let Some(uris) = raw.subscribe {
+        for uri in uris {
+            let uri = uri.trim();
+            if uri.is_empty() {
+                return Err("`subscribe` contains an empty uri".to_string());
+            }
+            subscribe.push(uri.to_string());
+        }
+    }
+
     Ok(ServerConfig {
         name: name.to_string(),
         transport,
         enabled: raw.enabled.unwrap_or(true),
         timeout,
+        subscribe,
     })
 }
 
@@ -280,6 +306,25 @@ mod tests {
     }
 
     #[test]
+    fn server_names_containing_the_tool_separator_are_rejected() {
+        // `a__b` would make owns_tool_name parse `a__b__t` as server `a` (the
+        // namespace half is matched by splitting on the FIRST `__`) — the
+        // separator must never appear inside the namespace itself.
+        let (servers, issues) = parse(json!({
+            "a__b": { "command": "srv" },
+            "a_": { "command": "srv" },
+            "docs": { "command": "srv" }
+        }));
+        assert_eq!(servers.len(), 2, "single underscores stay legal");
+        assert_eq!(issues.len(), 1, "issues: {issues:?}");
+        assert!(
+            issues[0].contains("invalid server name"),
+            "issues: {issues:?}"
+        );
+        assert!(issues[0].contains("\"__\""), "issues: {issues:?}");
+    }
+
+    #[test]
     fn contradictory_discriminator_is_rejected() {
         let (servers, issues) = parse(json!({
             "both": { "command": "srv", "url": "https://x" },
@@ -336,6 +381,7 @@ mod tests {
             }),
             enabled: true,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            subscribe: Vec::new(),
         }
     }
 
@@ -370,5 +416,27 @@ mod tests {
         let (merged, issues) = merge_servers(vec![stdio("global")], Vec::new(), false);
         assert_eq!(merged.len(), 1);
         assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn subscribe_uris_are_kept_verbatim_and_empty_ones_reject_the_entry() {
+        let (servers, issues) = parse(json!({
+            "docs": { "command": "srv", "subscribe": ["file:///a.md", "  file:///b.md  "] },
+            "bad": { "command": "srv", "subscribe": ["   "] }
+        }));
+        assert_eq!(servers.len(), 1);
+        assert_eq!(
+            servers[0].subscribe,
+            vec!["file:///a.md".to_string(), "file:///b.md".to_string()]
+        );
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("`subscribe` contains an empty uri"));
+    }
+
+    #[test]
+    fn absent_subscribe_field_yields_an_empty_list() {
+        let (servers, issues) = parse(json!({ "plain": { "command": "srv" } }));
+        assert!(issues.is_empty());
+        assert!(servers[0].subscribe.is_empty());
     }
 }

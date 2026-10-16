@@ -78,7 +78,7 @@ pub(crate) struct LiveSession {
     /// itself — `resubscribe` needs only `&self`, so no lock wraps it.
     event_rx: broadcast::Receiver<AgentEvent>,
     pub(crate) turn: Arc<TurnState>,
-    reload_context: Option<crate::session::ReloadContext>,
+    pub(crate) reload_context: Option<crate::session::ReloadContext>,
     /// The plugin UI-dialog mailbox the session was built with.
     ui_dialog: Option<UiDialogMailbox>,
     /// The dialog pump started once a connection exists to carry the outbound

@@ -39,7 +39,7 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Error, Responder, Stdio};
 use rpi_agent::events::AgentEvent;
-use rpi_harness::agent_harness::{AgentLane, HarnessRunOutcome, RunResult};
+use rpi_harness::agent_harness::{AgentHarness, AgentLane, HarnessRunOutcome, RunResult};
 use rpi_harness::result::HarnessResult;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -569,11 +569,16 @@ async fn handle_prompt(
                     session.harness.lane("main"),
                     session.subscribe(),
                     Arc::clone(&session.turn),
+                    session.harness.clone(),
+                    session
+                        .reload_context
+                        .as_ref()
+                        .map(|ctx| Arc::clone(&ctx.mcp)),
                 )),
             },
         }
     };
-    let (token, lane, events, turn) = match began {
+    let (token, lane, events, turn, harness, mcp) = match began {
         Ok(parts) => parts,
         Err((code, message)) => {
             diag::diagln!("session/prompt rejected: {message}");
@@ -629,6 +634,8 @@ async fn handle_prompt(
         responder,
         turn,
         guard,
+        harness,
+        mcp,
     )) {
         // Spawn is only refused while the connection is shutting down; the
         // dropped future releases the guard, and the client is already gone.
@@ -649,7 +656,15 @@ async fn drive_turn(
     responder: Responder<PromptResponse>,
     turn: Arc<TurnState>,
     guard: InFlightGuard,
+    harness: AgentHarness,
+    mcp: Option<Arc<rpi_mcp::McpManager>>,
 ) -> agent_client_protocol::Result<()> {
+    // Between-turn boundary, run-side: notices gathered since the last turn
+    // append NOW, before `prompt_text` starts — the run's context build then
+    // includes them in THIS turn, instead of a turn later.
+    if let Some(mcp) = &mcp {
+        crate::session::drain_mcp_boundary(&harness, mcp).await;
+    }
     // A clone survives for the decision below: a cancel landing in the gap
     // between the flag swap and the guard drop trips this token, and the
     // decision must see it.
@@ -707,6 +722,12 @@ async fn drive_turn(
     // would be wiped by the next turn's `begin`). After the guard drop a
     // cancel is genuinely the next turn's business: the slot is free and the
     // response is already decided.
+    // Turn-end boundary: notices gathered during the run append now — the run
+    // is over, so the entry cannot splice between the run's entries and the
+    // client's next prompt sees it in its context build.
+    if let Some(mcp) = &mcp {
+        crate::session::drain_mcp_boundary(&harness, mcp).await;
+    }
     let was_cancelled = turn.consume_cancelled() || decision_token.is_cancelled();
     // Release the turn slot BEFORE answering: a client that pipelines the next
     // prompt off this response must not hit "a prompt turn is already in

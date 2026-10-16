@@ -153,10 +153,14 @@ pub(super) async fn drain_agent_events(
     state: Arc<TuiState>,
     chat: Arc<Container>,
     lane: Arc<dyn AgentLane>,
+    harness: AgentHarness,
+    mcp: Arc<rpi_mcp::McpManager>,
 ) {
     loop {
         match rx.recv().await {
-            Ok(event) => handle_agent_event(event, &tui, &state, &chat, &lane).await,
+            Ok(event) => {
+                handle_agent_event(event, &tui, &state, &chat, &lane, &harness, &mcp).await
+            }
             Err(broadcast::error::RecvError::Lagged(_)) => {
                 // We dropped some intermediate deltas; the next MessageUpdate/
                 // MessageEnd carries a full partial snapshot so the UI re-syncs.
@@ -175,6 +179,8 @@ pub(super) async fn handle_agent_event(
     state: &Arc<TuiState>,
     chat: &Arc<Container>,
     lane: &Arc<dyn AgentLane>,
+    harness: &AgentHarness,
+    mcp: &Arc<rpi_mcp::McpManager>,
 ) {
     match event {
         AgentEvent::AgentStart => {
@@ -196,6 +202,9 @@ pub(super) async fn handle_agent_event(
                     add_error_message(chat, &format!("Could not record bash result: {error}"));
                 }
             }
+            // Same boundary, same reason: MCP resource-update notices gathered
+            // during the run append now, never mid-run.
+            crate::session::drain_mcp_boundary(harness, mcp).await;
             // The run drained the queue; refresh so consumed entries drop out
             // of the pending-messages display.
             refresh_pending_messages(state, lane).await;
