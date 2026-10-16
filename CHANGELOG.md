@@ -28,6 +28,17 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   settings.json with a comment-preserving JSONC splice (a `.ki-bak` backup is
   kept on first change), and `ki dev acp serve` refuses loudly instead of
   pretending the dev extension session applies.
+- **MCP is a host-level capability now (stdio)**: external MCP servers configured
+  under `mcpServers` in ki's `settings.json` (global `~/.ki/agent/settings.json`
+  and project `<cwd>/.ki/settings.json`, the same shape the retired adapter
+  used, so existing config files port) are connected with the official `rmcp`
+  client, and every discovered tool is exposed as a native `{server}__{tool}`
+  tool (no `mcp_call` meta-tool: the model sees real tools). Connections live
+  with the session and every teardown path reaps the server's whole process
+  tree; a server never inherits ki's provider keys (`env_clear` + allowlist),
+  every spawn is logged, and a broken server is skipped loudly without killing
+  the session. HTTP servers, resources, and ACP-supplied `mcpServers` are
+  later batches.
 - **`fs` grants carry a scope (grant-model change; the ABI stays 0.7.1 — no WIT change)**: `ki plugin grant <id> fs --cwd project`
   opts a plugin into reading and writing the project tree (same scope as
   `exec`/`proc`); the default stays the plugin's own data directory, and legacy

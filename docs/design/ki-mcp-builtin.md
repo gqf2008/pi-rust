@@ -118,3 +118,25 @@
 - HTTP 落地时 reqwest 0.12/0.13 重复的取舍（接受重复 vs 自写 HTTP 层）——批次 2；
 - ACP 客户端注入 server 的授权策略（直接接受 vs `settings` allowlist）——批次 3，需业主裁决；
 - 工具展开后 `--tools` 过滤与插件命名冲突的最终形态——批次 1 实测后补记。
+
+## 10. 批次 1 状态（2026-10-16，完成）
+
+提交 `07d808a`（分支 `feat/mcp-builtin`，已 ff-合入 main）。交付：新 crate `crates/rpi-mcp`
+（config/manager/tool，~1.5k 行）+ rpi-cli 接线（Settings 只读解析 `mcpServers`、
+`start_mcp_manager`、seam 注入 `merge_mcp_tools`、ReloadContext 持有、各模式收尾 +
+ACP close + Drop 兜底）。引擎 `rmcp 1.8.0`（pin）；测试 21 单测 + 10 e2e（含进程树
+OS 级断言：server pid 与孙进程都须消失）。
+
+**审查 9 条（去重 6）全部修复**，两条高危：`/reload` 重建工具集时静默丢掉全部 MCP
+工具（改为 load/reload 共用 `merge_mcp_tools`）；工具名允许 `.` 且无长度上限会产生
+provider 非法名（收紧 `[A-Za-z0-9_-]` + 64，按 Anthropic 规则）。
+
+**实现期挖出的 rmcp 事实（写下来备查）**：① rmcp 的优雅关闭只收干净退出的 server，
+**孙进程会成孤儿**——实现用进程组 SIGTERM（pgid 仍在手上时）兜住，Windows 走 job object；
+② rmcp 的读路径**没有长度上限**（`AsyncRwTransport::receive` 用无界 `read_until`，codec
+的 max_length 只管写侧）——自建 `ChildTransport` + 16MiB `CappedReader` 补上（前身
+adapter 的 16MiB 约定）。
+
+**批次 2/3 待做**：HTTP/Streamable + SSE、resources（list/read/subscribe +
+`resources/updated` 注入）、list_changed 刷新；ACP 合流（`session/new mcpServers`
+由拒绝改接受、`mcpCapabilities` 如实声明、两条契约测试翻转、客户端注入策略裁决）。
