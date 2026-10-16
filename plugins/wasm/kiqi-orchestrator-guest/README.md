@@ -27,11 +27,16 @@ also gone — reshape between waves works as before.
 ki insmod --build plugins/wasm/kiqi-orchestrator-guest --id rpi-orchestrator --yes
 ki plugin grant rpi-orchestrator proc --command ki --cwd project --timeout 1800
 ki plugin grant rpi-orchestrator exec --command sh --command test --cwd project --timeout 300
+ki plugin grant rpi-orchestrator fs --cwd project
 ```
 
 - `proc --command ki`: the subagent/dispatch children (`ki` resolved from PATH).
 - `exec` `sh`/`test`: only for nodes declaring `verify`/`expectFile`. Nodes
   without them need neither.
+- `fs --cwd project`: reads `.ki/goals.json` to gate the guidance (below).
+  `insmod --yes` grants a newly declared `fs` at the default scope (the plugin's
+  own data directory), which this guest cannot read the project file from — the
+  explicit `--cwd project` grant above is what scopes it, so run it too.
 
 ## Differences from the compile-time plugin
 
@@ -40,10 +45,19 @@ ki plugin grant rpi-orchestrator exec --command sh --command test --cwd project 
 2. **`maxTurns` is not enforced on the child** — the env knob
    (`KI_MAX_TURNS_PER_RUN`) has no `proc` equivalent. Accepted for schema
    parity, recorded, not enforced.
-3. **Guidance is always injected.** The compiled version couples it to an
-   active goal in `.ki/goals.json` and an env override; a guest has neither
-   (fs is jailed to its own data dir, there is no env). Installing the guest
-   is the signal.
+3. **Guidance is goal-gated, like the compiled version.** The
+   "## Subagent orchestration" section is appended to the system prompt only
+   when `<project>/.ki/goals.json` holds an active goal — the compiled
+   `active_goal_from` semantics, fail-closed (any read or parse problem is "no
+   goal"), never appended twice. The compiled `KI_ORCHESTRATOR_GUIDE` env
+   override has no guest equivalent (there is no environment to read), so it is
+   gone; the file alone decides. The `fs --cwd project` grant is what lets the
+   guest read the file, so without it the guidance never turns on. The compiled
+   gate has a second condition the guest does not reproduce: it skips injection
+   inside a subagent (`KI_ORCHESTRATOR_SUBAGENT`). A guest cannot carry that
+   marker — `proc::spawn` has no env knob and the host scrubs the child's env
+   (only `PATH` survives) — so a delegated child with an active goal still sees
+   the guidance even though `--exclude-tools` left it without `plan`/`dispatch`.
 4. **Children spawn `ki` from PATH** — there is no `current_exe()` in wasm.
    `program` overrides it (test seam; the exec/proc allow-list still gates
    whatever is named), and an overridden program receives no ki-specific flags.

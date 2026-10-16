@@ -14,12 +14,17 @@
 //! call, so "return and collect later" would strand them); no mid-wave
 //! reshape (returning mid-wave would kill the in-flight children); no enforced
 //! turn ceiling on the child (the env knob has no `proc` equivalent —
-//! `maxTurns` is accepted for schema parity but not enforced); and the
-//! guidance is always injected (a guest has neither project fs for the goal
-//! file nor env for the override — installing the guest is the signal).
+//! `maxTurns` is accepted for schema parity but not enforced). The
+//! goal-coupled guidance *does* survive: the guest reads `.ki/goals.json`
+//! through the project-scoped `fs` grant, so an active goal turns it on as in
+//! the compiled plugin. Two compiled conditions are gone: the
+//! `KI_ORCHESTRATOR_GUIDE` env override (a guest has no environment), and the
+//! subagent guard (`KI_ORCHESTRATOR_SUBAGENT` — a guest's children carry a
+//! scrubbed env with no marker, so a delegated child with an active goal still
+//! sees the guidance).
 
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
-use kiqi_plugin_guest::bindings::kiqi::plugin::{exec, proc, types};
+use kiqi_plugin_guest::bindings::kiqi::plugin::{exec, fs, proc, types};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,6 +40,12 @@ const MAX_PARALLEL_CAP: usize = 16;
 const RESULT_SUMMARY_BYTES: usize = 2_000;
 const POLL_SLICE_MS: u64 = 100;
 const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Project-relative path of `rpi-goal`'s state — the compile-time `GOALS_FILE`.
+/// An active goal in it is what turns the guidance on; the `fs` grant's scope is
+/// the project tree, so this resolves under the session's directory.
+const GOALS_FILE: &str = ".ki/goals.json";
+const GUIDE_HEADING: &str = "## Subagent orchestration";
 
 const GUIDE_SECTION: &str = "## Subagent orchestration\n\nFor work that has several steps, or steps that can run in parallel, use the\n`plan` and `dispatch` tools instead of doing everything inline:\n\n1. `plan` with action=set: write the task graph as nodes, each with an `id`, a\n   self-contained `task`, and its `deps`.\n2. `dispatch`: run the current ready wave. Nodes whose dependencies are done run\n   in parallel (up to `maxParallel`).\n3. Read the results, then `plan` with action=update (add/remove/re-dep/reset\n   nodes) and `dispatch` again until the goal is met.\n\nA subagent starts fresh and cannot see this conversation, so each node's `task`\nmust contain everything it needs. Prefer this over hand-rolling the whole\nworkflow with `bash`.";
 
@@ -311,7 +322,11 @@ impl Graph {
         if self.nodes.is_empty() {
             return "plan is empty".into();
         }
-        let done = self.nodes.iter().filter(|n| n.status == Status::Done).count();
+        let done = self
+            .nodes
+            .iter()
+            .filter(|n| n.status == Status::Done)
+            .count();
         let mut lines = vec![format!("{done}/{} done", self.nodes.len())];
         for node in &self.nodes {
             let mark = match node.status {
@@ -341,10 +356,7 @@ impl Graph {
 // compiled plugin's process statics
 // ---------------------------------------------------------------------------
 
-
-static GRAPH: Mutex<Graph> = Mutex::new(Graph {
-    nodes: Vec::new(),
-});
+static GRAPH: Mutex<Graph> = Mutex::new(Graph { nodes: Vec::new() });
 /// `(node id, child handle, when that node's own timeout expires)`.
 static RUNNING: Mutex<Vec<(String, u32, Instant)>> = Mutex::new(Vec::new());
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -360,6 +372,25 @@ fn running() -> &'static Mutex<Vec<(String, u32, Instant)>> {
 
 fn bump_generation() -> u64 {
     GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// Whether `rpi-goal` has an active goal in this project — the compile-time
+/// `active_goal_in_project` gate, reading `.ki/goals.json` through the `fs`
+/// grant. Fail-closed: any read or parse problem is "no goal".
+fn active_goal_in_project() -> bool {
+    let Ok(bytes) = fs::read(GOALS_FILE) else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    let Some(active) = value.get("active") else {
+        return false;
+    };
+    !active.is_null() && active.get("status").and_then(Value::as_str) == Some("active")
 }
 
 /// Session switch → cancel running children, drop the graph. Same contract as
@@ -388,10 +419,7 @@ fn stop_all_running() {
     for handle in handles {
         let _ = proc::kill(handle);
     }
-    running()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clear();
+    running().lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +427,10 @@ fn stop_all_running() {
 // ---------------------------------------------------------------------------
 
 fn plan(params: &Value) -> Result<types::ToolResult, String> {
-    let action = params.get("action").and_then(Value::as_str).unwrap_or("show");
+    let action = params
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("show");
     let mut guard = graph_state().lock().unwrap_or_else(|p| p.into_inner());
     match action {
         "set" => {
@@ -816,10 +847,11 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
             // The node's own timeout bounds its child (the host kills the whole
             // group at call end; the guest enforces the node-level deadline).
             let deadline = Instant::now() + Duration::from_secs(node.timeout_secs);
-            running()
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push((id.clone(), handle, deadline));
+            running().lock().unwrap_or_else(|p| p.into_inner()).push((
+                id.clone(),
+                handle,
+                deadline,
+            ));
             started.push(id);
         }
         started
@@ -837,10 +869,8 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
         // streaming would never be read or collected, and the `waitSeconds`
         // expiry would then kill it and mark a successfully finished node
         // failed.
-        let batch: Vec<(String, u32, Instant)> = running()
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
+        let batch: Vec<(String, u32, Instant)> =
+            running().lock().unwrap_or_else(|p| p.into_inner()).clone();
         if batch.is_empty() {
             break;
         }
@@ -902,8 +932,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                             }
                             _ => {
                                 slot.status = Status::Failed;
-                                slot.result =
-                                    Some(summarize(&format!("{output}\n[exit {exit}]")));
+                                slot.result = Some(summarize(&format!("{output}\n[exit {exit}]")));
                             }
                         }
                     }
@@ -975,10 +1004,7 @@ fn fail_remaining(reason: &str) {
         }
     }
     graph.propagate_skips();
-    running()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clear();
+    running().lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
 
 fn spawn_node(node: &Node, program: &str) -> Result<u32, String> {
@@ -1022,7 +1048,9 @@ fn verify_node(node: &Node) -> Result<(), String> {
             .map_err(|error| format!("test -f {file}: {}", capability_reason(error)))?;
         let status = parse_status(&raw);
         if status != Some(0) {
-            return Err(format!("expect_file `{file}` is missing after the child ran"));
+            return Err(format!(
+                "expect_file `{file}` is missing after the child ran"
+            ));
         }
     }
     if let Some(command) = &node.verify {
@@ -1077,10 +1105,7 @@ impl Guest for RpiOrchestrator {
         tools()
     }
 
-    fn call_tool(
-        name: String,
-        arguments: String,
-    ) -> Result<types::ToolResult, types::PluginError> {
+    fn call_tool(name: String, arguments: String) -> Result<types::ToolResult, types::PluginError> {
         if !tools().iter().any(|spec| spec.name == name) {
             return Err(types::PluginError::UnknownTool(name));
         }
@@ -1118,18 +1143,21 @@ impl Guest for RpiOrchestrator {
     fn before_agent_start(prompt: String) -> Option<String> {
         let event: Value = serde_json::from_str(&prompt).ok()?;
         note_session(&event);
-        // The goal-coupled guidance and the env override from the compiled
-        // version cannot exist here (no project fs, no env in a guest), so an
-        // installed orchestrator always injects its guidance — the one signal
-        // that remains is "you installed it".
-        Some(format!(
-            "{}\n\n{}",
-            event
-                .get("systemPrompt")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            GUIDE_SECTION
-        ))
+        // The compile-time gate: guidance only when the project has an active
+        // goal. The compiled env override (`KI_ORCHESTRATOR_GUIDE`) is gone —
+        // a guest has no environment to read — so the file alone decides.
+        if !active_goal_in_project() {
+            return None;
+        }
+        let base = event
+            .get("systemPrompt")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        // Idempotent, like the compiled handler: never append the section twice.
+        if base.contains(GUIDE_HEADING) {
+            return None;
+        }
+        Some(format!("{base}\n\n{GUIDE_SECTION}"))
     }
 
     fn list_probe_points() -> Vec<String> {

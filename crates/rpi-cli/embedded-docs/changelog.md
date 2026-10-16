@@ -90,7 +90,20 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   orchestrator's goal-linked guidance reads `.ki/goals.json`, which the
   **compiled** `rpi-goal` writes — with that plugin opt-in, the guidance no
   longer turns itself on (set `KI_ORCHESTRATOR_GUIDE=1` to force it, or build
-  `--features plugin-rpi-goal`).
+  `--features plugin-rpi-goal`). The **wasm** tier closes this gap (below):
+  `kiqi-goal-guest` writes the same `.ki/goals.json` and
+  `kiqi-orchestrator-guest` gates its guidance on it.
+- **The goal→orchestrator coupling is restored in the wasm tier.** `kiqi-goal-guest`
+  now keeps its state in `<project>/.ki/goals.json` in the compiled shape
+  (`{"active": …|null, "archived": […]}`) through the project-scoped `fs`
+  grant, instead of a `{project: Goals}` map in its own data directory — so the
+  compiled `rpi-orchestrator` reads it too. `kiqi-orchestrator-guest` gates its
+  "## Subagent orchestration" guidance on that file (an active goal, the compiled
+  `active_goal_from` semantics, fail-closed) instead of injecting it
+  unconditionally; the compiled `KI_ORCHESTRATOR_GUIDE` override is dropped (a
+  guest has no environment). Both guests now need `fs --cwd project`, and the
+  old data-directory store is migrated best-effort on first use. The write stays
+  non-atomic (`fs` has no `rename`).
 
 ### Added
 

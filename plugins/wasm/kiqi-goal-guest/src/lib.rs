@@ -7,17 +7,17 @@
 //! `/goal` command, and a `TurnEnd` hook that counts turns, enforces the budget
 //! and re-injects the active goal.
 //!
-//! Three things differ from the compile-time plugin, and each is stated rather
-//! than hidden (see the README for the full list):
+//! State lives in `<project>/.ki/goals.json` — the compile-time `GOAL_FILE` and
+//! the exact shape the compiled `rpi-orchestrator` reads, so an active goal
+//! started here turns the compiled orchestration guidance on. (The `fs` grant's
+//! scope is now the project tree — a grant-model change, not an ABI one; the
+//! ABI stays 0.7.1. Before the scope existed the guest kept a
+//! `{ "<project path>": Goals }` map in its own data directory, which the
+//! compiled orchestrator could not see.)
 //!
-//! * **State location + map keying.** The compiled plugin writes
-//!   `<project>/.ki/goals.json`. The wasm `fs` jail only reaches the plugin's own
-//!   data directory (`plugins/<id>/data/`), so the port keeps a
-//!   `{ "<project path>": Goals }` map in `goals.json` there, keyed on
-//!   `session-read`'s `info().cwd`. The per-project semantics survive; the
-//!   location and the keying are the difference. Consequence: the compiled
-//!   `rpi-orchestrator` reads `.ki/goals.json`, so a goal started here does not
-//!   switch on compiled orchestration guidance.
+//! Two things still differ from the compile-time plugin, and each is stated
+//! rather than hidden (see the README for the full list):
+//!
 //! * **`TurnEnd` arrives untyped.** The WIT event enum has no turn-end tag; the
 //!   host maps `EventTag::TurnEnd` to `event::other` with kind `"TurnEnd"`, so
 //!   the hook string-matches `other.kind`.
@@ -35,12 +35,18 @@ use std::sync::{Mutex, OnceLock};
 
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
 use kiqi_plugin_guest::bindings::kiqi::plugin::{fs, inject, session_read, types};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 const ID: &str = "rpi-goal";
-/// The store file inside the jail (`plugins/rpi-goal/data/`). The compile-time
-/// plugin used `.ki/goals.json`; the location change is documented.
-const STORE_FILE: &str = "goals.json";
+/// Project-relative path of the state file — the compile-time `rpi-goal`
+/// contract (`GOAL_FILE`). The `fs` grant's scope is the project tree, so this
+/// path resolves under the session's directory.
+const PROJECT_FILE: &str = ".ki/goals.json";
+/// The pre-scope store: the `{ "<project>": Goals }` map the guest used to keep
+/// in its own data directory under `fs` scope `plugin-data`. Read-only, and only
+/// when the current `fs` root makes it reachable (see the README); used to
+/// migrate a project's entry into [`PROJECT_FILE`] on first use.
+const LEGACY_STORE_FILE: &str = "goals.json";
 /// The custom-message type stored in the generic AgentMessage payload.
 const GOAL_CUSTOM_TYPE: &str = "goal";
 const MAX_TITLE_CHARS: usize = 500;
@@ -216,45 +222,60 @@ impl Goals {
     }
 }
 
-/// The key a project's goals are stored under: the session's working directory
-/// (`session-read.info().cwd`). Two spellings of one path (e.g. a symlinked
-/// `/tmp` vs `/private/tmp`) are two keys — the jail has no canonicalization.
+/// The session's working directory. Used only to find this project's entry in
+/// the pre-scope store during migration — the project file itself is addressed
+/// through the `fs` root, which the host scopes to the project tree.
 fn project_key() -> String {
     session_read::info().cwd
 }
 
-/// The whole `{project: Goals}` map. A missing/unreadable/denied file is an
-/// empty map, exactly as the compile-time `read_goals` degraded to defaults.
-fn load_store() -> Map<String, Value> {
-    let Ok(bytes) = fs::read(STORE_FILE) else {
-        return Map::new();
-    };
-    let Ok(text) = String::from_utf8(bytes) else {
-        return Map::new();
-    };
-    serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default()
+/// Parse a `Goals` value, or `None` when the file holds something else — the
+/// compile-time `read_goals` treated a malformed file as "no goals".
+fn parse_goals(bytes: &[u8]) -> Option<Goals> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let value: Value = serde_json::from_str(text).ok()?;
+    Goals::from_json(&value)
 }
 
-fn save_store(store: &Map<String, Value>) -> Result<(), String> {
-    let text = Value::Object(store.clone()).to_string();
-    fs::write(STORE_FILE, &text.into_bytes()).map_err(reason)
+/// This project's entry in the pre-scope data-directory store, when that store
+/// is reachable through the current `fs` root. Absent/unreadable/malformed, or
+/// no entry for this project, is `None`.
+fn legacy_entry() -> Option<Goals> {
+    let bytes = fs::read(LEGACY_STORE_FILE).ok()?;
+    let text = std::str::from_utf8(&bytes).ok()?;
+    let store: Value = serde_json::from_str(text).ok()?;
+    store
+        .as_object()?
+        .get(&project_key())
+        .and_then(Goals::from_json)
 }
 
 fn read_goals() -> Goals {
-    let store = load_store();
-    store
-        .get(&project_key())
-        .and_then(Goals::from_json)
-        .unwrap_or_default()
+    match fs::read(PROJECT_FILE) {
+        Ok(bytes) => parse_goals(&bytes).unwrap_or_default(),
+        Err(_) => {
+            // No project file yet. Surface any pre-scope state *if* the old
+            // data-directory store is reachable through this `fs` root; in the
+            // shipped layout it is not (the data directory sits outside the
+            // project tree), so this is normally a no-op and the guest starts
+            // from nothing — see the README's "Pre-scope migration".
+            match legacy_entry() {
+                Some(goals) => {
+                    let _ = write_goals(&goals);
+                    goals
+                }
+                None => Goals::default(),
+            }
+        }
+    }
 }
 
 fn write_goals(goals: &Goals) -> Result<(), String> {
-    let mut store = load_store();
-    store.insert(project_key(), goals.to_json());
-    save_store(&store)
+    // The `fs` capability has no `rename`, so this truncate-writes in place; the
+    // file now holds one project's goals, so a torn write no longer takes every
+    // project's state with it (see the README).
+    let text = goals.to_json().to_string();
+    fs::write(PROJECT_FILE, &text.into_bytes()).map_err(reason)
 }
 
 fn now_ms() -> i64 {

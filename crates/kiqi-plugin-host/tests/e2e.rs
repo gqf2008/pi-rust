@@ -1642,12 +1642,10 @@ fn orchestrator_guest_session_switch_clears_the_plan() {
         blocks: Mutex::new(Vec::new()),
     };
 
-    plugin
-        .before_agent_start(
-            &serde_json::json!({"sessionId": "s1", "systemPrompt": "base"}),
-            &caps,
-        )
-        .expect("event parses");
+    let _ = plugin.before_agent_start(
+        &serde_json::json!({"sessionId": "s1", "systemPrompt": "base"}),
+        &caps,
+    );
     plugin
         .call(
             "plan",
@@ -1659,12 +1657,10 @@ fn orchestrator_guest_session_switch_clears_the_plan() {
         )
         .expect("plan set");
 
-    plugin
-        .before_agent_start(
-            &serde_json::json!({"sessionId": "s2", "systemPrompt": "base"}),
-            &caps,
-        )
-        .expect("event parses");
+    let _ = plugin.before_agent_start(
+        &serde_json::json!({"sessionId": "s2", "systemPrompt": "base"}),
+        &caps,
+    );
     let shown = plugin
         .call("plan", &serde_json::json!({"action": "show"}), &caps, &sink)
         .expect("plan show");
@@ -1672,6 +1668,188 @@ fn orchestrator_guest_session_switch_clears_the_plan() {
         text_of(&shown).contains("plan is empty"),
         "the session switch cleared the graph: {}",
         text_of(&shown)
+    );
+}
+
+/// The goal-coupled guidance gate, restored through the project-scoped `fs`
+/// grant: the section is appended only when `<project>/.ki/goals.json` says an
+/// active goal exists, never twice, and always fail-closed.
+#[test]
+fn orchestrator_guest_gates_guidance_on_the_active_goal() {
+    use kiqi_plugin_host::{ExecCwd, FsGrant};
+
+    let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let plugin = WasmPlugin::load_with_options(
+        "rpi-orchestrator",
+        &wasm,
+        Grants {
+            fs: Some(FsGrant {
+                cwd: ExecCwd::Project,
+            }),
+            ..Grants::default()
+        },
+        kiqi_plugin_host::Options {
+            project_dir: Some(project.path().to_path_buf()),
+            ..kiqi_plugin_host::Options::default()
+        },
+    )
+    .expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let prompt = |base: &str| serde_json::json!({"sessionId": "s", "systemPrompt": base});
+    let goals = project.path().join(".ki/goals.json");
+    std::fs::create_dir_all(project.path().join(".ki")).expect("state dir");
+
+    // No goal file → no guidance (fail-closed).
+    assert!(
+        plugin.before_agent_start(&prompt("base"), &caps).is_none(),
+        "no goal file means no guidance"
+    );
+
+    // An active goal turns it on, over the base prompt.
+    std::fs::write(&goals, r#"{"active":{"status":"active"},"archived":[]}"#).expect("write");
+    let injected = plugin
+        .before_agent_start(&prompt("base"), &caps)
+        .expect("the section is appended");
+    assert!(
+        injected.contains("## Subagent orchestration") && injected.contains("base"),
+        "the base prompt plus the section: {injected}"
+    );
+
+    // The heading is never appended twice (idempotent).
+    let twice = plugin.before_agent_start(
+        &prompt("base\n\n## Subagent orchestration\nalready here"),
+        &caps,
+    );
+    assert!(twice.is_none(), "no second append: {twice:?}");
+
+    // A paused goal, a completed goal, a null active, and a malformed file all
+    // mean "no guidance".
+    for state in [
+        r#"{"active":{"status":"paused"},"archived":[]}"#,
+        r#"{"active":{"status":"complete"},"archived":[]}"#,
+        r#"{"active":null,"archived":[]}"#,
+        "not json",
+    ] {
+        std::fs::write(&goals, state).expect("write");
+        assert!(
+            plugin.before_agent_start(&prompt("base"), &caps).is_none(),
+            "`{state}` means no guidance"
+        );
+    }
+}
+
+/// Without the `fs` grant the guest cannot read the goal file, so the guidance
+/// stays off — the compiled plugin had no capability gate, a guest fails closed.
+#[test]
+fn orchestrator_guest_guidance_needs_the_fs_grant() {
+    let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
+    let project = tempfile::tempdir().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join(".ki")).expect("state dir");
+    std::fs::write(
+        project.path().join(".ki/goals.json"),
+        r#"{"active":{"status":"active"},"archived":[]}"#,
+    )
+    .expect("write");
+    let plugin = WasmPlugin::load_with_options(
+        "rpi-orchestrator",
+        &wasm,
+        Grants::default(),
+        kiqi_plugin_host::Options {
+            project_dir: Some(project.path().to_path_buf()),
+            ..kiqi_plugin_host::Options::default()
+        },
+    )
+    .expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    assert!(
+        plugin
+            .before_agent_start(
+                &serde_json::json!({"sessionId": "s", "systemPrompt": "base"}),
+                &caps
+            )
+            .is_none(),
+        "no fs grant means the file cannot be read, so no guidance"
+    );
+}
+
+/// The coupling this batch restores, end to end: the **goal** guest starts a
+/// goal through its own tool, and the **orchestrator** guest turns its
+/// guidance on by reading the file the goal guest actually wrote. Neither
+/// side's literals are used here — a drift in the file's field names or shape
+/// between the two guests (exactly the coupling) fails this test, where the
+/// two per-guest suites would both still pass.
+#[test]
+fn goal_guest_output_turns_the_orchestrator_guidance_on() {
+    use kiqi_plugin_host::{ExecCwd, FsGrant};
+
+    // One project tree, shared by both guests (their `fs --cwd project` root).
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    // The goal guest starts a goal through its own `goal` tool.
+    let goal_artifact = build_guest("kiqi-goal-guest", "kiqi_goal_guest.wasm");
+    let goal_component = tempfile::tempdir().expect("goal component tempdir");
+    let goal_wasm = goal_component.path().join("plugin.wasm");
+    std::fs::copy(&goal_artifact, &goal_wasm).expect("copy the goal guest");
+    let goal_plugin = WasmPlugin::load_with_options(
+        "rpi-goal",
+        &goal_wasm,
+        goal_fs_grant(),
+        kiqi_plugin_host::Options {
+            project_dir: Some(project.path().to_path_buf()),
+            ..kiqi_plugin_host::Options::default()
+        },
+    )
+    .expect("load the goal guest");
+    let inject_host = GoalInjectHost::default();
+    let log = NullLog;
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    goal_plugin
+        .call(
+            "goal",
+            &serde_json::json!({"action": "start", "title": "Couple the tiers"}),
+            &goal_caps(&inject_host, &log),
+            &sink,
+        )
+        .expect("start a goal");
+    let goals = project.path().join(".ki/goals.json");
+    assert!(
+        goals.is_file(),
+        "the goal guest wrote the project file the orchestrator reads"
+    );
+
+    // The orchestrator guest reads that same file and turns the guidance on.
+    let orchestrator_artifact =
+        build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
+    let orchestrator = WasmPlugin::load_with_options(
+        "rpi-orchestrator",
+        &orchestrator_artifact,
+        Grants {
+            fs: Some(FsGrant {
+                cwd: ExecCwd::Project,
+            }),
+            ..Grants::default()
+        },
+        kiqi_plugin_host::Options {
+            project_dir: Some(project.path().to_path_buf()),
+            ..kiqi_plugin_host::Options::default()
+        },
+    )
+    .expect("load the orchestrator guest");
+    let caps = HostCaps::observer(&log);
+    let injected = orchestrator
+        .before_agent_start(
+            &serde_json::json!({"sessionId": "s", "systemPrompt": "base"}),
+            &caps,
+        )
+        .expect("the goal guest's active goal turns the guidance on");
+    assert!(
+        injected.contains("## Subagent orchestration") && injected.contains("base"),
+        "the coupling fired: {injected}"
     );
 }
 
@@ -2827,7 +3005,7 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
 }
 
 // ---------------------------------------------------------------------------
-// rpi-goal: per-project state in the plugin data dir, inject, TurnEnd hook.
+// rpi-goal: the project file (compiled shape), inject, TurnEnd hook.
 // ---------------------------------------------------------------------------
 
 /// A host that records what the goal guest injects, so the port's
@@ -2857,29 +3035,63 @@ impl kiqi_plugin::InjectApi for GoalInjectHost {
     }
 }
 
-/// Load the goal guest from a scratch directory, so `fs` writes into a temp data
-/// directory instead of the build output.
-fn load_goal_guest(grants: Grants) -> (tempfile::TempDir, WasmPlugin) {
-    let artifact = build_guest("kiqi-goal-guest", "kiqi_goal_guest.wasm");
-    let dir = tempfile::tempdir().expect("tempdir");
-    let wasm = dir.path().join("plugin.wasm");
-    std::fs::copy(&artifact, &wasm).expect("copy the guest next to a writable data dir");
-    let plugin = WasmPlugin::load_with_grants("rpi-goal", &wasm, grants).expect("load");
-    (dir, plugin)
-}
-
-/// `rpi-goal` ported to wasm: the `goal` tool records a per-project goal in the
-/// plugin's data directory, injects a `goal` custom message, and the `TurnEnd`
-/// hook (delivered as an untyped `other` event, kind `"TurnEnd"`) charges the
-/// turn budget and auto-pauses an exhausted goal.
-#[test]
-fn goal_guest_persists_per_project_and_charges_the_turn_budget() {
-    let (dir, plugin) = load_goal_guest(Grants {
+/// The `fs` grant both goal and orchestrator tests need: the project tree
+/// (`--cwd project`), so state lands in `<project>/.ki/goals.json` and never in
+/// the repo or the build output.
+fn goal_fs_grant() -> Grants {
+    Grants {
         fs: Some(kiqi_plugin::grants::FsGrant {
-            cwd: kiqi_plugin::grants::ExecCwd::PluginData,
+            cwd: kiqi_plugin::grants::ExecCwd::Project,
         }),
         ..Grants::default()
-    });
+    }
+}
+
+fn read_json(path: &std::path::Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(path).expect("read the file");
+    serde_json::from_str(&text).expect("the file is JSON")
+}
+
+/// Load the goal guest from a scratch component directory, with the project
+/// scope pointed at a temp project: writes land there, not in the repo. Returns
+/// the component dir (whose `data/` was the old jail) and the project dir.
+fn load_goal_guest(grants: Grants) -> (tempfile::TempDir, tempfile::TempDir, WasmPlugin) {
+    let artifact = build_guest("kiqi-goal-guest", "kiqi_goal_guest.wasm");
+    let component = tempfile::tempdir().expect("component tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let wasm = component.path().join("plugin.wasm");
+    std::fs::copy(&artifact, &wasm).expect("copy the guest next to its component dir");
+    let plugin = WasmPlugin::load_with_options(
+        "rpi-goal",
+        &wasm,
+        grants,
+        kiqi_plugin_host::Options {
+            project_dir: Some(project.path().to_path_buf()),
+            ..kiqi_plugin_host::Options::default()
+        },
+    )
+    .expect("load");
+    (component, project, plugin)
+}
+
+fn goal_caps<'a>(host: &'a GoalInjectHost, log: &'a NullLog) -> HostCaps<'a> {
+    HostCaps {
+        session: None,
+        control: None,
+        inject: Some(host),
+        ui: None,
+        log,
+        cancel: None,
+    }
+}
+
+/// The core port: `goal` records state in `<project>/.ki/goals.json` in the
+/// compiled shape (`{active, archived}`), and the lifecycle moves the goal
+/// between the active slot and the archive. The plugin data directory is not a
+/// second source of truth.
+#[test]
+fn goal_guest_writes_the_project_file_in_the_compiled_shape() {
+    let (component, project, plugin) = load_goal_guest(goal_fs_grant());
     assert_eq!(plugin.id(), "rpi-goal");
     assert!(plugin.tools().iter().any(|tool| tool.name == "goal"));
     assert!(plugin
@@ -2889,40 +3101,40 @@ fn goal_guest_persists_per_project_and_charges_the_turn_budget() {
 
     let host = GoalInjectHost::default();
     let log = NullLog;
-    let caps = HostCaps {
-        session: None,
-        control: None,
-        inject: Some(&host),
-        ui: None,
-        log: &log,
-        cancel: None,
-    };
+    let caps = goal_caps(&host, &log);
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
+    let file = project.path().join(".ki/goals.json");
 
-    // Start a goal with a two-turn budget.
-    let started = plugin
+    // start writes the project file in the compiled shape.
+    plugin
         .call(
             "goal",
-            &serde_json::json!({"action": "start", "title": "Ship the goal port", "maxTurns": 2}),
+            &serde_json::json!({"action": "start", "title": "Ship the goal port"}),
             &caps,
             &sink,
         )
         .expect("start the goal");
+    assert!(file.is_file(), "goal start writes <project>/.ki/goals.json");
+    let value = read_json(&file);
     assert!(
-        text_of(&started).contains("Goal started"),
-        "got {}",
-        text_of(&started)
+        value["active"].is_object(),
+        "compiled shape: an `active` object: {value}"
     );
-    // The envelope's metadata rides `tool-result.details`.
-    assert_eq!(started.details["kind"], "goal");
-    assert_eq!(started.details["action"], "start");
-    assert_eq!(started.details["active"], true);
-    assert_eq!(started.details["goal"]["title"], "Ship the goal port");
+    assert!(
+        value["archived"].is_array(),
+        "compiled shape: an `archived` array: {value}"
+    );
+    assert_eq!(value["active"]["title"], "Ship the goal port");
+    assert_eq!(value["active"]["status"], "active");
+    // The pre-scope jail holds nothing: the project file is the only truth.
+    assert!(
+        !component.path().join("data/goals.json").exists(),
+        "no data-directory authority"
+    );
 
-    // The injection reached `InjectApi::append_message` as a bare custom
-    // message, not double-wrapped in `{"message": ...}`.
+    // The injection reached `InjectApi::append_message` as a bare custom message.
     {
         let messages = host.messages.lock().unwrap();
         assert_eq!(messages.len(), 1, "one injection on start");
@@ -2930,32 +3142,67 @@ fn goal_guest_persists_per_project_and_charges_the_turn_budget() {
         assert_eq!(messages[0]["data"]["customType"], "goal");
     }
 
-    // The store landed in the plugin's data directory, keyed by project path.
-    let store_path = dir.path().join("data/goals.json");
+    // pause / resume flip the status in the file.
+    plugin
+        .call(
+            "goal",
+            &serde_json::json!({"action": "pause"}),
+            &caps,
+            &sink,
+        )
+        .expect("pause");
+    assert_eq!(read_json(&file)["active"]["status"], "paused");
+    plugin
+        .call(
+            "goal",
+            &serde_json::json!({"action": "resume"}),
+            &caps,
+            &sink,
+        )
+        .expect("resume");
+    assert_eq!(read_json(&file)["active"]["status"], "active");
+
+    // complete moves the goal to the archive and clears the active slot.
+    plugin
+        .call(
+            "goal",
+            &serde_json::json!({"action": "complete"}),
+            &caps,
+            &sink,
+        )
+        .expect("complete");
+    let value = read_json(&file);
     assert!(
-        store_path.is_file(),
-        "the goal store is written into the plugin data dir"
+        value["active"].is_null(),
+        "complete clears the active slot: {value}"
     );
-    let text = std::fs::read_to_string(&store_path).expect("read the store");
-    let store: serde_json::Value = serde_json::from_str(&text).expect("parse the store");
-    let map = store
-        .as_object()
-        .expect("the store is a {project: Goals} map");
-    assert_eq!(map.len(), 1, "one project key");
-    let (project, goals) = map.iter().next().unwrap();
-    // The documented key is the session cwd verbatim — pinning it to the real
-    // cwd makes a guest that keyed on a constant, its plugin dir, or a session
-    // id fail here. (Two distinct projects cannot be exercised from one test
-    // process: varying the cwd would need set_current_dir, which the repo's
-    // tests avoid for the same reason they avoid environment mutation.)
-    assert_eq!(
-        project,
-        &std::env::current_dir()
-            .expect("process cwd")
-            .to_string_lossy(),
-        "the store key is the session cwd"
-    );
-    assert_eq!(goals["active"]["title"], "Ship the goal port");
+    assert_eq!(value["archived"][0]["title"], "Ship the goal port");
+    assert_eq!(value["archived"][0]["status"], "complete");
+}
+
+/// The budget + fingerprint dedupe survive the move to the project file: a
+/// `TurnEnd` (delivered as an untyped `other` event, kind `"TurnEnd"`) charges a
+/// turn, re-injects only on a state change, and auto-pauses an exhausted goal.
+#[test]
+fn goal_guest_charges_the_turn_budget_from_the_project_file() {
+    let (_component, project, plugin) = load_goal_guest(goal_fs_grant());
+    let host = GoalInjectHost::default();
+    let log = NullLog;
+    let caps = goal_caps(&host, &log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    let file = project.path().join(".ki/goals.json");
+
+    plugin
+        .call(
+            "goal",
+            &serde_json::json!({"action": "start", "title": "Ship the goal port", "maxTurns": 2}),
+            &caps,
+            &sink,
+        )
+        .expect("start the goal");
+    assert_eq!(read_json(&file)["active"]["title"], "Ship the goal port");
 
     // One TurnEnd charges a turn and does not re-inject (fingerprint unchanged).
     plugin.on_event(&Event::new(EventTag::TurnEnd, serde_json::json!({})), &caps);
@@ -2988,10 +3235,10 @@ fn goal_guest_persists_per_project_and_charges_the_turn_budget() {
             .expect("the notice has a text block");
         assert!(notice.contains("paused"), "got {notice}");
     }
+    assert_eq!(read_json(&file)["active"]["status"], "paused");
     let paused = plugin
         .call("goal", &serde_json::json!({"action": "show"}), &caps, &sink)
         .expect("show after the budget is spent");
-    assert_eq!(paused.details["goal"]["status"], "paused");
     assert!(
         text_of(&paused).contains("turns 2/2"),
         "got {}",
@@ -3005,23 +3252,77 @@ fn goal_guest_persists_per_project_and_charges_the_turn_budget() {
     assert!(status.contains("Ship the goal port"), "got {status}");
 }
 
+/// Migration: a pre-scope entry — the `{ "<project>": Goals }` map the guest
+/// kept in its data directory — surfaces in the project file on first use.
+///
+/// The pre-scope store is reachable through the `fs` root only when that root
+/// *is* the old data directory, so the fixture points the project scope there.
+/// In the shipped layout the data directory sits outside the project tree, so a
+/// real upgrade's migration is a no-op and the guest starts fresh.
+#[test]
+fn goal_guest_migrates_the_pre_scope_store() {
+    let artifact = build_guest("kiqi-goal-guest", "kiqi_goal_guest.wasm");
+    let component = tempfile::tempdir().expect("component tempdir");
+    let wasm = component.path().join("plugin.wasm");
+    std::fs::copy(&artifact, &wasm).expect("copy the guest");
+    let data = component.path().join("data");
+    std::fs::create_dir_all(&data).expect("data dir");
+    let key = std::env::current_dir()
+        .expect("process cwd")
+        .to_string_lossy()
+        .into_owned();
+    let legacy = serde_json::json!({
+        key: {"active": {"title": "Old project goal", "status": "active"}, "archived": []}
+    });
+    std::fs::write(data.join("goals.json"), legacy.to_string()).expect("seed the pre-scope store");
+
+    let plugin = WasmPlugin::load_with_options(
+        "rpi-goal",
+        &wasm,
+        goal_fs_grant(),
+        kiqi_plugin_host::Options {
+            project_dir: Some(data.clone()),
+            ..kiqi_plugin_host::Options::default()
+        },
+    )
+    .expect("load");
+    let host = GoalInjectHost::default();
+    let log = NullLog;
+    let caps = goal_caps(&host, &log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    // A read surfaces the migrated goal and writes it out.
+    let shown = plugin
+        .call("goal", &serde_json::json!({"action": "show"}), &caps, &sink)
+        .expect("show");
+    assert!(
+        text_of(&shown).contains("Old project goal"),
+        "the pre-scope goal is visible after migration: {}",
+        text_of(&shown)
+    );
+    let file = data.join(".ki/goals.json");
+    assert!(
+        file.is_file(),
+        "first use surfaces the pre-scope entry in the project file"
+    );
+    let value = read_json(&file);
+    assert_eq!(value["active"]["title"], "Old project goal");
+    assert_eq!(value["active"]["status"], "active");
+    assert!(value["archived"].is_array());
+}
+
 /// The port degrades like the compiled plugin: no `fs` grant makes the write a
 /// typed error (not a trap) while a read falls back to "no goal", and a missing
 /// injection surface is non-fatal — the goal is still recorded.
 #[test]
 fn goal_guest_denies_without_fs_and_injection_is_optional() {
     // No fs: starting a goal cannot persist, so the action is a typed error.
-    let (_dir, plugin) = load_goal_guest(Grants::default());
+    let (_component, _project, plugin) = load_goal_guest(Grants::default());
     let host = GoalInjectHost::default();
     let log = NullLog;
-    let caps = HostCaps {
-        session: None,
-        control: None,
-        inject: Some(&host),
-        ui: None,
-        log: &log,
-        cancel: None,
-    };
+    let caps = goal_caps(&host, &log);
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
@@ -3048,12 +3349,7 @@ fn goal_guest_denies_without_fs_and_injection_is_optional() {
     );
 
     // With fs but no injection surface, the goal is still recorded.
-    let (_dir, plugin) = load_goal_guest(Grants {
-        fs: Some(kiqi_plugin::grants::FsGrant {
-            cwd: kiqi_plugin::grants::ExecCwd::PluginData,
-        }),
-        ..Grants::default()
-    });
+    let (_component, _project, plugin) = load_goal_guest(goal_fs_grant());
     let log = NullLog;
     let caps = HostCaps {
         session: None,
