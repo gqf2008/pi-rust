@@ -37,8 +37,14 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   with the session and every teardown path reaps the server's whole process
   tree; a server never inherits ki's provider keys (`env_clear` + allowlist),
   every spawn is logged, and a broken server is skipped loudly without killing
-  the session. HTTP servers, resources, and ACP-supplied `mcpServers` are
-  later batches.
+  the session. Resources are in too: a server advertising the MCP resources
+  capability gets a native `{server}__read_resource(uri)` tool (20k-char bound),
+  and `resources/subscribe` is host/config-driven — when the server pushes
+  `notifications/resources/updated`, a light notice (server + uri) reaches the
+  model, which reads on demand; subscription lifetime follows upstream semantics
+  (idempotent subscribe, reconnect restore, unsubscribe-failure transport
+  retirement). HTTP servers, ACP-supplied `mcpServers`, and prompts/sampling
+  remain later batches.
 - **`fs` grants carry a scope (grant-model change; the ABI stays 0.7.1 — no WIT change)**: `ki plugin grant <id> fs --cwd project`
   opts a plugin into reading and writing the project tree (same scope as
   `exec`/`proc`); the default stays the plugin's own data directory, and legacy
