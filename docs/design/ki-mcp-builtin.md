@@ -140,3 +140,28 @@ adapter 的 16MiB 约定）。
 **批次 2/3 待做**：HTTP/Streamable + SSE、resources（list/read/subscribe +
 `resources/updated` 注入）、list_changed 刷新；ACP 合流（`session/new mcpServers`
 由拒绝改接受、`mcpCapabilities` 如实声明、两条契约测试翻转、客户端注入策略裁决）。
+
+## 11. 批次 2/3 状态（2026-10-17）
+
+**批次 2**（`fb3ae8b`，已合入）：resources（`{server}__read_resource`，20k 截断）+ 订阅
+（上游 main 语义含 PR #21/#23：幂等 subscribe、mark-before-RPC、重连按序恢复、退订失败
+退役传输）+ **通知进 LLM**（业主语义：`resources/updated` → `McpNoticeMailbox` 按
+(server,uri) 合并 + 抑制计数 → 五个宿主的回合边界排干为一条批量 custom entry；绝不自动读
+全文，读取经展开工具按需）。审查 11 条（去重 8）全处理，含 rotate_lifetime 锁外清队列、
+list_changed 误删撞名工具、server 名含 `__` 破坏前缀解析等；`--subscribe` 配置数组驱动
+自动订阅。**对比上游的刻意差异**：上游收到通知后程序自动 `resources/read` 并注入全文；
+ki 只投递通知（业主裁定）。
+
+**批次 3**（`c6114d6`，已合入）：ACP 合流。`session/new`/`session/load` 的 `mcpServers`
+由拒绝改为接受（stdio；**POLICY 1**：ACP 客户端即用户本人在编辑器里的授权，不做项目信任
+门，每个接受都在 stderr 响亮记录）；HTTP/SSE 变体 -32602 直到传输落地；
+`additional_directories` 维持拒绝。资源更新的**用户侧副本**：客户端声明 `notices` 能力时
+边界排干同时发 `SessionUpdate::Notice`（模型副本不变，不双投）。契约测试两条翻转 + decode
+单测（stdio 含 env 转换、Http/Sse 拒绝）。
+
+**已知缺口（批次 3 记录）**：ACP 级「客户端 server 的工具经真实启动路径出现」未做端到端
+（假 server 二进制对 rpi-cli 测试不可达、ACP 测试工厂为桩）；该链路由 decode 单测 + rpi-mcp
+启动路径 e2e + 类型化接线共同覆盖。
+
+**剩余**：HTTP/Streamable + SSE 传输（届时 HTTP 订阅自然解锁）、prompts/sampling（明确不做）、
+`autoRead` 配置项（若要把部分资源改为程序自动读）。
