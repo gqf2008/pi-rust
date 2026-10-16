@@ -135,6 +135,20 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   subagents it spawned instead of leaving them running.
 
 
+### Fixed
+
+- **Zero budgets are rejected at parse, and proc budgets are capped everywhere**:
+  a hand-edited `grants.json` with `timeout-seconds: 0` / `max-open: 0` used to
+  parse (now fail-closed, naming the field and bound); `proc`'s `max-open` gained
+  the host-side 256 cap it was missing; and `ki plugin grant --timeout` no longer
+  applies `exec`'s 300s ceiling to `proc` (600s default / 1800s cap are reachable
+  again, and the error names the right bound).
+- **Langfuse exports real costs again**: the host reports `UsageCost` as a float
+  while the plugin read it as an integer, so every cost came back `None` and the
+  `costDetails` block never reached Langfuse; query-string values are now
+  percent-encoded too.
+
+
 ## [0.4.1] - 2026-10-14
 
 ### Added
