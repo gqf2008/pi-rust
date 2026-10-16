@@ -825,11 +825,11 @@ struct PiUsage {
 
 #[derive(Debug, Clone)]
 struct CostDetails {
-    input: u64,
-    output: u64,
-    cache_read: u64,
-    cache_write: u64,
-    total: u64,
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: f64,
+    total: f64,
 }
 
 fn parse_usage(value: &Value) -> Option<PiUsage> {
@@ -840,13 +840,16 @@ fn parse_usage(value: &Value) -> Option<PiUsage> {
     let reasoning = value.get("reasoning").and_then(Value::as_u64);
     let cache_write_1h = value.get("cacheWrite1h").and_then(Value::as_u64);
 
+    // Costs are dollar figures, so they arrive as fractions (the host's
+    // `UsageCost` is `f64`); `as_u64` dropped every real cost silently — the
+    // whole costDetails block never exported.
     let cost = value.get("cost").and_then(|c| {
         Some(CostDetails {
-            input: c.get("input")?.as_u64()?,
-            output: c.get("output")?.as_u64()?,
-            cache_read: c.get("cacheRead")?.as_u64()?,
-            cache_write: c.get("cacheWrite")?.as_u64()?,
-            total: c.get("total")?.as_u64()?,
+            input: c.get("input")?.as_f64()?,
+            output: c.get("output")?.as_f64()?,
+            cache_read: c.get("cacheRead")?.as_f64()?,
+            cache_write: c.get("cacheWrite")?.as_f64()?,
+            total: c.get("total")?.as_f64()?,
         })
     });
 
@@ -912,27 +915,28 @@ fn build_usage_details(usage: &PiUsage) -> Option<Map<String, Value>> {
 
 fn build_cost_details(usage: &PiUsage) -> Option<Map<String, Value>> {
     let cost = usage.cost.as_ref()?;
-    if cost.total == 0 {
+    if cost.total == 0.0 {
         return None;
     }
 
     let mut details = Map::new();
     details.insert("total".to_string(), json!(cost.total));
 
-    if cost.input > 0 {
+    if cost.input > 0.0 {
         details.insert("input".to_string(), json!(cost.input));
     }
 
-    if cost.output > 0 {
+    if cost.output > 0.0 {
         let (reasoning, can_split) = resolve_reasoning_split(usage);
         if can_split {
-            let reasoning_cost =
-                (cost.output as f64 * (reasoning as f64 / usage.output as f64)) as u64;
+            // The split stays in dollars: a fractional share cast to a whole
+            // number would floor every real cost to zero.
+            let reasoning_cost = cost.output * (reasoning as f64 / usage.output as f64);
             let non_reasoning_cost = cost.output - reasoning_cost;
-            if non_reasoning_cost > 0 {
+            if non_reasoning_cost > 0.0 {
                 details.insert("output".to_string(), json!(non_reasoning_cost));
             }
-            if reasoning_cost > 0 {
+            if reasoning_cost > 0.0 {
                 details.insert("output_reasoning_tokens".to_string(), json!(reasoning_cost));
             }
         } else {
@@ -940,14 +944,14 @@ fn build_cost_details(usage: &PiUsage) -> Option<Map<String, Value>> {
         }
     }
 
-    if cost.cache_read > 0 {
+    if cost.cache_read > 0.0 {
         details.insert(
             "cache_read_input_tokens".to_string(),
             json!(cost.cache_read),
         );
     }
 
-    if cost.cache_write > 0 {
+    if cost.cache_write > 0.0 {
         details.insert(
             "cache_creation_input_tokens".to_string(),
             json!(cost.cache_write),
@@ -2888,6 +2892,24 @@ fn on_session_shutdown(_event: &Event, host: &dyn StatusHost) -> i32 {
 // Manual tools
 // ---------------------------------------------------------------------------
 
+/// Percent-encode one query-string value: RFC 3986 unreserved characters
+/// pass through, everything else becomes `%XX`. The values below come from
+/// tool arguments — a prompt name like `a&b` would otherwise split the query
+/// and a trace id carrying `#` would truncate it — so nothing is interpolated
+/// raw.
+fn query_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
 fn client(timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
@@ -2964,7 +2986,7 @@ pub fn score(p: &Value) -> Result<String, String> {
                 query.push(format!("page={}", page.max(1)));
             }
             if let Some(user_id) = p.get("userId").and_then(Value::as_str) {
-                query.push(format!("userId={}", user_id));
+                query.push(format!("userId={}", query_encode(user_id)));
             }
             let qs = if query.is_empty() {
                 String::new()
@@ -3006,7 +3028,7 @@ pub fn prompt(p: &Value) -> Result<String, String> {
                 .get("name")
                 .and_then(Value::as_str)
                 .ok_or("name is required")?;
-            let mut query = vec![format!("name={}", name)];
+            let mut query = vec![format!("name={}", query_encode(name))];
             if let Some(version) = p.get("version").and_then(Value::as_u64) {
                 query.push(format!("version={}", version));
             }
@@ -3025,7 +3047,7 @@ pub fn prompt(p: &Value) -> Result<String, String> {
                  GET /api/public/prompts?name=... (no list-all endpoint). Use \"get\" \
                  with a name instead.",
             )?;
-            let mut query = vec![format!("name={}", name)];
+            let mut query = vec![format!("name={}", query_encode(name))];
             if let Some(version) = p.get("version").and_then(Value::as_u64) {
                 query.push(format!("version={}", version));
             }
@@ -3063,7 +3085,10 @@ pub fn trace(p: &Value) -> Result<String, String> {
             let v = api_request(
                 &client(30)?,
                 "GET",
-                &format!("/api/public/v2/observations?traceId={}&limit=200", id),
+                &format!(
+                    "/api/public/v2/observations?traceId={}&limit=200",
+                    query_encode(id)
+                ),
                 None,
             )?;
             Ok(json!({"action":"get","traceId":id,"observations":v}).to_string())
@@ -3075,7 +3100,7 @@ pub fn trace(p: &Value) -> Result<String, String> {
                 query.push(format!("limit={}", limit.clamp(1, 1000)));
             }
             if let Some(user_id) = p.get("userId").and_then(Value::as_str) {
-                query.push(format!("userId={}", user_id));
+                query.push(format!("userId={}", query_encode(user_id)));
             }
             // One row per trace, which is what the removed traces list returned.
             query.push("isRootObservation=true".into());
@@ -4171,6 +4196,75 @@ mod tests {
             std::thread::sleep(Duration::from_secs(2));
         }
         assert!(seen, "trace {trace} never showed up on v2/observations");
+    }
+
+    /// `UsageCost` is `f64` on the host side, so real costs arrive as
+    /// fractions; `as_u64` used to drop every one of them and the whole
+    /// `costDetails` block never exported.
+    #[test]
+    fn fractional_costs_parse_into_cost_details() {
+        let usage = parse_usage(&json!({
+            "input": 7, "output": 3, "cacheRead": 0, "cacheWrite": 0,
+            "cost": {
+                "input": 0.001, "output": 0.002,
+                "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.003,
+            },
+        }))
+        .expect("usage parses");
+        let cost = usage.cost.as_ref().expect("a fractional cost must parse");
+        assert_eq!(cost.total, 0.003);
+
+        let details = build_cost_details(&usage).expect("cost details built");
+        assert_eq!(details["total"], json!(0.003));
+        assert_eq!(details["input"], json!(0.001));
+        assert_eq!(details["output"], json!(0.002));
+    }
+
+    /// A cost object missing any field is no cost at all (no panic, no
+    /// partial value), and an absent cost stays None end to end.
+    #[test]
+    fn incomplete_cost_objects_degrade_to_no_cost() {
+        let usage = parse_usage(&json!({
+            "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0,
+            "cost": { "input": 0.1, "output": 0.2 },
+        }))
+        .expect("usage parses");
+        assert!(usage.cost.is_none(), "a partial cost object is no cost");
+
+        let usage = parse_usage(&json!({
+            "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0,
+        }))
+        .expect("usage parses");
+        assert!(usage.cost.is_none());
+        assert!(build_cost_details(&usage).is_none());
+    }
+
+    /// The reasoning share of the output cost stays in dollars instead of
+    /// being floored to a whole number.
+    #[test]
+    fn cost_split_keeps_fractions() {
+        let usage = parse_usage(&json!({
+            "input": 0, "output": 10, "cacheRead": 0, "cacheWrite": 0,
+            "reasoning": 5,
+            "cost": {
+                "input": 0.0, "output": 0.02,
+                "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.02,
+            },
+        }))
+        .expect("usage parses");
+        let details = build_cost_details(&usage).expect("cost details built");
+        assert_eq!(details["output"], json!(0.01));
+        assert_eq!(details["output_reasoning_tokens"], json!(0.01));
+    }
+
+    /// Tool-argument strings reach the API as query values; they must be
+    /// percent-encoded so `&`, `=`, `#` and friends cannot change the query.
+    #[test]
+    fn query_values_are_percent_encoded() {
+        assert_eq!(query_encode("a b&c=d#e+f"), "a%20b%26c%3Dd%23e%2Bf");
+        assert_eq!(query_encode("safe-._~09"), "safe-._~09");
+        assert_eq!(query_encode("端"), "%E7%AB%AF");
+        assert_eq!(query_encode(""), "");
     }
 
     #[test]

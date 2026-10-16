@@ -109,7 +109,8 @@ pub struct ExecGrant {
     /// capped at [`EXEC_TIMEOUT_MAX_SECONDS`].
     #[serde(
         default = "default_exec_timeout",
-        skip_serializing_if = "is_default_exec_timeout"
+        skip_serializing_if = "is_default_exec_timeout",
+        deserialize_with = "nonzero_exec_timeout"
     )]
     pub timeout_seconds: u64,
 }
@@ -145,6 +146,50 @@ fn default_proc_max_open() -> u32 {
 
 fn is_default_proc_max_open(value: &u32) -> bool {
     *value == PROC_MAX_OPEN_DEFAULT
+}
+
+/// Zero budgets parse nowhere. `grant()` rejects `--timeout 0`/`--max-open 0`
+/// (a 0s timeout would kill every child instantly, 0 slots denies every
+/// spawn), so a hand-edited grants.json cannot sneak the same values in
+/// through the deserialize path — the file then loads as "nothing granted",
+/// the same fail-closed a malformed file gets.
+fn nonzero_exec_timeout<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let seconds = u64::deserialize(deserializer)?;
+    if seconds == 0 {
+        return Err(serde::de::Error::custom(
+            "exec `timeout-seconds` must be at least 1 second",
+        ));
+    }
+    Ok(seconds)
+}
+
+fn nonzero_proc_timeout<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let seconds = u64::deserialize(deserializer)?;
+    if seconds == 0 {
+        return Err(serde::de::Error::custom(
+            "proc `timeout-seconds` must be at least 1 second",
+        ));
+    }
+    Ok(seconds)
+}
+
+fn nonzero_proc_max_open<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let open = u32::deserialize(deserializer)?;
+    if open == 0 {
+        return Err(serde::de::Error::custom(
+            "proc `max-open` must be at least 1",
+        ));
+    }
+    Ok(open)
 }
 
 /// The `proc` policy: which commands, in which scope, for how long, and how
@@ -197,13 +242,15 @@ pub struct ProcGrant {
     /// [`PROC_TIMEOUT_MAX_SECONDS`].
     #[serde(
         default = "default_proc_timeout",
-        skip_serializing_if = "is_default_proc_timeout"
+        skip_serializing_if = "is_default_proc_timeout",
+        deserialize_with = "nonzero_proc_timeout"
     )]
     pub timeout_seconds: u64,
     /// How many children one call may hold open at once.
     #[serde(
         default = "default_proc_max_open",
-        skip_serializing_if = "is_default_proc_max_open"
+        skip_serializing_if = "is_default_proc_max_open",
+        deserialize_with = "nonzero_proc_max_open"
     )]
     pub max_open: u32,
 }
@@ -897,5 +944,75 @@ mod tests {
         assert_eq!(ExecCwd::parse("project").unwrap(), ExecCwd::Project);
         assert_eq!(ExecCwd::parse("plugin-data").unwrap(), ExecCwd::PluginData);
         assert!(ExecCwd::parse("/abs/path").is_err());
+    }
+
+    /// Zero budgets parse nowhere: the deserialize layer rejects
+    /// `timeout-seconds` 0 and `max-open` 0 with the field and the bound
+    /// named — the same rule `grant()` applies to `--timeout 0`/`--max-open
+    /// 0` — and the boundary value 1 is accepted.
+    #[test]
+    fn zero_budgets_are_rejected_at_parse_and_one_is_accepted() {
+        let error = serde_json::from_value::<Grants>(serde_json::json!({
+            "exec": {"commands": ["x"], "timeout-seconds": 0}
+        }))
+        .expect_err("exec timeout 0 must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("exec `timeout-seconds` must be at least 1"),
+            "the error should name the field and the bound: {error}"
+        );
+
+        let error = serde_json::from_value::<Grants>(serde_json::json!({
+            "proc": {"commands": ["x"], "timeout-seconds": 0}
+        }))
+        .expect_err("proc timeout 0 must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("proc `timeout-seconds` must be at least 1"),
+            "the error should name the field and the bound: {error}"
+        );
+
+        let error = serde_json::from_value::<Grants>(serde_json::json!({
+            "proc": {"commands": ["x"], "max-open": 0}
+        }))
+        .expect_err("proc max-open 0 must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("proc `max-open` must be at least 1"),
+            "the error should name the field and the bound: {error}"
+        );
+
+        // The boundary value is inside every bound.
+        let grants: Grants = serde_json::from_value(serde_json::json!({
+            "exec": {"commands": ["x"], "timeout-seconds": 1},
+            "proc": {"commands": ["y"], "timeout-seconds": 1, "max-open": 1},
+        }))
+        .expect("1 is accepted for every budget field");
+        assert_eq!(grants.exec.as_ref().unwrap().timeout_seconds, 1);
+        assert_eq!(grants.proc.as_ref().unwrap().timeout_seconds, 1);
+        assert_eq!(grants.proc.as_ref().unwrap().max_open, 1);
+    }
+
+    /// A grants.json carrying a zero budget loads as "nothing granted": the
+    /// rejected file fails closed exactly like a malformed one.
+    #[test]
+    fn a_zero_budget_file_grants_nothing() {
+        let root = std::env::temp_dir().join(format!("kiqi-zero-grants-{}", std::process::id()));
+        let dir = plugin_dir_at(&root, "zero");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("grants.json"),
+            r#"{"exec": {"commands": ["x"], "timeout-seconds": 0}}"#,
+        )
+        .unwrap();
+
+        let grants = Grants::load_for_at(&root, "zero");
+        assert!(grants.exec.is_none(), "a rejected file grants nothing");
+        assert!(grants.granted().is_empty());
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

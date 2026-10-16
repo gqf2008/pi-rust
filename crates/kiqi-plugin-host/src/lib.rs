@@ -885,11 +885,12 @@ impl crate::kiqi::plugin::proc::Host for HostState {
                 "proc command must be a bare name, not a path: `{cmd}`"
             )));
         }
-        if self.procs.len() >= grant.max_open as usize {
+        let max_open = effective_proc_max_open(grant.max_open);
+        if self.procs.len() >= max_open as usize {
             return Err(CapabilityError::Denied(format!(
                 "proc already holds {} children and the grant allows {} at once",
                 self.procs.len(),
-                grant.max_open
+                max_open
             )));
         }
         let cwd = self.scoped_cwd(grant.cwd, cwd)?;
@@ -1218,13 +1219,18 @@ fn split_host_port(address: &str) -> Result<(String, u16), CapabilityError> {
     Ok((host, port))
 }
 
-/// The effective exec timeout: the grant's budget clamped to the cap. The CLI
-/// validates at grant time, so only a hand-edited `grants.json` can come in
-/// over the cap — the clamp is the last-resort guard, and it says so.
 /// The effective per-child budget for `proc`: the grant's value clamped to its
 /// own cap (600s by default, 1800s at most — deliberately independent of
-/// `exec`'s 300s, which is the point of a separate capability).
+/// `exec`'s 300s, which is the point of a separate capability) and floored at
+/// 1s (the parse layer rejects 0, so only an in-code grant can say it).
 fn effective_proc_timeout(timeout_seconds: u64) -> std::time::Duration {
+    if timeout_seconds == 0 {
+        eprintln!(
+            "[kiqi-plugin] proc grant timeout 0s is not a usable budget; using 1s \
+             (the parse layer rejects 0, so only an in-code grant can say it)"
+        );
+        return std::time::Duration::from_secs(1);
+    }
     let clamped = timeout_seconds.min(kiqi_plugin::grants::PROC_TIMEOUT_MAX_SECONDS);
     if clamped != timeout_seconds {
         eprintln!(
@@ -1235,7 +1241,35 @@ fn effective_proc_timeout(timeout_seconds: u64) -> std::time::Duration {
     std::time::Duration::from_secs(clamped)
 }
 
+/// The effective `proc` concurrency bound: the grant's `max-open` clamped to
+/// the hard cap (the machine's process table, not something the sandbox can
+/// carry). Like the timeouts, only a hand-edited `grants.json` can come in
+/// over it — `grant()` rejects the rest at grant time — so the clamp is the
+/// last-resort guard, and it says so.
+fn effective_proc_max_open(max_open: u32) -> u32 {
+    let clamped = max_open.min(kiqi_plugin::grants::PROC_MAX_OPEN_MAX);
+    if clamped != max_open {
+        eprintln!(
+            "[kiqi-plugin] proc grant max-open {max_open} exceeds the {clamped} cap; \
+             clamped (a hand-edited grants.json is the only way in past the CLI's check)"
+        );
+    }
+    clamped
+}
+
+/// The effective exec timeout: the grant's budget clamped to the cap and
+/// floored at 1s. The CLI and the parse layer validate at grant time, so only
+/// a hand-edited `grants.json` (over the cap) or an in-code grant (at 0) can
+/// come in out of bounds — the clamp is the last-resort guard, and it says
+/// so.
 fn effective_exec_timeout(timeout_seconds: u64) -> std::time::Duration {
+    if timeout_seconds == 0 {
+        eprintln!(
+            "[kiqi-plugin] exec grant timeout 0s is not a usable budget; using 1s \
+             (the parse layer rejects 0, so only an in-code grant can say it)"
+        );
+        return std::time::Duration::from_secs(1);
+    }
     let clamped = timeout_seconds.min(kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS);
     if clamped != timeout_seconds {
         eprintln!(
@@ -1978,6 +2012,53 @@ mod tests {
             effective_exec_timeout(120),
             std::time::Duration::from_secs(120),
             "an in-range budget is untouched"
+        );
+        assert_eq!(
+            effective_exec_timeout(0),
+            std::time::Duration::from_secs(1),
+            "a zero budget floors to 1s (the parse layer rejects 0; this is \
+             the last-resort guard)"
+        );
+    }
+
+    /// `proc`'s budget gets the same guard: its own cap, and the 0 floor the
+    /// parse layer's rejection implies.
+    #[test]
+    fn the_proc_timeout_is_capped() {
+        let max = kiqi_plugin::grants::PROC_TIMEOUT_MAX_SECONDS;
+        assert_eq!(
+            effective_proc_timeout(max + 1),
+            std::time::Duration::from_secs(max),
+            "a hand-edited oversized budget clamps to the cap"
+        );
+        assert_eq!(
+            effective_proc_timeout(900),
+            std::time::Duration::from_secs(900),
+            "an in-range budget is untouched"
+        );
+        assert_eq!(
+            effective_proc_timeout(0),
+            std::time::Duration::from_secs(1),
+            "a zero budget floors to 1s (the parse layer rejects 0; this is \
+             the last-resort guard)"
+        );
+    }
+
+    /// `proc`'s concurrency bound gets the same last-resort guard as its
+    /// budget: a hand-edited `max-open` over the hard cap clamps to it, an
+    /// in-range one passes through untouched.
+    #[test]
+    fn the_proc_max_open_is_capped() {
+        let max = kiqi_plugin::grants::PROC_MAX_OPEN_MAX;
+        assert_eq!(
+            effective_proc_max_open(max + 1),
+            max,
+            "a hand-edited oversized max-open clamps to the cap"
+        );
+        assert_eq!(
+            effective_proc_max_open(8),
+            8,
+            "an in-range max-open is untouched"
         );
     }
 

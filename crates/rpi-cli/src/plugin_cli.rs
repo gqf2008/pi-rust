@@ -285,18 +285,30 @@ struct Target {
     options: GrantOptions,
 }
 
-/// Parse a `--timeout` value, enforcing the budget's bounds at the same layer
-/// `--cwd` is validated (the grants model re-checks, but a CLI error belongs
-/// here — `install` downgrades grant errors to a note, so a bad timeout must
-/// fail before it ever gets there).
+/// The `--timeout` ceiling for a capability: `proc` runs long jobs by design,
+/// so it carries its own, longer cap than `exec`; any other capability falls
+/// back to `exec`'s (the grants model rejects `--timeout` on those outright,
+/// so the fallback only shapes the message).
+fn timeout_max_for(capability: &str) -> u64 {
+    if capability == "proc" {
+        kiqi_plugin::grants::PROC_TIMEOUT_MAX_SECONDS
+    } else {
+        kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS
+    }
+}
+
+/// Parse a `--timeout` value's shared lower bound (zero is rejected for every
+/// capability). The capability-specific ceiling is checked by the caller once
+/// the capability is known — the flag may precede it — keeping a bad timeout a
+/// CLI error: the grants model re-checks, but `install` downgrades grant
+/// errors to a note, so it must fail before it ever gets there.
 fn parse_timeout(value: &str) -> Result<u64, String> {
     let seconds = value
         .parse::<u64>()
         .map_err(|_| format!("--timeout needs seconds, got `{value}`"))?;
-    let max = kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS;
-    if seconds == 0 || seconds > max {
+    if seconds == 0 {
         return Err(format!(
-            "--timeout must be 1..={max} seconds, got {seconds}"
+            "--timeout must be at least 1 second, got {seconds}"
         ));
     }
     Ok(seconds)
@@ -376,6 +388,17 @@ fn parse_target(args: &[String]) -> Result<Target, i32> {
         );
         return Err(2);
     };
+    // The capability is known only now (it may follow --timeout), so the
+    // budget's ceiling is enforced here, on the same layer as a bad --cwd.
+    if let Some(seconds) = options.timeout_seconds {
+        if matches!(capability.as_str(), "exec" | "proc") {
+            let max = timeout_max_for(&capability);
+            if seconds > max {
+                eprintln!("error: {capability} --timeout must be 1..={max} seconds, got {seconds}");
+                return Err(2);
+            }
+        }
+    }
     if let Err(error) = validate_id(&id) {
         eprintln!("error: {error}");
         return Err(2);
@@ -690,6 +713,24 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
         );
         return 2;
     }
+    // `--timeout` lands on every declared exec/proc, so the tightest of their
+    // ceilings is what must hold (proc allows more than exec). A bad value is
+    // a hard error here, never the note `grant()`'s re-check would become.
+    if let Some(seconds) = exec_options.timeout_seconds {
+        let max = declared
+            .iter()
+            .filter_map(|cap| match cap.as_str() {
+                "exec" => Some(kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS),
+                "proc" => Some(kiqi_plugin::grants::PROC_TIMEOUT_MAX_SECONDS),
+                _ => None,
+            })
+            .min()
+            .unwrap_or(kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS);
+        if seconds > max {
+            eprintln!("error: --timeout must be 1..={max} seconds, got {seconds}");
+            return 2;
+        }
+    }
 
     let Some(root) = resolve_root(root) else {
         eprintln!("error: cannot resolve the agent directory");
@@ -919,6 +960,41 @@ mod tests {
         ] {
             assert!(parse_target(&bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// The `--timeout` ceiling is per-capability: `proc` accepts its own, longer
+    /// budget (default 600, at most 1800) while `exec` keeps its 300s cap.
+    #[test]
+    fn proc_and_exec_timeouts_use_their_own_caps() {
+        let proc_args = |seconds: &str| {
+            vec![
+                "p".to_string(),
+                "proc".to_string(),
+                "--command".to_string(),
+                "sh".to_string(),
+                "--timeout".to_string(),
+                seconds.to_string(),
+            ]
+        };
+        let target = parse_target(&proc_args("600")).expect("600 is proc's default budget");
+        assert_eq!(target.options.timeout_seconds, Some(600));
+        assert!(
+            parse_target(&proc_args("1800")).is_ok(),
+            "proc's cap is inclusive"
+        );
+        assert!(parse_target(&proc_args("1801")).is_err(), "past proc's cap");
+        assert!(
+            parse_target(&proc_args("0")).is_err(),
+            "zero is rejected everywhere"
+        );
+
+        let exec_args = vec![
+            "p".to_string(),
+            "exec".to_string(),
+            "--timeout".to_string(),
+            "301".to_string(),
+        ];
+        assert!(parse_target(&exec_args).is_err(), "exec keeps its 300s cap");
     }
 
     /// Re-granting exec without the flags resets a previously granted
