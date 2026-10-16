@@ -1,0 +1,120 @@
+# 方案：MCP 内建 —— `mcpServers` 作为宿主级能力
+
+> 状态：**已立项，方案待评审**（2026-10-16）。目标：把 MCP 客户端从「插件」提升为 **ki 宿主级能力**
+> ——外部 MCP server 在 `settings.json` 里配置、连接随会话存活、工具展开成原生工具；ACP 的
+> `session/new mcpServers` 从拒绝改为接受。
+> 关联：`plugin-abi.md` §6.2（mcp-adapter 不迁 wasm 的裁定：长连/起子进程，宿主级功能）；
+> `ki-acp-serve.md`（ACP 面，批次 3 在此合流）。前身实现：`rpi-package/packages/rpi-mcp-adapter`
+> （手写客户端 2299 行，本机曾以 dylib 运行，已于 2026-10-16 退役）。
+
+## 1. 要解决什么（实核证据）
+
+| 事实 | 证据 |
+|---|---|
+| MCP 连接必须跨工具调用存活 | 前身实现按 `(host_scope, identity, name)` 键把连接存进程级 map，跨调用复用（`runtime.rs:134-185`）；stdio server 是长活子进程 |
+| wasm ABI 表达不了 | `exec`/`proc` 句柄随调用收（`plugin-abi.md` §6.32/§6.34）；`net-http` 请求级 |
+| ACP 协议面本就期待宿主管 MCP | `session/new` 携带 `mcpServers`（schema `v1/agent.rs:2659`）；ki 现为**响亮拒绝**（`acp/mod.rs:266-276, 374-383`） |
+| 宿主内建的所有机制已就位 | 内建工具 trait（`rpi-agent/src/agent_tool.rs:29`）、装配 seam（`session.rs:371-378` 之间）、会话级长活资源先例（ReloadContext/ACP LiveSession） |
+| 生态有官方 SDK | `rmcp`（modelcontextprotocol/rust-sdk，Apache-2.0）；ABB 已在本组织内用 1.8.0 跑通 stdio 全链路（`abb/crates/abb-agent/src/mcp.rs`，1253 行） |
+| MSRV 不是障碍（实核） | ki 声明 `rust-version = "1.78"` 已陈旧——已在依赖中的 `agent-client-protocol 3.3.0` 自身要求 `1.88.0`；实际工具链 1.99.0 |
+
+## 2. 目标 / 非目标
+
+| | 项 | 本方案 |
+|---|---|---|
+| ✅ | 配置驱动的 MCP（全局 + 项目 settings.json） | 批次 1（stdio） |
+| ✅ | 工具展开为原生工具（`{server}__{tool}`），模型直接可见可调 | 批次 1 |
+| ✅ | 连接随会话存活、每条收尾路径回收（含进程树） | 批次 1 |
+| ✅ | resources（list/read/subscribe）与 list_changed 刷新 | 批次 2 |
+| ✅ | HTTP/Streamable + SSE | 批次 2 |
+| ✅ | ACP `mcpServers` 接受 + `mcpCapabilities` 如实声明 | 批次 3 |
+| ❌ | meta-tool 形态（`mcp_call`/`mcp_list`/`mcp_request` 这类） | §8：以展开工具取代 |
+| ❌ | prompts / sampling / elicitation / roots | §8：无需要，且扩大攻击面 |
+
+## 3. 三个参照物
+
+- **前身 `rpi-mcp-adapter`**（手写 2299 行）：配置 schema（`{mcpServers:{name:{command,args,env,cwd,enabled,timeoutSeconds}|{url,headers,…}}}`，`config.rs:6-47`）、stdio 行帧 + 16MiB 上限 + 进程树收杀（`transport.rs`）、逐请求 deadline 1..=300s、失败即弃连下次重建——**语义蓝本**。它的三个已知弱点不继承：`exposure` 是死配置（从不执行）、配置路径每调用传参无默认、全局静态 SESSIONS（无会话归属）。
+- **ABB 的 `rmcp` 用法**：官方 SDK 1.8.0（`client` + `transport-child-process`）跑通 initialize/工具分页列举/调用/取消/resources 订阅/通知处理/连接与结果预算/子进程 env 卫生——**引擎选型的直接证据**；其「用 serde_json 中转而非类型字段」的手法用来吸收 rmcp 的类型漂移。
+- **ki 自身**：内建工具机制（`AgentTool` + `build_tools` + seam）、settings 解析（`Settings`，Deserialize-only、无 deny_unknown_fields）、会话级资源与收尾先例（各模式结尾 + `LiveSession::close` + Drop 兜底）、信任模型先例（插件授权文件：声明归作者、授权归用户、执行归宿主）。
+
+## 4. 设计取舍
+
+### 4.1 宿主级，不是插件（已裁定，不重复论证）
+`plugin-abi.md` §6.2 已裁：长连 + 起子进程，宿主级功能。本机已据此退役 mcp-adapter dylib。
+
+### 4.2 引擎：`rmcp` 1.x，pin 精确版本
+采用 `rmcp = { version = "1.8", default-features = false, features = ["client", "transport-child-process"] }`（与 ABB 同为 1.x 线；3.x 近周级 churn + 1.88 MSRV，v1 不冒险）。协议值经 `serde_json` 中转，不依赖 rmcp 的 typed fields。HTTP 传输留批次 2（rmcp 的 HTTP 要 reqwest 0.13，与 ki 的 0.12 重复——届时裁决「接受重复」或「自写 HTTP 层」，前身实现有现成的 SSE 解码器）。
+
+### 4.3 工具展开，而不是 meta-tool
+每个发现的 MCP 工具直接注册成原生工具，命名 `{server}__{tool}`（ABB 先例）。理由：模型直接看见可用工具（前身实现全部塞进 `mcp_call`，可见性差）；`__` 命名空间天然避开与内置/插件工具撞名。真撞名（恶意 server 自命名 `read`）→ 跳过该工具并在 stderr 记明。**注意**：这会替换用户已熟悉的 `mcp_list/mcp_call/mcp_request/mcp_resource` 四点面——迁移差异写进 CHANGELOG。
+
+### 4.4 配置：settings.json 的 `mcpServers` 段，schema 沿用前身
+- 全局 `~/.ki/agent/settings.json` + 项目 `<cwd>/.ki/settings.json`（项目段先于全局？——合并规则：同名以项目为准，逐项覆盖）。
+- schema 直接沿用前身形状（`command/args/env/cwd/enabled/timeoutSeconds` | `url/headers/…`），**用户既有配置文件可平移**；**不装 `exposure` 这种死配置**。
+- 载入时显式校验：name 字符集（字母数字 `-` `_`）、command/url 非空、`timeoutSeconds` 夹 1..=300、未知判别字段拒绝。`Settings` 无 `Serialize`：本方案只读不写该段（`save_settings_to_path` 不动）。
+
+### 4.5 信任立场（最高风险项）
+宿主级 MCP 比 exec 授权更危险：起任意进程 + 出网 + **默认会继承宿主环境（含 provider API key）**。因此：
+1. **授权即用户在自己文件里写的条目**（同 grants.json 规则：宿主绝不在调用方名下授权）；**项目声明的 server 需 `project_trusted`**（复用现成机制），未信任项目 → 整段跳过 + stderr 记明。
+2. **env 卫生**：`env_clear()` + 白名单透传（PATH/HOME/LANG…），**provider 密钥默认不进 server**。
+3. **每次 spawn 与每次出网都记日志**（command+args / host，stderr，WARN 级），失败不静默。
+4. **进程树收杀**在每条路径（含 panic/Drop 兜底）；不养孤儿。
+5. 批次 3 的 ACP 客户端注入另立策略（§4.7）。
+
+### 4.6 生命周期
+- 启动：`build_with_selection`（async）里建连接、做 initialize 握手，**在 seam（`session.rs:371` 编译期插件合并之后、`:378` active 过滤之前）注入工具**——一个 server 握手失败 = 跳过 + WARN，不拖死会话。
+- 存活：连接所有权随会话（工具持 `Arc`），**不用全局静态 map**（前身弱点 7）。
+- 收尾：print/json/interactive/rpc 四种模式的结尾 + ACP `LiveSession::close`，统一走一个 `McpManager::shutdown()`；`Drop` 兜底。
+
+### 4.7 ACP 合流的边界
+批次 3 才动：解码 `McpServerStdio`（`Http`/`Sse` 变体在 HTTP 落地前响亮拒绝）、经 `SessionParams`/`SessionDeps` 进 `build_session`、启用手握在 `session::build` 之前、`close` 收尾、翻转两条契约测试、`initialize` 如实声明 `mcpCapabilities`（stdio 恒真，http 视实现）。**客户端注入的授权策略（直接接受 vs 配置 allowlist）是批次 3 的待定项，需业主裁决。**
+
+## 5. 接口草案
+
+```jsonc
+// ~/.ki/agent/settings.json 或 <cwd>/.ki/settings.json
+{
+  "mcpServers": {
+    "codegraph": { "command": "codegraph", "args": ["serve", "--mcp"],
+                   "env": {}, "cwd": null, "enabled": true, "timeoutSeconds": 60 },
+    "docs":      { "url": "https://example/mcp", "headers": {"Authorization": "Bearer …"},
+                   "enabled": true, "timeoutSeconds": 30 }
+  }
+}
+```
+
+- 工具命名：`{server}__{tool}`；schema 原样透传 server 的 `inputSchema`。
+- 可见性：受 `--tools/--exclude-tools/--no-tools`（`tool_name_allowed`）过滤，与内置工具同规则。
+
+## 6. 触达与验收
+
+- **离线测试（批次 1 主验收）**：假 stdio server（`sh -c 'read line; echo …'` 形态，codegraph 测试先例）——起服务、列工具、调工具、isError 映射、超时、取消、收尾后**无孤儿进程**（OS 级断言）。
+- **门禁**：全量 fmt/check/test + features 门 + 文档快照，与历批一致。
+- **契约翻转**（批次 3）：`mcp_servers_are_rejected_and_unknown_sessions_fail`、`load_rejects_session_level_mcp_and_additional_directories` 两条测试改为接受语义。
+- **人工**：用真实 MCP server（如 codegraph 或任一公开 server）跑一轮。
+
+## 7. 明确不做
+
+- 不做 meta-tool 形态（`mcp_call` 等）——展开工具取代之，迁移差异进 CHANGELOG。
+- 不做 prompts / sampling / elicitation / roots（前身与 ABB 都不做；ki 的 ask-user 已有同类能力）。
+- 批次 1 不做 HTTP/SSE/resources（批次 2）；不做 ACP 合流（批次 3）。
+- 不写回 settings.json（`Settings` 无 `Serialize`，本方案只读）。
+
+## 8. 批次拆分
+
+| 批次 | 内容 | 验收 |
+|---|---|---|
+| 1 | rmcp 1.x + 配置解析/校验 + stdio 传输 + 工具展开 + seam 注入 + 生命周期收尾 + 信任（env 白名单/日志/进程树）+ 假 server 离线 e2e | 门禁全绿；假 server e2e 全过、无孤儿 |
+| 2 | resources（list/read/subscribe + `resources/updated` 注入）+ list_changed 刷新 + HTTP/Streamable（reqwest 重复裁决） | 同上 + HTTP 假 server |
+| 3 | ACP 合流（接受 mcpServers、能力如实、契约翻转）+ 客户端注入策略裁决 + 文档/CHANGELOG + 真实 server 实测 | 契约测试新语义全绿；一轮实测记录在案 |
+
+## 9. 已定 / 待定
+
+**已定**：宿主级（§4.1）；rmcp 1.x pin（§4.2，MSRV 实核无碍）；工具展开 `{server}__{tool}`（§4.3）；
+配置沿用前身 schema、不装死配置（§4.4）；信任立场五条（§4.5）；seam 与生命周期（§4.6）。
+
+**待定**：
+- 项目段 vs 全局段的合并细则（同名覆盖方向）——批次 1 定并在方案补记；
+- HTTP 落地时 reqwest 0.12/0.13 重复的取舍（接受重复 vs 自写 HTTP 层）——批次 2；
+- ACP 客户端注入 server 的授权策略（直接接受 vs `settings` allowlist）——批次 3，需业主裁决；
+- 工具展开后 `--tools` 过滤与插件命名冲突的最终形态——批次 1 实测后补记。
