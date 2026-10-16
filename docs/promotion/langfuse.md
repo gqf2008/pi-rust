@@ -1,4 +1,4 @@
-# 🔍 rpi-langfuse：让 AI Agent 运行透明可见
+# 🔍 kiqi-langfuse：让 AI Agent 运行透明可见
 
 > **一句话介绍**：安装即生效的 Langfuse 可观测性扩展，自动追踪 ki Agent 的全链路执行，从 prompt 到 response，从 tool call 到 token 消耗，一目了然。
 
@@ -6,7 +6,7 @@
 
 ## 📊 Langfuse Dashboard 实际效果
 
-安装 rpi-langfuse 后，你的 Langfuse Dashboard 会自动收到完整的追踪数据：
+安装 kiqi-langfuse 后，你的 Langfuse Dashboard 会自动收到完整的追踪数据：
 
 ![Langfuse Dashboard 实际效果](../images/langfuse-dashboard.png)
 
@@ -18,7 +18,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        rpi-langfuse 数据流                           │
+│                        kiqi-langfuse 数据流                           │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
 │   ┌──────────────┐                                                  │
@@ -30,7 +30,7 @@
 │   │                    ki Agent Runtime                      │     │
 │   │                                                          │     │
 │   │  ┌────────────────────────────────────────────────────┐ │     │
-│   │  │         Provider Hooks (rpi-extensions)            │ │     │
+│   │  │         Provider Hooks (kiqi-extensions)            │ │     │
 │   │  │                                                    │ │     │
 │   │  │  BeforeAgentStart ──────┐                         │ │     │
 │   │  │  BeforeProviderRequest ─┤                         │ │     │
@@ -44,7 +44,7 @@
 │                              │                                    │
 │                              ▼                                    │
 │   ┌──────────────────────────────────────────────────────────┐    │
-│   │              rpi-langfuse 扩展 (cdylib)                   │    │
+│   │              kiqi-langfuse 扩展 (cdylib)                   │    │
 │   │                                                          │    │
 │   │  ┌─────────────────┐    ┌──────────────────────────┐   │    │
 │   │  │  事件处理器      │    │  批量队列                │   │    │
@@ -92,7 +92,7 @@
 
 ### 1️⃣ 自动追踪：12 个事件处理器
 
-安装后**零配置生效**，rpi-langfuse 自动监听 Agent 生命周期事件：
+安装后**零配置生效**，kiqi-langfuse 自动监听 Agent 生命周期事件：
 
 ![Langfuse Tracing 实际效果](../images/langfuse-tracing-overview.png)
 
@@ -138,7 +138,7 @@ fn maybe_flush(state: &TracerState) {
         // Fire-and-forget flush on a thread
         std::thread::spawn(move || {
             if let Err(e) = flush_batch(events) {
-                eprintln!("[rpi-langfuse] flush error: {e}");
+                eprintln!("[kiqi-langfuse] flush error: {e}");
             }
         });
     }
@@ -154,7 +154,7 @@ fn maybe_flush(state: &TracerState) {
 
 ### 3️⃣ 手动工具：3 个 Langfuse API 封装
 
-除了自动追踪，rpi-langfuse 还提供 3 个手动工具，让 Agent 可以主动与 Langfuse 交互：
+除了自动追踪，kiqi-langfuse 还提供 3 个手动工具，让 Agent 可以主动与 Langfuse 交互：
 
 #### 📊 `langfuse_score` — 为 Trace 打分
 
@@ -165,7 +165,7 @@ fn maybe_flush(state: &TracerState) {
     "action": "create",
     "name": "accuracy",
     "value": 0.95,
-    "traceId": "rpi-12345678-0001",
+    "traceId": "kiqi-12345678-0001",
     "comment": "High accuracy response"
   }
 }
@@ -207,7 +207,7 @@ fn maybe_flush(state: &TracerState) {
   "tool": "langfuse_trace",
   "params": {
     "action": "get",
-    "traceId": "rpi-12345678-0001"
+    "traceId": "kiqi-12345678-0001"
   }
 }
 ```
@@ -314,7 +314,7 @@ fn load_config() -> LangfuseConfig {
 
 ### Trace 视图
 
-安装 rpi-langfuse 后，每次 Agent 执行都会在 Dashboard 中生成完整的追踪记录：
+安装 kiqi-langfuse 后，每次 Agent 执行都会在 Dashboard 中生成完整的追踪记录：
 
 ![Langfuse Tracing 实际效果](../images/langfuse-tracing-overview.png)
 
@@ -338,10 +338,10 @@ fn load_config() -> LangfuseConfig {
 ### Step 1：安装扩展
 
 ```bash
-ki install rpi-langfuse
+ki install kiqi-langfuse
 ```
 
-这会自动下载并编译 `rpi-langfuse` crate，生成 `rpi_langfuse.dll`（Windows）或 `librpi_langfuse.so`（Linux/macOS），放置到 `~/.ki/agent/extensions/`。
+这会自动下载并编译 `kiqi-langfuse` crate，生成 `kiqi_langfuse.dll`（Windows）或 `libkiqi_langfuse.so`（Linux/macOS），放置到 `~/.ki/agent/extensions/`。
 
 ### Step 2：配置 Langfuse
 
@@ -383,9 +383,9 @@ fn trace_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     let pid = std::process::id();
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("rpi-{:08x}-{:04x}", pid, seq & 0xFFFF)
+    format!("kiqi-{:08x}-{:04x}", pid, seq & 0xFFFF)
 }
-// 示例输出: "rpi-1a2b3c4d-0001"
+// 示例输出: "kiqi-1a2b3c4d-0001"
 
 // Observation ID：全局序列号
 fn obs_id() -> String {
@@ -446,7 +446,7 @@ fn flush_batch(events: Vec<Value>) -> Result<(), String> {
 
 ### 审查报告摘要
 
-根据 [REVIEW.md](https://github.com/pi-rust/rpi-package/blob/main/packages/rpi-langfuse/REVIEW.md) 审查报告：
+根据 [REVIEW.md](https://github.com/pi-rust/rpi-package/blob/main/packages/kiqi-langfuse/REVIEW.md) 审查报告：
 
 **发现的问题（已全部修复）**：
 
@@ -476,7 +476,7 @@ https://langfuse.laofu.online/project/default-project/traces/test-1790177361-109
 
 ```toml
 [package]
-name = "rpi-langfuse"
+name = "kiqi-langfuse"
 version = "0.1.3"
 edition = "2021"
 rust-version = "1.78"
@@ -485,27 +485,27 @@ rust-version = "1.78"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rpi-plugin-sdk = { workspace = true }  # 稳定 ABI
+kiqi-plugin-sdk = { workspace = true }  # 稳定 ABI
 serde_json = { workspace = true }      # JSON 序列化
 reqwest = { workspace = true }         # HTTP 客户端
 ```
 
 **编译产物**：
 
-- Windows: `rpi_langfuse.dll`
-- Linux: `librpi_langfuse.so`
-- macOS: `librpi_langfuse.dylib`
+- Windows: `kiqi_langfuse.dll`
+- Linux: `libkiqi_langfuse.so`
+- macOS: `libkiqi_langfuse.dylib`
 
 **代码质量**：
 
 ```bash
-cargo check --package rpi-langfuse
+cargo check --package kiqi-langfuse
 # ✅ Finished `dev` profile [unoptimized + debuginfo] in 0.48s
 
-cargo test --package rpi-langfuse
+cargo test --package kiqi-langfuse
 # ✅ test result: ok. 7 passed; 0 failed
 
-cargo build --package rpi-langfuse --release
+cargo build --package kiqi-langfuse --release
 # ✅ Finished `release` profile [optimized] in 37.94s
 ```
 
@@ -515,8 +515,8 @@ cargo build --package rpi-langfuse --release
 
 | 资源                 | 链接                                                                                                               |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| 📦 源码仓库          | [pi-rust/rpi-package/packages/rpi-langfuse](https://github.com/pi-rust/rpi-package/tree/main/packages/rpi-langfuse) |
-| 📋 审查报告          | [REVIEW.md](https://github.com/pi-rust/rpi-package/blob/main/packages/rpi-langfuse/REVIEW.md)                       |
+| 📦 源码仓库          | [pi-rust/rpi-package/packages/kiqi-langfuse](https://github.com/pi-rust/rpi-package/tree/main/packages/kiqi-langfuse) |
+| 📋 审查报告          | [REVIEW.md](https://github.com/pi-rust/rpi-package/blob/main/packages/kiqi-langfuse/REVIEW.md)                       |
 | 🔍 Langfuse 官网     | [langfuse.com](https://langfuse.com)                                                                                |
 | 📚 Langfuse API 文档 | [langfuse.com/docs](https://langfuse.com/docs)                                                                      |
 | 🏠 ki 官网          | [ki.laofu.online](https://ki.laofu.online)                                                                        |
@@ -526,7 +526,7 @@ cargo build --package rpi-langfuse --release
 
 ## 💡 总结
 
-rpi-langfuse 是一个**生产级**的 Langfuse 集成扩展，具备以下特点：
+kiqi-langfuse 是一个**生产级**的 Langfuse 集成扩展，具备以下特点：
 
 ✅ **零配置**：安装即生效，自动追踪全链路
 ✅ **高性能**：批量异步上报，不阻塞 Agent
@@ -537,7 +537,7 @@ rpi-langfuse 是一个**生产级**的 Langfuse 集成扩展，具备以下特�
 **立即体验**：
 
 ```bash
-ki install rpi-langfuse
+ki install kiqi-langfuse
 export LANGFUSE_PUBLIC_KEY="pk-lf-xxx"
 export LANGFUSE_SECRET_KEY="sk-lf-xxx"
 ki -p "Hello, observable agent!"

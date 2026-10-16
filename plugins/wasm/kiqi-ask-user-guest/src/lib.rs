@@ -1,4 +1,4 @@
-//! `rpi-ask-user` ported to the wasm ABI.
+//! `kiqi-ask-user` ported to the wasm ABI.
 //!
 //! Same argument normalization as the compile-time plugin; the interaction is
 //! the difference. A C ABI cannot block, so the native plugin needs a
@@ -434,7 +434,7 @@ struct AskUserPlugin;
 
 impl Guest for AskUserPlugin {
     fn id() -> String {
-        "rpi-ask-user".to_string()
+        "kiqi-ask-user".to_string()
     }
 
     fn shutdown() {}

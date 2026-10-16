@@ -1,6 +1,6 @@
 # kiqi-orchestrator-guest
 
-`rpi-orchestrator` ported to the kiqi wasm ABI (0.7.1): the same three tools
+`kiqi-orchestrator` ported to the kiqi wasm ABI (0.7.1): the same three tools
 (`subagent` / `plan` / `dispatch`) and the orchestration guidance, with the
 process plumbing on `proc` and one-command `init`-style work on `exec` only
 where the acceptance checks need it (`test -f`, `sh -c`).
@@ -24,10 +24,10 @@ also gone — reshape between waves works as before.
 ## Grant it needs
 
 ```bash
-ki insmod --build plugins/wasm/kiqi-orchestrator-guest --id rpi-orchestrator --yes
-ki plugin grant rpi-orchestrator proc --command ki --cwd project --timeout 1800
-ki plugin grant rpi-orchestrator exec --command sh --command test --cwd project --timeout 300
-ki plugin grant rpi-orchestrator fs --cwd project
+ki insmod --build plugins/wasm/kiqi-orchestrator-guest --id kiqi-orchestrator --yes
+ki plugin grant kiqi-orchestrator proc --command ki --cwd project --timeout 1800
+ki plugin grant kiqi-orchestrator exec --command sh --command test --cwd project --timeout 300
+ki plugin grant kiqi-orchestrator fs --cwd project
 ```
 
 - `proc --command ki`: the subagent/dispatch children (`ki` resolved from PATH).

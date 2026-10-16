@@ -1,6 +1,6 @@
 # ki 使用手册
 
-这是一份面向使用者和扩展作者的 ki 手册。ki 是基于 Pi agent 设计的 Rust 原生 coding-agent：核心能力以 crate 形式提供，`ki` 是开箱即用的 CLI。本文记录当前版本已经实现的命令和行为，随 `rpi-cli` 一起发布。
+这是一份面向使用者和扩展作者的 ki 手册。ki 是基于 Pi agent 设计的 Rust 原生 coding-agent：核心能力以 crate 形式提供，`ki` 是开箱即用的 CLI。本文记录当前版本已经实现的命令和行为，随 `kiqi-cli` 一起发布。
 
 ## 1. 安装
 
@@ -9,7 +9,7 @@
 需要 Rust/Cargo：
 
 ```bash
-cargo install rpi-cli
+cargo install kiqi-cli
 ki --version
 ki --help
 ```
@@ -19,10 +19,10 @@ ki --help
 ```bash
 git clone https://github.com/bigfish1913/pi-rust.git
 cd pi-rust
-cargo install --path crates/rpi-cli --force
+cargo install --path crates/kiqi-cli --force
 ```
 
-`cargo install` 安装的是可执行文件；它不等同于 `ki install`。后者用于安装由 `rpi-plugin-sdk` 构建的 Rust 动态库扩展。
+`cargo install` 安装的是可执行文件；它不等同于 `ki install`。后者用于安装由 `kiqi-plugin-sdk` 构建的 Rust 动态库扩展。
 
 ### 从源码启动与构建
 
@@ -30,20 +30,20 @@ cargo install --path crates/rpi-cli --force
 
 ```bash
 # 直接启动 CLI
-cargo run -p rpi-cli
+cargo run -p kiqi-cli
 
 # 向 CLI 传递参数（`--` 后的内容属于 ki）
-cargo run -p rpi-cli -- -p "总结 README.md"
-cargo run -p rpi-cli -- --mode json -p "列出项目中的 crates"
+cargo run -p kiqi-cli -- -p "总结 README.md"
+cargo run -p kiqi-cli -- --mode json -p "列出项目中的 crates"
 
 # 构建 release 版本
-cargo build -p rpi-cli --release
+cargo build -p kiqi-cli --release
 ```
 
 构建完成后，Windows 可执行文件位于 `target/release/ki.exe`，Linux/macOS 下通常为 `target/release/ki`。也可以把本地 CLI 安装到 Cargo 的 bin 目录后直接使用：
 
 ```bash
-cargo install --path crates/rpi-cli --force
+cargo install --path crates/kiqi-cli --force
 ki
 ```
 
@@ -212,7 +212,7 @@ ki package link|list|unlink # 管理项目本地 Rust 扩展包
 更新后第一次启动新交互会话，会展示自上次阅读以来的新版本说明，后续启动不再重复。
 恢复已有会话时，提示会延后到下一次新会话。
 
-ki 使用全局 `settings.json` 中的 `lastRpiChangelogVersion` 记录已读版本，避免导入的
+ki 使用全局 `settings.json` 中的 `lastKiqiChangelogVersion` 记录已读版本，避免导入的
 `lastChangelogVersion` 干扰。已有配置缺少 ki 标记时，只补充展示当前版本一次；首次安装
 直接建立基线。设置 `collapseChangelog: true` 可显示简短更新提示。
 
@@ -304,14 +304,14 @@ ki --project-only
 配置目录可以重定位：
 
 ```bash
-KI_CODING_AGENT_DIR=/work/rpi-agent ki
+KI_CODING_AGENT_DIR=/work/kiqi-agent ki
 ```
 
 会话默认保存到 agent 配置目录下的 sessions；`--no-session` 可使用临时会话。
 
 ## 6. Rust 插件
 
-Rust 原生插件是 `cdylib`，只依赖 `rpi-plugin-sdk`，由 `rpi-extensions` 动态加载：
+Rust 原生插件是 `cdylib`，只依赖 `kiqi-plugin-sdk`，由 `kiqi-extensions` 动态加载：
 
 ```bash
 cargo build -p plugin-stub
@@ -321,21 +321,21 @@ ki --extensions-dir target/debug -p 'echo "hi"'
 从 crates.io 安装：
 
 ```bash
-ki install rpi-extension-example
-ki install rpi-extension-example --version 0.1.0
-ki install rpi-extension-example --force
+ki install kiqi-extension-example
+ki install kiqi-extension-example --version 0.1.0
+ki install kiqi-extension-example --force
 ```
 
 本地开发：
 
 ```bash
-ki install my-extension --path ../my-rpi-extension --force
+ki install my-extension --path ../my-kiqi-extension --force
 ```
 
 开发扩展项目时使用 watch 模式：
 
 ```bash
-cd ../my-rpi-extension
+cd ../my-kiqi-extension
 ki dev
 # 多扩展 workspace：ki dev --package my-extension
 # 只调试当前扩展：ki dev-local（隔离模式，不加载全局扩展）
@@ -354,15 +354,15 @@ ki package unlink my-extension
 
 项目包位于 `.ki/packages/<name>/`，是受信任的本机 Rust 动态库；它不是 npm/Node Pi package。全局安装仍使用 `ki install`。完整模板和边界规则见在线扩展作者指南：<https://ki.laofu.online/extension-authoring.md>`，调试技巧见 `docs` 的 `debugging` 主题。
 
-安装后的动态库位于 `~/.ki/agent/extensions`（或 `KI_CODING_AGENT_DIR` 指定的目录），下次启动 ki 时加载。插件通过稳定 ABI 注册工具、Provider、事件处理器和资源处理器；不要直接依赖 `rpi-cli` 的私有模块。
+安装后的动态库位于 `~/.ki/agent/extensions`（或 `KI_CODING_AGENT_DIR` 指定的目录），下次启动 ki 时加载。插件通过稳定 ABI 注册工具、Provider、事件处理器和资源处理器；不要直接依赖 `kiqi-cli` 的私有模块。
 
 ## 7. SDK 集成
 
-只需要嵌入 Agent 时，依赖 `rpi-agent` 和 `rpi-ai`；需要内置工具时再加入 `rpi-tools`；需要会话、压缩、skills 和上下文文件时加入 `rpi-harness`。
+只需要嵌入 Agent 时，依赖 `kiqi-agent` 和 `kiqi-ai`；需要内置工具时再加入 `kiqi-tools`；需要会话、压缩、skills 和上下文文件时加入 `kiqi-harness`。
 
 ```rust
-use rpi_agent::{Agent, AgentEvent};
-use rpi_ai::providers::faux::faux_provider;
+use kiqi_agent::{Agent, AgentEvent};
+use kiqi_ai::providers::faux::faux_provider;
 
 let model = faux_provider().model("echo");
 let mut agent = Agent::builder(model)
@@ -378,7 +378,7 @@ while let Some(event) = events.recv().await {
 }
 ```
 
-自定义工具实现 `rpi-agent::AgentTool`；Provider 实现 `rpi-ai::Provider`。使用 `faux provider` 和 `InMemoryExecutionEnv` 可以在没有网络、API key 或真实文件系统的情况下测试 Agent loop。
+自定义工具实现 `kiqi-agent::AgentTool`；Provider 实现 `kiqi-ai::Provider`。使用 `faux provider` 和 `InMemoryExecutionEnv` 可以在没有网络、API key 或真实文件系统的情况下测试 Agent loop。
 
 ## 8. 故障排查
 
@@ -425,8 +425,8 @@ cargo test --workspace
 发布 crate 时按依赖顺序：
 
 ```text
-rpi-telemetry → rpi-ai → rpi-agent → rpi-tools → rpi-harness →
-rpi-plugin-sdk → rpi-extensions → rpi-tui → rpi-cli
+kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness →
+kiqi-plugin-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
 ```
 
 发布前更新版本号和 `docs/release-vX.Y.Z.md`，确认 README、官网 `website/data/docs.json` 和本手册中的命令一致。官网是静态站点，文档文件提交到仓库后仍需按项目部署流程重新部署。
@@ -435,7 +435,7 @@ rpi-plugin-sdk → rpi-extensions → rpi-tui → rpi-cli
 
 - 在线文档：<https://ki.laofu.online/docs.html>
 - 源码仓库：<https://github.com/bigfish1913/pi-rust>
-- Rust API：<https://docs.rs/rpi-agent>、<https://docs.rs/rpi-plugin-sdk>
+- Rust API：<https://docs.rs/kiqi-agent>、<https://docs.rs/kiqi-plugin-sdk>
 
 - Package 与扩展作者指南：<https://ki.laofu.online/extension-authoring.md>
 - 远程模式：<docs/remote/user-guide.md>

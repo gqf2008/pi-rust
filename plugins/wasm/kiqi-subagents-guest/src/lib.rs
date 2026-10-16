@@ -1,4 +1,4 @@
-//! `rpi-subagents` ported to the wasm ABI (0.7.0).
+//! `kiqi-subagents` ported to the wasm ABI (0.7.0).
 //!
 //! The plugin registers one tool, `delegate_task`, which validates its arguments
 //! and emits a bounded, non-recursive delegation envelope. That is *all* the
@@ -13,7 +13,7 @@
 //!   could run a bounded one-shot (default 30s, capped at 300s), but the
 //!   delegation contract is a session-level child that outlives a tool call,
 //!   which a wasm guest has no handle for. A real spawner belongs to the
-//!   compile-time `rpi-orchestrator`, not to this envelope tool.
+//!   compile-time `kiqi-orchestrator`, not to this envelope tool.
 //! * **Field order is pinned deliberately.** The compile-time plugin builds the
 //!   envelope with `serde_json::json!`, and its workspace turns on serde_json's
 //!   `preserve_order`, so the keys serialize in insertion order (`kind, task,
@@ -29,7 +29,7 @@ use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
 use kiqi_plugin_guest::bindings::kiqi::plugin::types;
 use serde_json::Value;
 
-const ID: &str = "rpi-subagents";
+const ID: &str = "kiqi-subagents";
 const TOOL: &str = "delegate_task";
 const DESCRIPTION: &str = "Create a bounded, non-recursive subagent delegation envelope.";
 const SCHEMA: &str = r#"{"type":"object","properties":{"task":{"type":"string","maxLength":20000},"role":{"type":"string"},"maxTurns":{"type":"integer","minimum":1,"maximum":32},"timeoutSeconds":{"type":"integer","minimum":10,"maximum":1800}},"required":["task"]}"#;
@@ -129,7 +129,7 @@ fn delegate_task(arguments: &str) -> Result<String, types::PluginError> {
 /// map's ordering. See the module docs for why.
 fn envelope(task: &str, role: &str, max_turns: u64, timeout_seconds: u64) -> String {
     format!(
-        "{{\"kind\":\"rpi-delegation\",\"task\":{},\"role\":{},\"maxTurns\":{},\"timeoutSeconds\":{},\"recursive\":false}}",
+        "{{\"kind\":\"kiqi-delegation\",\"task\":{},\"role\":{},\"maxTurns\":{},\"timeoutSeconds\":{},\"recursive\":false}}",
         Value::String(task.to_string()).to_string(),
         Value::String(role.to_string()).to_string(),
         max_turns,

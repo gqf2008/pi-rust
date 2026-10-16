@@ -1,6 +1,6 @@
 # kiqi-websearch-guest
 
-`rpi-websearch` ported to the kiqi wasm ABI. The `websearch` tool searches public
+`kiqi-websearch` ported to the kiqi wasm ABI. The `websearch` tool searches public
 web references with DuckDuckGo and falls back to Wikipedia.
 
 ## What the port exercises
@@ -16,7 +16,7 @@ A guest has no sockets, so both GETs go through the host capability and the
 **user's allow-list** decides which of them it may reach:
 
 ```bash
-ki insmod --build plugins/wasm/kiqi-websearch-guest --id rpi-websearch \
+ki insmod --build plugins/wasm/kiqi-websearch-guest --id kiqi-websearch \
     --host api.duckduckgo.com --host en.wikipedia.org
 ```
 
@@ -58,7 +58,7 @@ Both hosts are required for the tool to work fully:
   `.json()` decide), which also lets the Wikipedia fallback distinguish a real
   error page from a result. The guest also sends `accept: application/json`
   alongside its `user-agent`; the host forwards both.
-- **Cross-tier takeover.** The compiled `rpi-websearch` is a default feature of
+- **Cross-tier takeover.** The compiled `kiqi-websearch` is a default feature of
   a stock `ki`; per §6.20 its `websearch` tool owns the name, so installing this
   guest alongside it refuses the guest's tool (the designed takeover guard,
   not a bug). The guest is for installs without the compiled plugin.

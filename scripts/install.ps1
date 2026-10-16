@@ -1,14 +1,14 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-Install the prebuilt rpi binary from GitHub Releases on Windows.
+Install the prebuilt ki binary from GitHub Releases on Windows.
 .EXAMPLE
 & .\install.ps1
 .EXAMPLE
-& .\install.ps1 -Version 0.3.19 -Dir "$env:LOCALAPPDATA\Programs\rpi" -DryRun
+& .\install.ps1 -Version 0.3.19 -Dir "$env:LOCALAPPDATA\Programs\ki" -DryRun
 .NOTES
 No Rust toolchain or administrator privileges are required. To build from
-source instead, use 'cargo install rpi-cli'.
+source instead, use 'cargo install kiqi-cli'.
 #>
 [CmdletBinding()]
 param(
@@ -34,7 +34,7 @@ try {
         $Architecture = $env:PROCESSOR_ARCHITEW6432
     }
     if ($Architecture -ne 'AMD64') {
-        throw "No prebuilt binary for Windows architecture '$Architecture'. Build from source with 'cargo install rpi-cli'."
+        throw "No prebuilt binary for Windows architecture '$Architecture'. Build from source with 'cargo install kiqi-cli'."
     }
     $Target = 'x86_64-pc-windows-msvc'
 
@@ -42,7 +42,7 @@ try {
         if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
             throw 'LOCALAPPDATA is not set; pass -Dir to choose an installation directory.'
         }
-        $Dir = Join-Path $env:LOCALAPPDATA 'Programs\rpi'
+        $Dir = Join-Path $env:LOCALAPPDATA 'Programs\ki'
     }
     $Dir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Dir)
 
@@ -50,7 +50,7 @@ try {
         try {
             $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers @{
                 Accept = 'application/vnd.github+json'
-                'User-Agent' = 'rpi-installer'
+                'User-Agent' = 'kiqi-installer'
             }
             $Version = $Release.tag_name
         }
@@ -63,7 +63,7 @@ try {
         throw 'Could not determine a valid release version; pass -Version (for example, -Version 0.3.19).'
     }
 
-    $Asset = "rpi-v$Version-$Target.zip"
+    $Asset = "kiqi-v$Version-$Target.zip"
     $Url = "https://github.com/$Repo/releases/download/v$Version/$Asset"
 
     if ($DryRun) {
@@ -75,7 +75,7 @@ try {
         return
     }
 
-    $TempDir = Join-Path ([IO.Path]::GetTempPath()) ("rpi-install-" + [guid]::NewGuid().ToString('N'))
+    $TempDir = Join-Path ([IO.Path]::GetTempPath()) ("kiqi-install-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $TempDir | Out-Null
     $ArchivePath = Join-Path $TempDir $Asset
     $ChecksumPath = "$ArchivePath.sha256"
@@ -85,7 +85,7 @@ try {
         Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $ArchivePath
     }
     catch {
-        throw "Could not download $Url. Check that v$Version has a prebuilt binary for $Target at https://github.com/$Repo/releases. Build from source with 'cargo install rpi-cli'. $($_.Exception.Message)"
+        throw "Could not download $Url. Check that v$Version has a prebuilt binary for $Target at https://github.com/$Repo/releases. Build from source with 'cargo install kiqi-cli'. $($_.Exception.Message)"
     }
     try {
         Invoke-WebRequest -UseBasicParsing -Uri "$Url.sha256" -OutFile $ChecksumPath
@@ -108,15 +108,15 @@ try {
 
     $ExtractDir = Join-Path $TempDir 'extracted'
     Expand-Archive -LiteralPath $ArchivePath -DestinationPath $ExtractDir
-    $Source = Join-Path $ExtractDir 'rpi.exe'
+    $Source = Join-Path $ExtractDir 'ki.exe'
     if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
-        throw 'Archive did not contain rpi.exe.'
+        throw 'Archive did not contain ki.exe.'
     }
 
     New-Item -ItemType Directory -Path $Dir -Force | Out-Null
-    $Destination = Join-Path $Dir 'rpi.exe'
+    $Destination = Join-Path $Dir 'ki.exe'
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
-    Write-Host "Installed rpi $Version to $Destination"
+    Write-Host "Installed ki $Version to $Destination"
 
     if (($env:PATH -split ';') -notcontains $Dir) {
         # Quote literal paths safely, including directories containing apostrophes.
@@ -127,7 +127,7 @@ try {
     }
     & $Destination --version
     if ($LASTEXITCODE -ne 0) {
-        throw "Installed rpi could not run --version (exit code $LASTEXITCODE)."
+        throw "Installed ki could not run --version (exit code $LASTEXITCODE)."
     }
 }
 finally {

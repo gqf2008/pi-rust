@@ -13,13 +13,13 @@ set -uo pipefail
 
 REPO="bigfish1913/pi-rust"
 CRATES=(
-  rpi-telemetry rpi-ai rpi-agent rpi-plugin-sdk rpi-extensions
-  rpi-tools rpi-harness rpi-tui rpi-cli
+  kiqi-telemetry kiqi-ai kiqi-agent kiqi-plugin-sdk kiqi-extensions
+  kiqi-tools kiqi-harness kiqi-tui kiqi-cli
 )
 # crates.io returns 403 without a User-Agent, so every request carries one.
 # `set --` splits the "<all> <recent>" pair; the defaults keep a row honest
 # (0, not empty) when the API is unreachable.
-UA="rpi-metrics (+https://github.com/${REPO})"
+UA="kiqi-metrics (+https://github.com/${REPO})"
 
 hr() { printf '%s\n' "────────────────────────────────────────────────────────────"; }
 

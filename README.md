@@ -6,10 +6,10 @@
 > to crates.io, and `ki update` installs from this repo's GitHub Releases).
 > Upstream (`bigfish1913/pi-rust`) is tracked only as a source of cherry-picks.
 
-[![crates.io](https://img.shields.io/crates/v/rpi-cli.svg)](https://crates.io/crates/rpi-cli)
-[![downloads](https://img.shields.io/crates/d/rpi-cli.svg)](https://crates.io/crates/rpi-cli)
-[![docs.rs](https://docs.rs/rpi-cli/badge.svg)](https://docs.rs/rpi-cli)
-[![license](https://img.shields.io/crates/l/rpi-cli.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/kiqi-cli.svg)](https://crates.io/crates/kiqi-cli)
+[![downloads](https://img.shields.io/crates/d/kiqi-cli.svg)](https://crates.io/crates/kiqi-cli)
+[![docs.rs](https://docs.rs/kiqi-cli/badge.svg)](https://docs.rs/kiqi-cli)
+[![license](https://img.shields.io/crates/l/kiqi-cli.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.78-blue.svg)](#install)
 [![CI](https://github.com/bigfish1913/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/bigfish1913/pi-rust/actions/workflows/ci.yml)
 [![GitHub stars](https://img.shields.io/github/stars/bigfish1913/pi-rust?style=flat)](https://github.com/bigfish1913/pi-rust/stargazers)
@@ -22,11 +22,11 @@ the same code works as an embedded SDK or as a ready-to-run `ki` command.
 
 Website: <https://ki.laofu.online/> · Docs: <https://ki.laofu.online/docs.html>
 
-![ki interactive session](docs/images/rpi-interactive.png)
+![ki interactive session](docs/images/kiqi-interactive.png)
 
 <sub>Interactive TUI. See [`docs/guides/user-guide.md`](docs/guides/user-guide.md) for the full command surface.</sub>
 
-![ki SDK demo — an agent loop and a real tool round-trip, offline with the faux provider](docs/images/rpi-sdk-demo.gif)
+![ki SDK demo — an agent loop and a real tool round-trip, offline with the faux provider](docs/images/kiqi-sdk-demo.gif)
 
 <sub>The agent loop and a real `write` tool round-trip, recorded with no API key and no network — the same path the tests take. Source of truth is [`demo/sdk.tape`](demo/sdk.tape); regenerate with `task demo`.</sub>
 
@@ -34,9 +34,9 @@ Website: <https://ki.laofu.online/> · Docs: <https://ki.laofu.online/docs.html>
 
 | You want | Depend on | Start at |
 | -------- | --------- | -------- |
-| A working terminal coding agent | nothing | `cargo install rpi-cli` |
-| Your own agent inside your process | `rpi-agent` (+ `rpi-ai`, `rpi-tools`) | [`examples/minimal`](examples/minimal) |
-| A tool/provider that extends every session | `rpi-plugin-sdk` | [`examples/plugin-stub`](examples/plugin-stub) |
+| A working terminal coding agent | nothing | `cargo install kiqi-cli` |
+| Your own agent inside your process | `kiqi-agent` (+ `kiqi-ai`, `kiqi-tools`) | [`examples/minimal`](examples/minimal) |
+| A tool/provider that extends every session | `kiqi-plugin-sdk` | [`examples/plugin-stub`](examples/plugin-stub) |
 
 The three share one implementation. Build your tools once, debug them inside an
 embedded agent, and ship the same code as a `cdylib` plugin that the global `ki`
@@ -68,7 +68,7 @@ PATH, then run `ki --version`. Append `-DryRun` to preview, or use
 **From crates.io** (requires Rust 1.78+):
 
 ```bash
-cargo install rpi-cli
+cargo install kiqi-cli
 ki --version
 ```
 
@@ -82,7 +82,7 @@ scoop install ki                                     # Windows
 
 The Homebrew formula currently supports Apple silicon on macOS. Intel Macs can
 use the prebuilt installer for releases with an `x86_64-apple-darwin` asset, or
-`cargo install rpi-cli`. A winget manifest is [open for
+`cargo install kiqi-cli`. A winget manifest is [open for
 review](https://github.com/microsoft/winget-pkgs/pull/444745).
 
 **From source:**
@@ -131,9 +131,9 @@ Build an agent against a deterministic in-process provider — no API key, no
 network, no flakiness:
 
 ```rust
-use rpi_agent::AgentBuilder;
-use rpi_ai::providers::faux::{FauxProvider, FauxScript};
-use rpi_ai::Provider;
+use kiqi_agent::AgentBuilder;
+use kiqi_ai::providers::faux::{FauxProvider, FauxScript};
+use kiqi_ai::Provider;
 
 #[tokio::main]
 async fn main() {
@@ -168,46 +168,46 @@ Nine crates, one version, published together. Dependency direction is one-way
 and enforced in review:
 
 ```
-rpi-telemetry → rpi-ai → rpi-agent → rpi-tools → rpi-harness
+kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness
 ```
 
 Three crates sit outside that chain:
 
-- `rpi-tui` depends on no other `rpi-*` crate.
-- `rpi-plugin-sdk` is a leaf too (it has no `rpi-*` deps), but it is not only
-  the host's plugin contract: `rpi-tools` also reads its env-var names, so the
+- `kiqi-tui` depends on no other `kiqi-*` crate.
+- `kiqi-plugin-sdk` is a leaf too (it has no `kiqi-*` deps), but it is not only
+  the host's plugin contract: `kiqi-tools` also reads its env-var names, so the
   host and its plugins cannot disagree about the strings they exchange across
   the ABI. That edge is names-only — nothing is linked or called.
-- `rpi-extensions` is `rpi-plugin-sdk` plus `rpi-ai`/`rpi-agent`, since it hosts
+- `kiqi-extensions` is `kiqi-plugin-sdk` plus `kiqi-ai`/`kiqi-agent`, since it hosts
   plugins that run tools.
-- `rpi-cli` depends on all eight of the others, which is how the `ki` binary
+- `kiqi-cli` depends on all eight of the others, which is how the `ki` binary
 gets the TUI, the harness and the plugin loader at once.
 
 | Crate | What it is |
 | ----- | ---------- |
-| [`rpi-telemetry`](https://crates.io/crates/rpi-telemetry) | Span/event contracts with a no-op default — instrumentation is opt-in, and pulls in no tracing or OpenTelemetry backend |
-| [`rpi-ai`](https://crates.io/crates/rpi-ai) | Provider-agnostic message, streaming and tool-schema types; Anthropic + OpenAI-compatible + `faux` providers |
-| [`rpi-agent`](https://crates.io/crates/rpi-agent) | The agent loop: `AgentTool`, events, hooks, queues, cancellation |
-| [`rpi-tools`](https://crates.io/crates/rpi-tools) | `read`/`write`/`edit`/`bash` (+ `grep`, `find`, `ls`, `powershell`) and the `ExecutionEnv` seam |
-| [`rpi-harness`](https://crates.io/crates/rpi-harness) | Session tree, JSONL persistence, compaction, crash recovery, the run loop |
-| [`rpi-tui`](https://crates.io/crates/rpi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
-| [`rpi-cli`](https://crates.io/crates/rpi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, plugin loading |
-| [`rpi-plugin-sdk`](https://crates.io/crates/rpi-plugin-sdk) | The stable `#[repr(C)]` ABI contract for plugins. No `rpi-*` deps; only `serde_json`, behind a default `json` feature that can be turned off |
-| [`rpi-extensions`](https://crates.io/crates/rpi-extensions) | Host-side plugin loader and the async-across-ABI tool bridge |
+| [`kiqi-telemetry`](https://crates.io/crates/kiqi-telemetry) | Span/event contracts with a no-op default — instrumentation is opt-in, and pulls in no tracing or OpenTelemetry backend |
+| [`kiqi-ai`](https://crates.io/crates/kiqi-ai) | Provider-agnostic message, streaming and tool-schema types; Anthropic + OpenAI-compatible + `faux` providers |
+| [`kiqi-agent`](https://crates.io/crates/kiqi-agent) | The agent loop: `AgentTool`, events, hooks, queues, cancellation |
+| [`kiqi-tools`](https://crates.io/crates/kiqi-tools) | `read`/`write`/`edit`/`bash` (+ `grep`, `find`, `ls`, `powershell`) and the `ExecutionEnv` seam |
+| [`kiqi-harness`](https://crates.io/crates/kiqi-harness) | Session tree, JSONL persistence, compaction, crash recovery, the run loop |
+| [`kiqi-tui`](https://crates.io/crates/kiqi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
+| [`kiqi-cli`](https://crates.io/crates/kiqi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, plugin loading |
+| [`kiqi-plugin-sdk`](https://crates.io/crates/kiqi-plugin-sdk) | The stable `#[repr(C)]` ABI contract for plugins. No `kiqi-*` deps; only `serde_json`, behind a default `json` feature that can be turned off |
+| [`kiqi-extensions`](https://crates.io/crates/kiqi-extensions) | Host-side plugin loader and the async-across-ABI tool bridge |
 
-Every crate has its own README and docs.rs page. The `crates/rpi-*`
-directories and the published crate names use the same `rpi-` prefix.
+Every crate has its own README and docs.rs page. The `crates/kiqi-*`
+directories and the published crate names use the same `kiqi-` prefix.
 
 ## Why ki
 
 Most coding agents are CLIs. `ki` is a **runtime with a CLI attached**, which
 changes what you can build with it:
 
-- **Embeddable.** The agent loop is a library. `rpi-agent` + `rpi-ai` is enough
+- **Embeddable.** The agent loop is a library. `kiqi-agent` + `kiqi-ai` is enough
   to run an agent inside your own process, with your own event handling and
   output — no shelling out to a tool and scraping stdout.
 - **Testable offline.** A deterministic `faux` provider and an in-memory
-  execution environment are first-class, not mocks bolted on. `rpi-ai` puts its
+  execution environment are first-class, not mocks bolted on. `kiqi-ai` puts its
   real HTTP providers behind a `providers` feature flag, so your test suite
   cannot silently depend on the network for the paths you exercise.
 - **Durable.** Sessions are a tree with JSONL persistence and per-frame
@@ -281,7 +281,7 @@ can register tools, providers, slash commands, event handlers, markdown
 renderers and discovered resources.
 
 ```bash
-ki install rpi-todo                    # build from crates.io and install
+ki install kiqi-todo                    # build from crates.io and install
 ki install my-ext --path ../my-ext     # local, for development
 ki dev                                 # build + watch + live reload
 ```
@@ -294,7 +294,7 @@ Ready-to-install extensions live in the companion
 an [online catalog](https://ki.laofu.online/packages.html).
 
 ```rust
-use rpi_plugin_sdk::{export_plugin, StbStringRef};
+use kiqi_plugin_sdk::{export_plugin, StbStringRef};
 
 export_plugin!(|api| {
     if let Some(declare) = api.declare {
@@ -326,7 +326,7 @@ machine. See [`docs/remote/user-guide.md`](docs/remote/user-guide.md).
 | | |
 | --- | --- |
 | Current release | **[0.3.21](https://github.com/bigfish1913/pi-rust/releases)** (nine crates, published together) |
-| Stability | `rpi-ai`, `rpi-agent`, `rpi-tools`, `rpi-harness`, `rpi-plugin-sdk` are the intended stable surface |
+| Stability | `kiqi-ai`, `kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-plugin-sdk` are the intended stable surface |
 | MSRV | 1.78 |
 | Platforms | Linux, macOS, Windows (CI runs the suite on Linux) |
 | Binary release targets | Linux (x86_64/aarch64), macOS (Intel/Apple silicon), Windows (x86_64) |
@@ -346,7 +346,7 @@ Start with the [documentation index](docs/README.md), grouped by feature.
 - [Extension authoring](docs/extensions/authoring.md) — plugin templates and ABI rules
 - [Remote mode](docs/remote/user-guide.md) — protocol, tokens, limitations
 - [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
-- [docs.rs](https://docs.rs/rpi-cli) for per-crate API docs
+- [docs.rs](https://docs.rs/kiqi-cli) for per-crate API docs
 
 ## Contributing
 
@@ -380,7 +380,7 @@ Questions, ideas and early builds are welcome in either group:
 
 MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-The `rpi-*` crates are a Rust-native coding-agent stack.
+The `kiqi-*` crates are a Rust-native coding-agent stack.
 
 ## Star history
 

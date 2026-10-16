@@ -1,6 +1,6 @@
 # kiqi-codegraph-guest
 
-`rpi-codegraph` ported to the kiqi wasm ABI (`kiqi:plugin@0.7.0`). The same
+`kiqi-codegraph` ported to the kiqi wasm ABI (`kiqi:plugin@0.7.0`). The same
 eight `codegraph_*` tools, with the process plumbing replaced by the two
 capabilities that fit it:
 
@@ -18,9 +18,9 @@ are the compile-time logic, kept in the guest.
 ## Grant it needs
 
 ```bash
-ki insmod --build plugins/wasm/kiqi-codegraph-guest --id rpi-codegraph --yes
-ki plugin grant rpi-codegraph exec --command codegraph --command test --cwd project --timeout 300
-ki plugin grant rpi-codegraph proc --command codegraph --cwd project --timeout 600
+ki insmod --build plugins/wasm/kiqi-codegraph-guest --id kiqi-codegraph --yes
+ki plugin grant kiqi-codegraph exec --command codegraph --command test --cwd project --timeout 300
+ki plugin grant kiqi-codegraph proc --command codegraph --cwd project --timeout 600
 ```
 
 - `test` is in the **exec** list because the index probe is a `test -d` run,

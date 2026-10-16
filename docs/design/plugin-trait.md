@@ -9,7 +9,7 @@
 | 契约 | Rust `trait Plugin`（`kiqi-plugin`） |
 | 接入 | **cargo feature，18 个包全部编译进 `ki` 二进制**（默认开） |
 | 语言 | 只支持 Rust |
-| 动态通道 | **保留 cdylib（`rpi-plugin-sdk`）专门伺候 dev**：`ki dev` + watch + `/reload` |
+| 动态通道 | **保留 cdylib（`kiqi-plugin-sdk`）专门伺候 dev**：`ki dev` + watch + `/reload` |
 | wasm/WIT | **推迟**，不删：同一个 `Plugin` trait 就是将来 `WasmPlugin` 适配器要实现的接缝，只用于「跑不受信的第三方插件」 |
 
 **为什么放弃 WIT**：WIT 的那套约束（跨语言 guest、无稳定 ABI、canonical ABI 表达不了递归）对"只有 Rust 实现"的契约一条都不成立。于是工具的部分输出、可认领的事件、23 个带类型的运行时动作，在 WIT 里全都别扭，在这里全是直路。
@@ -35,34 +35,34 @@
 
 | 包 | 工具 | 事件 | claim | 分步/部分输出 | 对话框 | 用到的 runtime action | 起子进程 |
 |---|---|---|---|---|---|---|---|
-| rpi-acp | | ✓ | | | ✓ | GetCliFlag, StdioLifecycle | 3 |
-| rpi-ask-user | ✓ | | | ✓ | | UiDialog | 1 |
-| rpi-codegraph | ✓ | | | ✓ | | — | 1 |
-| rpi-goal | ✓ | ✓ | | ✓ | | AppendEntry | 1 |
-| rpi-im-message | ✓ | ✓ | | ✓ | | GetCliFlag, SendUserMessage | 1 |
-| rpi-langfuse | ✓ | ✓ | | ✓ | | SetStatus | 1 |
-| rpi-lens | ✓ | | | ✓ | | — | 1 |
-| rpi-mcp-adapter | ✓ | ✓ | | ✓ | | — | 2 |
-| rpi-permission-gate | | ✓ | | | ✓ | GetCliFlag, UiDialog | 1 |
-| rpi-permissions | ✓ | | | ✓ | | — | 1 |
-| rpi-plan-mode | ✓ | ✓ | | ✓ | | AppendEntry, GetActiveTools, GetSessionBranch | |
-| rpi-run-stats | | ✓ | ✓ | ✓ | | UiComponent | |
-| rpi-server | ✓ | ✓ | | ✓ | | GetCliFlag | 1 |
-| rpi-subagents | ✓ | | | ✓ | | — | |
-| rpi-todo | ✓ | ✓ | | ✓ | | GetSessionBranch | |
-| rpi-voice | | ✓ | ✓ | ✓ | | SendUserMessage, SetEditorText, SetStatus | 1 |
-| rpi-webfetch | ✓ | | | ✓ | | — | |
-| rpi-websearch | ✓ | | | ✓ | | — | |
+| kiqi-acp | | ✓ | | | ✓ | GetCliFlag, StdioLifecycle | 3 |
+| kiqi-ask-user | ✓ | | | ✓ | | UiDialog | 1 |
+| kiqi-codegraph | ✓ | | | ✓ | | — | 1 |
+| kiqi-goal | ✓ | ✓ | | ✓ | | AppendEntry | 1 |
+| kiqi-im-message | ✓ | ✓ | | ✓ | | GetCliFlag, SendUserMessage | 1 |
+| kiqi-langfuse | ✓ | ✓ | | ✓ | | SetStatus | 1 |
+| kiqi-lens | ✓ | | | ✓ | | — | 1 |
+| kiqi-mcp-adapter | ✓ | ✓ | | ✓ | | — | 2 |
+| kiqi-permission-gate | | ✓ | | | ✓ | GetCliFlag, UiDialog | 1 |
+| kiqi-permissions | ✓ | | | ✓ | | — | 1 |
+| kiqi-plan-mode | ✓ | ✓ | | ✓ | | AppendEntry, GetActiveTools, GetSessionBranch | |
+| kiqi-run-stats | | ✓ | ✓ | ✓ | | UiComponent | |
+| kiqi-server | ✓ | ✓ | | ✓ | | GetCliFlag | 1 |
+| kiqi-subagents | ✓ | | | ✓ | | — | |
+| kiqi-todo | ✓ | ✓ | | ✓ | | GetSessionBranch | |
+| kiqi-voice | | ✓ | ✓ | ✓ | | SendUserMessage, SetEditorText, SetStatus | 1 |
+| kiqi-webfetch | ✓ | | | ✓ | | — | |
+| kiqi-websearch | ✓ | | | ✓ | | — | |
 
 ### 数据给出的三条结论
 
 1. **16/18 需要分步/部分输出**——这不是边角需求。WIT 草案里的单发 `execute() -> outcome` 会一次打死 16 个包；`trait` 版直接 `&dyn ProgressSink` 就够。这是放弃 WIT 的最硬证据。
 2. **14/18 会起子进程**——若走 wasm 沙箱，这 14 个都得开宿主 `process` 能力，**沙箱价值基本归零**。所以"编译期接入"不是图省事，是这批插件的形态本来就与沙箱不兼容。
-3. **只有 2/18 用 claim**（`rpi-run-stats`、`rpi-voice`）——用得少但确实在用，`EventAction::Claimed` 保留。
+3. **只有 2/18 用 claim**（`kiqi-run-stats`、`kiqi-voice`）——用得少但确实在用，`EventAction::Claimed` 保留。
 
 ### 覆盖核对
 
-- 4 个包（`rpi-acp` `rpi-permission-gate` `rpi-run-stats` `rpi-voice`）**不提供工具** → `Plugin::tools()` 默认空集即可；
+- 4 个包（`kiqi-acp` `kiqi-permission-gate` `kiqi-run-stats` `kiqi-voice`）**不提供工具** → `Plugin::tools()` 默认空集即可；
 - 6 个包**没有事件处理器** → `on_event` 默认 `Continue`；
 - 实际用到的 action 只有 10/23，其余 13 个是**已声明未使用**；`HostCaps` 按需给即可，不预开放。
 
@@ -83,31 +83,31 @@
 1. **长连 / 服务生命周期**：插件自己维持一个长连接或服务循环（WebSocket、设备流、server）。
    → 编译期模式下"更新插件 = 重编 `ki` 二进制"，对常驻服务是实打实的坏处。
 2. **驱动子进程**：插件需要起并管理外部进程。
-   → 进程内模型不禁止（已移植的 `rpi-codegraph` 就在起 `codegraph`），但**与长连叠加**时归属原生。
+   → 进程内模型不禁止（已移植的 `kiqi-codegraph` 就在起 `codegraph`），但**与长连叠加**时归属原生。
 3. **需要在调用之外行动**：插件要起后台线程 / 定时器，在两次调用之间主动推送
-   （`rpi-run-stats` 就是一个 1 秒 tick 的线程，注释写明"即使没有流式事件也保持等待时间与
+   （`kiqi-run-stats` 就是一个 1 秒 tick 的线程，注释写明"即使没有流式事件也保持等待时间与
    TPM 窗口新鲜"）。
    → `HostCaps` 是**每次调用借来**的，后台线程拿不到它；原生 ABI 能这么干，是因为它给的是
    全局 `Runtime`（函数指针 `Copy + Send`）。这是两种模型的真实差异，不是实现疏漏。
 4. **宿主 vtable 散射进签名**：把 `runtime_action` / `free_string` 裸函数指针存进一个 context 结构
-   并到处传参（`rpi-im-message` 的 `StartupContext` 即如此）。
+   并到处传参（`kiqi-im-message` 的 `StartupContext` 即如此）。
    → 穿 `HostCaps` 要改的签名面比 goal + plan-mode 加起来还宽，收益只是少一个 dylib。
 
 ### 名单
 
 | 插件 | 归属 | 依据 |
 |---|---|---|
-| `rpi-todo` `rpi-lens` `rpi-webfetch` `rpi-websearch` `rpi-subagents` `rpi-permissions` `rpi-goal` `rpi-plan-mode` `rpi-codegraph` | **编译期**（已移植，见 §6） | 纯进程内，宿主契约窄（0~5 处） |
-| `rpi-ask-user` | 编译期（已移植） | 纯进程内 |
-| `rpi-langfuse` | 编译期（已移植，见 §7） | 纯进程内（14 个事件，无后台线程） |
-| `rpi-run-stats` | **原生** | 1 秒定时线程主动推送（判据 3） |
-| `rpi-im-message` | **原生** | 飞书 WebSocket 长连 + 专用服务 runtime + 驱动 `rpi print` 子进程 + `StartupContext` 散射（判据 1+2+3 全中） |
-| `rpi-voice` | **原生** | 录音设备流长连（判据 1） |
-| `rpi-mcp-adapter` | **原生** | 管理外部 MCP 子进程的 stdio 生命周期（判据 2） |
-| `rpi-acp` | **原生** | stdio 生命周期（`StdioLifecycle`）（判据 2） |
-| `rpi-server` | **原生** | 服务端（判据 1） |
+| `kiqi-todo` `kiqi-lens` `kiqi-webfetch` `kiqi-websearch` `kiqi-subagents` `kiqi-permissions` `kiqi-goal` `kiqi-plan-mode` `kiqi-codegraph` | **编译期**（已移植，见 §6） | 纯进程内，宿主契约窄（0~5 处） |
+| `kiqi-ask-user` | 编译期（已移植） | 纯进程内 |
+| `kiqi-langfuse` | 编译期（已移植，见 §7） | 纯进程内（14 个事件，无后台线程） |
+| `kiqi-run-stats` | **原生** | 1 秒定时线程主动推送（判据 3） |
+| `kiqi-im-message` | **原生** | 飞书 WebSocket 长连 + 专用服务 runtime + 驱动 `ki print` 子进程 + `StartupContext` 散射（判据 1+2+3 全中） |
+| `kiqi-voice` | **原生** | 录音设备流长连（判据 1） |
+| `kiqi-mcp-adapter` | **原生** | 管理外部 MCP 子进程的 stdio 生命周期（判据 2） |
+| `kiqi-acp` | **原生** | stdio 生命周期（`StdioLifecycle`）（判据 2） |
+| `kiqi-server` | **原生** | 服务端（判据 1） |
 
-**判据里没有"代码行数"**：`rpi-langfuse` 有 4227 行却该搬（纯事件），`rpi-im-message` 2122 行却该留
+**判据里没有"代码行数"**：`kiqi-langfuse` 有 4227 行却该搬（纯事件），`kiqi-im-message` 2122 行却该留
 （结构属性）。行数不预测移植成本，契约宽度才预测。
 
 ### 贡献面（`Plugin` 该实现多少）
@@ -127,7 +127,7 @@
 加 `probes`（权限闸门）与 `shutdown`，`Plugin` 共 **8 个贡献面**。
 
 > 注：本仓**在树内**没有插件注册 `register_flag` / `register_shortcut`（只有 `examples/plugin-stub` 用
-> `register_before_agent_start`，以及 `rpi-langfuse` 里的 `None` 占位），上表的计数描述的是**上游插件
+> `register_before_agent_start`，以及 `kiqi-langfuse` 里的 `None` 占位），上表的计数描述的是**上游插件
 > 生态**。`Plugin` 侧对应面的消费者由会话与 `ki plugin show` 提供（见 `plugin-abi.md` §6.19–§6.21）。
 
 ## 6. 移植进度
@@ -135,12 +135,12 @@
 已移植并通过 **caps 级验收**（断言宿主被要求做了什么，而非"加载成功"）：
 
 ```
-rpi-todo · rpi-lens · rpi-webfetch · rpi-websearch ·
-rpi-subagents · rpi-permissions · rpi-goal · rpi-plan-mode · rpi-codegraph · rpi-ask-user ·
-rpi-langfuse
+kiqi-todo · kiqi-lens · kiqi-webfetch · kiqi-websearch ·
+kiqi-subagents · kiqi-permissions · kiqi-goal · kiqi-plan-mode · kiqi-codegraph · kiqi-ask-user ·
+kiqi-langfuse
 ```
 
-`rpi-goal` 与 `rpi-plan-mode` 的宿主访问在**工具路径**上，因此用窄 trait 双适配器
+`kiqi-goal` 与 `kiqi-plan-mode` 的宿主访问在**工具路径**上，因此用窄 trait 双适配器
 （`AbiHost` 走 `call_runtime` / `CapsHost` 走 `HostCaps`）穿参——**不合成 `PluginApi` vtable**，
 那会把 C ABI 拖回编译期通道。
 
@@ -149,24 +149,24 @@ rpi-langfuse
 排批次时用过两个**测不到目标**的指标，都已废弃：
 
 - `call_runtime(` 计数 → 对使用包装函数（`invoke_runtime_action`）的包返回 0；
-- `RuntimeActionId::` 计数 → 对**故意钉裸数字 id** 的包（`rpi-ask-user` 用 17、`rpi-langfuse` 用 18，
+- `RuntimeActionId::` 计数 → 对**故意钉裸数字 id** 的包（`kiqi-ask-user` 用 17、`kiqi-langfuse` 用 18，
   理由写在注释里：不能依赖会漂移的 SDK 枚举）返回 0。
 
 正确度量是三者**取并集**：`RuntimeActionId::X` + 裸数字 id + 包装函数名。
 
-## 7. rpi-langfuse 端口规格（**已落地**，规格保留作度量记录）
+## 7. kiqi-langfuse 端口规格（**已落地**，规格保留作度量记录）
 
 落地结果：`src/kiqi.rs` 是 `impl Plugin`（14 路 `handler_for` 表 + 3 个同步工具），
 `lib.rs` 的 8 个 `event_handler!` 宏块拆成普通 fn（签名 `(&Event, &dyn StatusHost) -> i32`），
 StepHandle 壳 / `HANDLES` / `Drive` / `StepResult` / `ToolPartialCb` 已删除，`set_status`
 改走 `StatusHost`（`AbiHost` 保留裸 id 18，`CapsHost` 走 `HostCaps::ui`），并接进
-`rpi-cli` 的 `plugin-rpi-langfuse` feature + 注册表。caps 级验收在
-`plugins/rpi-langfuse/src/kiqi.rs`（14 tag 一一对应）与 `lib.rs` 测试
+`kiqi-cli` 的 `plugin-kiqi-langfuse` feature + 注册表。caps 级验收在
+`plugins/kiqi-langfuse/src/kiqi.rs`（14 tag 一一对应）与 `lib.rs` 测试
 （`SessionStart` 重置、`BeforeAgentStart` 建 trace、`CapsHost` 经 `UiApi` 发状态）中。
-后续（宿主侧，**已随本轮完成**）：`crates/rpi-extensions/src/compiled.rs` 提供
+后续（宿主侧，**已随本轮完成**）：`crates/kiqi-extensions/src/compiled.rs` 提供
 全局 sink，在 `dispatch_to_handlers` / `dispatch_lifecycle_event` /
 `dispatch_data_event_claiming` 三个分发入口把事件转成 `(tag, JSON)` 并交回宿主；
-`rpi-cli` 在 session build 时用 `install_compiled_event_sink(caps)` 安装闭包，
+`kiqi-cli` 在 session build 时用 `install_compiled_event_sink(caps)` 安装闭包，
 把事件送给每个 `PluginHost::on_event`。`kiqi_plugin::EventTag::from_u32` 做判别值映射，
 `AgentEvent`/生命周期/provider hook 因此都到达编译期插件。附注：编译期插件目前只
 observe。**后续已补**：`CompiledEventSink` 现在返回 `CompiledVerdict`（`Continue`/`Claimed`），
@@ -198,7 +198,7 @@ pub(crate) struct CapsHost<'a>(pub &'a kiqi_plugin::HostCaps<'a>);
 ```
 
 `set_status` 的调用点在 5 处（1559 / 1561 / 1584 / 2093 / 3256），都在 flush 路径深处，
-所以 `StatusHost` 要沿调用链穿到那里——与 `rpi-goal` 的 `GoalHost` 同一手法。
+所以 `StatusHost` 要沿调用链穿到那里——与 `kiqi-goal` 的 `GoalHost` 同一手法。
 
 ### 7.2 14 个处理器
 
@@ -223,7 +223,7 @@ let data: Value = event.payload.clone();     // 本来就是 JSON
 
 ### 7.3 结构性障碍（唯一真正费工的地方）
 
-**13 个处理器写在 `rpi_plugin_sdk::event_handler! { ... }` 宏块里**。编译期路径要把它们
+**13 个处理器写在 `kiqi_plugin_sdk::event_handler! { ... }` 宏块里**。编译期路径要把它们
 变成普通函数（去掉宏），dispatch 由 `Plugin::on_event` 按 `event.tag` 做 14 路 match。
 
 这一步要手工做，且要留出编译修错的余量——批量替换会改坏定义行（plan-mode 的教训）。
@@ -253,7 +253,7 @@ caps 级：一次 `SessionStart` 后状态被重置；一次 `before_agent_start
 而 langfuse 的 3 个工具（`langfuse_score` / `langfuse_prompt` / `langfuse_trace`）走的是**阻塞 HTTP**，
 所以原生侧必须拆成 start/poll 两段。
 
-编译期路径下这整套没有存在理由：调用可以直接阻塞。做法与 `rpi-ask-user` 一致——
+编译期路径下这整套没有存在理由：调用可以直接阻塞。做法与 `kiqi-ask-user` 一致——
 **丢机器、写成同步循环**，而不是照搬（"移植后必须更简单，不能更复杂"）。
 
 净效果：这一块不是"改 70 行"，是**删 70 行 + 3 个工具的调用路径重写**。
@@ -272,7 +272,7 @@ caps 级：一次 `SessionStart` 后状态被重置；一次 `before_agent_start
 
 ### 7.7 最后两块（侦察完毕，规格已无未知项）
 
-**注册块**在 `src/lib.rs:3113` 的 `rpi_plugin_sdk::export_plugin!(|api| { .. })` 里：
+**注册块**在 `src/lib.rs:3113` 的 `kiqi_plugin_sdk::export_plugin!(|api| { .. })` 里：
 
 ```rust
 let handlers: &[(EventTag, EventHandlerFn)] = &[ (EventTag::SessionStart, on_session_start), .. ]; // 14 个

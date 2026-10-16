@@ -59,7 +59,7 @@ pi 的两个数差约 20 ms：`--version` 169.5 ms，冷启动 189.5 ms。那 20
 
 第二次是 npm 的 shim 白送对方一个 shell。npm 装的 `pi` 是 `.bin/pi`，在 Windows 上要走 `cmd.exe`，直接跑会把 `cmd.exe` 的启动算进 pi 的时间里。现在解析 shim 指向的 JS 入口，直接用 `node` 跑。
 
-第三次最严重，ki 根本没被隔离。我给两边都设了 `PI_CODING_AGENT_DIR` 和 `PI_OFFLINE`，那是原生 pi 的变量名；ki 用的是 `KI_CODING_AGENT_DIR` 和 `KI_OFFLINE`。结果是 pi 老老实实用空目录冷启动，ki 忽略这些变量，直接读本机真实的 `~/.ki/agent`，把我装在里面的 25 个插件 DLL 全加载了（`rpi_voice.dll` 19 MB、`rpi_im_message.dll` 7 MB，还有 `mcp_adapter`、`langfuse`、`codegraph` 等等）。证据在 `get_state` 的回包里：那个配置下 ki 报告 31 个工具，真正隔离后只有 6 个内置工具。那"83 ms 初始化"几乎全是加载我自己的插件，不是 ki 的核心开销。修好隔离后，冷启动从 101 ms 掉到 10 ms。
+第三次最严重，ki 根本没被隔离。我给两边都设了 `PI_CODING_AGENT_DIR` 和 `PI_OFFLINE`，那是原生 pi 的变量名；ki 用的是 `KI_CODING_AGENT_DIR` 和 `KI_OFFLINE`。结果是 pi 老老实实用空目录冷启动，ki 忽略这些变量，直接读本机真实的 `~/.ki/agent`，把我装在里面的 25 个插件 DLL 全加载了（`kiqi_voice.dll` 19 MB、`kiqi_im_message.dll` 7 MB，还有 `mcp_adapter`、`langfuse`、`codegraph` 等等）。证据在 `get_state` 的回包里：那个配置下 ki 报告 31 个工具，真正隔离后只有 6 个内置工具。那"83 ms 初始化"几乎全是加载我自己的插件，不是 ki 的核心开销。修好隔离后，冷启动从 101 ms 掉到 10 ms。
 
 但这 10 ms 也没算全。修好隔离后我得到一个比 `--version` 还小的冷启动，这不合理。查脚本发现计时器是这么起的：
 
@@ -84,7 +84,7 @@ const startedAt = performance.now();   // 秒表却在这之后才起
 
 ```bash
 git clone https://github.com/bigfish1913/pi-rust && cd pi-rust
-cargo build -p rpi-cli --release
+cargo build -p kiqi-cli --release
 
 npm install --prefix .bench @earendil-works/pi-coding-agent
 node scripts/bench-vs-pi.mjs --pi .bench/node_modules/.bin/pi --runs 11 --warmup 3 \
@@ -95,7 +95,7 @@ node scripts/bench-vs-pi.mjs --pi .bench/node_modules/.bin/pi --runs 11 --warmup
 
 ## 项目
 
-ki 是 Rust 原生、library-first 的 coding-agent runtime，九个 crate 同版本发布：`rpi-telemetry → rpi-ai → rpi-agent → rpi-tools → rpi-harness → rpi-cli`，另有 `rpi-plugin-sdk`（稳定 `#[repr(C)]` ABI）与 `rpi-extensions`（宿主加载器）。MIT 许可。
+ki 是 Rust 原生、library-first 的 coding-agent runtime，九个 crate 同版本发布：`kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli`，另有 `kiqi-plugin-sdk`（稳定 `#[repr(C)]` ABI）与 `kiqi-extensions`（宿主加载器）。MIT 许可。
 
 - GitHub：https://github.com/bigfish1913/pi-rust
 - 官网：https://ki.laofu.online/
@@ -161,7 +161,7 @@ The first bug was RSS sampling inside the timing window. Spawning `tasklist` eve
 
 The second was npm's `.bin/pi` shim, which needs `cmd.exe` on Windows and would have charged that startup to pi. The harness now resolves the shim to its JS entrypoint and runs `node` directly.
 
-The third was the worst: ki was not actually isolated. I set `PI_CODING_AGENT_DIR` and `PI_OFFLINE`, which are pi's variables; ki reads `KI_CODING_AGENT_DIR` and `KI_OFFLINE`. So pi ran against an empty config dir while ki read the real `~/.ki/agent` and loaded the 25 plugin DLLs installed there (`rpi_voice.dll` at 19 MB, `rpi_im_message.dll` at 7 MB, plus `mcp_adapter`, `langfuse`, `codegraph`). The proof is in the `get_state` reply: that run reported 31 tools; properly isolated, 6 built-ins. The "83 ms of initialisation" was almost all my own plugins. Fixing isolation took cold start from 101 ms to 10 ms.
+The third was the worst: ki was not actually isolated. I set `PI_CODING_AGENT_DIR` and `PI_OFFLINE`, which are pi's variables; ki reads `KI_CODING_AGENT_DIR` and `KI_OFFLINE`. So pi ran against an empty config dir while ki read the real `~/.ki/agent` and loaded the 25 plugin DLLs installed there (`kiqi_voice.dll` at 19 MB, `kiqi_im_message.dll` at 7 MB, plus `mcp_adapter`, `langfuse`, `codegraph`). The proof is in the `get_state` reply: that run reported 31 tools; properly isolated, 6 built-ins. The "83 ms of initialisation" was almost all my own plugins. Fixing isolation took cold start from 101 ms to 10 ms.
 
 But 10 ms was not the whole story either. A cold start smaller than `--version` is impossible, and that is what I got. The stopwatch was the problem:
 
@@ -186,7 +186,7 @@ That third number also says something about plugins: loading them costs time, so
 
 ```bash
 git clone https://github.com/bigfish1913/pi-rust && cd pi-rust
-cargo build -p rpi-cli --release
+cargo build -p kiqi-cli --release
 
 npm install --prefix .bench @earendil-works/pi-coding-agent
 node scripts/bench-vs-pi.mjs --pi .bench/node_modules/.bin/pi --runs 11 --warmup 3 \

@@ -18,7 +18,7 @@
 ///     emit many blocks (16/18 real plugins need stepwise output);
 ///   * a tool returns a **structured `tool-result`** (blocks + is-error +
 ///     `details` JSON), not a bare string — `details` is how a plugin carries
-///     state that must survive fork/switch (`rpi-todo`'s task list);
+///     state that must survive fork/switch (`kiqi-todo`'s task list);
 ///   * `on-event` returns an **`event-action`** (`continue`/`claimed`) so a wasm
 ///     plugin can claim an event like a native handler's `CLAIMED`; the enum
 ///     stops there because this host has no channel for a rewritten payload.
@@ -94,7 +94,7 @@ interface types {
     /// A tool's terminal result.
     ///
     /// `details` is JSON and is how a plugin carries state that must survive
-    /// fork/switch — `rpi-todo` keeps its whole task list there, so a bare
+    /// fork/switch — `kiqi-todo` keeps its whole task list there, so a bare
     /// string result is not enough.
     record tool-result {
         blocks: list<content-block>,

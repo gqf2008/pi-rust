@@ -9,7 +9,7 @@ authors.workspace = true
 repository.workspace = true
 description = "First real kiqi wasm plugin: the todo task list, ported off the compile-time trait"
 readme = "README.md"
-keywords = ["rpi", "kiqi", "wasm", "plugin", "todo"]
+keywords = ["ki", "kiqi", "wasm", "plugin", "todo"]
 categories = ["development-tools"]
 
 [lib]

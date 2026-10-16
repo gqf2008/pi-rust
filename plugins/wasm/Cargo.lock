@@ -106,6 +106,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiqi-lens-guest"
+version = "0.1.0"
+dependencies = [
+ "kiqi-plugin-guest",
+ "serde_json",
+]
+
+[[package]]
 name = "kiqi-orchestrator-guest"
 version = "0.1.0"
 dependencies = [
@@ -114,11 +122,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiqi-plan-mode-core"
+version = "0.1.5"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "kiqi-plan-mode-guest"
 version = "0.1.0"
 dependencies = [
+ "kiqi-plan-mode-core",
  "kiqi-plugin-guest",
- "rpi-plan-mode-core",
  "serde_json",
 ]
 
@@ -127,14 +142,6 @@ name = "kiqi-plugin-guest"
 version = "0.1.0"
 dependencies = [
  "wit-bindgen",
-]
-
-[[package]]
-name = "kiqi-rpi-lens-guest"
-version = "0.1.0"
-dependencies = [
- "kiqi-plugin-guest",
- "serde_json",
 ]
 
 [[package]]
@@ -224,13 +231,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
-]
-
-[[package]]
-name = "rpi-plan-mode-core"
-version = "0.1.5"
-dependencies = [
- "serde_json",
 ]
 
 [[package]]

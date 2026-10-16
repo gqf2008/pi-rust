@@ -1,4 +1,4 @@
-//! `rpi-orchestrator` ported to the wasm ABI (0.7.1).
+//! `kiqi-orchestrator` ported to the wasm ABI (0.7.1).
 //!
 //! The compile-time plugin runs node workers on OS threads and lets a wave
 //! outlive its `dispatch` call. A wasm guest exists only *during* a call, so
@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const ID: &str = "rpi-orchestrator";
+const ID: &str = "kiqi-orchestrator";
 const DEFAULT_PROGRAM: &str = "ki";
 const EXCLUDED_TOOLS: &str = "subagent,plan,dispatch";
 const MAX_OUTPUT_BYTES: usize = 40_000;
@@ -41,7 +41,7 @@ const RESULT_SUMMARY_BYTES: usize = 2_000;
 const POLL_SLICE_MS: u64 = 100;
 const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Project-relative path of `rpi-goal`'s state — the compile-time `GOALS_FILE`.
+/// Project-relative path of `kiqi-goal`'s state — the compile-time `GOALS_FILE`.
 /// An active goal in it is what turns the guidance on; the `fs` grant's scope is
 /// the project tree, so this resolves under the session's directory.
 const GOALS_FILE: &str = ".ki/goals.json";
@@ -374,7 +374,7 @@ fn bump_generation() -> u64 {
     GENERATION.fetch_add(1, Ordering::SeqCst) + 1
 }
 
-/// Whether `rpi-goal` has an active goal in this project — the compile-time
+/// Whether `kiqi-goal` has an active goal in this project — the compile-time
 /// `active_goal_in_project` gate, reading `.ki/goals.json` through the `fs`
 /// grant. Fail-closed: any read or parse problem is "no goal".
 fn active_goal_in_project() -> bool {
@@ -1092,9 +1092,9 @@ struct ExecOutput {
 // The Guest impl
 // ---------------------------------------------------------------------------
 
-struct RpiOrchestrator;
+struct KiOrchestrator;
 
-impl Guest for RpiOrchestrator {
+impl Guest for KiOrchestrator {
     fn id() -> String {
         ID.to_string()
     }
@@ -1169,4 +1169,4 @@ impl Guest for RpiOrchestrator {
     }
 }
 
-kiqi_plugin_guest::bindings::export!(RpiOrchestrator with_types_in kiqi_plugin_guest::bindings);
+kiqi_plugin_guest::bindings::export!(KiOrchestrator with_types_in kiqi_plugin_guest::bindings);

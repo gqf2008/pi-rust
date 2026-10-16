@@ -142,7 +142,7 @@ compare **ratios**, not the values quoted here.
 
 ```bash
 # ki
-cargo build -p rpi-cli --release
+cargo build -p kiqi-cli --release
 
 # native pi, into an isolated local prefix
 npm install --prefix .bench @earendil-works/pi-coding-agent

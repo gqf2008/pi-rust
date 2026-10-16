@@ -11,15 +11,15 @@ it works. Delete any section that does not apply.
 
 <!-- Tick everything the diff touches. -->
 
-- [ ] `rpi-telemetry`
-- [ ] `rpi-ai`
-- [ ] `rpi-agent`
-- [ ] `rpi-tools`
-- [ ] `rpi-harness`
-- [ ] `rpi-tui`
-- [ ] `rpi-cli`
-- [ ] `rpi-plugin-sdk`
-- [ ] `rpi-extensions`
+- [ ] `kiqi-telemetry`
+- [ ] `kiqi-ai`
+- [ ] `kiqi-agent`
+- [ ] `kiqi-tools`
+- [ ] `kiqi-harness`
+- [ ] `kiqi-tui`
+- [ ] `kiqi-cli`
+- [ ] `kiqi-plugin-sdk`
+- [ ] `kiqi-extensions`
 - [ ] docs / website / CI only
 
 ## Type of change
@@ -52,7 +52,7 @@ API addition, a change to session persistence, the plugin ABI, or the security
 boundary described in SECURITY.md.
 -->
 
-- [ ] I kept the `rpi-telemetry → rpi-ai → rpi-agent → rpi-tools → rpi-harness → rpi-cli`
+- [ ] I kept the `kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli`
       dependency direction (no new backwards edges).
 - [ ] New behaviour has a test that runs offline (no live provider, no network).
 - [ ] Public API additions have doc comments.

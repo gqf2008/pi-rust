@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command release for the rpi-* crate family.
+# One-command release for the kiqi-* crate family.
 #
 #   task release RELEASE_VERSION=0.3.4
 #   bash scripts/release.sh 0.3.4 --dry-run
@@ -17,7 +17,7 @@
 #     bigfish1913/scoop-bucket
 #   * `gh` authenticated (release assets, taps, fork + PR to winget-pkgs)
 #   * `cargo login` for the crates.io publish phase
-#   * SSH to the rpi web host for the site phase
+#   * SSH to the ki web host for the site phase
 #
 # The winget phase only *opens* a PR: a winget-team moderator merges it, which
 # no command here can do.
@@ -191,7 +191,7 @@ phase_wait() {
   for entry in "${ASSET_TARGETS[@]}"; do
     target="${entry%%:*}"
     ext="${entry##*:}"
-    needed+=("rpi-$release_tag-$target.$ext" "rpi-$release_tag-$target.$ext.sha256")
+    needed+=("kiqi-$release_tag-$target.$ext" "kiqi-$release_tag-$target.$ext.sha256")
   done
   if [[ "$DRY_RUN" == "1" ]]; then
     echo "  \$ poll: gh release view $release_tag --json assets until all archives + .sha256 exist"
@@ -247,8 +247,8 @@ phase_crates() {
 
 phase_site() {
   note "deploy the site"
-  confirm "Deploy the site (SSH to the rpi host)?" || { note "  skipped"; return; }
-  step task rpi-deploy
+  confirm "Deploy the site (SSH to the ki host)?" || { note "  skipped"; return; }
+  step task kiqi-deploy
 }
 
 # --------------------------------------------------------------------------

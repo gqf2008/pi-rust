@@ -1,4 +1,4 @@
-//! `rpi-websearch` ported to the wasm ABI (0.7.0).
+//! `kiqi-websearch` ported to the wasm ABI (0.7.0).
 //!
 //! The compile-time plugin builds a `reqwest` client and talks to two keyless
 //! HTTPS endpoints directly — the DuckDuckGo Instant Answer API (primary) and
@@ -31,13 +31,13 @@ use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
 use kiqi_plugin_guest::bindings::kiqi::plugin::{net_http, types};
 use serde_json::{json, Value};
 
-const ID: &str = "rpi-websearch";
+const ID: &str = "kiqi-websearch";
 const TOOL: &str = "websearch";
 const DESCRIPTION: &str = "Search public web references with DuckDuckGo.";
 const SCHEMA: &str = r#"{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":20}},"required":["query"]}"#;
 
 /// Set by the compile-time client; the host forwards it unchanged.
-const USER_AGENT: &str = "rpi-websearch/0.1";
+const USER_AGENT: &str = "kiqi-websearch/0.1";
 const DDG_ENDPOINT: &str = "https://api.duckduckgo.com/";
 const WIKI_ENDPOINT: &str = "https://en.wikipedia.org/w/api.php";
 /// The compile-time fallback always asks Wikipedia for up to eight hits.

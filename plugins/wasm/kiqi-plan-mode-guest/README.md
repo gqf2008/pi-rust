@@ -1,6 +1,6 @@
 # kiqi-plan-mode-guest
 
-`rpi-plan-mode` ported to the kiqi wasm ABI. The plugin swaps the active tool set
+`kiqi-plan-mode` ported to the kiqi wasm ABI. The plugin swaps the active tool set
 so the model plans before it edits, persists the finished plan as a custom
 session entry, and restores it on session start / tree change.
 
@@ -26,7 +26,7 @@ added `inject.append-custom-entry` to the ABI (0.6.0).
 ## Sharing one implementation
 
 The logic (which tools survive, what `/plan` prints, how the outline is parsed)
-lives in `rpi-plan-mode-core`, the same crate the compile-time plugin uses. Only
+lives in `kiqi-plan-mode-core`, the same crate the compile-time plugin uses. Only
 the `PlanHost` adapter differs: `HostCaps` there, the WIT imports here.
 
 ## Build

@@ -6,17 +6,17 @@ ki 是 Rust 原生 Agent SDK 与终端应用。当前 workspace 包含九个产�
 
 | Crate | 职责 |
 | --- | --- |
-| `rpi-telemetry` | 遥测接口与 span/event 合约 |
-| `rpi-ai` | 模型与消息类型、Provider、流式响应、协议适配及 faux Provider |
-| `rpi-agent` | Agent Loop、工具调用、事件、队列、取消与轮次回调 |
-| `rpi-tools` | 内置工具与 ExecutionEnv 执行环境抽象 |
-| `rpi-harness` | 会话树、JSONL 持久化、上下文压缩、恢复、skills 与模板 |
-| `rpi-tui` | 终端组件、编辑器、布局、Markdown 与 transcript 渲染 |
-| `rpi-plugin-sdk` | 动态库扩展使用的 C ABI 类型与注册接口 |
-| `rpi-extensions` | 宿主扩展加载与跨 ABI 调用桥接 |
-| `rpi-cli` | 配置、认证、资源发现、CLI/TUI、远程服务端与客户端 |
+| `kiqi-telemetry` | 遥测接口与 span/event 合约 |
+| `kiqi-ai` | 模型与消息类型、Provider、流式响应、协议适配及 faux Provider |
+| `kiqi-agent` | Agent Loop、工具调用、事件、队列、取消与轮次回调 |
+| `kiqi-tools` | 内置工具与 ExecutionEnv 执行环境抽象 |
+| `kiqi-harness` | 会话树、JSONL 持久化、上下文压缩、恢复、skills 与模板 |
+| `kiqi-tui` | 终端组件、编辑器、布局、Markdown 与 transcript 渲染 |
+| `kiqi-plugin-sdk` | 动态库扩展使用的 C ABI 类型与注册接口 |
+| `kiqi-extensions` | 宿主扩展加载与跨 ABI 调用桥接 |
+| `kiqi-cli` | 配置、认证、资源发现、CLI/TUI、远程服务端与客户端 |
 
-具体依赖以各 crate 的 `Cargo.toml` 为准。`rpi-agent` 可独立运行；需要会话持久化和压缩时再使用 Harness。插件通过 ABI 加载，不要求与宿主使用相同 Rust 编译器版本。
+具体依赖以各 crate 的 `Cargo.toml` 为准。`kiqi-agent` 可独立运行；需要会话持久化和压缩时再使用 Harness。插件通过 ABI 加载，不要求与宿主使用相同 Rust 编译器版本。
 
 ## 一次请求的路径
 
@@ -40,12 +40,12 @@ TUI Enter → Editor::submit → editor.on_submit 回调
 
 ## TUI 模块边界
 
-[interactive_tui.rs](../../crates/rpi-cli/src/interactive_tui.rs) 保留启动、输入提交与主循环。
+[interactive_tui.rs](../../crates/kiqi-cli/src/interactive_tui.rs) 保留启动、输入提交与主循环。
 同名目录的子模块按职责组织：`commands`、`extensions`、`settings`、`sessions`、`state`、
 `run`、`events`、`selectors`、`autocomplete`、`rendering`；回归测试放在 `tests.rs`。
 主文件负责调度，子模块共享宿主状态，辅助接口限制在 TUI 模块内部。
 
-Provider 是 LLM 协议边界。上层处理统一消息和事件，具体 HTTP/SSE 协议由 `rpi-ai` 适配。工具通过 AgentTool 接口执行，内置工具使用 ExecutionEnv，以支持真实环境与离线测试环境。
+Provider 是 LLM 协议边界。上层处理统一消息和事件，具体 HTTP/SSE 协议由 `kiqi-ai` 适配。工具通过 AgentTool 接口执行，内置工具使用 ExecutionEnv，以支持真实环境与离线测试环境。
 
 ## 会话与长任务
 

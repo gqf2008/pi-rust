@@ -2075,6 +2075,247 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiqi-agent"
+version = "0.4.1"
+dependencies = [
+ "async-trait",
+ "futures",
+ "kiqi-ai",
+ "kiqi-telemetry",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "kiqi-ai"
+version = "0.4.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "eventsource-stream",
+ "futures",
+ "jsonschema",
+ "kiqi-telemetry",
+ "regex",
+ "reqwest",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "kiqi-ask-user"
+version = "0.1.5"
+dependencies = [
+ "kiqi-plugin",
+ "kiqi-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
+name = "kiqi-cli"
+version = "0.4.1"
+dependencies = [
+ "agent-client-protocol",
+ "arboard",
+ "async-trait",
+ "base64 0.22.1",
+ "crossterm",
+ "dirs",
+ "fs2",
+ "futures",
+ "globset",
+ "indexmap 2.14.2",
+ "kiqi-agent",
+ "kiqi-ai",
+ "kiqi-ask-user",
+ "kiqi-codegraph",
+ "kiqi-extensions",
+ "kiqi-goal",
+ "kiqi-harness",
+ "kiqi-langfuse",
+ "kiqi-lens",
+ "kiqi-mcp",
+ "kiqi-orchestrator",
+ "kiqi-permissions",
+ "kiqi-plan-mode",
+ "kiqi-plugin",
+ "kiqi-plugin-host",
+ "kiqi-plugin-sdk",
+ "kiqi-subagents",
+ "kiqi-telemetry",
+ "kiqi-todo",
+ "kiqi-tools",
+ "kiqi-tui",
+ "kiqi-webfetch",
+ "kiqi-websearch",
+ "nix 0.29.0",
+ "png",
+ "reqwest",
+ "rpassword",
+ "schemars 0.8.22",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "kiqi-codegraph"
+version = "0.1.5"
+dependencies = [
+ "kiqi-plugin",
+ "kiqi-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
+name = "kiqi-extensions"
+version = "0.4.1"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "futures",
+ "kiqi-agent",
+ "kiqi-ai",
+ "kiqi-plugin-sdk",
+ "libloading",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "kiqi-goal"
+version = "0.1.6"
+dependencies = [
+ "kiqi-plugin",
+ "kiqi-plugin-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kiqi-harness"
+version = "0.4.1"
+dependencies = [
+ "async-trait",
+ "futures",
+ "kiqi-agent",
+ "kiqi-ai",
+ "kiqi-telemetry",
+ "kiqi-tools",
+ "rusqlite",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "yaml_serde",
+]
+
+[[package]]
+name = "kiqi-langfuse"
+version = "0.4.1"
+dependencies = [
+ "kiqi-plugin",
+ "kiqi-plugin-sdk",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kiqi-lens"
+version = "0.4.1"
+dependencies = [
+ "kiqi-plugin",
+ "kiqi-plugin-sdk",
+ "serde_json",
+ "wait-timeout",
+]
+
+[[package]]
+name = "kiqi-mcp"
+version = "0.4.1"
+dependencies = [
+ "async-trait",
+ "kiqi-agent",
+ "kiqi-ai",
+ "nix 0.31.3",
+ "process-wrap",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "kiqi-orchestrator"
+version = "0.4.1"
+dependencies = [
+ "kiqi-plugin",
+ "kiqi-plugin-sdk",
+ "nix 0.29.0",
+ "serde_json",
+ "wait-timeout",
+]
+
+[[package]]
+name = "kiqi-permissions"
+version = "0.1.4"
+dependencies = [
+ "kiqi-plugin",
+ "kiqi-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
+name = "kiqi-plan-mode"
+version = "0.1.5"
+dependencies = [
+ "kiqi-plan-mode-core",
+ "kiqi-plugin",
+ "kiqi-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
+name = "kiqi-plan-mode-core"
+version = "0.1.5"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "kiqi-plugin"
 version = "0.4.1"
 dependencies = [
@@ -2095,6 +2336,111 @@ dependencies = [
  "wasmparser 0.259.0",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "kiqi-plugin-sdk"
+version = "0.4.1"
+dependencies = [
+ "libc",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "kiqi-subagents"
+version = "0.4.1"
+dependencies = [
+ "kiqi-plugin",
+ "kiqi-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
+name = "kiqi-telemetry"
+version = "0.4.1"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "kiqi-todo"
+version = "0.2.2"
+dependencies = [
+ "kiqi-plugin",
+ "kiqi-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
+name = "kiqi-tools"
+version = "0.4.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "dirs",
+ "futures",
+ "globset",
+ "image",
+ "kiqi-agent",
+ "kiqi-ai",
+ "kiqi-plugin-sdk",
+ "nix 0.29.0",
+ "regex",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "unicode-normalization",
+ "uuid",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "kiqi-tui"
+version = "0.4.1"
+dependencies = [
+ "base64 0.22.1",
+ "crossterm",
+ "pulldown-cmark",
+ "regex",
+ "similar",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "unicode-segmentation",
+ "unicode-width 0.1.14",
+ "winapi",
+]
+
+[[package]]
+name = "kiqi-webfetch"
+version = "0.1.4"
+dependencies = [
+ "kiqi-plugin",
+ "kiqi-plugin-sdk",
+ "reqwest",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "kiqi-websearch"
+version = "0.1.4"
+dependencies = [
+ "kiqi-plugin",
+ "kiqi-plugin-sdk",
+ "reqwest",
+ "serde_json",
+ "url",
 ]
 
 [[package]]
@@ -2257,8 +2603,8 @@ name = "minimal"
 version = "0.1.11"
 dependencies = [
  "futures",
- "rpi-agent",
- "rpi-ai",
+ "kiqi-agent",
+ "kiqi-ai",
  "tokio",
 ]
 
@@ -2694,7 +3040,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 name = "plugin-stub"
 version = "0.1.11"
 dependencies = [
- "rpi-plugin-sdk",
+ "kiqi-plugin-sdk",
  "serde_json",
 ]
 
@@ -3274,352 +3620,6 @@ dependencies = [
  "libc",
  "rtoolbox",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "rpi-agent"
-version = "0.4.1"
-dependencies = [
- "async-trait",
- "futures",
- "rpi-ai",
- "rpi-telemetry",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "rpi-ai"
-version = "0.4.1"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "eventsource-stream",
- "futures",
- "jsonschema",
- "regex",
- "reqwest",
- "rpi-telemetry",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "rpi-ask-user"
-version = "0.1.5"
-dependencies = [
- "kiqi-plugin",
- "rpi-plugin-sdk",
- "serde_json",
-]
-
-[[package]]
-name = "rpi-cli"
-version = "0.4.1"
-dependencies = [
- "agent-client-protocol",
- "arboard",
- "async-trait",
- "base64 0.22.1",
- "crossterm",
- "dirs",
- "fs2",
- "futures",
- "globset",
- "indexmap 2.14.2",
- "kiqi-plugin",
- "kiqi-plugin-host",
- "nix 0.29.0",
- "png",
- "reqwest",
- "rpassword",
- "rpi-agent",
- "rpi-ai",
- "rpi-ask-user",
- "rpi-codegraph",
- "rpi-extensions",
- "rpi-goal",
- "rpi-harness",
- "rpi-langfuse",
- "rpi-lens",
- "rpi-mcp",
- "rpi-orchestrator",
- "rpi-permissions",
- "rpi-plan-mode",
- "rpi-plugin-sdk",
- "rpi-subagents",
- "rpi-telemetry",
- "rpi-todo",
- "rpi-tools",
- "rpi-tui",
- "rpi-webfetch",
- "rpi-websearch",
- "schemars 0.8.22",
- "semver",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "rpi-codegraph"
-version = "0.1.5"
-dependencies = [
- "kiqi-plugin",
- "rpi-plugin-sdk",
- "serde_json",
-]
-
-[[package]]
-name = "rpi-extensions"
-version = "0.4.1"
-dependencies = [
- "async-trait",
- "dirs",
- "futures",
- "libloading",
- "rpi-agent",
- "rpi-ai",
- "rpi-plugin-sdk",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "rpi-goal"
-version = "0.1.6"
-dependencies = [
- "kiqi-plugin",
- "rpi-plugin-sdk",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rpi-harness"
-version = "0.4.1"
-dependencies = [
- "async-trait",
- "futures",
- "rpi-agent",
- "rpi-ai",
- "rpi-telemetry",
- "rpi-tools",
- "rusqlite",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "yaml_serde",
-]
-
-[[package]]
-name = "rpi-langfuse"
-version = "0.4.1"
-dependencies = [
- "kiqi-plugin",
- "reqwest",
- "rpi-plugin-sdk",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rpi-lens"
-version = "0.4.1"
-dependencies = [
- "kiqi-plugin",
- "rpi-plugin-sdk",
- "serde_json",
- "wait-timeout",
-]
-
-[[package]]
-name = "rpi-mcp"
-version = "0.4.1"
-dependencies = [
- "async-trait",
- "nix 0.31.3",
- "process-wrap",
- "rmcp",
- "rpi-agent",
- "rpi-ai",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "rpi-orchestrator"
-version = "0.4.1"
-dependencies = [
- "kiqi-plugin",
- "nix 0.29.0",
- "rpi-plugin-sdk",
- "serde_json",
- "wait-timeout",
-]
-
-[[package]]
-name = "rpi-permissions"
-version = "0.1.4"
-dependencies = [
- "kiqi-plugin",
- "rpi-plugin-sdk",
- "serde_json",
-]
-
-[[package]]
-name = "rpi-plan-mode"
-version = "0.1.5"
-dependencies = [
- "kiqi-plugin",
- "rpi-plan-mode-core",
- "rpi-plugin-sdk",
- "serde_json",
-]
-
-[[package]]
-name = "rpi-plan-mode-core"
-version = "0.1.5"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
-name = "rpi-plugin-sdk"
-version = "0.4.1"
-dependencies = [
- "libc",
- "serde_json",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "rpi-subagents"
-version = "0.4.1"
-dependencies = [
- "kiqi-plugin",
- "rpi-plugin-sdk",
- "serde_json",
-]
-
-[[package]]
-name = "rpi-telemetry"
-version = "0.4.1"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "rpi-todo"
-version = "0.2.2"
-dependencies = [
- "kiqi-plugin",
- "rpi-plugin-sdk",
- "serde_json",
-]
-
-[[package]]
-name = "rpi-tools"
-version = "0.4.1"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "dirs",
- "futures",
- "globset",
- "image",
- "nix 0.29.0",
- "regex",
- "rpi-agent",
- "rpi-ai",
- "rpi-plugin-sdk",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "similar",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "unicode-normalization",
- "uuid",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "rpi-tui"
-version = "0.4.1"
-dependencies = [
- "base64 0.22.1",
- "crossterm",
- "pulldown-cmark",
- "regex",
- "similar",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "unicode-segmentation",
- "unicode-width 0.1.14",
- "winapi",
-]
-
-[[package]]
-name = "rpi-webfetch"
-version = "0.1.4"
-dependencies = [
- "kiqi-plugin",
- "reqwest",
- "rpi-plugin-sdk",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "rpi-websearch"
-version = "0.1.4"
-dependencies = [
- "kiqi-plugin",
- "reqwest",
- "rpi-plugin-sdk",
- "serde_json",
- "url",
 ]
 
 [[package]]
@@ -4332,9 +4332,9 @@ name = "tools-example"
 version = "0.1.11"
 dependencies = [
  "futures",
- "rpi-agent",
- "rpi-ai",
- "rpi-tools",
+ "kiqi-agent",
+ "kiqi-ai",
+ "kiqi-tools",
  "serde_json",
  "tokio",
 ]
@@ -4426,7 +4426,7 @@ name = "tui-example"
 version = "0.1.11"
 dependencies = [
  "crossterm",
- "rpi-tui",
+ "kiqi-tui",
  "tokio",
 ]
 

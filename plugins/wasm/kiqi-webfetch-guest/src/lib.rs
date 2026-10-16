@@ -1,4 +1,4 @@
-//! `rpi-webfetch` ported to the wasm ABI (0.5.0).
+//! `kiqi-webfetch` ported to the wasm ABI (0.5.0).
 //!
 //! The compile-time plugin builds a `reqwest` client and fetches directly. A wasm
 //! guest has no sockets of its own, so the request goes through the host's
@@ -23,7 +23,7 @@ use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
 use kiqi_plugin_guest::bindings::kiqi::plugin::{net_http, types};
 use serde_json::{json, Value};
 
-const ID: &str = "rpi-webfetch";
+const ID: &str = "kiqi-webfetch";
 const TOOL: &str = "webfetch";
 const DESCRIPTION: &str = "Fetch bounded readable text from a public HTTP(S) URL.";
 const SCHEMA: &str = r#"{"type":"object","properties":{"url":{"type":"string"},"maxChars":{"type":"integer","minimum":256,"maximum":50000}},"required":["url"]}"#;

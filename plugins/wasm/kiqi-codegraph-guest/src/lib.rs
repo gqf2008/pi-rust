@@ -1,4 +1,4 @@
-//! `rpi-codegraph` ported to the wasm ABI (0.7.0).
+//! `kiqi-codegraph` ported to the wasm ABI (0.7.0).
 //!
 //! The compile-time plugin spawns the `codegraph` CLI itself: a one-shot
 //! `init`/`sync`, then a per-call MCP server it talks to over stdio, then it
@@ -42,7 +42,7 @@ use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
 use kiqi_plugin_guest::bindings::kiqi::plugin::{exec, proc, session_read, types};
 use serde_json::{json, Map, Value};
 
-const ID: &str = "rpi-codegraph";
+const ID: &str = "kiqi-codegraph";
 /// The binary the grant must allow (both `exec` and `proc`) — and `test` for
 /// the `.codegraph/` probe.
 const CODEGRAPH: &str = "codegraph";
@@ -51,9 +51,9 @@ const MAX_OUTPUT_CHARS: usize = 25_000;
 const MAX_DIAGNOSTIC_CHARS: usize = 1_000;
 const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
 
-struct RpiCodegraph;
+struct KiCodegraph;
 
-impl Guest for RpiCodegraph {
+impl Guest for KiCodegraph {
     fn id() -> String {
         ID.to_string()
     }
@@ -117,7 +117,7 @@ impl Guest for RpiCodegraph {
     }
 }
 
-kiqi_plugin_guest::bindings::export!(RpiCodegraph with_types_in kiqi_plugin_guest::bindings);
+kiqi_plugin_guest::bindings::export!(KiCodegraph with_types_in kiqi_plugin_guest::bindings);
 
 // ---------------------------------------------------------------------------
 // Tool surface (ported verbatim: the model must see the same eight tools)
@@ -339,7 +339,7 @@ fn call_codegraph(tool: &str, params: &Value) -> Result<String, String> {
                     "rootUri": root_uri,
                     "workspaceFolders": [{"uri": root_uri, "name": "project"}],
                     "capabilities": {},
-                    "clientInfo": {"name": "rpi-codegraph", "version": env!("CARGO_PKG_VERSION")}
+                    "clientInfo": {"name": "kiqi-codegraph", "version": env!("CARGO_PKG_VERSION")}
                 }
             }),
         )?;

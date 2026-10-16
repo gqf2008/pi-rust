@@ -7,9 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "rpi-subagents ported to the kiqi wasm ABI (pure envelope tool, no capabilities)"
+description = "kiqi-subagents ported to the kiqi wasm ABI (pure envelope tool, no capabilities)"
 readme = "README.md"
-keywords = ["rpi", "kiqi", "wasm", "plugin", "subagents"]
+keywords = ["ki", "kiqi", "wasm", "plugin", "subagents"]
 categories = ["development-tools"]
 
 [lib]

@@ -10,9 +10,9 @@
 
 | 形态 | 启动入口 | 直接依赖 | 适用场景 |
 | --- | --- | --- | --- |
-| 库内嵌 Agent | 你的 `[[bin]]` / 服务进程 | `rpi-agent` + `rpi-ai`（需要内置工具再加 `rpi-tools`） | 在自己的进程里跑 loop，完全掌控事件、工具和输出 |
+| 库内嵌 Agent | 你的 `[[bin]]` / 服务进程 | `kiqi-agent` + `kiqi-ai`（需要内置工具再加 `kiqi-tools`） | 在自己的进程里跑 loop，完全掌控事件、工具和输出 |
 | CLI 项目 | 全局 `ki` 宿主 | 无（资源与 cdylib） | 想要现成的 TUI、`-p`/`--mode json`、会话和 skills |
-| Rust 扩展 | 宿主加载 `.ki/extensions/*.dll` | `rpi-plugin-sdk` | 给全局 `ki` 加工具/Provider/事件，不改宿主 |
+| Rust 扩展 | 宿主加载 `.ki/extensions/*.dll` | `kiqi-plugin-sdk` | 给全局 `ki` 加工具/Provider/事件，不改宿主 |
 
 一个项目**可以同时提供"内嵌 Agent"和"cdylib 扩展"两份适配器，共享同一套工具实现**。
 这也是本指南默认推荐的形态：本地用内嵌 Agent 调试，线上/交互用全局 `ki` 加载
@@ -76,11 +76,11 @@ crate-type = ["cdylib", "rlib"]   # cdylib 给宿主；rlib 便于集成测试
 
 [dependencies]
 # 下面用 `<ki>` 代指当前 ki 发布版本，请替换为实际版本号（如 `0.1.x`），
-# 并保证所有 `rpi-*` 依赖同版本；第三方依赖按需增删。
-rpi-agent = "<ki>"
-rpi-ai = { version = "<ki>", features = ["providers"] }
-rpi-tools = "<ki>"
-rpi-plugin-sdk = "<ki>"          # 只有 cdylib 适配需要
+# 并保证所有 `kiqi-*` 依赖同版本；第三方依赖按需增删。
+kiqi-agent = "<ki>"
+kiqi-ai = { version = "<ki>", features = ["providers"] }
+kiqi-tools = "<ki>"
+kiqi-plugin-sdk = "<ki>"          # 只有 cdylib 适配需要
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -94,10 +94,10 @@ thiserror = "1"
 
 边界规则：
 
-- **扩展只依赖 `rpi-plugin-sdk`，绝不依赖 `rpi-cli`、`rpi-extensions`、`rpi-harness`
+- **扩展只依赖 `kiqi-plugin-sdk`，绝不依赖 `kiqi-cli`、`kiqi-extensions`、`kiqi-harness`
   内部模块**——宿主链接插件，不是插件链接宿主，否则 ABI 和版本会耦合。
-- 内嵌 Agent 只依赖 `rpi-agent`/`rpi-ai`/`rpi-tools`，与扩展 ABI 解耦。
-- 需要会话、压缩、skills、上下文文件时再加 `rpi-harness`。
+- 内嵌 Agent 只依赖 `kiqi-agent`/`kiqi-ai`/`kiqi-tools`，与扩展 ABI 解耦。
+- 需要会话、压缩、skills、上下文文件时再加 `kiqi-harness`。
 
 ## 4. 工具单一登记点
 
@@ -136,7 +136,7 @@ pub fn run_tool(name: &str, params: &serde_json::Value)
 ```
 
 `src/tools/core.rs` 放共享逻辑；`src/tools/content.rs` 只做编排（把 `run_tool`
-包成 `rpi_agent::AgentTool`）；cdylib 侧只做 ABI 编排。三者都不重复实现领域逻辑。
+包成 `kiqi_agent::AgentTool`）；cdylib 侧只做 ABI 编排。三者都不重复实现领域逻辑。
 
 为每个工具加一个断言 schema 在两个宿主之间一致的单元测试（见 §11）。
 
@@ -146,8 +146,8 @@ pub fn run_tool(name: &str, params: &serde_json::Value)
 
 ```rust
 use std::sync::Arc;
-use rpi_agent::AgentBuilder;
-use rpi_ai::Provider;
+use kiqi_agent::AgentBuilder;
+use kiqi_ai::Provider;
 
 let model = provider.default_model().clone();
 let agent = AgentBuilder::new()
@@ -161,7 +161,7 @@ let mut events = agent.subscribe();
 agent.prompt(user_input).await?;
 
 while let Some(event) = events.recv().await {
-    if matches!(event, rpi_agent::AgentEvent::AgentEnd { .. }) {
+    if matches!(event, kiqi_agent::AgentEvent::AgentEnd { .. }) {
         break;
     }
     // 转发 MessageUpdate / ToolExecutionStart / ToolResult 给你的 UI 或日志
@@ -171,20 +171,20 @@ while let Some(event) = events.recv().await {
 要点：
 
 - **先 `subscribe` 再 `prompt`**，否则广播缓冲里会漏掉早期事件。
-- 自定义工具实现 `rpi_agent::AgentTool`：`schema()` 返回 `rpi_ai::types::Tool`，
+- 自定义工具实现 `kiqi_agent::AgentTool`：`schema()` 返回 `kiqi_ai::types::Tool`，
   `execute(tool_call_id, params, signal, on_update)` 解析 JSON、检查 `signal`、
   返回 `AgentToolResult`。把参数解析失败映射成结构化错误，不要 panic。
 - 用 faux provider + `InMemoryExecutionEnv` 做离线测试：无需网络、API key 或真实文件系统。
-- 需要 CLI 级别的会话/压缩/skills 时，用 `rpi-harness` 而不是自己重造。
+- 需要 CLI 级别的会话/压缩/skills 时，用 `kiqi-harness` 而不是自己重造。
 
 ## 6. cdylib ABI 适配（给全局 `ki` 用）
 
-宿主只加载统一 C ABI 符号 `rpi_plugin_register`。扩展使用 `export_plugin!`，
+宿主只加载统一 C ABI 符号 `kiqi_plugin_register`。扩展使用 `export_plugin!`，
 通过同一个 `PluginApi` 注册能力并调用 `api.declare` 声明优先级/平台。
 SDK 在注册前检查 `abi_version` 和 `struct_size`；不兼容时返回非零状态，宿主报告加载失败。
 
 ```rust
-rpi_plugin_sdk::export_plugin!(|api| {
+kiqi_plugin_sdk::export_plugin!(|api| {
     let Some(register_tool) = api.register_tool else {
         return -1;                         // 能力检测：槽位缺失就明确失败
     };
@@ -291,7 +291,7 @@ Cargo target DLL 复制成固定文件名。
 - `ki dev --no-watch` 能编译、加载并注册预期工具；`ki install <crate> --force`
   的干净安装路径通过。
 - 提供 `cdylib` 时，`crate-type` 包含 `"cdylib"`，导出
-  `rpi_plugin_register`，依赖已发布的 `rpi-plugin-sdk`。
+  `kiqi_plugin_register`，依赖已发布的 `kiqi-plugin-sdk`。
 - `README` 写明工具 schema、权限边界、持久化文件、网络访问、支持平台和卸载方式；
   `AGENTS.md`、`config/agent.json`、`prompts/`、`skills/`、`.ki/settings.json`
   之间的路径保持一致。

@@ -9,7 +9,7 @@ authors.workspace = true
 repository.workspace = true
 description = "Conformance fixture: a minimal kiqi wasm plugin that exercises the ABI surface"
 readme = "README.md"
-keywords = ["rpi", "kiqi", "wasm", "plugin"]
+keywords = ["ki", "kiqi", "wasm", "plugin"]
 categories = ["development-tools"]
 
 [lib]

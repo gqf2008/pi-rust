@@ -9,7 +9,7 @@ authors.workspace = true
 repository.workspace = true
 description = "Host-side wasm (component model) plugin backend for kiqi"
 readme = "README.md"
-keywords = ["rpi", "kiqi", "wasm", "plugin", "component-model"]
+keywords = ["ki", "kiqi", "wasm", "plugin", "component-model"]
 categories = ["development-tools"]
 
 [lib]

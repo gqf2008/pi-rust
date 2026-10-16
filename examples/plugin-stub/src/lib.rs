@@ -1,8 +1,8 @@
-//! `plugin-stub` — a minimal **Rust cdylib** rpi plugin.
+//! `plugin-stub` — a minimal **Rust cdylib** ki plugin.
 //!
-//! This is the Part B2 ABI smoke target. The host loads it via `rpi-extensions`
+//! This is the Part B2 ABI smoke target. The host loads it via `kiqi-extensions`
 //! (`--extensions-dir examples/plugin-stub`'), which looks up
-//! `rpi_plugin_register` (the unified ABI) and calls it with the host vtable. In `register` this
+//! `kiqi_plugin_register` (the unified ABI) and calls it with the host vtable. In `register` this
 //! plugin:
 //!
 //! 1. Registers an **`echo`** tool — params `{ "text": string }`, returns that
@@ -21,15 +21,15 @@
 //!    loader). This is the "三者同交付" coherence point: a plugin's discovered
 //!    paths reuse the same loader as static `.pi/skills` dirs.
 //!
-//! It depends on **`rpi-plugin-sdk` only** — never on `rpi-extensions`,
-//! `rpi-harness`, or `rpi-cli` (a cdylib plugin must not link the host; the host
+//! It depends on **`kiqi-plugin-sdk` only** — never on `kiqi-extensions`,
+//! `kiqi-harness`, or `kiqi-cli` (a cdylib plugin must not link the host; the host
 //! links the plugin). The SDK is the ABI contract both sides share.
 //!
 //! ## Run
 //!
 //! ```sh
 //! cargo build -p plugin-stub
-//! rpi --extensions-dir examples/plugin-stub/target/.../echo.dll -p 'echo "hi"'
+//! ki --extensions-dir examples/plugin-stub/target/.../echo.dll -p 'echo "hi"'
 //! ```
 //! (`echo.dll`/`libecho.so`/`libecho.dylib` depending on platform — the loader
 //! recognizes all of `.{dll,so,dylib,pyd}`.)
@@ -37,7 +37,7 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rpi_plugin_sdk::{
+use kiqi_plugin_sdk::{
     EventTag, FreeStringFn, StableToolSchema, StbString, StbStringRef, StepHandle, StepResult,
     StepResultTag, ToolPartialCb,
 };
@@ -46,7 +46,7 @@ use rpi_plugin_sdk::{
 // passes our `extern "C" fn`s as `ProviderRequestFn`/`RenderFn`-typed params).
 // Naming the types here keeps the import live and documents the contract.
 #[allow(unused_imports)]
-use rpi_plugin_sdk::{ProviderRequestFn, RenderFn};
+use kiqi_plugin_sdk::{ProviderRequestFn, RenderFn};
 
 // ---------------------------------------------------------------------------
 // The echo tool's per-drive state — what execute() allocates and destroy() frees.
@@ -78,7 +78,7 @@ extern "C" fn echo_execute(
     // Contain panics: unwinding out of this `extern "C"` fn would abort the
     // whole host process. A null handle is reported by the host as "execute
     // refused".
-    rpi_plugin_sdk::guard_or(std::ptr::null_mut(), || {
+    kiqi_plugin_sdk::guard_or(std::ptr::null_mut(), || {
         // Read + free the input params (host-produced → plugin frees via host fn).
         let text = {
             let s = params.to_string_lossy();
@@ -116,7 +116,7 @@ extern "C" fn echo_poll(
 ) -> StepResult {
     // Contain panics so a buggy poll reports a tool error instead of aborting
     // the host process.
-    rpi_plugin_sdk::guard_or(
+    kiqi_plugin_sdk::guard_or(
         StepResult::err(StbString::from_string(
             r#"{"error":"echo poll panicked"}"#.to_string(),
         )),
@@ -189,21 +189,21 @@ extern "C" fn plugin_free_string(s: StbString) {
 // ---------------------------------------------------------------------------
 
 /// How many `MessageEnd` events the handler has received. Read from the host
-/// (rpi-cli's smoke test asserts it fires when a run produces an assistant
+/// (kiqi-cli's smoke test asserts it fires when a run produces an assistant
 /// message). A process-global atomic because `extern "C" fn` cannot capture.
 static MESSAGE_END_HITS: AtomicUsize = AtomicUsize::new(0);
 
 /// The handler the plugin registers for `MessageEnd`. Receives a
-/// [`rpi_plugin_sdk::StablePluginEvent`]; per the SDK contract the handler MUST
+/// [`kiqi_plugin_sdk::StablePluginEvent`]; per the SDK contract the handler MUST
 /// NOT free the event's strings (the host frees exactly once after the fan-out).
 /// Returns 0 (success); nonzero would be logged but not abort the fan-out.
 extern "C" fn on_message_end(
-    _event: rpi_plugin_sdk::StablePluginEvent,
+    _event: kiqi_plugin_sdk::StablePluginEvent,
     _user_data: *mut c_void,
 ) -> i32 {
     // Contain panics: returning nonzero is logged by the host (it never aborts
     // the fan-out), whereas unwinding would abort the host process.
-    rpi_plugin_sdk::guard_or(1, || {
+    kiqi_plugin_sdk::guard_or(1, || {
         MESSAGE_END_HITS.fetch_add(1, Ordering::SeqCst);
         0
     })
@@ -261,12 +261,12 @@ static DISCOVER_HITS: AtomicUsize = AtomicUsize::new(0);
 /// the real contract (a plugin hands back paths it discovered) without the
 /// plugin needing filesystem access at runtime.
 extern "C" fn on_resources_discover(
-    _cwd: rpi_plugin_sdk::StbStringRef,
-    _reason: rpi_plugin_sdk::StbStringRef,
-    out: *mut rpi_plugin_sdk::StbString,
+    _cwd: kiqi_plugin_sdk::StbStringRef,
+    _reason: kiqi_plugin_sdk::StbStringRef,
+    out: *mut kiqi_plugin_sdk::StbString,
     _user_data: *mut c_void,
 ) -> i32 {
-    rpi_plugin_sdk::guard_or(1, || {
+    kiqi_plugin_sdk::guard_or(1, || {
         DISCOVER_HITS.fetch_add(1, Ordering::SeqCst);
         // Build the JSON payload the host parses. `skillPaths` only (prompt/theme
         // omitted — lenient host treats missing fields as empty).
@@ -307,11 +307,11 @@ pub extern "C" fn plugin_stub_prompt_transform_hits() -> usize {
 /// host that treated the return as a wholesale replacement (dropping the base
 /// prompt) would fail.
 extern "C" fn on_before_agent_start(
-    event_json: rpi_plugin_sdk::StbStringRef,
-    out: *mut rpi_plugin_sdk::StbString,
+    event_json: kiqi_plugin_sdk::StbStringRef,
+    out: *mut kiqi_plugin_sdk::StbString,
     _user_data: *mut c_void,
 ) -> i32 {
-    rpi_plugin_sdk::guard_or(1, || {
+    kiqi_plugin_sdk::guard_or(1, || {
         PROMPT_TRANSFORM_HITS.fetch_add(1, Ordering::SeqCst);
         // SAFETY: the host guarantees the borrowed ref is valid for this call.
         let envelope = unsafe { event_json.as_str() };
@@ -356,7 +356,7 @@ extern "C" fn on_provider_request(
     out: *mut StbString,
     _user_data: *mut c_void,
 ) -> i32 {
-    rpi_plugin_sdk::guard_or(1, || {
+    kiqi_plugin_sdk::guard_or(1, || {
         PROVIDER_REQUEST_HITS.fetch_add(1, Ordering::SeqCst);
         let json = r#"{"role":"assistant","content":[{"type":"text","text":"from-stub-provider"}],"api":"faux","provider":"stub-provider","model":"stub-model","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},"stopReason":"stop","timestamp":0}"#;
         unsafe {
@@ -391,7 +391,7 @@ extern "C" fn on_markdown_transform(
     out: *mut StbString,
     _user_data: *mut c_void,
 ) -> i32 {
-    rpi_plugin_sdk::guard_or(1, || {
+    kiqi_plugin_sdk::guard_or(1, || {
         MARKDOWN_TRANSFORM_HITS.fetch_add(1, Ordering::SeqCst);
         // Parse the input (borrowed — must NOT free). lenient: missing `markdown` ⇒ "".
         let input = unsafe { input_json.as_str() };
@@ -414,10 +414,10 @@ extern "C" fn on_markdown_transform(
 // The register entrypoint
 // ---------------------------------------------------------------------------
 
-// The SDK macro exports the unified `rpi_plugin_register` symbol and applies
+// The SDK macro exports the unified `kiqi_plugin_register` symbol and applies
 // the version/null checks before running our registration body. Return 0 on
 // success; nonzero means the host logs and skips this plugin.
-rpi_plugin_sdk::export_plugin!(|api| {
+kiqi_plugin_sdk::export_plugin!(|api| {
     // Register the echo tool. Build an owning StableToolSchema (name +
     // description + parameters-as-JSON); the host frees the schema's strings
     // via our `plugin_free_string` after copying them out.
@@ -501,7 +501,7 @@ rpi_plugin_sdk::export_plugin!(|api| {
     }
 
     // Register a custom provider (B5c). The host wraps `on_provider_request`
-    // in a `PluggableProvider` impl of `rpi_ai::Provider` and injects it into
+    // in a `PluggableProvider` impl of `kiqi_ai::Provider` and injects it into
     // `AgentHarnessOptions.models`; a catalog model whose `provider` field is
     // `"stub-provider"` routes to it. The host calls `request_fn` on
     // `spawn_blocking` (it's sync), reclaims the plugin-owned `out` via our

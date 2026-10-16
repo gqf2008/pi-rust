@@ -1,14 +1,14 @@
 # 从 Prompt 到 AgentEnd：拆解 ki 的流式 Agent Loop
 
-> 很多 Agent CLI 把模型调用、工具执行和终端输出揉在一起。ki 把它们拆成 `rpi-ai`、`rpi-agent` 与上层 Harness，让同一套 loop 既能嵌入 Rust 服务，也能驱动终端 CLI。
+> 很多 Agent CLI 把模型调用、工具执行和终端输出揉在一起。ki 把它们拆成 `kiqi-ai`、`kiqi-agent` 与上层 Harness，让同一套 loop 既能嵌入 Rust 服务，也能驱动终端 CLI。
 
 ## 一次运行经过什么
 
 ```mermaid
 sequenceDiagram
     participant App as 应用
-    participant Agent as rpi-agent
-    participant Provider as rpi-ai Provider
+    participant Agent as kiqi-agent
+    participant Provider as kiqi-ai Provider
     participant Tool as AgentTool
     App->>Agent: prompt("...")
     Agent->>Provider: StreamFn(model, context, options)
@@ -24,13 +24,13 @@ sequenceDiagram
 `StreamFn` 是唯一的模型边界：
 
 ```rust
-// crates/rpi-agent/src/stream_fn.rs
+// crates/kiqi-agent/src/stream_fn.rs
 pub type StreamFn = std::sync::Arc<
     dyn Fn(
-        &rpi_ai::Model,
-        &rpi_ai::types::Context,
-        &rpi_ai::provider::SimpleStreamOptions,
-    ) -> rpi_ai::AssistantMessageEventStream
+        &kiqi_ai::Model,
+        &kiqi_ai::types::Context,
+        &kiqi_ai::provider::SimpleStreamOptions,
+    ) -> kiqi_ai::AssistantMessageEventStream
         + Send + Sync,
 >;
 ```
@@ -41,9 +41,9 @@ Agent loop 不关心 HTTP、SSE 或具体厂商，只消费统一事件。模型
 
 ```rust
 use std::sync::Arc;
-use rpi_agent::AgentBuilder;
-use rpi_ai::providers::faux::{FauxProvider, FauxScript};
-use rpi_ai::Provider;
+use kiqi_agent::AgentBuilder;
+use kiqi_ai::providers::faux::{FauxProvider, FauxScript};
+use kiqi_ai::Provider;
 
 #[tokio::main]
 async fn main() {
@@ -53,7 +53,7 @@ async fn main() {
     let model = provider.default_model().clone();
     let agent = AgentBuilder::new()
         .model(model)
-        .stream_fn(rpi_agent::stream_fn::stream_fn(move |model, ctx, opts| {
+        .stream_fn(kiqi_agent::stream_fn::stream_fn(move |model, ctx, opts| {
             provider.stream_simple(model, ctx, opts)
         }))
         .build()
@@ -83,10 +83,10 @@ async fn main() {
 
 # From a Prompt to `AgentEnd`: Reading ki’s Streaming Agent Loop
 
-A coding agent has to do more than call a model. It streams partial output, runs tools, accepts new input, and reports state changes. ki keeps these jobs in separate layers: `rpi-ai` owns model-facing types, `rpi-agent` runs the loop, and the CLI consumes the events.
+A coding agent has to do more than call a model. It streams partial output, runs tools, accepts new input, and reports state changes. ki keeps these jobs in separate layers: `kiqi-ai` owns model-facing types, `kiqi-agent` runs the loop, and the CLI consumes the events.
 
 The important boundary is `StreamFn`. It returns ki’s event stream instead of exposing an Anthropic or OpenAI response object. The loop stays the same when the provider changes. A tool call becomes a `ToolResult`, the result returns to context, and the loop requests the next turn.
 
-The faux provider follows the same path without an API key or network. That makes examples and regression tests repeatable. Start with `examples/minimal`, then read `crates/rpi-agent/src/agent.rs` and `stream_fn.rs`.
+The faux provider follows the same path without an API key or network. That makes examples and regression tests repeatable. Start with `examples/minimal`, then read `crates/kiqi-agent/src/agent.rs` and `stream_fn.rs`.
 
 Project: <https://github.com/bigfish1913/pi-rust>

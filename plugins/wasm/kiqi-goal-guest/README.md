@@ -1,6 +1,6 @@
 # kiqi-goal-guest
 
-`rpi-goal` ported to the kiqi wasm ABI. Codex-style goal mode: one persistent,
+`kiqi-goal` ported to the kiqi wasm ABI. Codex-style goal mode: one persistent,
 context-injected objective per project that the model keeps advancing across
 turns. The plugin is three surfaces over one core:
 
@@ -12,8 +12,8 @@ turns. The plugin is three surfaces over one core:
 
 State lives in `<project>/.ki/goals.json` in the compiled shape
 (`{"active": …|null, "archived": […]}`) — the exact file and shape the compiled
-`rpi-orchestrator` reads, so an active goal started here turns the compiled
-orchestration guidance on just as the compiled `rpi-goal` would. (Before `fs`
+`kiqi-orchestrator` reads, so an active goal started here turns the compiled
+orchestration guidance on just as the compiled `kiqi-goal` would. (Before `fs`
 gained a scope — a grant-model change, not an ABI one; the ABI stays 0.7.1 —
 the guest kept a `{ "<project>": Goals }` map in its own data directory and
 this coupling was broken; §"Differences" records the one-time migration.)
@@ -36,8 +36,8 @@ The state file is a real write in the project tree, so the grant must be scoped
 there:
 
 ```bash
-ki insmod --build plugins/wasm/kiqi-goal-guest --id rpi-goal --yes
-ki plugin grant rpi-goal fs --cwd project
+ki insmod --build plugins/wasm/kiqi-goal-guest --id kiqi-goal --yes
+ki plugin grant kiqi-goal fs --cwd project
 ```
 
 The `--cwd project` grant is the load-bearing line, and `insmod` does not
@@ -86,7 +86,7 @@ Stated, not hidden:
    project tree, so it is not reachable and the guest starts fresh (the e2e
    migration fixture arranges the data directory inside the project root to
    exercise the path). The old store is never written again.
-6. **Cross-tier takeover.** A stock `ki` compiles `rpi-goal` in, and per §6.20
+6. **Cross-tier takeover.** A stock `ki` compiles `kiqi-goal` in, and per §6.20
    the compiled plugin owns both the `goal` tool and the `/goal` command —
    installing this guest alongside it refuses the guest's surfaces (the
    designed takeover guard, not a bug). The guest is for installs without the

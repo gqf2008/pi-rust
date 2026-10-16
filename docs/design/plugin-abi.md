@@ -21,7 +21,7 @@
 
 ## 1. 为什么换
 
-现在的 `rpi-plugin-sdk` 是一套手搓 C ABI：`cdylib` + `libloading` + `StbString`
+现在的 `kiqi-plugin-sdk` 是一套手搓 C ABI：`cdylib` + `libloading` + `StbString`
 + `abi_version: 4` + 裸函数指针。代价：
 
 - 任何签名变更都要抬 ABI 版本，宿主与插件必须同 Rust/SDK 版本编译；
@@ -60,7 +60,7 @@
 
 ```rust
 pub trait Plugin: Send + Sync {
-    /// 稳定标识，用于日志前缀与配置寻址（如 "rpi-goal"）。
+    /// 稳定标识，用于日志前缀与配置寻址（如 "kiqi-goal"）。
     fn id(&self) -> &str;
 
     /// 一次性注册；对应 WIT `tools.list-tools`。
@@ -165,9 +165,9 @@ pub trait Plugin: Send + Sync {
 
 | 插件 | 覆盖的 ABI 面 | 理由 |
 |---|---|---|
-| `rpi-todo` | tools + events + 状态/details + 分支恢复（SessionRead）+ command | 最简；P2 基线 |
-| `rpi-langfuse` | 14 个事件的密集流 + **outgoing HTTP** + UI status + 3 个 HTTP 工具 | 真实压力（事件多、分步 flush、网络） |
-| `rpi-ask-user` | **UI dialog（阻塞式宿主往返）** + command | 专打 sync/async 最硬的点 |
+| `kiqi-todo` | tools + events + 状态/details + 分支恢复（SessionRead）+ command | 最简；P2 基线 |
+| `kiqi-langfuse` | 14 个事件的密集流 + **outgoing HTTP** + UI status + 3 个 HTTP 工具 | 真实压力（事件多、分步 flush、网络） |
+| `kiqi-ask-user` | **UI dialog（阻塞式宿主往返）** + command | 专打 sync/async 最硬的点 |
 
 **conformance fixture**（不是真插件）：为实现「每个 import interface + 每个 export 形状」而写的
 最小 guest，是 **SDK 成熟度判据**——只用公开 WIT + 生成 binding + 文档，不碰宿主内部，
@@ -175,17 +175,17 @@ pub trait Plugin: Send + Sync {
 
 **明确不迁**（选它们是在验证 host 的 exec/会话驱动，不是验证 ABI）：`im-message`、`voice`、
 `mcp-adapter`、`acp`（2026-10-16 实核确认：它要独占宿主进程 stdin/stdout 并在
-SessionStart→Shutdown 间维持服务线程——见 `rpi-package/packages/rpi-acp/src/lib.rs:4-8,67-70`。
+SessionStart→Shutdown 间维持服务线程——见 `rpi-package/packages/kiqi-acp/src/lib.rs:4-8,67-70`。
 正确形态是**宿主级功能**：让 `ki` 本体当 ACP server，而不是插件。）、`server`、`run-stats`、
 `subagents`、`codegraph`、~~`lens`~~
 （起子进程 / 长连 / 后台线程）。
 
-> 2026-10-15（§6.30）：`lens` 移出此名单并已移植（`plugins/wasm/kiqi-rpi-lens-guest`）。
+> 2026-10-15（§6.30）：`lens` 移出此名单并已移植（`plugins/wasm/kiqi-lens-guest`）。
 > 当初排除它是因为 exec 还没真实现、cwd 只能关在插件 data 目录；exec 授权带上 cwd 范围
 > 与时间预算后，“起子进程”不再是 ABI 验证之外的活。
 >
-> 2026-10-15（第二批）：`rpi-orchestrator` 从 `rpi-package` 收编为编译期插件
-> （`plugins/rpi-orchestrator`，默认 feature），但**不迁 wasm**——它是长生命周期编排：
+> 2026-10-15（第二批）：`kiqi-orchestrator` 从 `rpi-package` 收编为编译期插件
+> （`plugins/kiqi-orchestrator`，默认 feature），但**不迁 wasm**——它是长生命周期编排：
 > 子代理是可活到 1800s 的 `ki -p` 子进程（exec 预算上限 300s）、`dispatch` 的后台节点
 > worker 要在工具调用之间持续存活（wasm guest 调用间无线程）、子进程要整组收杀
 > （wasm 没有进程组概念）。wasm 化它需要宿主先长出「会话级长生命周期子进程句柄」这类
@@ -217,8 +217,8 @@ SessionStart→Shutdown 间维持服务线程——见 `rpi-package/packages/rpi
 
 1. 定 ABI 0.2.0（含 §6.1 两个 blocker）→ 出 **Rust guest SDK**；
 2. 宿主 wasm 后端 + mock；
-3. 迁 `rpi-todo`（打通 tools/事件/状态）→ `rpi-langfuse`（事件密度 + HTTP）→
-   `rpi-ask-user`（UI/阻塞）；
+3. 迁 `kiqi-todo`（打通 tools/事件/状态）→ `kiqi-langfuse`（事件密度 + HTTP）→
+   `kiqi-ask-user`（UI/阻塞）；
 4. conformance fixture + 跑 §6.3 门禁；
 5. 全绿后才谈第二门语言；官方其余插件留在编译期。
 
@@ -284,13 +284,13 @@ SessionStart→Shutdown 间维持服务线程——见 `rpi-package/packages/rpi
 
 1. ~~`call-tool` 只返回 string~~ → 已改为结构化 `tool-result`
    （`blocks: list<content-block>` + `is-error` + `details` JSON）。e2e 断言 `details` 往返成功，
-   `rpi-todo` 的任务列表从此有地方放。
+   `kiqi-todo` 的任务列表从此有地方放。
 2. ~~`on-event` 返回 `()`~~ → 已改为返回 `event-action`（`continue`/`claimed`/`replace`）。
    e2e 断言一个 wasm 插件能真 `Claimed` 一个事件。
 3. **下一条增量已解决**：`HostCaps` 已接进 host import（见 §6.9）。仍未做的是能力**授权
    （grant）**模型。
 
-### 6.9 已落地：`HostCaps` 接入 + 第一个真 wasm 插件（`rpi-todo`）
+### 6.9 已落地：`HostCaps` 接入 + 第一个真 wasm 插件（`kiqi-todo`）
 
 - **`HostCaps` 接进 host import**：调用期间把 `HostCaps` 与 `ProgressSink` 一起放进
   线程局部的 `CallContext`（借用期由 call 保证、调用被互斥序列化）；`session-read` 转发到
@@ -300,7 +300,7 @@ SessionStart→Shutdown 间维持服务线程——见 `rpi-package/packages/rpi
   `plugins/<id>/data/` 里，越狱写法直接拒）；`exec`/`net-sockets` 仍是 deny 桩，所以
   `ki plugin install` 会对“声明了但本构建无法执行”的能力**明说**（`capability_is_enforced`），
   而不是让用户授权一个永远不会生效的东西；`timer` 已随 `on-tick` 一起删除。
-- **`rpi-todo` 编成 wasm 插件**（`plugins/wasm/kiqi-todo-guest`）：list/add/update/toggle/clear
+- **`kiqi-todo` 编成 wasm 插件**（`plugins/wasm/kiqi-todo-guest`）：list/add/update/toggle/clear
   语义不变；状态走结构化 `tool-result.details`；`SessionStart`/`SessionTree` 时经
   `session-read.session-branch` 恢复（不再是 runtime action）。
 - e2e 新增 `todo_guest_restores_from_the_session_branch`：给一个固定 branch 的 `SessionRead`
@@ -325,7 +325,7 @@ SessionStart→Shutdown 间维持服务线程——见 `rpi-package/packages/rpi
   `fs`/`exec`/`timer`/`net-sockets` 的实际实现（仍是 deny 桩）、以及能力错误只有
   `denied` 一个分支（网络失败也被叫 `denied`，应当拆出 `failed`）。
 
-### 6.11 已落地：`rpi-langfuse` 代表性子集（事件密度 + HTTP）
+### 6.11 已落地：`kiqi-langfuse` 代表性子集（事件密度 + HTTP）
 
 `plugins/wasm/kiqi-langfuse-guest`：**不是**完整 langfuse（3 个管理工具与完整 usage/cost
 留在编译期插件），而是验证“高频事件 + 出站 HTTP”的最小真实体：
@@ -351,14 +351,14 @@ e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许
 | 1 跨平台同一份 `.wasm` | ✅ 同一 fixture 在本机 macOS 与 CI Linux 都构建+加载+跑通（与编译期版本的 golden diff 仍未做） |
 | 2 面覆盖断言 | ✅ `conformance_surface_is_reachable` 断言契约层被真实触达；**会话层也已接线**（§6.19）：tools / events（原有）+ commands / shortcuts / before_agent_start / probe（新增）；`flags` 的声明由 `ki plugin show` 消费（§6.21） |
 | 3 流式进度 | ✅ conformance e2e 断言 3 个 progress 块按序到达 |
-| 4 UI 往返 | ✅ `ui.dialog` 成功往返 + 取消 + 超时都断言（`rpi-ask-user` wasm 移植，§6.15） |
+| 4 UI 往返 | ✅ `ui.dialog` 成功往返 + 取消 + 超时都断言（`kiqi-ask-user` wasm 移植，§6.15） |
 | 5 拒绝双态 | ✅ 无 UI → `set_status` denied；授予 UI → granted；net-http 无 grant / 错 host → denied，匹配 → 真请求 |
 | 6 用户授权闭环 | ✅ `Grants`（缺失=拒）+ `ki plugin grant/revoke/list` + `install`（列声明、**只对增量重问**、无头默认拒）+ `uninstall`（移到备份）（§6.14/§6.17） |
 | 7 隔离 | ✅ 燃料计量的死循环 → trap（不挂）；`panic!` → trap；宿主存活 |
 | 8 性能基线 | ✅ 同机对比 `todo list`：wasm 33µs/次 vs 编译期 43µs/次（0.8x），断言比值而非绝对阈值（§6.18） |
 
-参照集（§6.2）：`rpi-todo` ✅（真插件）、`rpi-langfuse` 子集 ✅（真实压力面）、
-`rpi-ask-user` ✅（§6.15）、conformance fixture ✅。
+参照集（§6.2）：`kiqi-todo` ✅（真插件）、`kiqi-langfuse` 子集 ✅（真实压力面）、
+`kiqi-ask-user` ✅（§6.15）、conformance fixture ✅。
 
 ### 6.13 ABI 0.4.0：能力错误拆 `denied` / `failed`
 
@@ -379,7 +379,7 @@ e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许
 
 - `Grants` 从 `kiqi-plugin-host` 移到契约 crate **`kiqi-plugin::grants`**（加 `serde` 序列化）：
   `load_for` / `save_for` / `allows_host` / `granted` / `grant` / `revoke` / `installed_plugins`。
-  这样**宿主（强制）与 CLI（编辑）共用一份类型，且 `rpi-cli` 不会引入 wasmtime**。
+  这样**宿主（强制）与 CLI（编辑）共用一份类型，且 `kiqi-cli` 不会引入 wasmtime**。
 - `ki plugin list | show <id> | grant <id> <cap> [--host H]... | revoke <id> <cap>`：读写
   `$KI_AGENT_DIR/plugins/<id>/grants.json`（默认 `~/.ki/agent/plugins/<id>/grants.json`）。
   实测：grant → 落盘 → `list`/`show` 可见 → revoke → `{}`；未知能力/缺参 → exit 2。
@@ -389,7 +389,7 @@ e2e `langfuse_subset_builds_a_trace_and_flushes_it_over_net_http`：grant 允许
 - 仍未做：`ki plugin install/uninstall` 本身、以及“安装/更新时列出声明 + 增量重问”的提示
   （要有 install 才有落点）。
 
-### 6.15 已落地：`rpi-ask-user` 忠实移植（UI 往返 + 取消 + 超时）
+### 6.15 已落地：`kiqi-ask-user` 忠实移植（UI 往返 + 取消 + 超时）
 
 `plugins/wasm/kiqi-ask-user-guest`：参数归一化与编译期插件一致
 （`question`/`options`/`allow*`/`displayMode`/`timeout`/`confirm`/`questions`），交互则不同——
@@ -409,7 +409,7 @@ C ABI 不能阻塞，原生版才需要 start/poll/cancel 状态机；wasm 里 `
   包成同一个 `PluginHost`——**没有第二套注册/派发路径**：工具经 `merge_compiled_plugin_tools`、
   事件经 `install_compiled_event_sink`，与编译期插件完全同路。
 - 加载失败（坏组件 / 缺 WASI import）只打印并跳过，不拖垮会话。
-- 新增 rpi-cli 测试：把 conformance fixture 放到临时 `plugins/conformance/plugin.wasm`，
+- 新增 kiqi-cli 测试：把 conformance fixture 放到临时 `plugins/conformance/plugin.wasm`，
   断言被发现、工具可见、且调用跑通（经 `HostCaps::observer` 拿到 `ui=` 的拒绝报告）。
 - 代价：`ki` 现依赖 `kiqi-plugin-host` → **wasmtime 进了主二进制**（体积/编译时间上升），
   所以给了 `plugin-wasm` feature（默认开）；要精简二进制可关掉。
@@ -424,14 +424,14 @@ C ABI 不能阻塞，原生版才需要 start/poll/cancel 状态机；wasm 里 `
     **无 tty 且没 `--yes` → 什么都不授**（无头默认拒）；
   - `net-http` 的 host allow-list 走 `--host`（缺则该项不授并提示）。
 - `ki plugin uninstall <id>`：把 `plugins/<id>` **移到** `plugins/<id>.removed-<ts>`（可恢复），不删文件。
-- 测试：host `declared_capabilities`（conformance fixture 只声明 `net-http`）；rpi-cli
+- 测试：host `declared_capabilities`（conformance fixture 只声明 `net-http`）；kiqi-cli
   `install --yes --host 127.0.0.1` → 复制 + `grants.granted()==["net-http"]` + host 匹配 →
   `uninstall` → 目录被移走。**10 个 host e2e + 4 个 CLI 测试绿。**
 - 门禁 6 由此收绿；§6.3 只剩门禁 8（性能基线）。
 
 ### 6.18 已落地：性能基线（门禁 8）
 
-`crates/rpi-cli` 里一个同进程对比测试：同一个 `todo` list 调用，编译期插件 vs wasm 插件，warm 后
+`crates/kiqi-cli` 里一个同进程对比测试：同一个 `todo` list 调用，编译期插件 vs wasm 插件，warm 后
 各 2000 次：
 
 ```
@@ -456,7 +456,7 @@ todo list: compiled 43120 ns/call, wasm 32887 ns/call (0.8x)
   与原生 `CLAIMED` 同义。只问 `shortcut_hosts` 筛出来的插件。
 - **before_agent_start**：`compiled_prompt_hooks` 链在原生 `ExtensionProviderHooks` 之后，原生先算出提示词、
   编译期/wasm 插件再有机会替换；**按 prompt 时间戳去重**（一次工具循环的多次 provider 调用只算一次）。
-  `rpi_extensions::before_agent_start_input` 让两半共用同一份载荷形状。
+  `kiqi_extensions::before_agent_start_input` 让两半共用同一份载荷形状。
 - **probe**：`probe_tool_call` 在 harness 的 `BeforeToolCall` 钩子里跑 `before-tool-call` 闸门。它本地同步，
   所以否决在原生的审批对话框弹开**之前**就生效；`Replace` 会带进原生派发，两边看到同一份 args。
 - **flags**：**不需要接线**——`get_cli_flag` 本就从“通用解析的未知长选项”里取值，插件的 `cli_flag(name)`
@@ -644,12 +644,12 @@ conformance fixture 相应地多了一个 `alloc` 工具，e2e 两边都验：**
 
 **移植的两个插件**（都拿真实的 `Plugin::*` 语义对照，不是演示）：
 
-- **`rpi-webfetch` → `plugins/wasm/kiqi-webfetch-guest`**：走 `net-http`。保留了插件自己的 URL 策略
+- **`kiqi-webfetch` → `plugins/wasm/kiqi-webfetch-guest`**：走 `net-http`。保留了插件自己的 URL 策略
   （绝本地/绝字面私有 IP、绝内嵌凭证），两个差异写在 guest 文档里而不是藏起来：
   ① **不做 DNS 校验**（guest 无法解析，主机名交给用户允许列表管）；② **不再校验最终 URL**
   （宿主回的是 status/headers/body，重定向安全已由宿主逐跳白名单保证）。
-- **`rpi-plan-mode` → `plugins/wasm/kiqi-plan-mode-guest`**：走 `session-read`/`session-control`/`inject`。
-  逻辑（保留哪些工具、`/plan` 打印什么、大纲解析）**一份实现**，抽到 `crates/rpi-plan-mode-core`，
+- **`kiqi-plan-mode` → `plugins/wasm/kiqi-plan-mode-guest`**：走 `session-read`/`session-control`/`inject`。
+  逻辑（保留哪些工具、`/plan` 打印什么、大纲解析）**一份实现**，抽到 `crates/kiqi-plan-mode-core`，
   编译期插件与 guest 共用——两个 `PlanHost` 适配器分别接 `HostCaps` 和 WIT 导入。
   也正因为如此，“WIT 缺少 `append-custom-entry`” 这个缺口无法用“再写一份”绕过去。
 
@@ -657,7 +657,7 @@ e2e：webfetch 验“插件策略先拦 + 没授权就 denied”（全 hermetic�
 `SessionControl`/`InjectApi` 验“进入时换掉工具集、完成时恢复并写 `plan-mode` 自定义 entry、
 `/plan show` 能读回计划”。
 
-### 6.30 `exec` 的授权带 cwd 范围与时间预算（`rpi-lens` 移植）
+### 6.30 `exec` 的授权带 cwd 范围与时间预算（`kiqi-lens` 移植）
 
 handover 里点名的“下一个真实阻塞点”：诊断类插件要在**项目目录**跑 `cargo`/`clippy`，而
 `exec` 的 cwd 只能关在插件自己的 data 目录。这轮把它解开，并把 §6.2「明确不迁」名单里的
@@ -695,7 +695,7 @@ handover 里点名的“下一个真实阻塞点”：诊断类插件要在**项
 `cwd: project` 没有引入新的风险类别，它增加的是**人体工学**（让诊断插件落在正确的目录）；
 真正的授权重量始终在 `exec` 本身。给用户看的授权文案应当这么说。
 
-**移植 `rpi-lens` → `plugins/wasm/kiqi-rpi-lens-guest`**（走 `exec` + `session-read`）。
+**移植 `kiqi-lens` → `plugins/wasm/kiqi-lens-guest`**（走 `exec` + `session-read`）。
 逻辑小（check 名 → argv、输出截断格式化），照 webfetch 的样子直接随 guest 带一份，
 不开 `-core` crate。差异写进 guest README：
 
@@ -709,7 +709,7 @@ handover 里点名的“下一个真实阻塞点”：诊断类插件要在**项
 5. **参数 JSON 解析失败直接报错**——编译期版本把坏参数当 `null` 然后跑默认的 diff 检查；
    wasm 版拒绝，而不是跑一个没人点的检查。
 
-顺手修掉编译期 `rpi-lens` 的一个潜伏 panic：输出截断 `text.truncate(40_000)` 在多字节
+顺手修掉编译期 `kiqi-lens` 的一个潜伏 panic：输出截断 `text.truncate(40_000)` 在多字节
 字符中间下刀会 panic（`String::truncate` 的字符边界语义），改成退到字符边界再截，
 带回归测试（先红后绿验证过）；wasm 版不继承这个 bug。
 
@@ -738,11 +738,11 @@ lens 移植验“project scope 下 `git diff --check` exit=0 / data 目录下报
 剩余五个未移植插件各经一名分析员实核 + 交叉验证员对抗复核（10 agent），按证据裁决：
 
 **移植（3）**：
-- **`rpi-websearch`**：DDG + Wikipedia 全 keyless，`net-http` 完全覆盖（自定义 header
+- **`kiqi-websearch`**：DDG + Wikipedia 全 keyless，`net-http` 完全覆盖（自定义 header
   转发、8 MiB 上限）；需两个 allow-list host，单授 DDG 时 fallback 缺席按原设计降级。
-- **`rpi-subagents`**：现版本是**纯信封工具**（validate + emit，不起子进程），§6.2 当初
+- **`kiqi-subagents`**：现版本是**纯信封工具**（validate + emit，不起子进程），§6.2 当初
   的排除理由（起子进程）对现行代码不再成立；信封字节序用编译期/宿主两端钉同一个字面量。
-- **`rpi-goal`**：`inject`/WASI 时钟/命令/8 action 全通；TurnEnd 走 untyped `other.kind`
+- **`kiqi-goal`**：`inject`/WASI 时钟/命令/8 action 全通；TurnEnd 走 untyped `other.kind`
   （WIT 无 turn-end tag，人体工学缺口非能力缺口）。**状态取舍（已裁决并写进 README）**：
   fs 监禁进不了项目目录，guest 把 `{projectPath: Goals}` 映射存进插件 data 目录、以
   `info().cwd` 为键——每项目语义保留，但（a）与编译期插件互不可见、**compiled
@@ -751,10 +751,10 @@ lens 移植验“project scope 下 `git diff --check` exit=0 / data 目录下报
   忠实落盘项目目录，需给 `fs` 加 `cwd` 式 scope（§6.30 的对称扩展），单独立项。
 
 **不迁（2，均为设计缺口而非一时缺失）**：
-- **`rpi-permissions`**：三重缺口（项目 fs 原子写、home 作用域 + env、projectPath 语义）
+- **`kiqi-permissions`**：三重缺口（项目 fs 原子写、home 作用域 + env、projectPath 语义）
   之外是**信任倒置**——它的职责是重写宿主工具门所消费的策略文件，让沙箱 guest 拿到这个
   写权限等于让被监管者写监管规则。需要先设计（专用能力或宿主侧代理），不是补 scope 就能迁。
-- **`rpi-codegraph`**：`search` 要长活子进程的 stdio 流式句柄，与 orchestrator 同属
+- **`kiqi-codegraph`**：`search` 要长活子进程的 stdio 流式句柄，与 orchestrator 同属
   「会话级长生命周期句柄」类缓期能力；`init`/`sync` 一次性命令 exec（project scope）
   倒是能跑，但缺 search 的迁移没有意义。
 
@@ -762,11 +762,11 @@ lens 移植验“project scope 下 `git diff --check` exit=0 / data 目录下报
 `KIQI_WEBSEARCH_LIVE=1` 的 detect-and-return live 测试——解析/过滤路径要真网络，
 默认跳过并明说，符合「第三态显式化」）。
 
-### 6.32 ABI 0.7.0：`proc` —— 调用内可交互的子进程（为迁 `rpi-codegraph`）
+### 6.32 ABI 0.7.0：`proc` —— 调用内可交互的子进程（为迁 `kiqi-codegraph`）
 
 `exec` 是一次性的（跑完拿输出），表达不了「起一个服务、在它的 stdin/stdout 上做一场会话」。
-`rpi-codegraph` 正是这种：**每次调用内**起 `codegraph serve --mcp`，然后用 JSON-RPC 走
-stdin/stdout，调用结束杀掉（`plugins/rpi-codegraph/src/lib.rs:315`、`:335-346`、`:385-387`）。
+`kiqi-codegraph` 正是这种：**每次调用内**起 `codegraph serve --mcp`，然后用 JSON-RPC 走
+stdin/stdout，调用结束杀掉（`plugins/kiqi-codegraph/src/lib.rs:315`、`:335-346`、`:385-387`）。
 方案与取舍见 `docs/design/plugin-process-capability.md`。
 
 **接口**（新 interface `proc`，包版本 `0.6.0 → 0.7.0`，纯加法）：
@@ -790,10 +790,10 @@ cwd 走**同一对** `jail_under`/`symlink_checked_under`（与 §6.30 同源，
 门禁三态（未授权 / 不在白名单 / cwd 越狱）、`max-open` 上限、以及**收尸**——子进程自报 pid、
 guest 故意不杀，调用返回后该 pid 在 **OS 层面**查不到（断言落在 `kill(pid, 0)`，不是宿主自己的账本）。
 
-**本能力不解决** `rpi-orchestrator`：它要「调用之间还在跑」，需要宿主持调度（重新设计），
+**本能力不解决** `kiqi-orchestrator`：它要「调用之间还在跑」，需要宿主持调度（重新设计），
 不是给插件加一层能力能凑出来的。
 
-### 6.33 第一个真实消费者：`rpi-codegraph` 迁 wasm（并顺手修了契约缺口）
+### 6.33 第一个真实消费者：`kiqi-codegraph` 迁 wasm（并顺手修了契约缺口）
 
 `proc` 落地后立刻有了消费者。移植时发现契约少了一个参数——`read-line` 原本只受子进程预算
 （600s）约束，而 codegraph 的会话超时是 20s、且它的超时文案（“try `codegraph unlock`”）
@@ -827,7 +827,7 @@ e2e 三条：八工具面与 schema 形状、**探测决策**（有/无索引两
 e2e：project scope 下 fixture 的 fs 往返落在项目树内；data-dir 默认行为不变；
 CLI `grant fs --cwd project` 的 JSON 往返有单测钉住。
 
-至此默认构建只剩两个编译期插件：`rpi-orchestrator`（调度模型错位）与 `rpi-permissions`
+至此默认构建只剩两个编译期插件：`kiqi-orchestrator`（调度模型错位）与 `kiqi-permissions`
 （信任倒置）——都不是缺能力，是 wasm 层当前形状表达不了或有设计缺口。
 
 ## 7. 待定

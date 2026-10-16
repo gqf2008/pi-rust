@@ -1,4 +1,4 @@
-//! A representative subset of `rpi-langfuse`, on the wasm ABI.
+//! A representative subset of `kiqi-langfuse`, on the wasm ABI.
 //!
 //! It builds one turn trace from the event stream and flushes it to Langfuse's
 //! OTLP endpoint through `net-http`. This is the "high-frequency events +
@@ -20,7 +20,7 @@ const OTEL_PATH: &str = "/api/public/otel/v1/traces";
 const ROOT_NAME: &str = "Conversational Turn";
 const GENERATION_NAME: &str = "LLM Call";
 const TRACE_PREFIX_FALLBACK: &str = "kiqi";
-const SDK_NAME: &str = "rpi-langfuse";
+const SDK_NAME: &str = "kiqi-langfuse";
 
 #[derive(Clone, Default)]
 struct Config {
@@ -411,7 +411,7 @@ struct LangfusePlugin;
 
 impl Guest for LangfusePlugin {
     fn id() -> String {
-        "rpi-langfuse".to_string()
+        "kiqi-langfuse".to_string()
     }
 
     fn shutdown() {

@@ -9,7 +9,7 @@ authors.workspace = true
 repository.workspace = true
 description = "Guest SDK for writing kiqi wasm plugins (component model, ABI 0.7.1)"
 readme = "README.md"
-keywords = ["rpi", "kiqi", "wasm", "plugin", "component-model"]
+keywords = ["ki", "kiqi", "wasm", "plugin", "component-model"]
 categories = ["development-tools"]
 
 [lib]

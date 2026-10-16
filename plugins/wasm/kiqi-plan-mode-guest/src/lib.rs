@@ -1,8 +1,8 @@
-//! `rpi-plan-mode` ported to the wasm ABI (0.7.0).
+//! `kiqi-plan-mode` ported to the wasm ABI (0.7.0).
 //!
 //! Plan mode is a *session* plugin: it swaps the active tool set, persists its
 //! state as a custom entry, restores it from the session branch, and can submit a
-//! planning request. All of that already exists in `rpi-plan-mode-core`, shared
+//! planning request. All of that already exists in `kiqi-plan-mode-core`, shared
 //! with the compile-time plugin; the only new code here is the [`PlanHost`]
 //! adapter over the WIT imports.
 //!
@@ -12,12 +12,12 @@
 
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
 use kiqi_plugin_guest::bindings::kiqi::plugin::{inject, session_control, session_read, types};
-use rpi_plan_mode_core::{complete_plan, on_session_event, run_command, start_plan, PlanHost};
+use kiqi_plan_mode_core::{complete_plan, on_session_event, run_command, start_plan, PlanHost};
 use serde_json::Value;
 
-const ID: &str = "rpi-plan-mode";
-const COMPLETE_TOOL: &str = rpi_plan_mode_core::PLAN_TOOL;
-const START_TOOL: &str = rpi_plan_mode_core::START_TOOL;
+const ID: &str = "kiqi-plan-mode";
+const COMPLETE_TOOL: &str = kiqi_plan_mode_core::PLAN_TOOL;
+const START_TOOL: &str = kiqi_plan_mode_core::START_TOOL;
 const COMMAND: &str = "plan";
 
 /// The session operations, over the wasm imports instead of `HostCaps`.
@@ -69,7 +69,7 @@ impl Guest for PlanMode {
                 description: "Submit a complete implementation-ready plan and leave plan mode. Only available while /plan mode is active.".to_string(),
                 parameters_schema: format!(
                     r#"{{"type":"object","required":["plan"],"properties":{{"plan":{{"type":"string","minLength":1,"maxLength":{},"description":"The complete decision-ready implementation plan in Markdown."}}}}}}"#,
-                    rpi_plan_mode_core::MAX_PLAN_CHARS
+                    kiqi_plan_mode_core::MAX_PLAN_CHARS
                 ),
             },
             types::ToolSpec {

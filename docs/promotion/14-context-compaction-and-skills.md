@@ -17,15 +17,15 @@ flowchart TD
     Check -->|是| Budget
 ```
 
-`rpi-harness` 在 run 前以及运行中工具结果返回后评估上下文，并在需要时调用 `should_compact`、`prepare_compaction` 和 `compact`。摘要是会话树中的 entry，而不是偷偷修改历史文件。
+`kiqi-harness` 在 run 前以及运行中工具结果返回后评估上下文，并在需要时调用 `should_compact`、`prepare_compaction` 和 `compact`。摘要是会话树中的 entry，而不是偷偷修改历史文件。
 
 ## Skills 和模板是输入层
 
 ```rust
-// 调用形态示意：具体 options 以 crates/rpi-harness/src/types.rs 为准
-let options = rpi_harness::types::AgentHarnessOptions::default();
+// 调用形态示意：具体 options 以 crates/kiqi-harness/src/types.rs 为准
+let options = kiqi_harness::types::AgentHarnessOptions::default();
 // Harness 将 session、skills、prompt template 组合成 system prompt，
-// 再交给 rpi-agent 执行。
+// 再交给 kiqi-agent 执行。
 ```
 
 Skills 不应该直接改 Agent 内部状态；它们应当成为可审计的 prompt/resource 输入。这样可以区分“会话事实”“系统指令”和“本轮用户请求”。
@@ -38,7 +38,7 @@ Skills 不应该直接改 Agent 内部状态；它们应当成为可审计的 pr
 | Resource | skill、prompt template | 加载时组合 |
 | Runtime state | 当前 run、取消 token、队列 | 进程内 |
 
-这种拆分使长会话可恢复、可测试，也便于在 CLI 之外嵌入服务。相关代码在 `crates/rpi-harness/src/compaction`、`skills.rs`、`system_prompt.rs` 和 `agent_harness.rs`。
+这种拆分使长会话可恢复、可测试，也便于在 CLI 之外嵌入服务。相关代码在 `crates/kiqi-harness/src/compaction`、`skills.rs`、`system_prompt.rs` 和 `agent_harness.rs`。
 
 文章可以把重点放在“上下文工程是架构问题”，而不是只宣传更大的模型窗口。ki 让压缩和资源注入成为可替换、可观测的层。
 
@@ -48,13 +48,13 @@ Skills 不应该直接改 Agent 内部状态；它们应当成为可审计的 pr
 
 # Context Compaction Is a Harness Concern
 
-A long session eventually reaches a context limit. Putting every old message into the next request is simple, but it is expensive and eventually stops working. ki keeps compaction above the low-level loop, inside `rpi-harness`.
+A long session eventually reaches a context limit. Putting every old message into the next request is simple, but it is expensive and eventually stops working. ki keeps compaction above the low-level loop, inside `kiqi-harness`.
 
 Before a run and after tool results during a run, the harness estimates the context and decides whether a compaction pass is needed. It selects a cut point, writes a summary entry, and builds the next context from the branch plus that summary. The original records remain available for inspection.
 
 Skills and prompt templates are input resources. They are composed into the system prompt instead of being mixed into runtime state. This makes runs easier to inspect and keeps the same agent usable from a CLI or an embedded service.
 
-Read `crates/rpi-harness/src/compaction`, `skills.rs`, `system_prompt.rs`, and `agent_harness.rs`.
+Read `crates/kiqi-harness/src/compaction`, `skills.rs`, `system_prompt.rs`, and `agent_harness.rs`.
 
 
 当前行为与实现边界见 [上下文压缩](../agent/context-compaction.md)。

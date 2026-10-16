@@ -4,14 +4,14 @@ This is a direction document, not a commitment. It records what the project is
 working on next and why, so that issues and PRs can be judged against it. For
 what has already shipped, see [CHANGELOG.md](CHANGELOG.md).
 
-Current release: **0.3.0**. Install with `cargo install rpi-cli`.
+Current release: **0.3.0**. Install with `cargo install kiqi-cli`.
 
 ## Where the project is now
 
-`rpi` is a Rust-native, library-first coding-agent runtime: nine published
-crates (`rpi-telemetry` → `rpi-ai` → `rpi-agent` → `rpi-tools` →
-`rpi-harness` → `rpi-cli`, plus `rpi-tui`, `rpi-plugin-sdk` and
-`rpi-extensions`) and a terminal CLI built on them.
+`ki` is a Rust-native, library-first coding-agent runtime: nine published
+crates (`kiqi-telemetry` → `kiqi-ai` → `kiqi-agent` → `kiqi-tools` →
+`kiqi-harness` → `kiqi-cli`, plus `kiqi-tui`, `kiqi-plugin-sdk` and
+`kiqi-extensions`) and a terminal CLI built on them.
 
 What is solid today:
 
@@ -24,13 +24,13 @@ What is solid today:
   veto support.
 - Remote mode: a headless `--server` and a zero-local-resource `--connect`
   client.
-- Resource layout: `.rpi/` project resources and `settings.json` keys.
+- Resource layout: `.ki/` project resources and `settings.json` keys.
 
 ## Near term
 
 ### 1. Distribution without a Rust toolchain
 
-Today the only install path is `cargo install rpi-cli`, which requires rustup, a
+Today the only install path is `cargo install kiqi-cli`, which requires rustup, a
 C toolchain and a full release build. Prebuilt binaries for
 `x86_64`/`aarch64` on Linux, macOS and Windows, plus an install script, are the
 highest-leverage change for adoption. Package-manager taps (Homebrew, Scoop,
@@ -40,7 +40,7 @@ winget) follow from the same release artifacts.
 
 - Per-crate README and `lib.rs` landing docs, so each crates.io/docs.rs page is
   usable without the workspace README.
-- A task-oriented tutorial that goes from `cargo install rpi-cli` to a working
+- A task-oriented tutorial that goes from `cargo install kiqi-cli` to a working
   custom tool, in one page.
 - Keep `docs/native-pi-missing-features.md` current: it is the honest answer to
   "is this really at parity?" and it is more useful than a compatibility claim.
@@ -67,14 +67,14 @@ The ABI and loader work; the ecosystem is thin. Concretely:
 
 ### 5. Startup initialisation (measured)
 
-The benchmark in [`docs/performance/benchmark-vs-pi.md`](docs/performance/benchmark-vs-pi.md) puts rpi
+The benchmark in [`docs/performance/benchmark-vs-pi.md`](docs/performance/benchmark-vs-pi.md) puts ki
 at **17.7 ms** from spawn to cold start (native Pi: 189.5 ms). Core startup is
 essentially just process creation — config, session store, tool registry and the
-harness are negligible (rpi's `--version` and its cold start differ by 0.2 ms).
+harness are negligible (ki's `--version` and its cold start differ by 0.2 ms).
 
 The one real startup cost is **plugin loading**, and it scales with what the user
 installed: the same measurement reads ~100 ms on a machine whose
-`~/.rpi/agent/extensions` holds 25 plugin DLLs. So the work here is:
+`~/.ki/agent/extensions` holds 25 plugin DLLs. So the work here is:
 
 - make extension discovery and loading lazy (or parallel) so startup does not
   scale with the number of installed plugins;
@@ -82,7 +82,7 @@ installed: the same measurement reads ~100 ms on a machine whose
   accepted", not "the work was deferred somewhere later".
 
 Reproduce with `node scripts/bench-vs-pi.mjs`. Set **both** tools' isolation
-variables (`RPI_*` for rpi, `PI_*` for pi) or the rpi number will include your
+variables (`KI_*` for ki, `PI_*` for pi) or the ki number will include your
 global plugins.
 
 Still unmeasured and worth adding: tool-loop throughput, memory growth over a
@@ -105,7 +105,7 @@ long session, compaction cost, and interactive TUI frame cost.
 
 ## Not planned
 
-- A hosted service. `rpi` is a library and a local tool; there is no plan to
+- A hosted service. `ki` is a library and a local tool; there is no plan to
   run inference or store user sessions on project infrastructure.
 - A visual/GUI application. The TUI and the JSONL remote protocol are the
   supported interfaces.

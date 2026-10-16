@@ -11,8 +11,8 @@ use std::sync::Arc;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 
 #[allow(unused_imports)]
-use rpi_tui::TUI as _;
-use rpi_tui::{
+use kiqi_tui::TUI as _;
+use kiqi_tui::{
     Container, Editor, EditorOptions, EditorStyle, Focusable, FollowMode, ProcessTerminal,
     ScrollView, ScrollViewOptions, Spacer, StackChild, StackEntry, Text, TuiAltScreen, VStack, TUI,
 };
@@ -78,7 +78,7 @@ async fn run_interactive() {
             ..Default::default()
         },
         EditorStyle::default(),
-        Arc::new(rpi_tui::keybindings::Keybindings::new()),
+        Arc::new(kiqi_tui::keybindings::Keybindings::new()),
     ));
 
     // Clone for closure

@@ -6,17 +6,17 @@
 
 ## 1. Rust 扩展快速开始
 
-最小可用扩展是一个 Rust `cdylib` crate，只依赖 `rpi-plugin-sdk`：
+最小可用扩展是一个 Rust `cdylib` crate，只依赖 `kiqi-plugin-sdk`：
 
 ```bash
-cargo new my-rpi-extension
-cd my-rpi-extension
+cargo new my-kiqi-extension
+cd my-kiqi-extension
 # 在 Cargo.toml 中把 crate-type 设为 ["cdylib", "rlib"]
 ```
 
 ```toml
 [package]
-name = "my-rpi-extension"
+name = "my-kiqi-extension"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -25,12 +25,12 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rpi-plugin-sdk = "0.1"
+kiqi-plugin-sdk = "0.1"
 serde_json = "1"
 ```
 
-**扩展边界规则**：`cdylib` 只依赖 `rpi-plugin-sdk`。绝不链接 `rpi-cli`、
-`rpi-extensions` 或 harness 内部 crate——插件由宿主动态加载，宿主链接插件，
+**扩展边界规则**：`cdylib` 只依赖 `kiqi-plugin-sdk`。绝不链接 `kiqi-cli`、
+`kiqi-extensions` 或 harness 内部 crate——插件由宿主动态加载，宿主链接插件，
 插件不能反向链接宿主。保留 `rlib` 是为了能在同一 crate 内写 Rust 单元测试。
 
 仓库自带的 `examples/plugin-stub` 是完整可运行的模板，包含 echo 工具、事件
@@ -38,14 +38,14 @@ serde_json = "1"
 
 ## 2. 统一 ABI 入口
 
-宿主只加载统一 C ABI 符号 `rpi_plugin_register`。扩展使用 `export_plugin!`，
+宿主只加载统一 C ABI 符号 `kiqi_plugin_register`。扩展使用 `export_plugin!`，
 通过同一个 `PluginApi` 注册能力并调用 `api.declare` 声明优先级/平台。
 SDK 在注册前检查 `abi_version` 和 `struct_size`；不兼容时返回非零状态，宿主报告加载失败。
 
 ```rust
-rpi_plugin_sdk::export_plugin!(|api| {
+kiqi_plugin_sdk::export_plugin!(|api| {
     if let Some(declare) = api.declare {
-        let status = declare(rpi_plugin_sdk::StbStringRef::from_str(
+        let status = declare(kiqi_plugin_sdk::StbStringRef::from_str(
             r#"{"priority":60,"platforms":["linux"]}"#,
         ));
         if status != 0 {
@@ -203,11 +203,11 @@ ki 通过 Cargo metadata 识别当前 `cdylib`，首次编译后把版本化副�
 多扩展 workspace 必须明确选择 package：
 
 ```bash
-ki dev --package rpi-todo
-ki dev -P rpi-webfetch
+ki dev --package kiqi-todo
+ki dev -P kiqi-webfetch
 ki dev --release
 ki dev --no-watch
-ki dev --package rpi-todo -- --model gateway/model
+ki dev --package kiqi-todo -- --model gateway/model
 ```
 
 调试单个扩展用 `ki dev-local`（等价于 `ki dev --local-only`）：只加载当前编译
@@ -298,7 +298,7 @@ $env:KI_DEBUG_KEYS=1; ki
 KI_DEBUG_KEYS=1 ki
 ```
 
-默认写到 `<临时目录>/rpi-keys.log`（Windows 为 `%TEMP%\rpi-keys.log`），也可用
+默认写到 `<临时目录>/kiqi-keys.log`（Windows 为 `%TEMP%\kiqi-keys.log`），也可用
 `KI_DEBUG_KEYS=<路径>` 指定文件。格式：
 
 ```text
@@ -331,7 +331,7 @@ KI_DEBUG_KEYS=1 ki
 | 手机/远程终端回车变换行 | `KI_DEBUG_KEYS=1` 看按键：`Char('j') mods=CONTROL` = 客户端发的是 LF（已被 `Editor` 当提交处理）；`Enter` + `paste burst` = 粘贴启发式误判（已限定 Windows 平台） |
 | 粘贴内容不是系统剪贴板（而是 TUI 自己的文案） | 远程/手机客户端把粘贴映射成 `Ctrl+V` 时，`read_clipboard_text` 会读**服务器**剪贴板——可能被拖选复制（copy-on-select）写入了 TUI 文案（如欢迎语 `Skills (…): …`）。已限定该回退只在 Windows 生效；Unix 上真实粘贴走括号粘贴 `Event::Paste`，`Ctrl+V` 回退为编辑器 kill-ring yank |
 | panic / 段错误跨 ABI | `extern "C"` 边界不能 unwind；`StbString` 所有权遵守宿主/插件两侧规则 |
-| ABI 版本不匹配 | 宿主日志提示 mismatch 并跳过加载；确认 `rpi-plugin-sdk` 版本 |
+| ABI 版本不匹配 | 宿主日志提示 mismatch 并跳过加载；确认 `kiqi-plugin-sdk` 版本 |
 
 ## 9. 测试与发布
 

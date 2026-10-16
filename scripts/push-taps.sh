@@ -9,7 +9,7 @@
 set -euo pipefail
 
 VERSION="${1:?usage: push-taps.sh X.Y.Z}"
-MSG="rpi $VERSION"
+MSG="ki $VERSION"
 
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "» $*"; }
@@ -35,7 +35,7 @@ put() {
   fi
 }
 
-put "bigfish1913/homebrew-tap" "Formula/rpi.rb" "packaging/homebrew/rpi.rb"
-put "bigfish1913/scoop-bucket" "bucket/rpi.json" "packaging/scoop/rpi.json"
+put "bigfish1913/homebrew-tap" "Formula/ki.rb" "packaging/homebrew/ki.rb"
+put "bigfish1913/scoop-bucket" "bucket/ki.json" "packaging/scoop/ki.json"
 
 note "taps pushed"

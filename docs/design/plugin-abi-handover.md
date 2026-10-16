@@ -66,10 +66,10 @@
 | 契约 Rust 侧（`trait Plugin`、`Event`/`Verdict`、`grants`） | `crates/kiqi-plugin` |
 | 宿主（wasmtime，把组件包成 `trait Plugin`） | `crates/kiqi-plugin-host` |
 | 插件 SDK（WIT → Rust trait） | `plugins/wasm/kiqi-plugin-guest` |
-| 已移植插件（12） | `plugins/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode,rpi-lens,websearch,subagents,goal,codegraph,orchestrator}-guest` |
-| 共享逻辑（编译期与 wasm 共用） | `crates/rpi-plan-mode-core` |
-| CLI | `crates/rpi-cli/src/plugin_cli.rs`（`ki plugin …`） |
-| 会话接线（发现/注册/事件 sink/各贡献面） | `crates/rpi-cli/src/plugins.rs` |
+| 已移植插件（12） | `plugins/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode,kiqi-lens,websearch,subagents,goal,codegraph,orchestrator}-guest` |
+| 共享逻辑（编译期与 wasm 共用） | `crates/kiqi-plan-mode-core` |
+| CLI | `crates/kiqi-cli/src/plugin_cli.rs`（`ki plugin …`） |
+| 会话接线（发现/注册/事件 sink/各贡献面） | `crates/kiqi-cli/src/plugins.rs` |
 | 设计文档 | `docs/design/plugin-abi.md`、`docs/design/plugin-trait.md` |
 
 `ki` 通过 `plugin-wasm` feature（**默认开**）加载 `$KI_AGENT_DIR/plugins/<id>/plugin.wasm`；
@@ -84,8 +84,8 @@ cargo build --manifest-path plugins/wasm/kiqi-webfetch-guest/Cargo.toml \
 # → plugins/wasm/target/wasm32-wasip2/release/kiqi_webfetch_guest.wasm
 
 # 安装（列出声明能力；--yes 非交互；无 tty 且无 --yes 则什么都不授）
-ki insmod --build plugins/wasm/kiqi-webfetch-guest --id rpi-webfetch --yes --host api.example.com
-ki rmmod rpi-webfetch                                                 # 移到备份，不删
+ki insmod --build plugins/wasm/kiqi-webfetch-guest --id kiqi-webfetch --yes --host api.example.com
+ki rmmod kiqi-webfetch                                                 # 移到备份，不删
 ki plugin list | show <id>          # show 会列出声明面（tools/commands/flags/shortcuts/probe）
 ki plugin grant <id> exec --command echo     # 或 revoke / uninstall（uninstall 移到备份，不删）
 # exec 还能带 cwd 范围与时间预算（诊断类插件要在项目目录跑 cargo/clippy 时）：
@@ -99,41 +99,41 @@ wasm-tools component wit plugins/kiqi-plugin.wit
 
 ```bash
 cargo test -p kiqi-plugin-host --lib --test e2e      # 43 e2e + 5 单测
-cargo test -p rpi-plan-mode-core                      # 6
-cargo test -p rpi-lens                                # 3
+cargo test -p kiqi-plan-mode-core                      # 6
+cargo test -p kiqi-lens                                # 3
 cargo test -p kiqi-plugin --lib                       # 7
-cargo test -p rpi-cli --lib                           # 510
-cargo test -p rpi-extensions --lib                    # 102
+cargo test -p kiqi-cli --lib                           # 510
+cargo test -p kiqi-extensions --lib                    # 102
 ```
 
 CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows installer）全绿。
-注意：`cargo test --workspace` 会一并构建 wasmtime（慢、体积大）；rpi-cli 测试会改
-`crates/rpi-cli/.ki/goals.json`，跑完 `git checkout --` 还原。
+注意：`cargo test --workspace` 会一并构建 wasmtime（慢、体积大）；kiqi-cli 测试会改
+`crates/kiqi-cli/.ki/goals.json`，跑完 `git checkout --` 还原。
 
 ## 7. 未完成 / 已知限制
 
 | 项 | 说明 |
 |---|---|
-| ~~**`exec` 的 cwd 策略挡住 `rpi-lens`**~~ | ✅ 已解（§6.30）：exec 授权带 `cwd`（`plugin-data` 默认 / `project`）与 `timeout-seconds`（默认 30s、上限 300s）；`rpi-lens` 已移植为 `kiqi-rpi-lens-guest`。 |
+| ~~**`exec` 的 cwd 策略挡住 `kiqi-lens`**~~ | ✅ 已解（§6.30）：exec 授权带 `cwd`（`plugin-data` 默认 / `project`）与 `timeout-seconds`（默认 30s、上限 300s）；`kiqi-lens` 已移植为 `kiqi-lens-guest`。 |
 | Windows 不回收后台孙进程 | 用了 unix 进程组；Windows 需 job object，成本高，代码里已注明 |
 | `flags` 声明只有 `ki plugin show` 在读 | 取值路径是 `SessionRead::cli_flag`（通用 `--foo=bar`），声明本身是诊断用 |
 | `probe`/`shortcuts`/`before_agent_start` 无生产用户 | 会话已接线并有测试，但只有 conformance fixture 在用；移植 plan-mode/webfetch 也没用到它们 |
 | 第一方插件仍是编译期 | 设计；wasm 层面向第三方 |
-| **默认只编入无 wasm 版的插件** | 仅 `rpi-permissions`（orchestrator 已随 §6.34 迁走，opt-in）；有 guest 的那些（todo/lens/webfetch/websearch/subagents/goal/plan-mode/ask-user/langfuse）改为 `--features plugin-rpi-<name>` 或 `ki insmod --build`。crate/feature/cdylib 面/测试全保留，CI 跑 opt-in 配置防腐烂。注意耦合：orchestrator 的 goal 联动读 `.ki/goals.json`，只有**编译期** goal 会写 |
+| **默认只编入无 wasm 版的插件** | 仅 `kiqi-permissions`（orchestrator 已随 §6.34 迁走，opt-in）；有 guest 的那些（todo/lens/webfetch/websearch/subagents/goal/plan-mode/ask-user/langfuse）改为 `--features plugin-kiqi-<name>` 或 `ki insmod --build`。crate/feature/cdylib 面/测试全保留，CI 跑 opt-in 配置防腐烂。注意耦合：orchestrator 的 goal 联动读 `.ki/goals.json`，只有**编译期** goal 会写 |
 | `wasmtime` 常驻 `ki` | 由 `plugin-wasm`（默认开）控制；要瘦身需单独门控 |
 | `.wasm` 无签名/摘要校验 | 见 `plugin-abi.md` §7 待定项 |
 | 装完需重启 | `compiled_plugin_hosts()` 是进程级 `OnceLock` |
 | e2e 的 `exec_does_not_hang_when_the_command_leaves_a_background_child` 在满负载并行跑时偶发超时 | 15s 的 `recv_timeout` 窗口里含 wasmtime 编译 fixture 的时间，并行构建时可能不够；单跑必过。改阈值属 `RULE_阈值变更`，未动 |
 | **acp 不迁，宿主级立项** | `plugin-abi.md` §6.2 裁定（独占 stdio + 跨会话服务线程）；立项方案见 `ki-acp-serve.md`（`ki acp serve`：进程内驱动 AgentHarness、协议层用官方 `agent-client-protocol` crate、abb-agent 做语义层参照） |
-| 不迁 | `rpi-permissions`（信任倒置：沙箱 guest 重写宿主权限策略，需先设计）——唯一保留的编译期插件。~~orchestrator~~ 已按业主要求以**阻塞波**形态迁走（§6.34：放弃后台波与中途重塑，其余语义保留）；~~codegraph~~ 随 `proc` 迁走 |
+| 不迁 | `kiqi-permissions`（信任倒置：沙箱 guest 重写宿主权限策略，需先设计）——唯一保留的编译期插件。~~orchestrator~~ 已按业主要求以**阻塞波**形态迁走（§6.34：放弃后台波与中途重塑，其余语义保留）；~~codegraph~~ 随 `proc` 迁走 |
 
 ## 8. 提交轨迹（近期，`fork/main`）
 
 ```
-本批（exec cwd scope + rpi-lens 移植；含一轮分维度对抗审查的修正）：
+本批（exec cwd scope + kiqi-lens 移植；含一轮分维度对抗审查的修正）：
 - feat(plugins): exec grant carries a cwd scope and a time budget
-- feat(plugins): port rpi-lens to wasm (kiqi-rpi-lens-guest)
-- fix(plugins): rpi-lens truncation no longer panics mid-codepoint
+- feat(plugins): port kiqi-lens to wasm (kiqi-lens-guest)
+- fix(plugins): kiqi-lens truncation no longer panics mid-codepoint
 - docs(plugin-abi): round 6.30 + correct three stale claims
 - fix(host): the jail check must not create directories outside the root
 - fix(plugins): the lens guest's deny advice must list every command it needs
@@ -144,7 +144,7 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 - docs(plugin-abi): correct the phantom manifest gate and stale states
 - fix(cli): announce when re-granting exec resets its scope/budget
 
-dce1216 移植 rpi-webfetch + rpi-plan-mode（ABI 0.6.0，补导入面两缺口）
+dce1216 移植 kiqi-webfetch + kiqi-plan-mode（ABI 0.6.0，补导入面两缺口）
 087f73b docs: intro 里已成假的现状描述
 d1990cf exec 收整进程组（修“后台子进程挂死宿主”）
 9f1c2a9 net-http 响应体上限 8 MiB

@@ -21,15 +21,14 @@ target/*
 .deploy/
 .codegraph
 .ki/*
-.rpi/*
-!.rpi/skills/
-.rpi/skills/*
-!.rpi/skills/rpi-extension-authoring/
-!.rpi/skills/rpi-extension-authoring/SKILL.md
-!.rpi/skills/rpi-release/
-!.rpi/skills/rpi-release/SKILL.md
-website/.rpi/*
-.git/rpi-release-helper.exe
+!.ki/skills/
+.ki/skills/*
+!.ki/skills/kiqi-extension-authoring/
+!.ki/skills/kiqi-extension-authoring/SKILL.md
+!.ki/skills/kiqi-release/
+!.ki/skills/kiqi-release/SKILL.md
+website/.ki/*
+.git/kiqi-release-helper.exe
 publish-*.log
 
 # Guest-side workspace (wasm32-wasip2) build output. No trailing slash: the

@@ -1,6 +1,6 @@
 # kiqi-subagents-guest
 
-`rpi-subagents` ported to the kiqi wasm ABI (`kiqi:plugin@0.7.1`). It registers
+`kiqi-subagents` ported to the kiqi wasm ABI (`kiqi:plugin@0.7.1`). It registers
 one tool, `delegate_task`, which validates its arguments and returns a bounded,
 non-recursive **delegation envelope** — a JSON description of the work a host
 might schedule. It imports **no capability**: the whole behaviour is argument
@@ -14,7 +14,7 @@ ask for and the tool is usable immediately:
 ```bash
 cargo build --manifest-path plugins/wasm/kiqi-subagents-guest/Cargo.toml \
     --target wasm32-wasip2 --release
-ki insmod --build plugins/wasm/kiqi-subagents-guest --id rpi-subagents --yes
+ki insmod --build plugins/wasm/kiqi-subagents-guest --id kiqi-subagents --yes
 ```
 
 ## The envelope is byte-stable
@@ -22,7 +22,7 @@ ki insmod --build plugins/wasm/kiqi-subagents-guest --id rpi-subagents --yes
 The tool emits exactly the bytes the compile-time plugin emits:
 
 ```json
-{"kind":"rpi-delegation","task":"review","role":"worker","maxTurns":32,"timeoutSeconds":1800,"recursive":false}
+{"kind":"kiqi-delegation","task":"review","role":"worker","maxTurns":32,"timeoutSeconds":1800,"recursive":false}
 ```
 
 Field order, clamping (`maxTurns` 1–32 default 8, `timeoutSeconds` 10–1800
@@ -40,15 +40,15 @@ Stated, not hidden:
    run a bounded one-shot (default 30s, capped at 300s), but the delegation
    contract is a session-level child that outlives a tool call, and a wasm guest
    has no handle that lives between calls (plugin-abi.md §6.2 reaches the same
-   conclusion for `rpi-orchestrator`). A true spawner stays compile-time work.
+   conclusion for `kiqi-orchestrator`). A true spawner stays compile-time work.
 
 2. **Cross-tier tool-name takeover (§6.20).** This guest declares the same id
-   (`rpi-subagents`) and the same tool name (`delegate_task`) as the compiled
+   (`kiqi-subagents`) and the same tool name (`delegate_task`) as the compiled
    plugin. `ki` merges three tiers into one tool table (builtin → cdylib →
    compiled → wasm) and §6.20 makes a collision **asymmetric**: a trusted layer
    may override a name, but an *untrusted* (wasm) host that hits an occupied name
    is refused with a warning. So installed alongside a `ki` that already ships
-   the compiled `rpi-subagents`, the compiled `delegate_task` keeps the name and
+   the compiled `kiqi-subagents`, the compiled `delegate_task` keeps the name and
    **this guest's tool is the one refused**. That is the designed takeover guard
    (a third-party wasm plugin must not be able to shadow a first-party tool),
    not a bug. Run this guest on a build without the compiled plugin to exercise

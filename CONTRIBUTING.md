@@ -27,7 +27,7 @@ By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 - Optional: [`task`](https://taskfile.dev/) for the release/deploy targets in
   `Taskfile.yml`. Ordinary builds do not need it.
 
-No API key is required for the test suite: `rpi-ai` ships a deterministic
+No API key is required for the test suite: `kiqi-ai` ships a deterministic
 `faux` provider and the tests run offline.
 
 ## Build and test
@@ -63,31 +63,31 @@ provider to the default `cargo test` path.
 
 ## Repository layout
 
-The workspace directories and the published crate names both use the `rpi-`
-prefix (`crates/rpi-ai` ↔ `rpi-ai`). `package.name` in each `Cargo.toml` is the
+The workspace directories and the published crate names both use the `kiqi-`
+prefix (`crates/kiqi-ai` ↔ `kiqi-ai`). `package.name` in each `Cargo.toml` is the
 crate name; the directory name is not part of the public API.
 
 | Directory                          | Crate            |
 | ---------------------------------- | ---------------- |
-| `crates/rpi-telemetry`              | `rpi-telemetry`  |
-| `crates/rpi-ai`                     | `rpi-ai`         |
-| `crates/rpi-agent`                  | `rpi-agent`      |
-| `crates/rpi-tools`                  | `rpi-tools`      |
-| `crates/rpi-harness`                | `rpi-harness`    |
-| `crates/rpi-cli`                    | `rpi-cli`        |
-| `crates/rpi-tui`                    | `rpi-tui`        |
-| `crates/rpi-plugin-sdk`            | `rpi-plugin-sdk` |
-| `crates/rpi-extensions`            | `rpi-extensions` |
+| `crates/kiqi-telemetry`              | `kiqi-telemetry`  |
+| `crates/kiqi-ai`                     | `kiqi-ai`         |
+| `crates/kiqi-agent`                  | `kiqi-agent`      |
+| `crates/kiqi-tools`                  | `kiqi-tools`      |
+| `crates/kiqi-harness`                | `kiqi-harness`    |
+| `crates/kiqi-cli`                    | `kiqi-cli`        |
+| `crates/kiqi-tui`                    | `kiqi-tui`        |
+| `crates/kiqi-plugin-sdk`            | `kiqi-plugin-sdk` |
+| `crates/kiqi-extensions`            | `kiqi-extensions` |
 
 Dependency direction is one-way and must stay that way:
 
 ```
-rpi-telemetry → rpi-ai → rpi-agent → rpi-tools → rpi-harness → rpi-cli
+kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli
 ```
 
-`rpi-plugin-sdk` is a zero-dependency leaf so that plugins do not pull the
-whole runtime; `rpi-extensions` sits on top of it. Adding a dependency that
-points backwards (for example `rpi-agent` depending on `rpi-cli`) will be
+`kiqi-plugin-sdk` is a zero-dependency leaf so that plugins do not pull the
+whole runtime; `kiqi-extensions` sits on top of it. Adding a dependency that
+points backwards (for example `kiqi-agent` depending on `kiqi-cli`) will be
 rejected.
 
 `docs/architecture/overview.md` explains the design intent behind the split;
@@ -134,11 +134,11 @@ keep the type prefix and scope in the conventional form.
 4. Expect review comments on API additions; the public surface of these crates
    is intended to be small and stable.
 
-If your change touches the plugin ABI (`rpi-plugin-sdk`), call it out
+If your change touches the plugin ABI (`kiqi-plugin-sdk`), call it out
 explicitly in the PR description. ABI changes affect every already-built
 extension and require a documented negotiation story.
 
-If your change touches session persistence (`rpi-harness`), describe the
+If your change touches session persistence (`kiqi-harness`), describe the
 recovery behaviour for a crash in the middle of the affected operation.
 
 ## Releases

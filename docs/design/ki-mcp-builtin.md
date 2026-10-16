@@ -4,7 +4,7 @@
 > ——外部 MCP server 在 `settings.json` 里配置、连接随会话存活、工具展开成原生工具；ACP 的
 > `session/new mcpServers` 从拒绝改为接受。
 > 关联：`plugin-abi.md` §6.2（mcp-adapter 不迁 wasm 的裁定：长连/起子进程，宿主级功能）；
-> `ki-acp-serve.md`（ACP 面，批次 3 在此合流）。前身实现：`rpi-package/packages/rpi-mcp-adapter`
+> `ki-acp-serve.md`（ACP 面，批次 3 在此合流）。前身实现：`rpi-package/packages/kiqi-mcp-adapter`
 > （手写客户端 2299 行，本机曾以 dylib 运行，已于 2026-10-16 退役）。
 
 ## 1. 要解决什么（实核证据）
@@ -14,7 +14,7 @@
 | MCP 连接必须跨工具调用存活 | 前身实现按 `(host_scope, identity, name)` 键把连接存进程级 map，跨调用复用（`runtime.rs:134-185`）；stdio server 是长活子进程 |
 | wasm ABI 表达不了 | `exec`/`proc` 句柄随调用收（`plugin-abi.md` §6.32/§6.34）；`net-http` 请求级 |
 | ACP 协议面本就期待宿主管 MCP | `session/new` 携带 `mcpServers`（schema `v1/agent.rs:2659`）；ki 现为**响亮拒绝**（`acp/mod.rs:266-276, 374-383`） |
-| 宿主内建的所有机制已就位 | 内建工具 trait（`rpi-agent/src/agent_tool.rs:29`）、装配 seam（`session.rs:371-378` 之间）、会话级长活资源先例（ReloadContext/ACP LiveSession） |
+| 宿主内建的所有机制已就位 | 内建工具 trait（`kiqi-agent/src/agent_tool.rs:29`）、装配 seam（`session.rs:371-378` 之间）、会话级长活资源先例（ReloadContext/ACP LiveSession） |
 | 生态有官方 SDK | `rmcp`（modelcontextprotocol/rust-sdk，Apache-2.0）；ABB 已在本组织内用 1.8.0 跑通 stdio 全链路（`abb/crates/abb-agent/src/mcp.rs`，1253 行） |
 | MSRV 不是障碍（实核） | ki 声明 `rust-version = "1.78"` 已陈旧——已在依赖中的 `agent-client-protocol 3.3.0` 自身要求 `1.88.0`；实际工具链 1.99.0 |
 
@@ -33,7 +33,7 @@
 
 ## 3. 三个参照物
 
-- **前身 `rpi-mcp-adapter`**（手写 2299 行）：配置 schema（`{mcpServers:{name:{command,args,env,cwd,enabled,timeoutSeconds}|{url,headers,…}}}`，`config.rs:6-47`）、stdio 行帧 + 16MiB 上限 + 进程树收杀（`transport.rs`）、逐请求 deadline 1..=300s、失败即弃连下次重建——**语义蓝本**。它的三个已知弱点不继承：`exposure` 是死配置（从不执行）、配置路径每调用传参无默认、全局静态 SESSIONS（无会话归属）。
+- **前身 `kiqi-mcp-adapter`**（手写 2299 行）：配置 schema（`{mcpServers:{name:{command,args,env,cwd,enabled,timeoutSeconds}|{url,headers,…}}}`，`config.rs:6-47`）、stdio 行帧 + 16MiB 上限 + 进程树收杀（`transport.rs`）、逐请求 deadline 1..=300s、失败即弃连下次重建——**语义蓝本**。它的三个已知弱点不继承：`exposure` 是死配置（从不执行）、配置路径每调用传参无默认、全局静态 SESSIONS（无会话归属）。
 - **ABB 的 `rmcp` 用法**：官方 SDK 1.8.0（`client` + `transport-child-process`）跑通 initialize/工具分页列举/调用/取消/resources 订阅/通知处理/连接与结果预算/子进程 env 卫生——**引擎选型的直接证据**；其「用 serde_json 中转而非类型字段」的手法用来吸收 rmcp 的类型漂移。
 - **ki 自身**：内建工具机制（`AgentTool` + `build_tools` + seam）、settings 解析（`Settings`，Deserialize-only、无 deny_unknown_fields）、会话级资源与收尾先例（各模式结尾 + `LiveSession::close` + Drop 兜底）、信任模型先例（插件授权文件：声明归作者、授权归用户、执行归宿主）。
 
@@ -121,8 +121,8 @@
 
 ## 10. 批次 1 状态（2026-10-16，完成）
 
-提交 `07d808a`（分支 `feat/mcp-builtin`，已 ff-合入 main）。交付：新 crate `crates/rpi-mcp`
-（config/manager/tool，~1.5k 行）+ rpi-cli 接线（Settings 只读解析 `mcpServers`、
+提交 `07d808a`（分支 `feat/mcp-builtin`，已 ff-合入 main）。交付：新 crate `crates/kiqi-mcp`
+（config/manager/tool，~1.5k 行）+ kiqi-cli 接线（Settings 只读解析 `mcpServers`、
 `start_mcp_manager`、seam 注入 `merge_mcp_tools`、ReloadContext 持有、各模式收尾 +
 ACP close + Drop 兜底）。引擎 `rmcp 1.8.0`（pin）；测试 21 单测 + 10 e2e（含进程树
 OS 级断言：server pid 与孙进程都须消失）。
@@ -160,7 +160,7 @@ ki 只投递通知（业主裁定）。
 单测（stdio 含 env 转换、Http/Sse 拒绝）。
 
 **已知缺口（批次 3 记录）**：ACP 级「客户端 server 的工具经真实启动路径出现」未做端到端
-（假 server 二进制对 rpi-cli 测试不可达、ACP 测试工厂为桩）；该链路由 decode 单测 + rpi-mcp
+（假 server 二进制对 kiqi-cli 测试不可达、ACP 测试工厂为桩）；该链路由 decode 单测 + kiqi-mcp
 启动路径 e2e + 类型化接线共同覆盖。
 
 **剩余**：HTTP/Streamable + SSE 传输（届时 HTTP 订阅自然解锁）、prompts/sampling（明确不做）、

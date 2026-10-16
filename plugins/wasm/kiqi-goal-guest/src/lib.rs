@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! `rpi-goal` ported to the wasm ABI (0.7.0).
+//! `kiqi-goal` ported to the wasm ABI (0.7.0).
 //!
 //! Goal mode records one persistent, context-injected objective per project and
 //! lets the model advance it across turns: the `goal` tool (eight actions), the
@@ -8,7 +8,7 @@
 //! and re-injects the active goal.
 //!
 //! State lives in `<project>/.ki/goals.json` — the compile-time `GOAL_FILE` and
-//! the exact shape the compiled `rpi-orchestrator` reads, so an active goal
+//! the exact shape the compiled `kiqi-orchestrator` reads, so an active goal
 //! started here turns the compiled orchestration guidance on. (The `fs` grant's
 //! scope is now the project tree — a grant-model change, not an ABI one; the
 //! ABI stays 0.7.1. Before the scope existed the guest kept a
@@ -37,8 +37,8 @@ use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
 use kiqi_plugin_guest::bindings::kiqi::plugin::{fs, inject, session_read, types};
 use serde_json::{json, Value};
 
-const ID: &str = "rpi-goal";
-/// Project-relative path of the state file — the compile-time `rpi-goal`
+const ID: &str = "kiqi-goal";
+/// Project-relative path of the state file — the compile-time `kiqi-goal`
 /// contract (`GOAL_FILE`). The `fs` grant's scope is the project tree, so this
 /// path resolves under the session's directory.
 const PROJECT_FILE: &str = ".ki/goals.json";

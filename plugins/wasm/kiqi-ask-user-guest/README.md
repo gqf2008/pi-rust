@@ -1,6 +1,6 @@
 # kiqi-ask-user-guest
 
-`rpi-ask-user` ported to wasm. It is the reference case for the `ui` capability:
+`kiqi-ask-user` ported to wasm. It is the reference case for the `ui` capability:
 it normalizes the tool arguments, opens one host dialog per question, polls it
 to an answer, and honours cancellation and `timeout`.
 

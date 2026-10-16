@@ -1,6 +1,6 @@
 # demo/sdk.tape — record the offline, deterministic SDK demo.
 #
-#   vhs demo/sdk.tape        # -> docs/images/rpi-sdk-demo.gif
+#   vhs demo/sdk.tape        # -> docs/images/kiqi-sdk-demo.gif
 #
 # Everything shown is the real output of real code driven by the `faux` provider:
 # no API key, no network, same bytes every run. That is the whole point of the
@@ -14,7 +14,7 @@
 # Recording it from scratch in CI: `scoop install vhs ttyd` (Windows) or
 # `brew install vhs` (macOS); ffmpeg is the other dependency.
 
-Output docs/images/rpi-sdk-demo.gif
+Output docs/images/kiqi-sdk-demo.gif
 
 Set Shell "bash"
 Set FontSize 15

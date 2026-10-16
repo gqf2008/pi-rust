@@ -2,7 +2,7 @@
   "hero": {
     "eyebrow": "RUST AGENT TOOLKIT",
     "title": "把 Agent 做成你自己的工具。",
-    "description": "rpi 是一个 library-first 的 Rust SDK。用清晰的分层、可替换的模型 Provider 和真正可测试的工具循环，构建属于你的 coding agent。"
+    "description": "ki 是一个 library-first 的 Rust SDK。用清晰的分层、可替换的模型 Provider 和真正可测试的工具循环，构建属于你的 coding agent。"
   },
   "stats": [
     {
@@ -50,31 +50,31 @@
   ],
   "architecture": [
     {
-      "name": "rpi-ai",
+      "name": "kiqi-ai",
       "label": "Models + streaming",
       "description": "统一消息类型、Provider 和流式事件",
       "tone": "orange"
     },
     {
-      "name": "rpi-agent",
+      "name": "kiqi-agent",
       "label": "Agent loop",
       "description": "工具调用、事件、Hook、steering",
       "tone": "mint"
     },
     {
-      "name": "rpi-tools",
+      "name": "kiqi-tools",
       "label": "Built-in tools",
       "description": "read / write / edit / bash",
       "tone": "blue"
     },
     {
-      "name": "rpi-harness",
+      "name": "kiqi-harness",
       "label": "Sessions",
       "description": "会话树、JSONL、compaction",
       "tone": "violet"
     },
     {
-      "name": "rpi-cli",
+      "name": "kiqi-cli",
       "label": "Your interface",
       "description": "CLI、TUI、配置和插件",
       "tone": "cream"
@@ -86,7 +86,7 @@
       "label": "Minimal agent",
       "file": "examples/minimal/src/main.rs",
       "note": "确定性的本地 provider，不需要 API key。",
-      "code": "use rpi_agent::AgentBuilder;\nuse rpi_ai::providers::faux::{FauxProvider, FauxScript};\n\n#[tokio::main]\nasync fn main() {\n    let script = FauxScript::new()\n        .with_text(\"Hello from rpi!\");\n    let provider = FauxProvider::new(script);\n    let model = provider.default_model().clone();\n\n    let agent = AgentBuilder::new()\n        .model(model)\n        .stream_fn(make_stream_fn(provider))\n        .build()\n        .expect(\"agent builds\");\n\n    agent.prompt(\"hi\").await.expect(\"prompt completes\");\n}\n"
+      "code": "use kiqi_agent::AgentBuilder;\nuse kiqi_ai::providers::faux::{FauxProvider, FauxScript};\n\n#[tokio::main]\nasync fn main() {\n    let script = FauxScript::new()\n        .with_text(\"Hello from ki!\");\n    let provider = FauxProvider::new(script);\n    let model = provider.default_model().clone();\n\n    let agent = AgentBuilder::new()\n        .model(model)\n        .stream_fn(make_stream_fn(provider))\n        .build()\n        .expect(\"agent builds\");\n\n    agent.prompt(\"hi\").await.expect(\"prompt completes\");\n}\n"
     },
     {
       "id": "tools",
@@ -101,7 +101,7 @@
       "version": "0.3.1",
       "status": "current",
       "title": "同机实测：启动快 9.7×、内存小 4.9×",
-      "description": "以同一套 JSONL RPC 协议、同一台机器实测：rpi 启动快 9.7×、内存小 4.9×；并让每个 crate 在 crates.io 与 docs.rs 上正确展示。"
+      "description": "以同一套 JSONL RPC 协议、同一台机器实测：ki 启动快 9.7×、内存小 4.9×；并让每个 crate 在 crates.io 与 docs.rs 上正确展示。"
     },
     {
       "version": "next",
@@ -113,7 +113,7 @@
       "version": "future",
       "status": "exploring",
       "title": "你的想法",
-      "description": "把 rpi 接进你的产品、工作流和自己的运行环境。"
+      "description": "把 ki 接进你的产品、工作流和自己的运行环境。"
     }
   ]
 }

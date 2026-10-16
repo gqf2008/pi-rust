@@ -24,7 +24,7 @@ ki --connect 127.0.0.1:9899 --token <token>
 
 | 参数 | 说明 |
 |---|---|
-| `--server` | 进入无头服务端模式（由内置/扩展 `rpi-server` 提供 TCP 监听） |
+| `--server` | 进入无头服务端模式（由内置/扩展 `kiqi-server` 提供 TCP 监听） |
 | `--port <n>` | 监听端口（默认 `9800`） |
 | `--bind <ip>` | 监听地址（默认 `127.0.0.1`） |
 | `--token <t>` | 使用指定 token（默认随机生成 32 位 hex） |
@@ -33,7 +33,7 @@ ki --connect 127.0.0.1:9899 --token <token>
 启动日志示例：
 
 ```text
-rpi-server listening on 127.0.0.1:9899
+kiqi-server listening on 127.0.0.1:9899
 token: 3592139afa7b77e43592139afa7b77e4
 ```
 
@@ -68,14 +68,14 @@ ki --connect 127.0.0.1:9899        # 无需再传 --token
 
 | 层 | 位置 | 职责 |
 |---|---|---|
-| 协议（单一真源） | `crates/rpi-cli/src/remote/protocol.rs` | `RemoteEvent` / `RemoteCommand` / `RemoteResponse` / `SessionState`，服务端与客户端**共用**这些类型 |
-| 无头 agent 循环 | `crates/rpi-cli/src/modes.rs`（`modes::rpc`） | 读 stdin 命令、驱动 `main` lane、把 `AgentEvent` 投影成线协议输出 |
-| 服务端适配 | `rpi-package/packages/rpi-server` | TCP JSON-RPC、会话管理、token 校验、把子进程 stdout 转发为事件 |
-| 客户端连接 | `crates/rpi-cli/src/remote/client.rs` | TCP 握手、`authenticate`、事件泵、发送命令 |
-| 客户端会话模型 | `crates/rpi-cli/src/remote/session.rs` | 把事件流折叠成 `Transcript`（用户/助手/思考/工具/通知）+ `SessionState` |
-| 客户端 TUI | `crates/rpi-cli/src/remote/tui.rs` | 基于 `pi-tui` 渲染 transcript + 输入编辑器 + 状态栏 |
+| 协议（单一真源） | `crates/kiqi-cli/src/remote/protocol.rs` | `RemoteEvent` / `RemoteCommand` / `RemoteResponse` / `SessionState`，服务端与客户端**共用**这些类型 |
+| 无头 agent 循环 | `crates/kiqi-cli/src/modes.rs`（`modes::rpc`） | 读 stdin 命令、驱动 `main` lane、把 `AgentEvent` 投影成线协议输出 |
+| 服务端适配 | `rpi-package/packages/kiqi-server` | TCP JSON-RPC、会话管理、token 校验、把子进程 stdout 转发为事件 |
+| 客户端连接 | `crates/kiqi-cli/src/remote/client.rs` | TCP 握手、`authenticate`、事件泵、发送命令 |
+| 客户端会话模型 | `crates/kiqi-cli/src/remote/session.rs` | 把事件流折叠成 `Transcript`（用户/助手/思考/工具/通知）+ `SessionState` |
+| 客户端 TUI | `crates/kiqi-cli/src/remote/tui.rs` | 基于 `pi-tui` 渲染 transcript + 输入编辑器 + 状态栏 |
 
-`--connect` 在 `crates/rpi-cli/src/app.rs::run()` 中**最早**被拦截，直接跳过
+`--connect` 在 `crates/kiqi-cli/src/app.rs::run()` 中**最早**被拦截，直接跳过
 provider / harness / session / extension 的全部本地构建——这是“客户端零本地资源”的实现方式。
 
 ## 线协议
@@ -139,8 +139,8 @@ provider / harness / session / extension 的全部本地构建——这是“客
 
 ## 测试
 
-- 单元测试：`crates/rpi-cli/src/remote/protocol.rs`（线形往返）、`session.rs`（事件折叠）。
-- 集成测试：`crates/rpi-cli/tests/remote_client_smoke.rs`
+- 单元测试：`crates/kiqi-cli/src/remote/protocol.rs`（线形往返）、`session.rs`（事件折叠）。
+- 集成测试：`crates/kiqi-cli/tests/remote_client_smoke.rs`
   - 自包含（假服务端）：握手 + transcript 折叠、事件泵忽略响应帧、**token 认证三态**；
   - 真实服务端（env 门控）：`KI_REMOTE_E2E_ADDR` + `KI_REMOTE_E2E_TOKEN`
     驱动真实客户端跑一轮真实模型调用。

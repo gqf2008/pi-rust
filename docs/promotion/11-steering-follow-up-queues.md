@@ -19,8 +19,8 @@ stateDiagram-v2
 队列模式决定一次释放多少消息：
 
 ```rust
-use rpi_agent::queue::PendingMessageQueue;
-use rpi_agent::types::QueueMode;
+use kiqi_agent::queue::PendingMessageQueue;
+use kiqi_agent::types::QueueMode;
 
 let mut queue = PendingMessageQueue::new(QueueMode::OneAtATime);
 queue.enqueue(message_a);
@@ -43,7 +43,7 @@ flowchart LR
     Context --> Events[统一 AgentEvent]
 ```
 
-取消运行时，队列也必须有明确策略：恢复到编辑器、保留等待，或显式丢弃。ki 的测试覆盖 steering、follow-up 和 abort 路径，入口见 `crates/rpi-agent/tests/steering.rs`、`follow_up.rs`。
+取消运行时，队列也必须有明确策略：恢复到编辑器、保留等待，或显式丢弃。ki 的测试覆盖 steering、follow-up 和 abort 路径，入口见 `crates/kiqi-agent/tests/steering.rs`、`follow_up.rs`。
 
 ## 这对实际项目有什么用
 
@@ -59,4 +59,4 @@ Users often need to correct an agent before the current run ends. ki has two que
 
 Both queues are FIFO queues with an explicit drain policy. `OneAtATime` releases the oldest message and keeps the rest. `All` drains the whole queue in order. The loop chooses the drain point, so input is not inserted into a transcript halfway through a model operation.
 
-This makes cancellation and UI behavior easier to reason about. The implementation is in `crates/rpi-agent/src/queue.rs`; the steering and follow-up tests document the edge cases.
+This makes cancellation and UI behavior easier to reason about. The implementation is in `crates/kiqi-agent/src/queue.rs`; the steering and follow-up tests document the edge cases.

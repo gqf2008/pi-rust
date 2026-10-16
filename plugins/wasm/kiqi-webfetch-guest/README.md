@@ -1,6 +1,6 @@
 # kiqi-webfetch-guest
 
-`rpi-webfetch` ported to the kiqi wasm ABI. The tool fetches a public HTTP(S) URL
+`kiqi-webfetch` ported to the kiqi wasm ABI. The tool fetches a public HTTP(S) URL
 and returns bounded readable text (HTML reduced to text).
 
 ## What the port exercises
@@ -10,7 +10,7 @@ no sockets, so the request goes through the host capability and the **user's
 allow-list** decides where it may go:
 
 ```bash
-ki insmod --build plugins/wasm/kiqi-webfetch-guest --id rpi-webfetch \
+ki insmod --build plugins/wasm/kiqi-webfetch-guest --id kiqi-webfetch \
     --host api.example.com --host docs.rs
 ```
 

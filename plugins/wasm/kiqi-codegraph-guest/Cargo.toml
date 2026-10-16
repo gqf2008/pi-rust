@@ -7,9 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "rpi-codegraph ported to the kiqi wasm ABI (exec for init/sync, proc for the MCP session)"
+description = "kiqi-codegraph ported to the kiqi wasm ABI (exec for init/sync, proc for the MCP session)"
 readme = "README.md"
-keywords = ["rpi", "kiqi", "wasm", "plugin", "codegraph"]
+keywords = ["ki", "kiqi", "wasm", "plugin", "codegraph"]
 categories = ["development-tools"]
 
 [lib]

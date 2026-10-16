@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the `rpi-*` crate family are documented in this file.
+All notable changes to the `kiqi-*` crate family are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -10,6 +10,26 @@ in dependency order. `git tag vX.Y.Z` marks the commit that a release was cut
 from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
+
+### Changed
+
+- **The `rpi-*` → `kiqi-*` rename is finished.** Every crate, plugin and wasm
+  guest directory, package name, feature flag (`plugin-rpi-*` →
+  `plugin-kiqi-*`), Rust path (`rpi_ai` → `kiqi_ai`), plugin id and file name
+  now uses the `kiqi-` prefix the fork's own `kiqi-plugin` /
+  `kiqi-plugin-host` / `kiqi-*-guest` already used; `ki` stays the command. The
+  docs, website data, `Taskfile.yml`, CI, packaging manifests (Homebrew
+  `Formula/ki.rb`, Scoop `ki.json`, winget `bigfish1913.ki.*`) and release-asset
+  names (`kiqi-v<version>-<target>`) follow. The project-local runtime directory
+  is `.ki/` (was `.rpi/`), including the tracked `.ki/skills/` skill.
+  Deliberately kept — each because dropping it would lose data or silently
+  ignore a configured setup, and each now marked as a legacy trace in place:
+  the `rpi.value` session marker (`kiqi-harness/src/session/values.rs`), the
+  update-cache `#[serde(alias = "rpi")]` (`kiqi-cli/src/updates.rs`), and the
+  pre-fork `RPI_*` / `.rpi` fallbacks in `kiqi-langfuse` and
+  `kiqi-permissions`. Deliberately **not** renamed, because they name other
+  projects rather than this one: `pi-rust/rpi-package` (the extension registry
+  the ported plugins came from) and `@juicesharp/rpiv-todo`.
 
 ### Added
 - **An active goal points the model at the orchestrator**: the goal guest's
@@ -58,20 +78,20 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   opts a plugin into reading and writing the project tree (same scope as
   `exec`/`proc`); the default stays the plugin's own data directory, and legacy
   `"fs": true` files keep working unchanged.
-- **`rpi-orchestrator` ported to wasm** (`plugins/wasm/kiqi-orchestrator-guest`):
+- **`kiqi-orchestrator` ported to wasm** (`plugins/wasm/kiqi-orchestrator-guest`):
   the same three tools and guidance, with waves that run to completion inside
   the dispatch call (children in parallel on `proc`; per-node timeouts enforced
   in the guest). Semantic reductions, documented in the guest README: no
   background waves (`waitSeconds: 0` refused), no mid-wave reshape, and the
   child turn ceiling is not enforced (no env equivalent). It leaves the default
-  build too — which now compiles in only `rpi-permissions`.
-- **`rpi-codegraph` ported to wasm** (`plugins/wasm/kiqi-codegraph-guest`):
+  build too — which now compiles in only `kiqi-permissions`.
+- **`kiqi-codegraph` ported to wasm** (`plugins/wasm/kiqi-codegraph-guest`):
   the same eight tools, with the index probe/`init`/`sync` on `exec` and the
   per-call MCP session on `proc`. `proc.read-line` gained a `timeout-ms`
   parameter so the port keeps the 20-second session timeout and its
   "try `codegraph unlock`" message (the contract gap the first real consumer
   found). It leaves the default build, which now compiles in only
-  `rpi-orchestrator` and `rpi-permissions`. Windows stays on the compiled
+  `kiqi-orchestrator` and `kiqi-permissions`. Windows stays on the compiled
   plugin: resolving npm/Scoop shims needs PowerShell, and `exec`/`proc` take
   bare command names.
 - **`proc` (ABI 0.7.0): a child process the plugin may talk to for the length
@@ -82,9 +102,9 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   each child's process group and reaps it when the calling entry point
   returns, so a guest that forgets `kill` or traps leaves nothing behind
   (asserted on the OS, not on the host's bookkeeping). It exists to migrate
-  `rpi-codegraph`, whose search runs a per-call MCP server over stdio; it
+  `kiqi-codegraph`, whose search runs a per-call MCP server over stdio; it
   deliberately does not give plugins a subprocess that outlives a call —
-  rpi-orchestrator's background model needs the host to own the scheduler,
+  kiqi-orchestrator's background model needs the host to own the scheduler,
   which is a separate design.
 
 - **`ki insmod <path.wasm>` / `ki rmmod <id>`** — kernel-flavoured top-level
@@ -96,23 +116,23 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 ### Changed
 
 - **Only the plugins without a wasm port are compiled in by default.** A
-  `plugins/rpi-*` crate that has a `plugins/wasm/kiqi-*-guest` counterpart is
-  now opt-in: `--features plugin-rpi-<name>`, or install the wasm guest with
-  `ki insmod --build plugins/wasm/kiqi-<name>-guest`. Default: `rpi-orchestrator`,
-  `rpi-permissions`, `rpi-codegraph` (nothing else registered). The crates,
+  `plugins/kiqi-*` crate that has a `plugins/wasm/kiqi-*-guest` counterpart is
+  now opt-in: `--features plugin-kiqi-<name>`, or install the wasm guest with
+  `ki insmod --build plugins/wasm/kiqi-<name>-guest`. Default: `kiqi-orchestrator`,
+  `kiqi-permissions`, `kiqi-codegraph` (nothing else registered). The crates,
   their features, their cdylib faces and their tests all stay, and CI runs the
   opt-in configuration, so nothing rots. One coupling to know about: the
   orchestrator's goal-linked guidance reads `.ki/goals.json`, which the
-  **compiled** `rpi-goal` writes — with that plugin opt-in, the guidance no
+  **compiled** `kiqi-goal` writes — with that plugin opt-in, the guidance no
   longer turns itself on (set `KI_ORCHESTRATOR_GUIDE=1` to force it, or build
-  `--features plugin-rpi-goal`). The **wasm** tier closes this gap (below):
+  `--features plugin-kiqi-goal`). The **wasm** tier closes this gap (below):
   `kiqi-goal-guest` writes the same `.ki/goals.json` and
   `kiqi-orchestrator-guest` gates its guidance on it.
 - **The goal→orchestrator coupling is restored in the wasm tier.** `kiqi-goal-guest`
   now keeps its state in `<project>/.ki/goals.json` in the compiled shape
   (`{"active": …|null, "archived": […]}`) through the project-scoped `fs`
   grant, instead of a `{project: Goals}` map in its own data directory — so the
-  compiled `rpi-orchestrator` reads it too. `kiqi-orchestrator-guest` gates its
+  compiled `kiqi-orchestrator` reads it too. `kiqi-orchestrator-guest` gates its
   "## Subagent orchestration" guidance on that file (an active goal, the compiled
   `active_goal_from` semantics, fail-closed) instead of injecting it
   unconditionally; the compiled `KI_ORCHESTRATOR_GUIDE` override is dropped (a
@@ -128,23 +148,23 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed (previous)
 
-- **`rpi-langfuse` is no longer in the default build.** The tracing tier needs a
+- **`kiqi-langfuse` is no longer in the default build.** The tracing tier needs a
   Langfuse instance and an API key pair, so it is now opt-in:
-  `cargo build --features plugin-rpi-langfuse` (or a `ki` built that way). The
+  `cargo build --features plugin-kiqi-langfuse` (or a `ki` built that way). The
   crate, the wasm port and the feature flag all stay, and CI builds the feature
   explicitly so the compiled path keeps compiling.
 
 
 ### Added
 
-- **`rpi-orchestrator` is compiled in** behind `plugin-rpi-orchestrator`
+- **`kiqi-orchestrator` is compiled in** behind `plugin-kiqi-orchestrator`
   (default on): bounded DAG subagent orchestration — `subagent` runs one task
   in a child `ki -p --no-session` process, `plan` authors/edits the task graph,
   `dispatch` runs the ready wave, and a goal-coupled guidance section is
   appended to the system prompt when `/goal` is active. Ported from the
   `rpi-package` extension with pre-fork spellings fixed
-  (`.rpi/` → `.ki/`, `RPI_MAX_TURNS_PER_RUN` → `KI_MAX_TURNS_PER_RUN`,
-  `RPI_ORCHESTRATOR_*` → `KI_ORCHESTRATOR_*`); under `ki` the old names were
+  (`.ki/` → `.ki/`, `KI_MAX_TURNS_PER_RUN` → `KI_MAX_TURNS_PER_RUN`,
+  `KI_ORCHESTRATOR_*` → `KI_ORCHESTRATOR_*`); under `ki` the old names were
   silently inert. The harness's tool-call cancellation token now reaches
   compiled plugins as `HostCaps::cancel`, so aborting a call winds down the
   subagents it spawned instead of leaving them running.
@@ -184,9 +204,9 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - **Compile-time plugins now receive events.** The host fans `SessionStart`,
   `BeforeAgentStart`, provider requests, messages and tool calls out to every
   compiled-in plugin's `on_event`, so a `ki` with no dynamic libraries still
-  traces a run and restores session state. `rpi-extensions` owns the dispatch
+  traces a run and restores session state. `kiqi-extensions` owns the dispatch
   sink; `ki` installs it per session with that session's capabilities.
-- **`rpi-langfuse` is compiled in** behind `plugin-rpi-langfuse` (default on):
+- **`kiqi-langfuse` is compiled in** behind `plugin-kiqi-langfuse` (default on):
   automatic Langfuse tracing over OTLP, plus the `langfuse_score`,
   `langfuse_prompt` and `langfuse_trace` tools. Its 14 event handlers and three
   tools left the cdylib ABI for the `Plugin` trait, and `set_status` now goes
@@ -194,7 +214,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
-- The `rpi-goal` test target compiles again (its unknown-action test predated
+- The `kiqi-goal` test target compiles again (its unknown-action test predated
   the host-aware `goal()` signature).
 
 ## [0.4.0] - 2026-10-13
@@ -202,11 +222,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 ### Changed
 
 - **Fork release.** The project is now `kiqi` and the command is `ki` (was
-  `rpi`): the executable, the startup lockup and window title, the config
-  directory (`~/.ki`, was `~/.rpi`), the project-local directory (`.ki`) and
-  every environment variable (`KI_*`, was `RPI_*`) were renamed. Existing
-  configs keep working after copying `~/.rpi` to `~/.ki`.
-- Crates keep the `rpi-*` names but are no longer published to crates.io
+  `ki`): the executable, the startup lockup and window title, the config
+  directory (`~/.ki`, was `~/.ki`), the project-local directory (`.ki`) and
+  every environment variable (`KI_*`, was `KI_*`) were renamed. Existing
+  configs keep working after copying `~/.ki` to `~/.ki`.
+- Crates keep the `kiqi-*` names but are no longer published to crates.io
   (`publish = false`); releases are cut from this fork only.
 
 
@@ -223,7 +243,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - Batch confirmed Windows console text pastes instead of dispatching each
   character separately, substantially reducing the delay before large pasted
   text folds. Preserve Unicode, tabs, line endings, shortcuts and trailing Enter.
-- Track rpi release notes independently from imported Pi settings so updates
+- Track ki release notes independently from imported Pi settings so updates
   appear once on the next new interactive session. `/changelog` defaults to the
   latest release; `/changelog all` shows the complete history.
 - Read scroll position and follow-output state from the primary scroll view,
@@ -326,29 +346,29 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   real `delta` field once, so it no longer has to diff successive cumulative
   snapshots and stream size stays linear — matching the JSON/RPC contract the
   other Pi runtimes emit.
-- `rpi update` no longer stages a brand new build of the version that is
+- `ki update` no longer stages a brand new build of the version that is
   already running. It now asks crates.io first and reports
-  `rpi is up to date (0.3.13 is the latest release)` instead of compiling and
+  `ki is up to date (0.3.13 is the latest release)` instead of compiling and
   scheduling a replacement for the same version — the behaviour that made a
   working update look broken. `--force` keeps an explicit reinstall available,
   and an unverified answer (cached, or a registry that could not be reached) is
   labelled as such rather than asserted. A `pending-*` directory that already
   holds a validated binary counts as "about to happen", so re-running
-  `rpi update` while an update is queued does not start a second compile.
-- `rpi update` prunes the debris previous interrupted runs left in
-  `~/.rpi/agent/self-update`. A Windows update persists its `pending-*` staging
+  `ki update` while an update is queued does not start a second compile.
+- `ki update` prunes the debris previous interrupted runs left in
+  `~/.ki/agent/self-update`. A Windows update persists its `pending-*` staging
   directory so the PowerShell helper can install from it after the parent exits;
   when the helper died first — a reboot at the wrong moment, a machine-wide
   `taskkill` — the directory stayed forever, because nothing in the update path
   removed it and its still-`preparing` status file meant the next start never
   looked at it either. Staging directories no live status file claims are now
   reclaimed, along with the `preparing`/`waiting` records that named them.
-- The status file `rpi update` prints is readable by the time you go looking for
-  it. A `succeeded` record used to be deleted by the very next rpi start, so the
+- The status file `ki update` prints is readable by the time you go looking for
+  it. A `succeeded` record used to be deleted by the very next ki start, so the
   path in that message was dead on arrival and a finished update read as one
   that never ran. Completed records now survive as the receipt for the installed
   version (aging out after a day), and the `staged` line names the version and
-  says what to do: `rpi 0.3.13 staged; quit this rpi and it will be applied.`
+  says what to do: `ki 0.3.13 staged; quit this ki and it will be applied.`
 
 ## [0.3.12] - 2026-10-01
 
@@ -356,7 +376,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 - Plugins can now replace the system prompt at runtime via
   `register_before_agent_start` — the mechanism pi's extensions use as a
-  `before_agent_start` handler returning `systemPrompt`. rpi already broadcast
+  `before_agent_start` handler returning `systemPrompt`. ki already broadcast
   `BeforeAgentStart` so a plugin could watch a turn start, but the event handler
   ABI is fire-and-forget (`i32` only), so it could not influence one. The new
   slot carries an `out` pointer instead, which is the shape
@@ -377,45 +397,45 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
-- A spawned shell no longer inherits rpi-langfuse's subagent-nesting channel
+- A spawned shell no longer inherits kiqi-langfuse's subagent-nesting channel
   (`LANGFUSE_PI_PARENT_TRACE_ID` / `_SPAN_ID` / `_SESSION_ID` / `_DEPTH`). The
-  extension publishes those variables so a launcher can attach a nested `rpi` to
+  extension publishes those variables so a launcher can attach a nested `ki` to
   the turn that spawned it, and decides it is a subagent by reading them back —
-  but a bash/powershell child inherits the environment, so a plain `rpi` started
+  but a bash/powershell child inherits the environment, so a plain `ki` started
   from inside a shell adopted its ancestor's trace: it reused the parent trace
   id, hung its root off the parent's root span, and named it `Subagent Turn`
-  instead of opening its own trace. Only `RPI_SESSION_ID` was on the
+  instead of opening its own trace. Only `KI_SESSION_ID` was on the
   host-private exclusion list, because the prefix-based check could not see
   these. They are now excluded; a launcher that sets them deliberately still
   gets through, which is the supported nesting path. Two tests pin both halves.
 - The subagent channel's variable names moved into the plugin contract
-  (`rpi_plugin_sdk::SUBAGENT_PARENT_*`, with `SUBAGENT_PARENT_ENV` as the
-  family), and `rpi-tools` now consults that declaration instead of restating
+  (`kiqi_plugin_sdk::SUBAGENT_PARENT_*`, with `SUBAGENT_PARENT_ENV` as the
+  family), and `kiqi-tools` now consults that declaration instead of restating
   the strings. Restating them is what made the leak above possible in the first
   place: the exclusion and the extension each held a private copy of the names,
   across two repositories, so a rename on either side left the list matching a
   name nobody sets — no compile error, no failing test, the leak simply came
   back. A newly added family member is now excluded automatically, and
-  `rpi-cli` pins the wire values so changing one is caught as the cross-repo
+  `kiqi-cli` pins the wire values so changing one is caught as the cross-repo
   change it is.
 
 ## [0.3.10] - 2026-10-01
 
 ### Added
 
-- The plugin contract now owns the host identity: `rpi_plugin_sdk::HOST_NAME`
-  (`"rpi"`) and `HOST_VERSION`, with `rpi_cli::APP_NAME` / `VERSION` defined as
+- The plugin contract now owns the host identity: `kiqi_plugin_sdk::HOST_NAME`
+  (`"ki"`) and `HOST_VERSION`, with `kiqi_cli::APP_NAME` / `VERSION` defined as
   aliases of them so the two cannot drift. `BeforeAgentStart`'s payload carries
   `host: {name, version}`, giving an extension a way to label its own output (a
   trace name, a tag, `service.name`) from the host instead of hardcoding a brand
-  that a rename silently invalidates. `rpi-langfuse` had been reporting the
+  that a rename silently invalidates. `kiqi-langfuse` had been reporting the
   upstream TypeScript plugin's `"Pi Turn"` / `"pi"` for exactly that reason.
 - The host now publishes the session id twice, so an extension that observes a
-  run can name the session it is watching. `RPI_SESSION_ID` (constant:
-  `rpi_plugin_sdk::SESSION_ID_ENV`) is written whenever a session becomes active,
+  run can name the session it is watching. `KI_SESSION_ID` (constant:
+  `kiqi_plugin_sdk::SESSION_ID_ENV`) is written whenever a session becomes active,
   and `BeforeAgentStart`'s payload carries `sessionId` next to
   `prompt`/`imageCount`, recomputed each turn. Previously the only channel was
-  `__rpi.sessionId` on a plugin **tool** call, so a tracing extension reported a
+  `__ki.sessionId` on a plugin **tool** call, so a tracing extension reported a
   placeholder session for a pure-chat run and for every turn before the first
   tool call. The payload field is the one that makes the first turn correct; the
   environment variable is a convenience for plugins that never see a tool call.
@@ -424,29 +444,29 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 - Switching sessions no longer leaves plugins naming the previous one. The
   session id reaches a plugin on two channels — the `ToolCallContext` (read per
-  plugin **tool** call) and `RPI_SESSION_ID` (read per turn by the provider
+  plugin **tool** call) and `KI_SESSION_ID` (read per turn by the provider
   hooks) — and only the startup build republished them. An in-process swap
   (`/import`, `/fork`, the `/session` selector, and the plugin
   `NewSession`/`Fork`/`SwitchSession` runtime actions) changed the session the
   harness serves without touching either, so a plugin keyed to the old id went
   on serving it. All of them now route through one funnel that republishes both.
-- `RPI_SESSION_ID` no longer leaks into the shell that `bash`/`powershell`
+- `KI_SESSION_ID` no longer leaks into the shell that `bash`/`powershell`
   spawn. The shell inherited the whole process environment, so the variable
-  reached anything the command ran — including another `rpi`, which had no way
+  reached anything the command ran — including another `ki`, which had no way
   to tell its ancestor's session from its own. A small deny-list now keeps the
   host's own plumbing out of a spawned shell, while explicit per-call values
   still pass through.
-- `rpi update` no longer refuses to run when the running `rpi` was launched
+- `ki update` no longer refuses to run when the running `ki` was launched
   through a link, junction, or `subst` drive. The path validation demanded that
   `canonicalize()` reproduce the launch path byte for byte, so any link *above*
-  the executable — a `C:\tools\current\rpi.exe` junction, a `subst`, scoop's
-  `current` directories — aborted the update with "current rpi executable
+  the executable — a `C:\tools\current\ki.exe` junction, a `subst`, scoop's
+  `current` directories — aborted the update with "current ki executable
   resolves through a link or junction". The message named neither the path nor
   the link, and the check was the wrong shape: the leaf is what matters, so a
   linked *file* is still refused, now with both paths printed, while links
   *above* the executable resolve to the real install directory the update
   should rewrite.
-- `rpi update` no longer tells you to add the staging directory to `PATH`.
+- `ki update` no longer tells you to add the staging directory to `PATH`.
   Cargo's install advice named `<agent>/self-update/pending-*/bin`, which the
   atomic replace consumes, so following it added a path that stopped existing a
   second later; the child `cargo install` now runs `--quiet` (errors still
@@ -456,7 +476,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 - `docs/README.md` is marked as a historical 0.1.13 release post,
   and its update-commands section now carries a correction. It still told
-  readers to run `rpi pi-update` and `rpi self-update`, neither of which exists
+  readers to run `ki pi-update` and `ki self-update`, neither of which exists
   any more — the article only documented 0.1.13-era behavior and was never
   revisited when the Pi layer was removed and the alias was dropped.
 
@@ -464,30 +484,30 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
-- `rpi update` performs a real self-update again. `a5506dd` had reduced it to a
-  bare `cargo install` that ignored its arguments, so `rpi update --help`
+- `ki update` performs a real self-update again. `a5506dd` had reduced it to a
+  bare `cargo install` that ignored its arguments, so `ki update --help`
   reinstalled the crate instead of printing help and `--offline` did nothing.
   Restored: argument validation, `--help`, the `cargo binstall`/`cargo install`
   path, direct binary replacement on Unix, the staged PowerShell replacement on
   Windows (a running `.exe` cannot replace itself), staged-binary version
   validation, rollback, and the status report shown on the next start.
-- The startup update check covers the rpi release and installed Rust extensions
+- The startup update check covers the ki release and installed Rust extensions
   again, with the 6-hour cache and per-item fallback that survived a registry
   outage.
 
 ### Changed
 
-- The Pi compatibility layer is *not* restored: `rpi package`, `pi-package
+- The Pi compatibility layer is *not* restored: `ki package`, `pi-package
   update`, `install-pi`, `uninstall-pi` and `--enable-pi-packages` stay removed,
   along with the npm/Git package stores and the Node extension host.
 
 ### Fixed
 
-- Removed subcommands no longer fall through to the prompt path. `rpi package
+- Removed subcommands no longer fall through to the prompt path. `ki package
   update` used to be sent to the model as the message "package update" and
-  appeared to hang; it now fails immediately with a pointer to `rpi install` /
-  `rpi uninstall` / `rpi update`. `rpi self-update` reports the same way and
-  points at `rpi update`.
+  appeared to hang; it now fails immediately with a pointer to `ki install` /
+  `ki uninstall` / `ki update`. `ki self-update` reports the same way and
+  points at `ki update`.
 
 ## [0.3.8] - 2026-09-30
 
@@ -516,7 +536,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 ### Changed
 
 - **Transcript repaints are now O(1) per unchanged message, closing the
-  long-session lag against native pi.** rpi re-parsed every finished message's
+  long-session lag against native pi.** ki re-parsed every finished message's
   markdown/layout on every frame, so a 400-message session cost ~18 ms per
   frame (over the 16 ms budget) and got slower as it grew. It now mirrors
   native pi's caching layers: `Markdown` and `Text` memoize
@@ -527,17 +547,17 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   not rendered again when painted. A live theme switch bumps a global revision
   that every cache keys on, so `apply_theme_preset` cannot leave stale colours.
   A 400-message transcript drops from ~18 ms to ~0.8 ms per frame (~22×) and
-  stays under budget past 3000 messages; `crates/rpi-tui/examples/bench_transcript.rs`
+  stays under budget past 3000 messages; `crates/kiqi-tui/examples/bench_transcript.rs`
   reproduces the measurement.
 - **The terminal window/tab title now carries the startup mark.** An idle
-  session sets `▃ ▅ ▂ rpi · 🦀` instead of `🦀π rpi`, keeping the activity
+  session sets `▃ ▅ ▂ ki · 🦀` instead of `🦀π ki`, keeping the activity
   suffix it had before (`⟳` in flight, `↻` retrying), so the tab and the startup
   lockup read as one brand: the title's three eighth-blocks are the lockup's
   3:5:2 bar silhouette flattened into a single row, and a test reads the bar
   heights back out of the lockup so the two cannot drift apart. Each bar is one
   cell wide — the first cut used `██` per bar and read as three fat slabs in a
   tab strip. The title is built by `pi-cli`'s `brand` module, so it drops the
-  crab with `RPI_NO_EMOJI` exactly like the lockup — and it drops `π`, which is
+  crab with `KI_NO_EMOJI` exactly like the lockup — and it drops `π`, which is
   East-Asian *Ambiguous* and therefore measured differently under a CJK locale.
   Block elements share `█`'s width class, so the title is still single-width
   everywhere.
@@ -559,13 +579,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   comment that named the old key was updated with it.
 - **The last native-only keybindings are wired up.** `Ctrl+Z` suspends to the
   background on Unix (`app.suspend` — native binds no key on Windows, so neither
-  does rpi): it stops the renderer, hands the terminal back to the shell, and
+  does ki): it stops the renderer, hands the terminal back to the shell, and
   re-enters the alternate screen when the process is resumed with `fg`. On
   Windows, `Ctrl+Q` joins `Alt+Enter` for follow-ups and `Alt+V` joins `Ctrl+V`
-  for image paste — native's Windows keys, added alongside rpi's rather than
+  for image paste — native's Windows keys, added alongside ki's rather than
   replacing them, because the Windows clipboard-*text* fallback still rides
   `Ctrl+V`. The registry now matches native's defaults for every app-level
-  action rpi implements.
+  action ki implements.
 
 ### Fixed
 
@@ -587,7 +607,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 ### Added
 
 - **Plugin tools now receive the session they run in.** The host merges a
-  reserved `__rpi` object — `{"cwd", "sessionId"}` — into every plugin tool
+  reserved `__ki` object — `{"cwd", "sessionId"}` — into every plugin tool
   call's arguments, in the tool adapter's `execute` rather than in the agent loop
   or `prepare_arguments`, so the field reaches the plugin and nothing else: not
   the model, not the `ToolExecutionStart`/`Update` events, not the session log.
@@ -597,8 +617,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   without asking the model to guess an identity. `docs/extensions/authoring.md`
   documents the contract, including the one failure mode worth naming: a
   `#[serde(deny_unknown_fields)]` parameter struct will reject the injected key.
-- `cargo binstall rpi-cli` works: `[package.metadata.binstall]` points at the
-  release assets, which are named after the binary (`rpi`) rather than the crate,
+- `cargo binstall kiqi-cli` works: `[package.metadata.binstall]` points at the
+  release assets, which are named after the binary (`ki`) rather than the crate,
   so the URL template uses `{ bin }`.
 
 ### Changed
@@ -621,8 +641,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   (raw seqs untouched, so later appends stay consistent), and re-chains an entry
   onto the lane leaf; when it dropped anything the file is republished
   atomically.
-- A session already open in another `rpi` process is refused with `session … is
-  already open in another rpi process` instead of being written to by both. The
+- A session already open in another `ki` process is refused with `session … is
+  already open in another ki process` instead of being written to by both. The
   host holds an exclusive OS advisory lock per session (`<path>.lock`) for its
   lifetime.
 - `Could not open the saved session:` was printed twice when a session could not
@@ -632,7 +652,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
-- Session pickers (`rpi -r` and `/session`) show readable rows instead of a wall
+- Session pickers (`ki -r` and `/session`) show readable rows instead of a wall
   of near-identical timestamped file names. Each row comes from a cheap
   head/tail summary of the session file — display name, first user prompt
   (single-lined and truncated to a label), and on-disk size — so saved sessions
@@ -650,11 +670,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   The old mark mixed an emoji with a box-drawing glyph, whose east-asian width is
   ambiguous, so the header rendered inconsistently depending on the terminal.
   The mark follows the active theme's accent colour for its middle bar.
-  `RPI_NO_EMOJI=1` renders the lockup without the crab (and without the
+  `KI_NO_EMOJI=1` renders the lockup without the crab (and without the
   separator that would otherwise dangle).
 - The workspace is now `rustfmt`-clean. The sweep is listed in
   `.git-blame-ignore-revs` so `git blame` skips it.
-- `rpi-ai`, `rpi-agent`, `rpi-tools`, `rpi-harness` and `rpi-cli` now carry the
+- `kiqi-ai`, `kiqi-agent`, `kiqi-tools`, `kiqi-harness` and `kiqi-cli` now carry the
   crates.io `artificial-intelligence` category, so they are reachable by
   browsing that category and not only by keyword search.
 
@@ -679,7 +699,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 
 ### Fixed
 
-- **`rpi-plugin-sdk` did not compile on `main`.** Duplicate definitions added
+- **`kiqi-plugin-sdk` did not compile on `main`.** Duplicate definitions added
   after 0.3.0 shipped — a `pub type PluginApi = PluginApiVt` alias beside the
   `PluginApi` struct, and a second `register_entrypoint_unified` — produced
   `E0428`, `E0119` and `E0609`, so `cargo test --workspace` failed immediately
@@ -694,22 +714,22 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
   docs.rs pages showed the same generic document, and its relative links
   (`docs/architecture/overview.md`, `LICENSE`, `examples/plugin-stub`) resolved to 404 on
   those sites.
-- docs.rs now builds with `all-features` for every crate except `rpi-cli`, whose
+- docs.rs now builds with `all-features` for every crate except `kiqi-cli`, whose
   clipboard feature needs platform libraries that are not present there.
 
 ### Docs
 
 - Added `docs/performance/benchmark-vs-pi.md` and `scripts/bench-vs-pi.mjs` — a reproducible,
   same-machine comparison against native Pi over the same JSONL command channel,
-  with isolated config directories and both tools offline. rpi is 9.7× faster to
+  with isolated config directories and both tools offline. ki is 9.7× faster to
   start, 10.7× faster to cold start, 7.6× smaller in memory and ~18× smaller
   installed. **Corrected after release:** an earlier run set only pi's `PI_*`
-  isolation variables, so rpi read the real `~/.rpi/agent` and loaded the
+  isolation variables, so ki read the real `~/.ki/agent` and loaded the
   machine's global plugins (reported 103.6 ms / 1.7×); a second bug started the
-  cold-start stopwatch after `spawn()`. With both fixed, rpi's `--version` (17.5 ms) and
+  cold-start stopwatch after `spawn()`. With both fixed, ki's `--version` (17.5 ms) and
   a cold start (17.7 ms) are effectively equal — the cost is process creation.
-- `crates/rpi-cli/embedded-docs/` — the documentation snapshot compiled into the
-  `rpi` binary for the `docs` tool — is refreshed and now guarded: CI runs
+- `crates/kiqi-cli/embedded-docs/` — the documentation snapshot compiled into the
+  `ki` binary for the `docs` tool — is refreshed and now guarded: CI runs
   `scripts/sync-embedded-docs.sh` and fails if the snapshot drifts from the
   repository documents. It had fallen behind by several releases.
 
@@ -717,13 +737,13 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 
 ### Changed
 
-- **Breaking:** the plugin ABI is unified on a single `rpi_plugin_register`
-  entrypoint (`RPI_PLUGIN_ABI_VERSION_UNIFIED`), with the version carried inside
-  the `PluginApi` struct instead of the symbol name. `rpi-extensions` still
-  resolves `rpi_plugin_register_v3` and then `rpi_plugin_register_v2`, so plugins
+- **Breaking:** the plugin ABI is unified on a single `kiqi_plugin_register`
+  entrypoint (`KI_PLUGIN_ABI_VERSION_UNIFIED`), with the version carried inside
+  the `PluginApi` struct instead of the symbol name. `kiqi-extensions` still
+  resolves `kiqi_plugin_register_v3` and then `kiqi_plugin_register_v2`, so plugins
   built against an older ABI keep loading; extension authors should rebuild
   against the current SDK when convenient.
-- Workspace dependencies (`rpi-*` internal crates) bumped to `0.2.0`, then to
+- Workspace dependencies (`kiqi-*` internal crates) bumped to `0.2.0`, then to
   `0.3.0` for the whole family.
 
 ### Added
@@ -756,9 +776,9 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
   enqueue and rebuilt on start, so a message typed while the agent works survives
   a restart.
 - **Deferred (long-poll) provider responses.** New `DeferredProvider` capability
-  and a defaulted `Provider::deferred()` in `rpi-ai`; `run_agent_loop_from_assistant`
-  in `rpi-agent` executes parked tool calls exactly once; `resume_deferred` in
-  `rpi-harness` polls, records, and re-suspends as needed.
+  and a defaulted `Provider::deferred()` in `kiqi-ai`; `run_agent_loop_from_assistant`
+  in `kiqi-agent` executes parked tool calls exactly once; `resume_deferred` in
+  `kiqi-harness` polls, records, and re-suspends as needed.
 - **Settings parity.** `retry`, `compaction`, `steeringMode` and `followUpMode`
   now come from `settings.json` instead of hardcoded defaults. `sessionDir`,
   `shellCommandPrefix` and `httpProxy` are wired, and native Pi's key names
@@ -781,7 +801,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 ### Added
 
 - CBOR binary protocol (framing + codec) in the CLI.
-- Image generation API (`openrouter-images`) in `rpi-ai`.
+- Image generation API (`openrouter-images`) in `kiqi-ai`.
 - Remote model catalog refresh (`pi.dev`).
 - TUI: rich footer status bar with live git branch refresh; code-block syntax
   highlighting.
@@ -797,7 +817,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
   corrupted fullscreen TUI rendering.
 - Extensions: a plugin panic is now isolated instead of taking down the host
   process.
-- `rpi-ai`: corrected a `constrained.rs` doc example that referenced a
+- `kiqi-ai`: corrected a `constrained.rs` doc example that referenced a
   non-existent `ToolDefinition`.
 
 ## [0.1.26] - 2026-09-23
@@ -816,7 +836,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 - Paste-content detection to fix multi-line pasting on Windows; bracketed paste
   mode is enabled explicitly.
 - PowerShell tool registered on Windows, plus a `default_tools` setting.
-- `rpi-agent`: updated agent construction API and restructured documentation.
+- `kiqi-agent`: updated agent construction API and restructured documentation.
 
 ### Fixed
 
@@ -828,20 +848,20 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 
 ### Added
 
-- **Remote mode.** `rpi --mode rpc` is a real JSONL command loop, `rpi --server`
+- **Remote mode.** `ki --mode rpc` is a real JSONL command loop, `ki --server`
   runs the agent headless over TCP and prints a token at startup, and
-  `rpi --connect <host:port>` attaches a terminal client that holds no local
+  `ki --connect <host:port>` attaches a terminal client that holds no local
   provider, tools, extensions or session files. Token auth is connection-level
   (`-32001` on missing/invalid token); `--no-token` disables it, and
-  `RPI_SERVER_TOKEN` is honoured. Shared wire types (`RemoteEvent` /
+  `KI_SERVER_TOKEN` is honoured. Shared wire types (`RemoteEvent` /
   `RemoteCommand` / `RemoteResponse`) live in one module so the two ends cannot
   drift.
 - **Extension lifecycle events (P0–P5) with veto support** — a handler can
   refuse startup by returning `EVENT_HANDLER_ABORT` (new `BeforeTuiStart` hook,
   exit code `3`).
 - **ABI v3** (`PluginApiVt3Ext.declare`) adds priority and platform declarations.
-- Optional JSONL event journal (`RPI_EVENT_LOG=1`) with `rpi events tail` and
-  `rpi events path`.
+- Optional JSONL event journal (`KI_EVENT_LOG=1`) with `ki events tail` and
+  `ki events path`.
 
 ### Docs
 
@@ -863,7 +883,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 
 ### Added
 
-- `rpi dev-local` degrades gracefully to skills-only mode when no Cargo `cdylib`
+- `ki dev-local` degrades gracefully to skills-only mode when no Cargo `cdylib`
   is present.
 
 ### Fixed
@@ -969,9 +989,9 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 
 ### Added
 
-- `rpi dev-local` and `rpi dev --local-only` load only resources from the current
+- `ki dev-local` and `ki dev --local-only` load only resources from the current
   project and the active development extension, including project-local
-  `.rpi/skills`, `.pi/skills`, configured project resource paths, and the
+  `.ki/skills`, `.pi/skills`, configured project resource paths, and the
   extension's own resources. `/reload` matches the local-only scope.
 
 ## [0.1.12] - 2026-09-14
@@ -981,7 +1001,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 - Pi-compatible managed npm and Git package stores: structured `npmCommand`
   argv, npm aliases, trusted project settings, bounded subprocesses and
   conservative provenance checks.
-- Independent rpi and package update checks at startup, with `PI_OFFLINE`
+- Independent ki and package update checks at startup, with `PI_OFFLINE`
   support across startup and manual update commands.
 - Resumable, clean-tree release workflow for the nine published crates.
 
@@ -1032,16 +1052,16 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
   declarations; it uses the same trust-gated package set as the session.
 - Rust 1.78 remains the supported minimum, verified with the 1.78 toolchain for
   both source APIs and the locked dependency graph.
-- The published `rpi-cli` crate embeds its documentation so the crates.io tarball
+- The published `kiqi-cli` crate embeds its documentation so the crates.io tarball
   builds independently of the workspace.
 
 ## [0.1.10] - 2026-09-12
 
 ### Added
 
-- `rpi dev` builds and watches a local Rust extension; `/reload` forces a fresh
+- `ki dev` builds and watches a local Rust extension; `/reload` forces a fresh
   build without replacing a working extension when compilation fails.
-- `rpi uninstall` and `rpi uninstall-pi`.
+- `ki uninstall` and `ki uninstall-pi`.
 - Multiplexed Node extension transport allowing concurrent requests with
   out-of-order responses; tool and command cancellation propagates through
   `AbortSignal`.
@@ -1072,18 +1092,18 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 
 - Session history, sharing and exports request entries in chronological order,
   matching the terminal transcript.
-- The package catalog distinguishes core Rust libraries (`cargo add rpi-tools`)
-  from loadable `cdylib` extensions (`rpi install rpi-todo`).
+- The package catalog distinguishes core Rust libraries (`cargo add kiqi-tools`)
+  from loadable `cdylib` extensions (`ki install kiqi-todo`).
 
 ## [0.1.7] - 2026-09-09
 
 ### Added
 
-- `rpi install <crate>` for crates.io `cdylib` extensions, with `--version`,
+- `ki install <crate>` for crates.io `cdylib` extensions, with `--version`,
   `--path`, `--locked` and `--force`.
-- Nine published extensions added to the website catalog: `rpi-mcp-adapter`,
-  `rpi-web-access`, `rpi-subagents`, `rpi-background-tasks`, `rpi-lens`,
-  `rpi-todo`, `rpi-codegraph`, `rpi-memory`, `rpi-token-usage`.
+- Nine published extensions added to the website catalog: `kiqi-mcp-adapter`,
+  `kiqi-web-access`, `kiqi-subagents`, `kiqi-background-tasks`, `kiqi-lens`,
+  `kiqi-todo`, `kiqi-codegraph`, `kiqi-memory`, `kiqi-token-usage`.
 
 ## [0.1.6] - 2026-09-09
 
@@ -1092,7 +1112,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 - First public crate family: async streaming agent runtime; Anthropic Messages,
   OpenAI-compatible Chat Completions and faux providers; `read`, `write`, `edit`,
   `bash`, `grep`, `find`, `ls` tools; JSONL sessions, context compaction, hooks,
-  queues and prompt templates; `rpi-plugin-sdk` with a stable ABI.
+  queues and prompt templates; `kiqi-plugin-sdk` with a stable ABI.
 
 ## [0.1.0] – [0.1.5]
 

@@ -7,9 +7,9 @@
 
 use std::sync::Arc;
 
-use rpi_agent::AgentBuilder;
-use rpi_ai::providers::faux::{FauxProvider, FauxScript};
-use rpi_ai::Provider;
+use kiqi_agent::AgentBuilder;
+use kiqi_ai::providers::faux::{FauxProvider, FauxScript};
+use kiqi_ai::Provider;
 
 #[tokio::main]
 async fn main() {
@@ -37,7 +37,7 @@ async fn main() {
     // Drain any events that landed in the broadcast buffer.
     let mut saw_end = false;
     while let Ok(ev) = rx.try_recv() {
-        if matches!(ev, rpi_agent::AgentEvent::AgentEnd { .. }) {
+        if matches!(ev, kiqi_agent::AgentEvent::AgentEnd { .. }) {
             saw_end = true;
         }
     }
@@ -50,12 +50,12 @@ async fn main() {
     for m in &state.messages {
         println!("  - {}", m.role().as_str());
     }
-    if let Some(rpi_agent::AgentMessage::Assistant(a)) = state.messages.last() {
+    if let Some(kiqi_agent::AgentMessage::Assistant(a)) = state.messages.last() {
         let text: String = a
             .content
             .iter()
             .filter_map(|c| match c {
-                rpi_ai::types::Content::Text(t) => Some(t.text.clone()),
+                kiqi_ai::types::Content::Text(t) => Some(t.text.clone()),
                 _ => None,
             })
             .collect();
@@ -73,8 +73,8 @@ async fn main() {
 /// usable. We bridge the sync/async gap with `block_in_place` + `block_on` —
 /// acceptable in an example `main`, and the pattern the `tokio` docs endorse
 /// for a sync wrapper over an async producer whose result is a live stream.
-fn make_stream_fn(provider: Arc<FauxProvider>) -> rpi_agent::StreamFn {
-    rpi_agent::stream_fn(move |model, ctx, opts| {
+fn make_stream_fn(provider: Arc<FauxProvider>) -> kiqi_agent::StreamFn {
+    kiqi_agent::stream_fn(move |model, ctx, opts| {
         let p = Arc::clone(&provider);
         let model = model.clone();
         let ctx = ctx.clone();

@@ -1,4 +1,4 @@
-//! `rpi-todo` ported to the wasm ABI (0.3.0).
+//! `kiqi-todo` ported to the wasm ABI (0.3.0).
 //!
 //! Same semantics as the compile-time plugin, but the two channels the port is
 //! meant to validate are the ABI's instead of `HostCaps`:
@@ -237,7 +237,7 @@ struct TodoPlugin;
 
 impl Guest for TodoPlugin {
     fn id() -> String {
-        "rpi-todo".to_string()
+        "kiqi-todo".to_string()
     }
 
     fn shutdown() {}

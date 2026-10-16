@@ -7,9 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "rpi-plan-mode ported to the kiqi wasm ABI (session capabilities)"
+description = "kiqi-plan-mode ported to the kiqi wasm ABI (session capabilities)"
 readme = "README.md"
-keywords = ["rpi", "kiqi", "wasm", "plugin", "plan"]
+keywords = ["ki", "kiqi", "wasm", "plugin", "plan"]
 categories = ["development-tools"]
 
 [lib]
@@ -17,5 +17,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 kiqi-plugin-guest = { path = "../kiqi-plugin-guest" }
-rpi-plan-mode-core = { path = "../../../crates/rpi-plan-mode-core" }
+kiqi-plan-mode-core = { path = "../../../crates/kiqi-plan-mode-core" }
 serde_json = "1"

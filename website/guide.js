@@ -61,7 +61,7 @@ async function loadGuide(guideId) {
   const locale = getLocale();
   const title = guide.title[locale] || guide.title.zh;
   $('[data-guide-title]').textContent = title;
-  document.title = `${title} · rpi`;
+  document.title = `${title} · ki`;
 
   const selector = $('[data-guide-selector]');
   selector.innerHTML = GUIDES.map((item) => `<button type="button" data-guide-id="${item.id}" class="${item.id === guide.id ? 'is-active' : ''}">${item.title[locale] || item.title.zh}</button>`).join('');

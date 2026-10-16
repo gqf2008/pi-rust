@@ -52,9 +52,9 @@ TUI drain task
 
 最重要的三个层次是：
 
-- [`pi-agent/src/agent_loop.rs`](../../crates/rpi-agent/src/agent_loop.rs)：纯 Agent Loop，负责调用模型、识别工具、循环运行。
-- [`pi-harness/src/agent_harness.rs`](../../crates/rpi-harness/src/agent_harness.rs)：带 session、持久化、压缩、系统提示和工具配置的运行外壳。
-- [`pi-ai/src/providers/`](../../crates/rpi-ai/src/providers)：具体模型协议和 HTTP/SSE 解析。
+- [`pi-agent/src/agent_loop.rs`](../../crates/kiqi-agent/src/agent_loop.rs)：纯 Agent Loop，负责调用模型、识别工具、循环运行。
+- [`pi-harness/src/agent_harness.rs`](../../crates/kiqi-harness/src/agent_harness.rs)：带 session、持久化、压缩、系统提示和工具配置的运行外壳。
+- [`pi-ai/src/providers/`](../../crates/kiqi-ai/src/providers)：具体模型协议和 HTTP/SSE 解析。
 
 ---
 
@@ -62,7 +62,7 @@ TUI drain task
 
 ### 2.0 拆分后的模块位置
 
-`crates/rpi-cli/src/interactive_tui.rs` 保留入口、初始化、提交回调和主循环；具体功能位于同名目录下：
+`crates/kiqi-cli/src/interactive_tui.rs` 保留入口、初始化、提交回调和主循环；具体功能位于同名目录下：
 
 | 模块 | 职责 |
 | --- | --- |
@@ -80,7 +80,7 @@ TUI drain task
 
 ### 2.1 TUI 创建和事件管道
 
-入口是 [`interactive_tui`](../../crates/rpi-cli/src/interactive_tui.rs#L825)：
+入口是 [`interactive_tui`](../../crates/kiqi-cli/src/interactive_tui.rs#L825)：
 
 ```rust
 let lane: Arc<dyn AgentLane> = harness.lane("main");
@@ -88,12 +88,12 @@ let lane: Arc<dyn AgentLane> = harness.lane("main");
 
 Harness 创建时会安装 `BroadcastEmitter`：
 
-- [`session.rs:608`](../../crates/rpi-cli/src/session.rs#L608)
-- [`BroadcastEmitter`](../../crates/rpi-agent/src/events.rs#L135)
+- [`session.rs:608`](../../crates/kiqi-cli/src/session.rs#L608)
+- [`BroadcastEmitter`](../../crates/kiqi-agent/src/events.rs#L135)
 
 ```rust
 let (broadcast, event_rx) =
-    rpi_agent::events::BroadcastEmitter::new(256);
+    kiqi_agent::events::BroadcastEmitter::new(256);
 ```
 
 其中：
@@ -109,7 +109,7 @@ let (broadcast, event_rx) =
 editor_for_key.handle_key(key);
 ```
 
-Editor 对 Enter 的处理位于 [`editor.rs:1274`](../../crates/rpi-tui/src/editor.rs#L1274)：
+Editor 对 Enter 的处理位于 [`editor.rs:1274`](../../crates/kiqi-tui/src/editor.rs#L1274)：
 
 ```rust
 (KeyModifiers::NONE, KeyCode::Enter) => {
@@ -117,11 +117,11 @@ Editor 对 Enter 的处理位于 [`editor.rs:1274`](../../crates/rpi-tui/src/edi
 }
 ```
 
-`Editor::submit` 位于 [`editor.rs:1185`](../../crates/rpi-tui/src/editor.rs#L1185)，它会调用之前注册的 `on_submit` 回调。
+`Editor::submit` 位于 [`editor.rs:1185`](../../crates/kiqi-tui/src/editor.rs#L1185)，它会调用之前注册的 `on_submit` 回调。
 
 ### 2.3 TUI 提交回调
 
-提交回调位于 [`interactive_tui.rs:1286`](../../crates/rpi-cli/src/interactive_tui.rs#L1286)。这里会先做本地命令分流：
+提交回调位于 [`interactive_tui.rs:1286`](../../crates/kiqi-cli/src/interactive_tui.rs#L1286)。这里会先做本地命令分流：
 
 ```text
 /command  → slash command
@@ -142,7 +142,7 @@ ctx_for_cb.tx.send(TuiMessage::UserInput(text.to_string()));
 
 ### 2.4 TUI 主循环接收消息
 
-主循环处理 `UserInput` 的位置是 [`interactive_tui.rs:2541`](../../crates/rpi-cli/src/interactive_tui.rs#L2541)：
+主循环处理 `UserInput` 的位置是 [`interactive_tui.rs:2541`](../../crates/kiqi-cli/src/interactive_tui.rs#L2541)：
 
 ```rust
 Some(TuiMessage::UserInput(prompt)) => {
@@ -161,18 +161,18 @@ Some(TuiMessage::UserInput(prompt)) => {
 
 ### 2.5 调用 Harness
 
-[`run_prompt_streaming`](../../crates/rpi-cli/src/interactive_tui/run.rs#L89) 最终调用：
+[`run_prompt_streaming`](../../crates/kiqi-cli/src/interactive_tui/run.rs#L89) 最终调用：
 
 ```rust
 lane.prompt_text(prompt, images).await
 ```
 
 从这里开始，消息离开 TUI，进入 Harness。`harness.lane("main")` 返回的
-[`LaneHandle::prompt_text`](../../crates/rpi-harness/src/agent_harness.rs#L4317)
+[`LaneHandle::prompt_text`](../../crates/kiqi-harness/src/agent_harness.rs#L4317)
 通过 `self.runner().prompt_text(text, images)` 转发给绑定该 lane 的 `AgentHarness`。
 
 这条 TUI 路径不经过 `AgentSession` 或 `Agent::prompt`。SDK 的纯文本入口是
-[`Agent::prompt`](../../crates/rpi-agent/src/agent.rs#L377)，走
+[`Agent::prompt`](../../crates/kiqi-agent/src/agent.rs#L377)，走
 `prompt_messages → run_prompt → run_agent_loop`，与 TUI 共用底层 loop。
 
 ### 2.6 运行中消息与恢复入口
@@ -196,7 +196,7 @@ follow-up 在 loop 准备停止时被消费。被消费的消息发出 `MessageS
 
 ### 3.1 `prompt_text`
 
-主 lane 的 `prompt_text` 位于 [`agent_harness.rs:3779`](../../crates/rpi-harness/src/agent_harness.rs#L3779)：
+主 lane 的 `prompt_text` 位于 [`agent_harness.rs:3779`](../../crates/kiqi-harness/src/agent_harness.rs#L3779)：
 
 ```rust
 let message = AgentMessage::User(UserMessage::new(content, now_ms()));
@@ -217,7 +217,7 @@ AgentMessage::User
 
 ### 3.2 `run_core`
 
-[`run_core`](../../crates/rpi-harness/src/agent_harness.rs#L2898) 只是一个薄封装：
+[`run_core`](../../crates/kiqi-harness/src/agent_harness.rs#L2898) 只是一个薄封装：
 
 ```rust
 async fn run_core(&self, prompts: Vec<AgentMessage>) -> HarnessResult<RunResult> {
@@ -225,7 +225,7 @@ async fn run_core(&self, prompts: Vec<AgentMessage>) -> HarnessResult<RunResult>
 }
 ```
 
-真正的准备工作在 [`run_core_with_entry`](../../crates/rpi-harness/src/agent_harness.rs#L2911)。
+真正的准备工作在 [`run_core_with_entry`](../../crates/kiqi-harness/src/agent_harness.rs#L2911)。
 
 ### 3.3 `run_core_with_entry` 做什么
 
@@ -244,7 +244,7 @@ async fn run_core(&self, prompts: Vec<AgentMessage>) -> HarnessResult<RunResult>
 11. 构造 `StreamFn`。
 12. 调用 Agent Loop。
 
-调用 Agent Loop 的位置是 [`agent_harness.rs:3345`](../../crates/rpi-harness/src/agent_harness.rs#L3345)：
+调用 Agent Loop 的位置是 [`agent_harness.rs:3345`](../../crates/kiqi-harness/src/agent_harness.rs#L3345)：
 
 ```rust
 run_agent_loop(
@@ -261,7 +261,7 @@ run_agent_loop(
 
 ### 3.4 构造 StreamFn
 
-Harness 中的 `build_stream_fn` 位于 [`agent_harness.rs:2362`](../../crates/rpi-harness/src/agent_harness.rs#L2362)。
+Harness 中的 `build_stream_fn` 位于 [`agent_harness.rs:2362`](../../crates/kiqi-harness/src/agent_harness.rs#L2362)。
 
 它根据：
 
@@ -281,11 +281,11 @@ p.stream_simple(&model, &ctx, &opts).await
 
 ## 4. Agent Loop：核心循环
 
-核心文件：[`crates/rpi-agent/src/agent_loop.rs`](../../crates/rpi-agent/src/agent_loop.rs)
+核心文件：[`crates/kiqi-agent/src/agent_loop.rs`](../../crates/kiqi-agent/src/agent_loop.rs)
 
 ### 4.1 入口 `run_agent_loop`
 
-位置：[`agent_loop.rs:72`](../../crates/rpi-agent/src/agent_loop.rs#L72)
+位置：[`agent_loop.rs:72`](../../crates/kiqi-agent/src/agent_loop.rs#L72)
 
 ```rust
 pub async fn run_agent_loop(
@@ -307,7 +307,7 @@ pub async fn run_agent_loop(
 
 ### 4.2 `run_loop`
 
-位置：[`agent_loop.rs:220`](../../crates/rpi-agent/src/agent_loop.rs#L220)
+位置：[`agent_loop.rs:220`](../../crates/kiqi-agent/src/agent_loop.rs#L220)
 
 这是 Agent 的真正状态循环：
 
@@ -355,7 +355,7 @@ let tool_calls: Vec<ToolCall> = message
 
 ### 4.3 `stream_assistant_response`
 
-位置：[`agent_loop.rs:441`](../../crates/rpi-agent/src/agent_loop.rs#L441)
+位置：[`agent_loop.rs:441`](../../crates/kiqi-agent/src/agent_loop.rs#L441)
 
 这是“上下文转换 + Provider 调用 + 流式消息折叠”的核心函数。
 
@@ -379,7 +379,7 @@ Message[]
 然后生成 Provider Context：
 
 ```rust
-let llm_context = rpi_ai::types::Context {
+let llm_context = kiqi_ai::types::Context {
     system_prompt: ...,
     messages: llm_messages,
     tools: ...,
@@ -392,7 +392,7 @@ let llm_context = rpi_ai::types::Context {
 let mut response = stream_fn(&config.model, &llm_context, &opts);
 ```
 
-`StreamFn` 类型定义在 [`stream_fn.rs:28`](../../crates/rpi-agent/src/stream_fn.rs#L28)：
+`StreamFn` 类型定义在 [`stream_fn.rs:28`](../../crates/kiqi-agent/src/stream_fn.rs#L28)：
 
 ```rust
 pub type StreamFn = Arc<dyn Fn(
@@ -444,7 +444,7 @@ response.result().await?
 
 ### 5.1 Provider 抽象
 
-Provider trait 位于 [`pi-ai/src/provider.rs`](../../crates/rpi-ai/src/provider.rs)。
+Provider trait 位于 [`pi-ai/src/provider.rs`](../../crates/kiqi-ai/src/provider.rs)。
 
 核心方法是：
 
@@ -459,7 +459,7 @@ async fn stream_simple(
 
 ### 5.2 Anthropic Provider
 
-Anthropic 的入口位于 [`anthropic/mod.rs:135`](../../crates/rpi-ai/src/providers/anthropic/mod.rs#L135)：
+Anthropic 的入口位于 [`anthropic/mod.rs:135`](../../crates/kiqi-ai/src/providers/anthropic/mod.rs#L135)：
 
 ```rust
 async fn stream_simple(
@@ -481,7 +481,7 @@ async fn stream_simple(
 
 ### 5.3 通用事件流
 
-事件流定义在 [`event_stream.rs:25`](../../crates/rpi-ai/src/event_stream.rs#L25)：
+事件流定义在 [`event_stream.rs:25`](../../crates/kiqi-ai/src/event_stream.rs#L25)：
 
 ```rust
 pub struct AssistantMessageEventStream
@@ -497,7 +497,7 @@ AssistantMessageEventStream
 Agent Loop
 ```
 
-创建函数位于 [`event_stream.rs:154`](../../crates/rpi-ai/src/event_stream.rs#L154)：
+创建函数位于 [`event_stream.rs:154`](../../crates/kiqi-ai/src/event_stream.rs#L154)：
 
 ```rust
 create_assistant_message_event_stream()
@@ -505,7 +505,7 @@ create_assistant_message_event_stream()
 
 ### 5.4 SSE 分帧和解析
 
-SSE 流位于 [`anthropic/sse.rs:190`](../../crates/rpi-ai/src/providers/anthropic/sse.rs#L190)：
+SSE 流位于 [`anthropic/sse.rs:190`](../../crates/kiqi-ai/src/providers/anthropic/sse.rs#L190)：
 
 ```rust
 pub struct SseEventStream
@@ -519,7 +519,7 @@ pub async fn next_event(
 ) -> Result<Option<ServerSentEvent>, AiError>
 ```
 
-位置：[`sse.rs:213`](../../crates/rpi-ai/src/providers/anthropic/sse.rs#L213)
+位置：[`sse.rs:213`](../../crates/kiqi-ai/src/providers/anthropic/sse.rs#L213)
 
 协议解析链路：
 
@@ -557,7 +557,7 @@ message_stop
 
 ### 6.1 识别 ToolCall
 
-在 [`agent_loop.rs:300`](../../crates/rpi-agent/src/agent_loop.rs#L300) 附近，从 assistant message 的 content 中提取：
+在 [`agent_loop.rs:300`](../../crates/kiqi-agent/src/agent_loop.rs#L300) 附近，从 assistant message 的 content 中提取：
 
 ```rust
 Content::ToolCall(tool_call)
@@ -565,7 +565,7 @@ Content::ToolCall(tool_call)
 
 ### 6.2 执行工具
 
-工具批处理入口：[`agent_loop.rs:624`](../../crates/rpi-agent/src/agent_loop.rs#L624)
+工具批处理入口：[`agent_loop.rs:624`](../../crates/kiqi-agent/src/agent_loop.rs#L624)
 
 ```rust
 async fn execute_tool_calls(...)
@@ -581,7 +581,7 @@ Parallel
   → execute_tool_calls_parallel
 ```
 
-实际调用 `AgentTool::execute` 的位置：[`agent_loop.rs:1025`](../../crates/rpi-agent/src/agent_loop.rs#L1025)
+实际调用 `AgentTool::execute` 的位置：[`agent_loop.rs:1025`](../../crates/kiqi-agent/src/agent_loop.rs#L1025)
 
 ```rust
 tool.execute(
@@ -592,7 +592,7 @@ tool.execute(
 ).await
 ```
 
-工具接口定义在 [`agent_tool.rs`](../../crates/rpi-agent/src/agent_tool.rs)：
+工具接口定义在 [`agent_tool.rs`](../../crates/kiqi-agent/src/agent_tool.rs)：
 
 ```rust
 #[async_trait]
@@ -629,7 +629,7 @@ current_context.messages
 
 Agent Loop 产生的事件通过 `BroadcastEmitter` 广播。
 
-TUI 的消费入口是 [`interactive_tui/events.rs:149`](../../crates/rpi-cli/src/interactive_tui/events.rs#L149)：
+TUI 的消费入口是 [`interactive_tui/events.rs:149`](../../crates/kiqi-cli/src/interactive_tui/events.rs#L149)：
 
 ```rust
 async fn drain_agent_events(
@@ -646,7 +646,7 @@ while let Ok(event) = rx.recv().await {
 }
 ```
 
-具体渲染逻辑位于 [`interactive_tui/events.rs:171`](../../crates/rpi-cli/src/interactive_tui/events.rs#L171)：
+具体渲染逻辑位于 [`interactive_tui/events.rs:171`](../../crates/kiqi-cli/src/interactive_tui/events.rs#L171)：
 
 ```rust
 async fn handle_agent_event(...) {
@@ -686,16 +686,16 @@ terminal render
 
 ### 第一遍：只看核心循环
 
-1. [`run_agent_loop`](../../crates/rpi-agent/src/agent_loop.rs#L72)
-2. [`run_loop`](../../crates/rpi-agent/src/agent_loop.rs#L220)
-3. [`stream_assistant_response`](../../crates/rpi-agent/src/agent_loop.rs#L441)
-4. [`execute_tool_calls`](../../crates/rpi-agent/src/agent_loop.rs#L624)
+1. [`run_agent_loop`](../../crates/kiqi-agent/src/agent_loop.rs#L72)
+2. [`run_loop`](../../crates/kiqi-agent/src/agent_loop.rs#L220)
+3. [`stream_assistant_response`](../../crates/kiqi-agent/src/agent_loop.rs#L441)
+4. [`execute_tool_calls`](../../crates/kiqi-agent/src/agent_loop.rs#L624)
 
 ### 第二遍：看消息类型
 
-1. [`pi-ai/src/types.rs`](../../crates/rpi-ai/src/types.rs)
-2. [`pi-agent/src/message.rs`](../../crates/rpi-agent/src/message.rs)
-3. [`pi-agent/src/events.rs`](../../crates/rpi-agent/src/events.rs)
+1. [`pi-ai/src/types.rs`](../../crates/kiqi-ai/src/types.rs)
+2. [`pi-agent/src/message.rs`](../../crates/kiqi-agent/src/message.rs)
+3. [`pi-agent/src/events.rs`](../../crates/kiqi-agent/src/events.rs)
 
 重点理解：
 
@@ -712,19 +712,19 @@ AgentEvent
 
 ### 第三遍：看 Harness
 
-1. [`prompt_text`](../../crates/rpi-harness/src/agent_harness.rs#L3779)
-2. [`run_core`](../../crates/rpi-harness/src/agent_harness.rs#L2898)
-3. [`run_core_with_entry`](../../crates/rpi-harness/src/agent_harness.rs#L2911)
-4. [`build_stream_fn`](../../crates/rpi-harness/src/agent_harness.rs#L2362)
-5. [`run_agent_loop 调用`](../../crates/rpi-harness/src/agent_harness.rs#L3345)
+1. [`prompt_text`](../../crates/kiqi-harness/src/agent_harness.rs#L3779)
+2. [`run_core`](../../crates/kiqi-harness/src/agent_harness.rs#L2898)
+3. [`run_core_with_entry`](../../crates/kiqi-harness/src/agent_harness.rs#L2911)
+4. [`build_stream_fn`](../../crates/kiqi-harness/src/agent_harness.rs#L2362)
+5. [`run_agent_loop 调用`](../../crates/kiqi-harness/src/agent_harness.rs#L3345)
 
 ### 第四遍：看 Provider
 
-1. [`StreamFn`](../../crates/rpi-agent/src/stream_fn.rs#L28)
-2. [`AiProvider::stream_simple`](../../crates/rpi-ai/src/provider.rs)
-3. [`Anthropic::stream_simple`](../../crates/rpi-ai/src/providers/anthropic/mod.rs#L135)
-4. [`SseEventStream`](../../crates/rpi-ai/src/providers/anthropic/sse.rs#L190)
-5. [`AssistantMessageEventStream`](../../crates/rpi-ai/src/event_stream.rs#L25)
+1. [`StreamFn`](../../crates/kiqi-agent/src/stream_fn.rs#L28)
+2. [`AiProvider::stream_simple`](../../crates/kiqi-ai/src/provider.rs)
+3. [`Anthropic::stream_simple`](../../crates/kiqi-ai/src/providers/anthropic/mod.rs#L135)
+4. [`SseEventStream`](../../crates/kiqi-ai/src/providers/anthropic/sse.rs#L190)
+5. [`AssistantMessageEventStream`](../../crates/kiqi-ai/src/event_stream.rs#L25)
 
 ---
 

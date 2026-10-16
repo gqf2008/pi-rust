@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compute the next release version for the rpi-* crate family.
+# Compute the next release version for the kiqi-* crate family.
 #
 #   bash scripts/next-version.sh [patch|minor|major|none]
 #

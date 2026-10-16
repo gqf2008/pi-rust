@@ -47,7 +47,7 @@ below are available through `task publish` too.
 | `preflight` | clean tree, tag unused, version differs |
 | `bump` | `Cargo.toml` workspace version + internal pins → `cargo update --workspace` |
 | `changelog` | cuts `## [Unreleased]` into `## [X.Y.Z] - <date>` |
-| `docs` | re-syncs `crates/rpi-cli/embedded-docs` (CI enforces it) |
+| `docs` | re-syncs `crates/kiqi-cli/embedded-docs` (CI enforces it) |
 | `validate` | `task release:validate` (version consistency across the nine crates) |
 | `commit` | `chore(release): X.Y.Z` |
 | `tag` | `git tag vX.Y.Z` |
@@ -58,7 +58,7 @@ below are available through `task publish` too.
 | `taps` | pushes the formula/manifest into `homebrew-tap` + `scoop-bucket` |
 | `winget` | opens the `microsoft/winget-pkgs` PR (`scripts/winget-submit.sh`) |
 | `crates` | `task publish:crates RELEASE_VERSION=X.Y.Z` (nine crates, dependency order) |
-| `site` | `task rpi-deploy` |
+| `site` | `task kiqi-deploy` |
 
 ## Flags
 

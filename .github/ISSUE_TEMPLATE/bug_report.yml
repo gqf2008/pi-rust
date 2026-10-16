@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in rpi does not work as documented
+description: Something in ki does not work as documented
 title: "bug: "
 labels: ["bug"]
 body:
@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         Thanks for the report. Please do not paste API keys, tokens, or the
-        contents of `~/.rpi/agent/auth.json` — redact them first.
+        contents of `~/.ki/agent/auth.json` — redact them first.
 
         For security vulnerabilities, stop here and follow
         [SECURITY.md](https://github.com/bigfish1913/pi-rust/blob/main/SECURITY.md)
@@ -20,13 +20,13 @@ body:
       description: Which crate or surface is involved?
       multiple: true
       options:
-        - rpi-cli (the `rpi` binary, CLI flags)
-        - rpi-tui (interactive terminal UI)
-        - rpi-agent (agent loop, events, hooks)
-        - rpi-ai (providers, streaming)
-        - rpi-tools (read/write/edit/bash and friends)
-        - rpi-harness (sessions, persistence, compaction)
-        - rpi-plugin-sdk / rpi-extensions (plugins)
+        - kiqi-cli (the `ki` binary, CLI flags)
+        - kiqi-tui (interactive terminal UI)
+        - kiqi-agent (agent loop, events, hooks)
+        - kiqi-ai (providers, streaming)
+        - kiqi-tools (read/write/edit/bash and friends)
+        - kiqi-harness (sessions, persistence, compaction)
+        - kiqi-plugin-sdk / kiqi-extensions (plugins)
         - Remote mode (--server / --connect)
         - Website or documentation
         - Not sure
@@ -36,9 +36,9 @@ body:
   - type: input
     id: version
     attributes:
-      label: rpi version
-      description: "Output of `rpi --version`."
-      placeholder: "rpi 0.3.0"
+      label: ki version
+      description: "Output of `ki --version`."
+      placeholder: "ki 0.3.0"
     validations:
       required: true
 
@@ -54,8 +54,8 @@ body:
   - type: input
     id: install
     attributes:
-      label: How did you install rpi?
-      placeholder: "cargo install rpi-cli / cargo install --path crates/rpi-cli / prebuilt binary"
+      label: How did you install ki?
+      placeholder: "cargo install kiqi-cli / cargo install --path crates/kiqi-cli / prebuilt binary"
     validations:
       required: true
 
@@ -87,8 +87,8 @@ body:
     attributes:
       label: Relevant output
       description: |
-        Paste the error output or a transcript excerpt. `RPI_EVENT_LOG=1` plus
-        `rpi events tail` can help for agent-loop problems. Long logs: attach a
+        Paste the error output or a transcript excerpt. `KI_EVENT_LOG=1` plus
+        `ki events tail` can help for agent-loop problems. Long logs: attach a
         file instead of pasting.
       render: shell
     validations:

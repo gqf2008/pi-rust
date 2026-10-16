@@ -1,8 +1,8 @@
-# rpi Agent 项目结构创建指南
+# ki Agent 项目结构创建指南
 
-本指南是模型可读的默认规范。当任务是用 rpi SDK"创建一个自己的 Agent"、
-"把 Agent 结构搭起来"或"给现有项目加 rpi 入口"时，按本文组织项目。默认推荐单 crate：
-内嵌 Agent 与全局 `rpi` 扩展共用同一套工具（见 §1），其余形态按需裁剪。
+本指南是模型可读的默认规范。当任务是用 ki SDK"创建一个自己的 Agent"、
+"把 Agent 结构搭起来"或"给现有项目加 ki 入口"时，按本文组织项目。默认推荐单 crate：
+内嵌 Agent 与全局 `ki` 扩展共用同一套工具（见 §1），其余形态按需裁剪。
 
 不要先写工具再想结构。先确定形态，再落目录，最后接入口。
 
@@ -10,12 +10,12 @@
 
 | 形态 | 启动入口 | 直接依赖 | 适用场景 |
 | --- | --- | --- | --- |
-| 库内嵌 Agent | 你的 `[[bin]]` / 服务进程 | `rpi-agent` + `rpi-ai`（需要内置工具再加 `rpi-tools`） | 在自己的进程里跑 loop，完全掌控事件、工具和输出 |
-| CLI 项目 | 全局 `rpi` 宿主 | 无（资源与 cdylib） | 想要现成的 TUI、`-p`/`--mode json`、会话和 skills |
-| Rust 扩展 | 宿主加载 `.rpi/extensions/*.dll` | `rpi-plugin-sdk` | 给全局 `rpi` 加工具/Provider/事件，不改宿主 |
+| 库内嵌 Agent | 你的 `[[bin]]` / 服务进程 | `kiqi-agent` + `kiqi-ai`（需要内置工具再加 `kiqi-tools`） | 在自己的进程里跑 loop，完全掌控事件、工具和输出 |
+| CLI 项目 | 全局 `ki` 宿主 | 无（资源与 cdylib） | 想要现成的 TUI、`-p`/`--mode json`、会话和 skills |
+| Rust 扩展 | 宿主加载 `.ki/extensions/*.dll` | `kiqi-plugin-sdk` | 给全局 `ki` 加工具/Provider/事件，不改宿主 |
 
 一个项目**可以同时提供"内嵌 Agent"和"cdylib 扩展"两份适配器，共享同一套工具实现**。
-这也是本指南默认推荐的形态：本地用内嵌 Agent 调试，线上/交互用全局 `rpi` 加载
+这也是本指南默认推荐的形态：本地用内嵌 Agent 调试，线上/交互用全局 `ki` 加载
 同一个扩展。只有当需求足够单一时才只做其中一种。
 
 ## 2. 推荐目录结构
@@ -23,7 +23,7 @@
 ```text
 my-agent/
 ├── Cargo.toml
-├── AGENTS.md                  # 项目级兜底指令（裸 rpi 也会读）
+├── AGENTS.md                  # 项目级兜底指令（裸 ki 也会读）
 ├── config/
 │   └── agent.json             # 项目 Agent 配置（system prompt / skill dirs / artifacts）
 ├── prompts/
@@ -39,7 +39,7 @@ my-agent/
 │       ├── mod.rs             # 唯一工具登记表（single source of truth）
 │       ├── core.rs            # run_tool 单一入口 + 领域逻辑
 │       └── content.rs         # AgentTool 适配器（内嵌 Agent 用）
-├── .rpi/
+├── .ki/
 │   ├── settings.json          # skillDirs / promptDirs / extensionDirs / defaultTools
 │   └── extensions/            # 编译后的 cdylib（生成物，不提交）
 └── tests/
@@ -48,11 +48,11 @@ my-agent/
 
 约定：
 
-- `.rpi/` 是 rpi 原生目录，`.pi/` 是同名兼容回退；**同名资源 `.rpi` 优先**
-  （项目优先于全局，`.rpi` 优先于 `.pi`，package 最后）。
-- `prompts/`、`skills/`、`config/` 是**可审查的普通源码目录**，不要藏进 `.rpi`
+- `.ki/` 是 ki 原生目录，`.pi/` 是同名兼容回退；**同名资源 `.ki` 优先**
+  （项目优先于全局，`.ki` 优先于 `.pi`，package 最后）。
+- `prompts/`、`skills/`、`config/` 是**可审查的普通源码目录**，不要藏进 `.ki`
   或依赖扩展运行期临时生成的路径。
-- `target/`、`.rpi/extensions/`、`artifacts/` 是生成物，写入 `.gitignore`。
+- `target/`、`.ki/extensions/`、`artifacts/` 是生成物，写入 `.gitignore`。
 - 系统提示词把生成约束写成固定文本，不要依赖模型在每次会话里重新推断。
 
 ## 3. Cargo.toml
@@ -75,12 +75,12 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]   # cdylib 给宿主；rlib 便于集成测试
 
 [dependencies]
-# 下面用 `<rpi>` 代指当前 rpi 发布版本，请替换为实际版本号（如 `0.1.x`），
-# 并保证所有 `rpi-*` 依赖同版本；第三方依赖按需增删。
-rpi-agent = "<rpi>"
-rpi-ai = { version = "<rpi>", features = ["providers"] }
-rpi-tools = "<rpi>"
-rpi-plugin-sdk = "<rpi>"          # 只有 cdylib 适配需要
+# 下面用 `<ki>` 代指当前 ki 发布版本，请替换为实际版本号（如 `0.1.x`），
+# 并保证所有 `kiqi-*` 依赖同版本；第三方依赖按需增删。
+kiqi-agent = "<ki>"
+kiqi-ai = { version = "<ki>", features = ["providers"] }
+kiqi-tools = "<ki>"
+kiqi-plugin-sdk = "<ki>"          # 只有 cdylib 适配需要
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -94,10 +94,10 @@ thiserror = "1"
 
 边界规则：
 
-- **扩展只依赖 `rpi-plugin-sdk`，绝不依赖 `rpi-cli`、`rpi-extensions`、`rpi-harness`
+- **扩展只依赖 `kiqi-plugin-sdk`，绝不依赖 `kiqi-cli`、`kiqi-extensions`、`kiqi-harness`
   内部模块**——宿主链接插件，不是插件链接宿主，否则 ABI 和版本会耦合。
-- 内嵌 Agent 只依赖 `rpi-agent`/`rpi-ai`/`rpi-tools`，与扩展 ABI 解耦。
-- 需要会话、压缩、skills、上下文文件时再加 `rpi-harness`。
+- 内嵌 Agent 只依赖 `kiqi-agent`/`kiqi-ai`/`kiqi-tools`，与扩展 ABI 解耦。
+- 需要会话、压缩、skills、上下文文件时再加 `kiqi-harness`。
 
 ## 4. 工具单一登记点
 
@@ -136,7 +136,7 @@ pub fn run_tool(name: &str, params: &serde_json::Value)
 ```
 
 `src/tools/core.rs` 放共享逻辑；`src/tools/content.rs` 只做编排（把 `run_tool`
-包成 `rpi_agent::AgentTool`）；cdylib 侧只做 ABI 编排。三者都不重复实现领域逻辑。
+包成 `kiqi_agent::AgentTool`）；cdylib 侧只做 ABI 编排。三者都不重复实现领域逻辑。
 
 为每个工具加一个断言 schema 在两个宿主之间一致的单元测试（见 §11）。
 
@@ -146,8 +146,8 @@ pub fn run_tool(name: &str, params: &serde_json::Value)
 
 ```rust
 use std::sync::Arc;
-use rpi_agent::AgentBuilder;
-use rpi_ai::Provider;
+use kiqi_agent::AgentBuilder;
+use kiqi_ai::Provider;
 
 let model = provider.default_model().clone();
 let agent = AgentBuilder::new()
@@ -161,7 +161,7 @@ let mut events = agent.subscribe();
 agent.prompt(user_input).await?;
 
 while let Some(event) = events.recv().await {
-    if matches!(event, rpi_agent::AgentEvent::AgentEnd { .. }) {
+    if matches!(event, kiqi_agent::AgentEvent::AgentEnd { .. }) {
         break;
     }
     // 转发 MessageUpdate / ToolExecutionStart / ToolResult 给你的 UI 或日志
@@ -171,20 +171,20 @@ while let Some(event) = events.recv().await {
 要点：
 
 - **先 `subscribe` 再 `prompt`**，否则广播缓冲里会漏掉早期事件。
-- 自定义工具实现 `rpi_agent::AgentTool`：`schema()` 返回 `rpi_ai::types::Tool`，
+- 自定义工具实现 `kiqi_agent::AgentTool`：`schema()` 返回 `kiqi_ai::types::Tool`，
   `execute(tool_call_id, params, signal, on_update)` 解析 JSON、检查 `signal`、
   返回 `AgentToolResult`。把参数解析失败映射成结构化错误，不要 panic。
 - 用 faux provider + `InMemoryExecutionEnv` 做离线测试：无需网络、API key 或真实文件系统。
-- 需要 CLI 级别的会话/压缩/skills 时，用 `rpi-harness` 而不是自己重造。
+- 需要 CLI 级别的会话/压缩/skills 时，用 `kiqi-harness` 而不是自己重造。
 
-## 6. cdylib ABI 适配（给全局 `rpi` 用）
+## 6. cdylib ABI 适配（给全局 `ki` 用）
 
-宿主只加载统一 C ABI 符号 `rpi_plugin_register`。扩展使用 `export_plugin!`，
+宿主只加载统一 C ABI 符号 `kiqi_plugin_register`。扩展使用 `export_plugin!`，
 通过同一个 `PluginApi` 注册能力并调用 `api.declare` 声明优先级/平台。
 SDK 在注册前检查 `abi_version` 和 `struct_size`；不兼容时返回非零状态，宿主报告加载失败。
 
 ```rust
-rpi_plugin_sdk::export_plugin!(|api| {
+kiqi_plugin_sdk::export_plugin!(|api| {
     let Some(register_tool) = api.register_tool else {
         return -1;                         // 能力检测：槽位缺失就明确失败
     };
@@ -211,13 +211,13 @@ handle，`poll` 必须非阻塞并响应取消标记，`cancel` 只置位不释�
 - `skills/<name>/SKILL.md`：领域技能。模型从启动时 `<available_skills>` 的
   `name`/`description`/`triggers` 动态选择，**不要维护硬编码的主题→技能映射**。
   发现（`loaded`）不等于使用；真正的激活证据是先完整 `read` 该 `SKILL.md`。
-- `AGENTS.md`：项目根兜底指令，裸 `rpi` 也会读取。与 `prompts/system.md` 的
+- `AGENTS.md`：项目根兜底指令，裸 `ki` 也会读取。与 `prompts/system.md` 的
   核心约束保持一致，改一个就同步另一个。
 - 系统提示词与 skills 在**每次会话启动时**加载快照；改完要重启会话，已有会话不会热替换。
 
 ## 8. `config/agent.json`（项目约定）
 
-`.rpi/settings.json` 是 rpi 宿主的原生配置。`config/agent.json` 是**项目自己的**
+`.ki/settings.json` 是 ki 宿主的原生配置。`config/agent.json` 是**项目自己的**
 约定文件，供内嵌 Agent 启动器或包装脚本读取，让"系统提示词 / 技能目录 / 产物目录 /
 默认 provider"集中在一处：
 
@@ -227,7 +227,7 @@ handle，`poll` 必须非阻塞并响应取消标记，`cancel` 只置位不释�
   "append_system_prompt": "prompts/append-system.md",
   "skills_dir": "skills",
   "skill_dirs": ["skills"],
-  "extension_dirs": [".rpi/extensions"],
+  "extension_dirs": [".ki/extensions"],
   "disable_context_files": true,
   "artifacts_dir": "artifacts",
   "provider": "<default-provider>"
@@ -235,7 +235,7 @@ handle，`poll` 必须非阻塞并响应取消标记，`cancel` 只置位不释�
 ```
 
 以上取值按项目实际使用的提供者与目录填写，不要照抄示例；`config/agent.json`
-不是 rpi 原生配置，只是本项目启动器的约定。同时用 `.rpi/settings.json` 让宿主
+不是 ki 原生配置，只是本项目启动器的约定。同时用 `.ki/settings.json` 让宿主
 原生发现资源：
 
 ```json
@@ -255,19 +255,19 @@ handle，`poll` 必须非阻塞并响应取消标记，`cancel` 只置位不释�
 两套入口的职责保持一致：
 
 - **内嵌 Agent**：一个启动脚本 → `cargo run --bin agent`（本项目进程，直连 SDK）。
-- **全局宿主**：一个构建脚本编译 cdylib 并复制到 `.rpi/extensions`，再由一个启动
-  脚本拉起全局 `rpi`。脚本应：
+- **全局宿主**：一个构建脚本编译 cdylib 并复制到 `.ki/extensions`，再由一个启动
+  脚本拉起全局 `ki`。脚本应：
   1. 固定工作目录到项目根，避免加载到别的项目的 skills；
-  2. 让宿主从 `.rpi/extensions` **原生扫描**，不要重复传同一个 `--extensions-dir`；
+  2. 让宿主从 `.ki/extensions` **原生扫描**，不要重复传同一个 `--extensions-dir`；
   3. 把 `prompts/system.md`、`prompts/append-system.md` 显式传给宿主；
   4. 只在没有更高优先级设置时选默认 provider/model，打印来源但**不打印 API key**；
   5. fail-closed：检测到 `--no-tools`、`--no-skills`、`--no-extensions` 或
      `--tools` 白名单缺少 `read` 时先失败——这些会阻止加载内容扩展或读取 skill。
 - Windows 上已加载的 DLL 无法原地覆盖：复制前比较 SHA256，字节未变就跳过；
-  被占用时给出"停止运行中的 rpi 后重试"的可操作错误，而不是静默失败。
+  被占用时给出"停止运行中的 ki 后重试"的可操作错误，而不是静默失败。
 
-编辑循环：改 Rust 扩展用 `rpi dev`（watch + 热重载，版本化 staging 到
-`.rpi/extensions/.dev`）；只调当前扩展用 `rpi dev-local`（隔离模式）。不要手工把
+编辑循环：改 Rust 扩展用 `ki dev`（watch + 热重载，版本化 staging 到
+`.ki/extensions/.dev`）；只调当前扩展用 `ki dev-local`（隔离模式）。不要手工把
 Cargo target DLL 复制成固定文件名。
 
 ## 10. 服务化 Agent（可选）
@@ -288,34 +288,34 @@ Cargo target DLL 复制成固定文件名。
 - 领域逻辑写 `rlib` 单元测试；ABI 注册/加载写至少一个宿主 smoke test。
 - 断言**两个宿主的 schema 一致**：同一份 `TOOLS` 派生的 Agent schema 与 ABI JSON
   必须相等，防止漂移。
-- `rpi dev --no-watch` 能编译、加载并注册预期工具；`rpi install <crate> --force`
+- `ki dev --no-watch` 能编译、加载并注册预期工具；`ki install <crate> --force`
   的干净安装路径通过。
 - 提供 `cdylib` 时，`crate-type` 包含 `"cdylib"`，导出
-  `rpi_plugin_register`，依赖已发布的 `rpi-plugin-sdk`。
+  `kiqi_plugin_register`，依赖已发布的 `kiqi-plugin-sdk`。
 - `README` 写明工具 schema、权限边界、持久化文件、网络访问、支持平台和卸载方式；
-  `AGENTS.md`、`config/agent.json`、`prompts/`、`skills/`、`.rpi/settings.json`
+  `AGENTS.md`、`config/agent.json`、`prompts/`、`skills/`、`.ki/settings.json`
   之间的路径保持一致。
 
 ## 12. 创建检查清单
 
 1. 选定形态（内嵌 / CLI / cdylib；推荐内嵌 + cdylib 同源）。
-2. 建目录：`src/tools/`、`prompts/`、`skills/`、`config/`、`.rpi/`。
+2. 建目录：`src/tools/`、`prompts/`、`skills/`、`config/`、`.ki/`。
 3. `Cargo.toml` 声明 `[[bin]]` 与（如需 cdylib）`[lib] crate-type`。
 4. 写工具登记表 `TOOLS` + 唯一 `run_tool`，再写两个适配器。
 5. 写 `prompts/system.md` 与 `AGENTS.md`，约束保持一致。
-6. 写 `config/agent.json` 和 `.rpi/settings.json`。
+6. 写 `config/agent.json` 和 `.ki/settings.json`。
 7. 接内嵌 Agent 入口；需要全局宿主时复制 `examples/plugin-stub` 的 ABI 骨架。
-8. 加脚本：编译扩展、启动内嵌 Agent、启动全局 rpi。
+8. 加脚本：编译扩展、启动内嵌 Agent、启动全局 ki。
 9. 加 schema 对齐测试和至少一个端到端 smoke test。
 10. 用 `--debug-system-prompt` 确认项目提示词与动态 skill 路由进入最终 composed prompt。
 
 ## 13. 模型执行规则
 
-模型收到"创建 rpi Agent 项目 / 搭 Agent 结构"任务时：
+模型收到"创建 ki Agent 项目 / 搭 Agent 结构"任务时：
 
 1. 先调用 `docs` 查询 `agent`（本指南）；扩展开发查 `authoring`，调试查 `debugging`。
 2. 读当前仓库现有 `Cargo.toml`、SDK 版本与相邻项目约定，不猜 API。
 3. 先落目录和单一工具登记点，再写适配器，最后接入口。
 4. 优先复制仓库内最小骨架（`examples/minimal`、`examples/plugin-stub`）。
-5. 用 faux provider 做离线测试，用 `rpi dev --no-watch` 做真实加载 smoke test。
+5. 用 faux provider 做离线测试，用 `ki dev --no-watch` 做真实加载 smoke test。
 6. 不声称未验证的 ABI/capability 已完全兼容；如实记录降级行为。

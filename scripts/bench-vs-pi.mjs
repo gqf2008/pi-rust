@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Compare `rpi` against the native TypeScript `pi` coding agent.
+ * Compare `ki` against the native TypeScript `pi` coding agent.
  *
  * Both tools are measured the same way, on the same machine, in the same shell:
  *
@@ -23,12 +23,12 @@
  * Fairness rules applied to both sides:
  *   - `PI_OFFLINE=1` and a fresh, empty `PI_CODING_AGENT_DIR` per run, so neither
  *     performs network work and neither reads machine-specific config,
- *     extensions or sessions. rpi uses **its own** variable names
- *     (`RPI_OFFLINE` / `RPI_CODING_AGENT_DIR`), so the harness sets those too —
- *     setting only the `PI_*` names leaves rpi pointed at the real
- *     `~/.rpi/agent` and silently loads the machine's global plugin set, which
+ *     extensions or sessions. ki uses **its own** variable names
+ *     (`KI_OFFLINE` / `KI_CODING_AGENT_DIR`), so the harness sets those too —
+ *     setting only the `PI_*` names leaves ki pointed at the real
+ *     `~/.ki/agent` and silently loads the machine's global plugin set, which
  *     dominates startup and makes the comparison meaningless.
- *   - a placeholder `ANTHROPIC_API_KEY` for both tools. rpi refuses to build a
+ *   - a placeholder `ANTHROPIC_API_KEY` for both tools. ki refuses to build a
  *     session in an empty config dir without some provider credential, so an
  *     isolated run needs one; it is never used because both tools run offline.
  *   - a neutral temporary working directory for both, so neither scans this
@@ -42,7 +42,7 @@
  * measurement is Node startup, not shell startup.
  *
  * Usage:
- *   node scripts/bench-vs-pi.mjs --pi <path-to-pi> [--rpi <path>] [--runs 7]
+ *   node scripts/bench-vs-pi.mjs --pi <path-to-pi> [--ki <path>] [--runs 7]
  *
  * To obtain the comparison target:
  *   npm install --prefix .bench @earendil-works/pi-coding-agent
@@ -59,7 +59,7 @@ const IS_WINDOWS = process.platform === "win32";
 const MEMORY_RUNS = 3;
 
 function parseArgs(argv) {
-  const options = { pi: null, rpi: null, runs: 7, warmup: 2, json: null };
+  const options = { pi: null, ki: null, runs: 7, warmup: 2, json: null };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     const next = () => {
@@ -69,12 +69,12 @@ function parseArgs(argv) {
       return value;
     };
     if (arg === "--pi") options.pi = next();
-    else if (arg === "--rpi") options.rpi = next();
+    else if (arg === "--ki") options.ki = next();
     else if (arg === "--runs") options.runs = Number.parseInt(next(), 10);
     else if (arg === "--warmup") options.warmup = Number.parseInt(next(), 10);
     else if (arg === "--json") options.json = next();
     else if (arg === "--help" || arg === "-h") {
-      console.log("usage: node scripts/bench-vs-pi.mjs --pi <path> [--rpi <path>] [--runs N] [--warmup N] [--json <file>]");
+      console.log("usage: node scripts/bench-vs-pi.mjs --pi <path> [--ki <path>] [--runs N] [--warmup N] [--json <file>]");
       process.exit(0);
     } else {
       throw new Error(`unknown argument: ${arg}`);
@@ -113,15 +113,15 @@ function resolveInvocation(path) {
   return { command: path, args: [], display: path };
 }
 
-/** Locate the release build of `rpi` through cargo's target directory. */
-function resolveRpi(explicit) {
+/** Locate the release build of `ki` through cargo's target directory. */
+function resolveKi(explicit) {
   if (explicit) return resolve(explicit);
   const meta = spawnSync("cargo", ["metadata", "--no-deps", "--format-version", "1", "--locked"], { encoding: "utf8" });
-  if (meta.status !== 0) throw new Error("could not run `cargo metadata` to locate the rpi binary");
+  if (meta.status !== 0) throw new Error("could not run `cargo metadata` to locate the ki binary");
   const targetDir = JSON.parse(meta.stdout).target_directory;
-  const candidate = join(targetDir, "release", IS_WINDOWS ? "rpi.exe" : "rpi");
+  const candidate = join(targetDir, "release", IS_WINDOWS ? "ki.exe" : "ki");
   if (existsSync(candidate)) return candidate;
-  throw new Error(`no release build found at ${candidate}. Run: cargo build -p rpi-cli --release`);
+  throw new Error(`no release build found at ${candidate}. Run: cargo build -p kiqi-cli --release`);
 }
 
 function run(invocation, extraArgs, options) {
@@ -164,11 +164,11 @@ function runEnvironment(agentDir) {
     PI_OFFLINE: "1",
     PI_SKIP_VERSION_CHECK: "1",
     PI_CODING_AGENT_DIR: agentDir,
-    // rpi — same isolation, its own variable names. Without these rpi ignores the
-    // PI_* vars above and loads the real ~/.rpi/agent (global extensions included).
-    RPI_OFFLINE: "1",
-    RPI_CODING_AGENT_DIR: agentDir,
-    // Real credentials are cleared. The placeholder only lets rpi resolve a
+    // ki — same isolation, its own variable names. Without these ki ignores the
+    // PI_* vars above and loads the real ~/.ki/agent (global extensions included).
+    KI_OFFLINE: "1",
+    KI_CODING_AGENT_DIR: agentDir,
+    // Real credentials are cleared. The placeholder only lets ki resolve a
     // default model in an otherwise empty config dir; offline, it is never sent.
     ANTHROPIC_API_KEY: "bench-placeholder",
     ANTHROPIC_AUTH_TOKEN: "",
@@ -292,10 +292,10 @@ async function main() {
 
   const piPath = resolve(options.pi);
   if (!existsSync(piPath)) throw new Error(`pi not found at ${piPath}`);
-  const rpiPath = resolveRpi(options.rpi);
+  const kiPath = resolveKi(options.ki);
 
   const tools = [
-    { name: "rpi", kind: "Rust", path: rpiPath },
+    { name: "ki", kind: "Rust", path: kiPath },
     { name: "pi", kind: "TypeScript", path: piPath },
   ].map((tool) => ({ ...tool, invocation: resolveInvocation(tool.path) }));
 
@@ -313,7 +313,7 @@ async function main() {
   for (const tool of tools) console.log(`  ${tool.name.padEnd(3)} -> ${tool.invocation.display}`);
   console.log("");
 
-  const scratch = mkdtempSync(join(tmpdir(), "rpi-vs-pi-"));
+  const scratch = mkdtempSync(join(tmpdir(), "kiqi-vs-pi-"));
   const neutralCwd = join(scratch, "cwd");
   const results = {};
 
@@ -379,17 +379,17 @@ async function main() {
     rmSync(scratch, { recursive: true, force: true });
   }
 
-  const rpi = results.rpi;
+  const ki = results.ki;
   const pi = results.pi;
   const rows = [
-    ["`--version` (median)", ms(rpi.versionMs), ms(pi.versionMs), `${(pi.versionMs / rpi.versionMs).toFixed(1)}× faster`],
-    ["Cold start (median)", ms(rpi.coldStartMs), ms(pi.coldStartMs), `${(pi.coldStartMs / rpi.coldStartMs).toFixed(1)}× faster`],
+    ["`--version` (median)", ms(ki.versionMs), ms(pi.versionMs), `${(pi.versionMs / ki.versionMs).toFixed(1)}× faster`],
+    ["Cold start (median)", ms(ki.coldStartMs), ms(pi.coldStartMs), `${(pi.coldStartMs / ki.coldStartMs).toFixed(1)}× faster`],
   ];
-  if (rpi.rssAtReadyBytes && pi.rssAtReadyBytes) {
-    rows.push(["RSS at ready", mib(rpi.rssAtReadyBytes), mib(pi.rssAtReadyBytes), `${(pi.rssAtReadyBytes / rpi.rssAtReadyBytes).toFixed(1)}× smaller`]);
+  if (ki.rssAtReadyBytes && pi.rssAtReadyBytes) {
+    rows.push(["RSS at ready", mib(ki.rssAtReadyBytes), mib(pi.rssAtReadyBytes), `${(pi.rssAtReadyBytes / ki.rssAtReadyBytes).toFixed(1)}× smaller`]);
   }
 
-  console.log(`| Metric | ${rpi.label} | ${pi.label} | Difference |`);
+  console.log(`| Metric | ${ki.label} | ${pi.label} | Difference |`);
   console.log("| ------ | ---------: | ----------: | ---------- |");
   for (const [metric, left, right, ratio] of rows) console.log(`| ${metric} | ${left} | ${right} | **${ratio}** |`);
 

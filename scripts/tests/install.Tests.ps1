@@ -4,7 +4,7 @@
 # use real files. The fixture executable needs no Rust installation.
 $ErrorActionPreference = 'Stop'
 $Installer = Join-Path (Split-Path $PSScriptRoot -Parent) 'install.ps1'
-$TestRoot = Join-Path ([IO.Path]::GetTempPath()) ("rpi-installer-tests-" + [guid]::NewGuid().ToString('N'))
+$TestRoot = Join-Path ([IO.Path]::GetTempPath()) ("kiqi-installer-tests-" + [guid]::NewGuid().ToString('N'))
 $OnWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 $SavedEnvironment = @{}
 $TestState = @{}
@@ -32,7 +32,7 @@ function Invoke-WebRequest {
         if ($TestState.Mode -eq 'MissingChecksum') { throw 'HTTP 404' }
         $Hash = (Get-FileHash -LiteralPath $TestState.FixtureArchive -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($TestState.Mode -eq 'Mismatch') { $Hash = '0' * 64 }
-        $Checksum = "$Hash  rpi-v0.3.19-x86_64-pc-windows-msvc.zip"
+        $Checksum = "$Hash  kiqi-v0.3.19-x86_64-pc-windows-msvc.zip"
         if ($TestState.Mode -eq 'MalformedChecksum') { $Checksum = 'not a sha256 checksum' }
         if ($TestState.Mode -eq 'WrongChecksumAsset') { $Checksum = "$Hash  another.zip" }
         [IO.File]::WriteAllText($OutFile, "$Checksum`n")
@@ -64,7 +64,7 @@ function Invoke-Test([string] $Name, [scriptblock] $Arrange, [scriptblock] $Chec
     $env:PROCESSOR_ARCHITEW6432 = $null
     $CaseDir = Join-Path $TestRoot $Name
     $env:LOCALAPPDATA = Join-Path $CaseDir 'local app data'
-    $TestState.InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\rpi'
+    $TestState.InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\ki'
     $TestState.Options = @{ Version = 'v0.3.19' }
     $TestState.Mode = 'Success'
     $TestState.FixtureArchive = $TestState.BinaryArchive
@@ -92,12 +92,12 @@ function Invoke-Test([string] $Name, [scriptblock] $Arrange, [scriptblock] $Chec
 
 function Assert-Installed {
     Assert-True (-not $TestState.Failure) "Installation failed: $TestState.Failure"
-    $Installed = Join-Path $TestState.InstallDir 'rpi.exe'
-    Assert-True (Test-Path -LiteralPath $Installed -PathType Leaf) 'rpi.exe was not installed.'
+    $Installed = Join-Path $TestState.InstallDir 'ki.exe'
+    Assert-True (Test-Path -LiteralPath $Installed -PathType Leaf) 'ki.exe was not installed.'
     Assert-True ((Get-FileHash -LiteralPath $Installed).Hash -eq $TestState.BinaryHash) 'Installed binary differs from the archive.'
-    Assert-True ($TestState.Output -match 'rpi fixture 0\.3\.19') 'Installed binary did not print its version.'
+    Assert-True ($TestState.Output -match 'ki fixture 0\.3\.19') 'Installed binary did not print its version.'
     Assert-True ($TestState.Downloads.Count -eq 2) 'Expected archive and checksum downloads.'
-    Assert-True ($TestState.Downloads[0] -eq 'https://github.com/bigfish1913/pi-rust/releases/download/v0.3.19/rpi-v0.3.19-x86_64-pc-windows-msvc.zip') 'Wrong archive URL.'
+    Assert-True ($TestState.Downloads[0] -eq 'https://github.com/bigfish1913/pi-rust/releases/download/v0.3.19/kiqi-v0.3.19-x86_64-pc-windows-msvc.zip') 'Wrong archive URL.'
     Assert-True ($TestState.Downloads[1] -eq "$($TestState.Downloads[0]).sha256") 'Wrong checksum URL.'
 }
 
@@ -119,23 +119,23 @@ function Assert-FailedBeforeExtraction([string] $Message) {
 try {
     $FixtureDir = Join-Path $TestRoot 'fixture'
     New-Item -ItemType Directory -Path $FixtureDir -Force | Out-Null
-    $Binary = Join-Path $FixtureDir 'rpi.exe'
+    $Binary = Join-Path $FixtureDir 'ki.exe'
     if ($OnWindows) {
         $Source = Join-Path $TestRoot 'fixture.cs'
-        [IO.File]::WriteAllText($Source, 'class Fixture { static void Main() { System.Console.WriteLine("rpi fixture 0.3.19"); } }')
+        [IO.File]::WriteAllText($Source, 'class Fixture { static void Main() { System.Console.WriteLine("ki fixture 0.3.19"); } }')
         # .NET Framework's compiler is included in Windows, including the CI image.
         $Compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
         & $Compiler /nologo /target:exe "/out:$Binary" $Source
         if ($LASTEXITCODE -ne 0) { throw 'Could not compile the Windows test fixture.' }
     }
     else {
-        [IO.File]::WriteAllText($Binary, "#!/bin/sh`nprintf 'rpi fixture 0.3.19\n'`n")
+        [IO.File]::WriteAllText($Binary, "#!/bin/sh`nprintf 'ki fixture 0.3.19\n'`n")
     }
     $TestState.BinaryHash = (Get-FileHash -LiteralPath $Binary).Hash
     $TestState.BinaryArchive = Join-Path $TestRoot 'binary.zip'
     Compress-Archive -LiteralPath $Binary -DestinationPath $TestState.BinaryArchive
     $Readme = Join-Path $TestRoot 'README.txt'
-    [IO.File]::WriteAllText($Readme, 'Archive without rpi.exe')
+    [IO.File]::WriteAllText($Readme, 'Archive without ki.exe')
     $TestState.EmptyArchive = Join-Path $TestRoot 'missing-binary.zip'
     Compress-Archive -LiteralPath $Readme -DestinationPath $TestState.EmptyArchive
 
@@ -145,11 +145,11 @@ try {
         Assert-True ($TestState.Output -match 'user PATH') 'Installer omitted PATH instructions.'
     }
     Invoke-Test 'custom-directory' {
-        $TestState.InstallDir = Join-Path $CaseDir "tools [rpi]'s directory"
+        $TestState.InstallDir = Join-Path $CaseDir "tools [ki]'s directory"
         $TestState.Options = @{ Version = '0.3.19'; Dir = $TestState.InstallDir }
     } {
         Assert-Installed
-        Assert-True ($TestState.Output.Contains("tools [rpi]''s directory;")) 'PATH instruction did not quote the apostrophe.'
+        Assert-True ($TestState.Output.Contains("tools [ki]''s directory;")) 'PATH instruction did not quote the apostrophe.'
     }
     Invoke-Test 'latest-release' { $TestState.Options = @{} } {
         Assert-Installed
@@ -173,12 +173,12 @@ try {
         Invoke-Test "unsupported-$Architecture" {
             $env:PROCESSOR_ARCHITECTURE = $Architecture
         } {
-            Assert-FailedBeforeExtraction 'cargo install rpi-cli'
+            Assert-FailedBeforeExtraction 'cargo install kiqi-cli'
             Assert-True ($TestState.Downloads.Count -eq 0 -and $TestState.ApiCalls.Count -eq 0) 'Unsupported platform accessed the network.'
         }
     }
     Invoke-Test 'missing-asset' { $TestState.Mode = 'MissingAsset' } {
-        Assert-FailedBeforeExtraction 'cargo install rpi-cli'
+        Assert-FailedBeforeExtraction 'cargo install kiqi-cli'
     }
     Invoke-Test 'checksum-mismatch' { $TestState.Mode = 'Mismatch' } {
         Assert-FailedBeforeExtraction 'Checksum verification failed'
@@ -186,11 +186,11 @@ try {
     Invoke-Test 'checksum-mismatch-preserves-install' {
         $TestState.Mode = 'Mismatch'
         New-Item -ItemType Directory -Path $TestState.InstallDir -Force | Out-Null
-        [IO.File]::WriteAllText((Join-Path $TestState.InstallDir 'rpi.exe'), 'existing installation')
+        [IO.File]::WriteAllText((Join-Path $TestState.InstallDir 'ki.exe'), 'existing installation')
     } {
         Assert-True ($TestState.Failure -like '*Checksum verification failed*') 'Checksum mismatch did not fail.'
         Assert-True ($TestState.Extractions -eq 0) 'Mismatched archive was extracted.'
-        Assert-True ((Get-Content -LiteralPath (Join-Path $TestState.InstallDir 'rpi.exe') -Raw) -eq 'existing installation') 'Checksum mismatch overwrote the existing installation.'
+        Assert-True ((Get-Content -LiteralPath (Join-Path $TestState.InstallDir 'ki.exe') -Raw) -eq 'existing installation') 'Checksum mismatch overwrote the existing installation.'
     }
     foreach ($Mode in @('MissingChecksum', 'MalformedChecksum', 'WrongChecksumAsset')) {
         Invoke-Test $Mode { $TestState.Mode = $Mode } {
@@ -198,7 +198,7 @@ try {
         }
     }
     Invoke-Test 'missing-binary' { $TestState.FixtureArchive = $TestState.EmptyArchive } {
-        Assert-True ($TestState.Failure -eq 'Archive did not contain rpi.exe.') 'Archive without rpi.exe did not fail clearly.'
+        Assert-True ($TestState.Failure -eq 'Archive did not contain ki.exe.') 'Archive without ki.exe did not fail clearly.'
         Assert-True (-not (Test-Path -LiteralPath $TestState.InstallDir)) 'Incomplete archive created an installation directory.'
     }
     foreach ($Mode in @('ApiFailure', 'EmptyTag')) {

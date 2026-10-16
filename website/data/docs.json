@@ -4,16 +4,16 @@
   "modes": {
     "guide": {
       "label": "使用文档",
-      "eyebrow": "RPI / USER GUIDE",
-      "description": "面向第一次使用 rpi 的开发者：从安装、运行到把 Agent 接进自己的应用。",
+      "eyebrow": "KI / USER GUIDE",
+      "description": "面向第一次使用 ki 的开发者：从安装、运行到把 Agent 接进自己的应用。",
       "sections": [
         {
           "id": "complete-guide",
           "kicker": "00 / COMPLETE GUIDE",
           "title": "完整使用手册",
-          "summary": "从安装、模型配置、.rpi 资源和 Rust 插件，到 SDK、排错和发布的完整路径。",
+          "summary": "从安装、模型配置、.ki 资源和 Rust 插件，到 SDK、排错和发布的完整路径。",
           "body": [
-            "官网文档与仓库内 /user-guide.md 保持同步。安装后的 rpi 默认提供核心工具，并通过 rpi-plugin-sdk 构建的 Rust cdylib 扩展增加工具、Provider 和事件处理。",
+            "官网文档与仓库内 /user-guide.md 保持同步。安装后的 ki 默认提供核心工具，并通过 kiqi-plugin-sdk 构建的 Rust cdylib 扩展增加工具、Provider 和事件处理。",
             "推荐先阅读安装与第一次运行，再按需求进入 Provider、Rust 扩展、Agent 项目结构或 SDK 集成章节。"
           ],
           "links": [
@@ -37,7 +37,7 @@
           "title": "快速开始",
           "summary": "先用 faux provider 跑通完整闭环，不需要 API key，也不需要网络。",
           "body": [
-            "rpi 是 library-first 的 Rust Agent toolkit。建议先运行仓库里的 minimal 示例，再根据需要组合 rpi-ai、rpi-agent 和 rpi-tools。",
+            "ki 是 library-first 的 Rust Agent toolkit。建议先运行仓库里的 minimal 示例，再根据需要组合 kiqi-ai、kiqi-agent 和 kiqi-tools。",
             "faux provider 会返回确定性的本地响应，适合学习事件流、写测试和验证工具循环。"
           ],
           "code": {
@@ -56,15 +56,15 @@
           "id": "install",
           "kicker": "02 / INSTALL",
           "title": "安装与运行",
-          "summary": "Rust 1.78+、Cargo 和 Tokio 是开始使用的最低条件；也可以直接安装 rpi-cli。",
+          "summary": "Rust 1.78+、Cargo 和 Tokio 是开始使用的最低条件；也可以直接安装 kiqi-cli。",
           "body": [
-            "只想直接使用 CLI 时执行 cargo install rpi-cli；想研究 Agent loop，再克隆仓库运行 minimal 示例。Cargo workspace 会按依赖顺序编译所有 crate。",
-            "真实 Provider 的凭据可以通过命令行参数、~/.rpi/auth.json、models.json 或环境变量提供。不要把密钥提交进仓库。"
+            "只想直接使用 CLI 时执行 cargo install kiqi-cli；想研究 Agent loop，再克隆仓库运行 minimal 示例。Cargo workspace 会按依赖顺序编译所有 crate。",
+            "真实 Provider 的凭据可以通过命令行参数、~/.ki/auth.json、models.json 或环境变量提供。不要把密钥提交进仓库。"
           ],
           "code": {
             "language": "shell",
             "file": "README.md",
-            "content": "# 直接安装 CLI\ncargo install rpi-cli\nrpi -p \"hello\"\n\n# 从源码运行示例\ngit clone https://github.com/bigfish1913/pi-rust.git\ncd pi-rust\ncargo run -p minimal"
+            "content": "# 直接安装 CLI\ncargo install kiqi-cli\nki -p \"hello\"\n\n# 从源码运行示例\ngit clone https://github.com/bigfish1913/pi-rust.git\ncd pi-rust\ncargo run -p minimal"
           },
           "links": [
             {
@@ -85,12 +85,12 @@
           "code": {
             "language": "rust",
             "file": "README.md",
-            "content": "use rpi_agent::{Agent, AgentEvent};\nuse rpi_ai::providers::faux::faux_provider;\n\nlet model = faux_provider().model(\"echo\");\nlet mut agent = Agent::builder(model)\n    .system_prompt(\"You are a helpful assistant.\")\n    .build();\n\nlet mut events = agent.subscribe();\nagent.prompt(\"Hello!\").await?;\nwhile let Some(event) = events.recv().await {\n    if matches!(event, AgentEvent::AgentEnd { .. }) { break; }\n}"
+            "content": "use kiqi_agent::{Agent, AgentEvent};\nuse kiqi_ai::providers::faux::faux_provider;\n\nlet model = faux_provider().model(\"echo\");\nlet mut agent = Agent::builder(model)\n    .system_prompt(\"You are a helpful assistant.\")\n    .build();\n\nlet mut events = agent.subscribe();\nagent.prompt(\"Hello!\").await?;\nwhile let Some(event) = events.recv().await {\n    if matches!(event, AgentEvent::AgentEnd { .. }) { break; }\n}"
           },
           "links": [
             {
-              "label": "rpi-agent API",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/rpi-agent"
+              "label": "kiqi-agent API",
+              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-agent"
             }
           ]
         },
@@ -100,18 +100,18 @@
           "title": "接入工具",
           "summary": "把 AgentTool 加入 builder；内置工具通过 ExecutionEnv 隔离文件系统和命令执行。",
           "body": [
-            "rpi-tools 提供与 Pi 对齐的 read、write、edit、bash 四个基础工具，写操作通过 MutationQueue 串行化。",
-            "在测试中使用 InMemoryExecutionEnv 可以避免触碰真实文件系统；需要自定义工具时，实现 rpi-agent 的 AgentTool trait。"
+            "kiqi-tools 提供与 Pi 对齐的 read、write、edit、bash 四个基础工具，写操作通过 MutationQueue 串行化。",
+            "在测试中使用 InMemoryExecutionEnv 可以避免触碰真实文件系统；需要自定义工具时，实现 kiqi-agent 的 AgentTool trait。"
           ],
           "code": {
             "language": "rust",
-            "file": "crates/rpi-tools/src/lib.rs",
-            "content": "use rpi_tools::{create_read_tool, InMemoryExecutionEnv};\n\nlet env = InMemoryExecutionEnv::default();\nlet read = create_read_tool(env.clone());\nlet mut agent = Agent::builder(model)\n    .tool(read)\n    .build();"
+            "file": "crates/kiqi-tools/src/lib.rs",
+            "content": "use kiqi_tools::{create_read_tool, InMemoryExecutionEnv};\n\nlet env = InMemoryExecutionEnv::default();\nlet read = create_read_tool(env.clone());\nlet mut agent = Agent::builder(model)\n    .tool(read)\n    .build();"
           },
           "links": [
             {
               "label": "内置工具与 ExecutionEnv",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/rpi-tools"
+              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-tools"
             }
           ]
         },
@@ -121,12 +121,12 @@
           "title": "配置 Provider",
           "summary": "统一的 Model / Provider 抽象让 Anthropic、OpenAI-compatible 和 faux provider 可以互换。",
           "body": [
-            "默认模型会从已认证的模型目录中选择。自定义网关写入 ~/.rpi/agent/models.json，并通过 provider/model 的形式传给 CLI。",
+            "默认模型会从已认证的模型目录中选择。自定义网关写入 ~/.ki/agent/models.json，并通过 provider/model 的形式传给 CLI。",
             "Anthropic 支持 ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN；OpenAI-compatible endpoint 使用 openai-completions API 配置。"
           ],
           "code": {
             "language": "json",
-            "file": "~/.rpi/agent/models.json",
+            "file": "~/.ki/agent/models.json",
             "content": "{\n  \"providers\": {\n    \"gateway\": {\n      \"api\": \"anthropic-messages\",\n      \"baseUrl\": \"https://gateway.example.com\",\n      \"apiKey\": \"sk-gateway-secret\",\n      \"models\": [{ \"id\": \"custom-claude\", \"name\": \"Custom Claude\" }]\n    }\n  }\n}"
           },
           "links": [
@@ -142,18 +142,18 @@
           "title": "Session 和 Harness",
           "summary": "需要持久化、压缩和上下文文件时，把 Agent 交给 AgentHarness。",
           "body": [
-            "rpi-harness 在 Agent 之上组合 session tree、JSONL 持久化、compaction、skills、prompt templates 和 context files。核心 Agent 仍然可以独立使用。",
+            "kiqi-harness 在 Agent 之上组合 session tree、JSONL 持久化、compaction、skills、prompt templates 和 context files。核心 Agent 仍然可以独立使用。",
             "建议把 session id 作为产品层的稳定标识，使用 JSONL backend 记录可回放的事件和消息。"
           ],
           "code": {
             "language": "rust",
-            "file": "crates/rpi-harness/src/lib.rs",
-            "content": "use rpi_harness::AgentHarness;\n\nlet harness = AgentHarness::builder(agent)\n    .session_dir(\".rpi/sessions\")\n    .build()\n    .await?;\nharness.prompt(\"Summarize this file\").await?;"
+            "file": "crates/kiqi-harness/src/lib.rs",
+            "content": "use kiqi_harness::AgentHarness;\n\nlet harness = AgentHarness::builder(agent)\n    .session_dir(\".ki/sessions\")\n    .build()\n    .await?;\nharness.prompt(\"Summarize this file\").await?;"
           },
           "links": [
             {
               "label": "Harness 模块",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/rpi-harness"
+              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-harness"
             }
           ]
         },
@@ -163,13 +163,13 @@
           "title": "插件与扩展",
           "summary": "用稳定 ABI 的 cdylib 插件注册工具、Provider、命令和资源。",
           "body": [
-            "插件 crate 依赖 rpi-plugin-sdk，通过 rpi_plugin_register 导出入口接收 PluginApiVt，并向宿主注册工具、Provider、事件和资源处理器。宿主的 rpi-extensions 负责发现、加载、注册和生命周期管理。",
+            "插件 crate 依赖 kiqi-plugin-sdk，通过 kiqi_plugin_register 导出入口接收 PluginApiVt，并向宿主注册工具、Provider、事件和资源处理器。宿主的 kiqi-extensions 负责发现、加载、注册和生命周期管理。",
             "把跨边界的数据限制在 SDK 定义的可序列化类型内；插件不应直接依赖宿主内部模块。"
           ],
           "code": {
             "language": "rust",
             "file": "examples/plugin-stub/src/lib.rs",
-            "content": "use rpi_plugin_sdk::{register_entrypoint, PluginApiVt};\n\n#[no_mangle]\npub extern \"C\" fn rpi_plugin_register(\n    api: *const PluginApiVt,\n    abi_version: u32,\n) -> i32 {\n    register_entrypoint(api, abi_version, |api| {\n        // api.register_tool / register_provider / register_event_handler\n        // are the stable ABI registration slots.\n        let _ = api;\n        0\n    })\n}"
+            "content": "use kiqi_plugin_sdk::{register_entrypoint, PluginApiVt};\n\n#[no_mangle]\npub extern \"C\" fn kiqi_plugin_register(\n    api: *const PluginApiVt,\n    abi_version: u32,\n) -> i32 {\n    register_entrypoint(api, abi_version, |api| {\n        // api.register_tool / register_provider / register_event_handler\n        // are the stable ABI registration slots.\n        let _ = api;\n        0\n    })\n}"
           },
           "links": [
             {
@@ -178,7 +178,7 @@
             },
             {
               "label": "插件加载器",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/rpi-extensions"
+              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-extensions"
             }
           ]
         },
@@ -193,13 +193,13 @@
           ],
           "code": {
             "language": "rust",
-            "file": "crates/rpi-ai/src/lib.rs",
+            "file": "crates/kiqi-ai/src/lib.rs",
             "content": "let model = faux_provider().model(\"echo\");\nlet mut agent = Agent::builder(model)\n    .tool(create_read_tool(InMemoryExecutionEnv::default()))\n    .build();\nagent.prompt(\"read README.md\").await?;"
           },
           "links": [
             {
               "label": "faux provider 源码",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/rpi-ai"
+              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-ai"
             }
           ]
         }
@@ -207,7 +207,7 @@
     },
     "sdk": {
       "label": "SDK 文档",
-      "eyebrow": "RPI / SDK REFERENCE",
+      "eyebrow": "KI / SDK REFERENCE",
       "description": "按 crate 和核心 trait 查找 API 边界，适合实现自定义 Provider、工具、Harness 或插件。",
       "sections": [
         {
@@ -216,25 +216,25 @@
           "title": "Crate 总览",
           "summary": "六层 workspace 保持单向依赖：从 telemetry 和 AI 类型一路组合到 CLI。",
           "body": [
-            "发布名使用 rpi- 前缀，磁盘目录仍保留 pi-* 历史路径。核心 crate 可以独立嵌入，不必依赖 CLI。",
-            "典型依赖方向是 rpi-telemetry → rpi-ai → rpi-agent → rpi-tools → rpi-harness → rpi-cli。"
+            "发布名使用 kiqi- 前缀，磁盘目录仍保留 pi-* 历史路径。核心 crate 可以独立嵌入，不必依赖 CLI。",
+            "典型依赖方向是 kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli。"
           ],
           "code": {
             "language": "text",
             "file": "README.md",
-            "content": "rpi-telemetry   telemetry contracts\nrpi-ai          provider types + streaming\nrpi-agent       runtime loop + AgentTool\nrpi-tools       built-in tools + ExecutionEnv\nrpi-harness     sessions + compaction\nrpi-cli         terminal application"
+            "content": "kiqi-telemetry   telemetry contracts\nkiqi-ai          provider types + streaming\nkiqi-agent       runtime loop + AgentTool\nkiqi-tools       built-in tools + ExecutionEnv\nkiqi-harness     sessions + compaction\nkiqi-cli         terminal application"
           },
           "links": [
             {
               "label": "Workspace README",
-              "url": "https://github.com/bigfish1913/pi-rust#crates-published-as-rpi-"
+              "url": "https://github.com/bigfish1913/pi-rust#crates-published-as-kiqi-"
             }
           ]
         },
         {
-          "id": "rpi-ai",
-          "kicker": "02 / RPI-AI",
-          "title": "rpi-ai",
+          "id": "kiqi-ai",
+          "kicker": "02 / KI-AI",
+          "title": "kiqi-ai",
           "summary": "统一 Model、Provider、Message、Context 和流式 AssistantMessageEvent。",
           "body": [
             "Provider 负责把统一请求转换成具体模型 API，并将响应转换回 SDK 事件。validate_tool_arguments 在调用前校验 JSON 参数。",
@@ -242,20 +242,20 @@
           ],
           "code": {
             "language": "rust",
-            "file": "crates/rpi-ai/src/provider.rs",
+            "file": "crates/kiqi-ai/src/provider.rs",
             "content": "#[async_trait]\npub trait Provider: Send + Sync {\n    fn id(&self) -> &str;\n    fn models(&self) -> &[Model];\n    async fn stream_simple(\n        &self,\n        model: &Model,\n        ctx: &Context,\n        opts: &SimpleStreamOptions,\n    ) -> AssistantMessageEventStream;\n}"
           },
           "links": [
             {
-              "label": "rpi-ai exports",
-              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/rpi-ai/src/lib.rs"
+              "label": "kiqi-ai exports",
+              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/kiqi-ai/src/lib.rs"
             }
           ]
         },
         {
-          "id": "rpi-agent",
-          "kicker": "03 / RPI-AGENT",
-          "title": "rpi-agent",
+          "id": "kiqi-agent",
+          "kicker": "03 / KI-AGENT",
+          "title": "kiqi-agent",
           "summary": "Agent、AgentBuilder、AgentTool、AgentEvent 和 run_agent_loop 构成运行时核心。",
           "body": [
             "AgentBuilder 负责组装模型、系统提示词、工具和 hooks；run_agent_loop 负责在消息、工具调用和 Provider 流之间推进状态。",
@@ -263,20 +263,20 @@
           ],
           "code": {
             "language": "rust",
-            "file": "crates/rpi-agent/src/agent_tool.rs",
+            "file": "crates/kiqi-agent/src/agent_tool.rs",
             "content": "#[async_trait]\npub trait AgentTool: Send + Sync {\n    fn schema(&self) -> &Tool;\n    fn label(&self) -> &str;\n    async fn execute(\n        &self,\n        tool_call_id: &str,\n        params: serde_json::Value,\n        signal: CancellationToken,\n        on_update: Arc<dyn Fn(ToolResultPartial) + Send + Sync>,\n    ) -> Result<AgentToolResult, AgentError>;\n}"
           },
           "links": [
             {
-              "label": "rpi-agent exports",
-              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/rpi-agent/src/lib.rs"
+              "label": "kiqi-agent exports",
+              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/kiqi-agent/src/lib.rs"
             }
           ]
         },
         {
-          "id": "rpi-tools",
-          "kicker": "04 / RPI-TOOLS",
-          "title": "rpi-tools",
+          "id": "kiqi-tools",
+          "kicker": "04 / KI-TOOLS",
+          "title": "kiqi-tools",
           "summary": "ExecutionEnv 把工具的文件、进程和路径操作隔离出来。",
           "body": [
             "OsExecutionEnv 连接真实操作系统，InMemoryExecutionEnv 为测试提供内存实现。create_*_tool 函数返回可直接注册的 AgentTool。",
@@ -284,34 +284,34 @@
           ],
           "code": {
             "language": "rust",
-            "file": "crates/rpi-tools/src/lib.rs",
+            "file": "crates/kiqi-tools/src/lib.rs",
             "content": "pub trait ExecutionEnv: Send + Sync {\n    async fn read_file(&self, path: &Path) -> Result<String>;\n    async fn write_file(&self, path: &Path, content: &str) -> Result<()>;\n    async fn run_command(&self, command: &str) -> Result<CommandOutput>;\n}\n\npub fn create_grep_tool(env: Arc<dyn ExecutionEnv>) -> impl AgentTool { /* ... */ }"
           },
           "links": [
             {
               "label": "ExecutionEnv API",
-              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/rpi-tools/src/lib.rs"
+              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/kiqi-tools/src/lib.rs"
             }
           ]
         },
         {
-          "id": "rpi-harness",
-          "kicker": "05 / RPI-HARNESS",
-          "title": "rpi-harness",
+          "id": "kiqi-harness",
+          "kicker": "05 / KI-HARNESS",
+          "title": "kiqi-harness",
           "summary": "在 Agent 之上提供 session、compaction、skills、模板和上下文文件。",
           "body": [
             "Harness 是产品集成层：它知道如何恢复 session、裁剪上下文、加载 skills，并把系统提示词拼成一次运行所需的 Context。",
-            "如果你只需要一次性的 Agent 调用，可以直接使用 rpi-agent；需要持久化时再引入 Harness。"
+            "如果你只需要一次性的 Agent 调用，可以直接使用 kiqi-agent；需要持久化时再引入 Harness。"
           ],
           "code": {
             "language": "rust",
-            "file": "crates/rpi-harness/src/lib.rs",
+            "file": "crates/kiqi-harness/src/lib.rs",
             "content": "pub mod agent_harness;\npub mod session;\npub mod compaction;\npub mod skills;\npub mod prompt_templates;\npub mod context_files;\npub mod events;\npub mod system_prompt;"
           },
           "links": [
             {
               "label": "Harness modules",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/rpi-harness"
+              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-harness"
             }
           ]
         },
@@ -326,13 +326,13 @@
           ],
           "code": {
             "language": "text",
-            "file": "crates/rpi-agent/src/lib.rs",
+            "file": "crates/kiqi-agent/src/lib.rs",
             "content": "AgentBuilder\n  -> Agent::build\n  -> subscribe()\n  -> prompt(message)\n  -> Provider stream\n  -> AgentTool execution\n  -> AgentEvent::AgentEnd"
           },
           "links": [
             {
               "label": "Agent loop",
-              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/rpi-agent/src/lib.rs"
+              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/kiqi-agent/src/lib.rs"
             }
           ]
         },
@@ -347,13 +347,13 @@
           ],
           "code": {
             "language": "rust",
-            "file": "crates/rpi-ai/src/lib.rs",
+            "file": "crates/kiqi-ai/src/lib.rs",
             "content": "pub enum AssistantMessageEvent {\n    Start,\n    TextDelta(String),\n    ToolCall { name: String, arguments: Value },\n    Done { stop_reason: StopReason },\n    Error(String),\n}"
           },
           "links": [
             {
               "label": "AI event types",
-              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/rpi-ai/src/lib.rs"
+              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/kiqi-ai/src/lib.rs"
             }
           ]
         },
@@ -361,24 +361,24 @@
           "id": "plugin-abi",
           "kicker": "08 / PLUGIN ABI",
           "title": "插件 ABI",
-          "summary": "rpi-plugin-sdk 是插件和宿主之间唯一应依赖的边界。",
+          "summary": "kiqi-plugin-sdk 是插件和宿主之间唯一应依赖的边界。",
           "body": [
-            "插件以 cdylib 编译，由 rpi-extensions loader 发现并加载。registry 负责保存 API 注册的工具、Provider、事件和资源处理器，宿主控制卸载与错误隔离。",
-            "ABI 变更应提升版本并同时更新 plugin-stub 与 smoke test；不要让插件直接链接 rpi-cli 私有模块。"
+            "插件以 cdylib 编译，由 kiqi-extensions loader 发现并加载。registry 负责保存 API 注册的工具、Provider、事件和资源处理器，宿主控制卸载与错误隔离。",
+            "ABI 变更应提升版本并同时更新 plugin-stub 与 smoke test；不要让插件直接链接 kiqi-cli 私有模块。"
           ],
           "code": {
             "language": "toml",
-            "file": "crates/rpi-plugin-sdk/Cargo.toml",
-            "content": "[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nrpi-plugin-sdk = \"0.1\""
+            "file": "crates/kiqi-plugin-sdk/Cargo.toml",
+            "content": "[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nkiqi-plugin-sdk = \"0.1\""
           },
           "links": [
             {
               "label": "SDK crate",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/rpi-plugin-sdk"
+              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-plugin-sdk"
             },
             {
               "label": "ABI smoke test",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/rpi-extensions/tests"
+              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-extensions/tests"
             }
           ]
         }

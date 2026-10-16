@@ -66,7 +66,7 @@ so a stale number lands the entry in the wrong slot.
 ### Entry, ready for the `### Open Source` section
 
 ```markdown
-- **[ki](https://github.com/bigfish1913/pi-rust)** `⭐ <refresh at submit time>` — Library-first Rust coding agent: nine composable crates (`rpi-agent`, `rpi-tools`, `rpi-harness`, `rpi-tui`, …) so the agent loop can be embedded in your own program, plus a ready-to-run `ki` terminal CLI. Crash-resumable JSONL sessions that self-heal a duplicated-seq log, a stable `#[repr(C)]` plugin ABI for tools and providers, and a provider-agnostic `StreamFn` boundary that makes the loop testable with no network. MIT.
+- **[ki](https://github.com/bigfish1913/pi-rust)** `⭐ <refresh at submit time>` — Library-first Rust coding agent: nine composable crates (`kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-tui`, …) so the agent loop can be embedded in your own program, plus a ready-to-run `ki` terminal CLI. Crash-resumable JSONL sessions that self-heal a duplicated-seq log, a stable `#[repr(C)]` plugin ABI for tools and providers, and a provider-agnostic `StreamFn` boundary that makes the loop testable with no network. MIT.
 ```
 
 Placement: bottom of `### Open Source` (32★ is the lowest band in that section).
@@ -158,7 +158,7 @@ is exactly the case where guessing would be worse than saying nothing.
 
 What is known without a browser:
 
-- **lib.rs** auto-indexes crates.io, so the nine `rpi-*` crates are already
+- **lib.rs** auto-indexes crates.io, so the nine `kiqi-*` crates are already
   listed there with no submission step. That is coverage we did not have to ask
   for, and it is the one directory channel currently working.
 - **AlternativeTo** is the highest-value unverified channel: it is a

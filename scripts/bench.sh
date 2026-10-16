@@ -4,14 +4,14 @@
 #   sh scripts/bench.sh
 #
 # Reports the release binary size and the median wall-clock time of a short
-# no-network command (`rpi --version`). Timing uses python3 when available,
+# no-network command (`ki --version`). Timing uses python3 when available,
 # because `date` has no sub-second precision that is portable across Linux,
 # macOS and MSYS.
 
 set -eu
 
 RUNS="${RUNS:-7}"
-BIN_NAME="rpi"
+BIN_NAME="ki"
 
 log() { printf '%s\n' "$*"; }
 
@@ -24,7 +24,7 @@ log "profile: release (lto=thin, codegen-units=16, strip=symbols)"
 log ""
 
 log "== build =="
-cargo build -p rpi-cli --release --locked
+cargo build -p kiqi-cli --release --locked
 
 target_dir="$(cargo metadata --no-deps --format-version 1 --locked \
   | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | head -n 1)"

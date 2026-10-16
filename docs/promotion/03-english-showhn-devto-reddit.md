@@ -18,7 +18,7 @@ Show HN: ki – A Rust-native coding-agent runtime that is usable as a library
 
 ```
 ki is a coding-agent runtime in Rust. The part I care about is that the agent
-loop is a library, not a CLI you shell out to and scrape: rpi-agent + rpi-ai is
+loop is a library, not a CLI you shell out to and scrape: kiqi-agent + kiqi-ai is
 enough to run an agent inside your own process with your own event handling.
 
 Highlights:
@@ -61,7 +61,7 @@ docs/native-pi-missing-features.md tracks the compatibility gaps rather than
 hiding them.
 
   curl -fsSL https://raw.githubusercontent.com/bigfish1913/pi-rust/main/scripts/install.sh | sh
-  # or: cargo install rpi-cli
+  # or: cargo install kiqi-cli
 
 https://github.com/bigfish1913/pi-rust
 
@@ -107,8 +107,8 @@ shipping a fake implementation of it. Every example and every test starts like
 this:
 
 ```rust
-use rpi_ai::providers::faux::{FauxProvider, FauxScript};
-use rpi_ai::Provider;
+use kiqi_ai::providers::faux::{FauxProvider, FauxScript};
+use kiqi_ai::Provider;
 
 let provider = FauxProvider::new(
     FauxScript::new()
@@ -130,12 +130,12 @@ mocking it.
 The tools do not touch the real filesystem. They go through `ExecutionEnv`:
 
 ```rust
-use rpi_tools::{create_read_tool, ExecutionToolContext, InMemoryExecutionEnv};
+use kiqi_tools::{create_read_tool, ExecutionToolContext, InMemoryExecutionEnv};
 
 let env = Arc::new(InMemoryExecutionEnv::new());
 let ctx = ExecutionToolContext::new(
-    env.clone() as Arc<dyn rpi_tools::ExecutionEnv>,
-    Some(env as Arc<dyn rpi_tools::MutatingEnv>),
+    env.clone() as Arc<dyn kiqi_tools::ExecutionEnv>,
+    Some(env as Arc<dyn kiqi_tools::MutatingEnv>),
 );
 let read = create_read_tool(&ctx, None);
 ```
@@ -189,7 +189,7 @@ If you want to try the finished version:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bigfish1913/pi-rust/main/scripts/install.sh | sh
-# or: cargo install rpi-cli
+# or: cargo install kiqi-cli
 ```
 
 Runnable offline example: `cargo run -p minimal`.
@@ -215,9 +215,9 @@ Repo: https://github.com/bigfish1913/pi-rust (MIT)
 ki is a coding-agent runtime in Rust, published as nine crates with one-way
 dependencies:
 
-  rpi-telemetry -> rpi-ai -> rpi-agent -> rpi-tools -> rpi-harness -> rpi-cli
+  kiqi-telemetry -> kiqi-ai -> kiqi-agent -> kiqi-tools -> kiqi-harness -> kiqi-cli
                     ^                                        ^
-              rpi-tui                          rpi-plugin-sdk -> rpi-extensions
+              kiqi-tui                          kiqi-plugin-sdk -> kiqi-extensions
 
 Design decisions that might be interesting here:
 
@@ -225,7 +225,7 @@ Design decisions that might be interesting here:
   providers, a test double and a recorded transcript are interchangeable. Provider
   failures are reported as `Error` events in the stream rather than `Err`, so the
   loop has a single failure path.
-- `rpi-ai`'s HTTP providers are behind a feature flag, so the default build
+- `kiqi-ai`'s HTTP providers are behind a feature flag, so the default build
   contains no network stack and the test suite cannot accidentally depend on one.
 - The plugin SDK is a **zero-dependency leaf**. Plugins are cdylibs the host loads
   with libloading, so if the SDK depended on the runtime the plugin would link the

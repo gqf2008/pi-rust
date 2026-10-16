@@ -7,9 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "rpi-webfetch ported to the kiqi wasm ABI (net-http capability)"
+description = "kiqi-webfetch ported to the kiqi wasm ABI (net-http capability)"
 readme = "README.md"
-keywords = ["rpi", "kiqi", "wasm", "plugin", "webfetch"]
+keywords = ["ki", "kiqi", "wasm", "plugin", "webfetch"]
 categories = ["development-tools"]
 
 [lib]

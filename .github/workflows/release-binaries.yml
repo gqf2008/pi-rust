@@ -1,6 +1,6 @@
 name: Release binaries
 
-# Builds prebuilt `rpi` binaries and attaches them to the GitHub Release for a
+# Builds prebuilt `ki` binaries and attaches them to the GitHub Release for a
 # tag. This is what makes `curl -fsSL .../install.sh | sh` work and what removes
 # the "you need a Rust toolchain and a C linker" barrier to trying the CLI.
 #
@@ -68,16 +68,16 @@ jobs:
         shell: bash
         run: |
           version="$(cargo metadata --no-deps --format-version 1 --locked \
-            | jq -r '.packages[] | select(.name == "rpi-cli") | .version' | head -n 1)"
+            | jq -r '.packages[] | select(.name == "kiqi-cli") | .version' | head -n 1)"
           if [[ -z "${version}" || "${version}" == "null" ]]; then
-            echo "Could not determine the rpi-cli workspace version." >&2
+            echo "Could not determine the kiqi-cli workspace version." >&2
             exit 1
           fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "Building kiqi ${version} for ${{ matrix.target }}"
 
       - name: Build release binary
-        run: cargo build -p rpi-cli --release --locked --target ${{ matrix.target }}
+        run: cargo build -p kiqi-cli --release --locked --target ${{ matrix.target }}
 
       - name: Smoke test Intel macOS binary
         if: matrix.target == 'x86_64-apple-darwin'

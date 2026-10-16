@@ -1,17 +1,17 @@
 # 方案：wasm 插件层的「调用内交互式子进程」能力（`proc`，ABI 0.7.0）
 
-> 状态：**方案（待评审）**。目标是把 `rpi-codegraph` 迁到 wasm；`rpi-orchestrator` **不在本方案范围内**
+> 状态：**方案（待评审）**。目标是把 `kiqi-codegraph` 迁到 wasm；`kiqi-orchestrator` **不在本方案范围内**
 > （理由见 §2 与 §9，它是执行模型错配，不是缺一个能力）。
 > 关联：`plugin-abi.md` §5（权限模型）/§6.2（不迁名单）/§6.30（exec cwd scope 那一轮）。
 
 ## 1. 要解决什么（实核证据）
 
-`rpi-codegraph` 的 `codegraph_search` 不是「跑一条命令拿输出」，而是**在一次工具调用内**做一场
+`kiqi-codegraph` 的 `codegraph_search` 不是「跑一条命令拿输出」，而是**在一次工具调用内**做一场
 stdio 会话：
 
 | 事实 | 证据 |
 |---|---|
-| 每次调用现起 MCP 服务进程 | `plugins/rpi-codegraph/src/lib.rs:315` `let mut child = spawn_server(&root)?;`（在 `call_codegraph` 内） |
+| 每次调用现起 MCP 服务进程 | `plugins/kiqi-codegraph/src/lib.rs:315` `let mut child = spawn_server(&root)?;`（在 `call_codegraph` 内） |
 | 服务命令 | `lib.rs:161-171` `codegraph serve --mcp --path <root>` |
 | 在子进程 stdin/stdout 上做 JSON-RPC | `lib.rs:179-181`（写）、`:335-346`（按行读）、`:197`/`:222`（会话超时/提前关闭） |
 | 调用结束即收 | `lib.rs:385-387` `drop(stdin); child.kill(); child.wait();` |
@@ -28,8 +28,8 @@ stdio 会话：
 
 | | 插件 | 现状缺口 | 本方案 |
 |---|---|---|---|
-| ✅ | `rpi-codegraph` | 调用内交互式 stdio 会话 | 解决 → 可迁 wasm |
-| ❌ | `rpi-orchestrator` | ① 子代理可活 1800s（exec 上限 300s）② `dispatch` 后台节点要**跨调用**存活 ③ 进程组收杀 ④ spawn `current_exe()` | **不解决**，且不该硬凑（§9） |
+| ✅ | `kiqi-codegraph` | 调用内交互式 stdio 会话 | 解决 → 可迁 wasm |
+| ❌ | `kiqi-orchestrator` | ① 子代理可活 1800s（exec 上限 300s）② `dispatch` 后台节点要**跨调用**存活 ③ 进程组收杀 ④ spawn `current_exe()` | **不解决**，且不该硬凑（§9） |
 
 ## 3. 设计取舍
 
@@ -157,7 +157,7 @@ interface proc {
 
 ## 9. 明确不做（边界）
 
-1. **不给 `rpi-orchestrator` 用。** 它要的是「调用之间还在跑」——那需要宿主拥有调度权
+1. **不给 `kiqi-orchestrator` 用。** 它要的是「调用之间还在跑」——那需要宿主拥有调度权
    （DAG 引擎搬进宿主、子代理生命周期由宿主管、1800s 长活与进程组语义在宿主侧定义），
    是一次**重新设计**而不是给插件加一层能力。本方案不做，也不假装它能。
 2. **不做会话级句柄**（跨调用持有）。理由同上：跨调用的存活意味着宿主要对「会话结束时收谁」负责，
@@ -170,7 +170,7 @@ interface proc {
 | 批次 | 内容 | 产出 | 规模（估） |
 |---|---|---|---|
 | **1** | WIT `proc` + 版本 0.7.0；宿主实现（句柄表/收尸/上限）；`grants` 加能力 + CLI flags；conformance 触达；e2e（往返/拒绝/收尸/取消/泄漏）；文档 §6.32 | 能力可用，暂无插件使用 | 中（WIT 小、宿主 ~250 行 + 测试） |
-| **2** | 迁 `rpi-codegraph` → `plugins/wasm/kiqi-codegraph-guest`：`init`/`sync` 走 `exec`、`search` 走 `proc`；差异清单（Windows 上 `codegraph` 的 powershell shim 解析在 wasm 里做不到，裸名规则下会失败——文档写明）；e2e；把它移出默认构建 | 第四个「无 wasm 版」的编译期插件退场 | 中 |
+| **2** | 迁 `kiqi-codegraph` → `plugins/wasm/kiqi-codegraph-guest`：`init`/`sync` 走 `exec`、`search` 走 `proc`；差异清单（Windows 上 `codegraph` 的 powershell shim 解析在 wasm 里做不到，裸名规则下会失败——文档写明）；e2e；把它移出默认构建 | 第四个「无 wasm 版」的编译期插件退场 | 中 |
 | 3（另议） | 会话级句柄 + 宿主持调度（为 orchestrator 之类） | —— | 大，且是重新设计 |
 
 批次 1 与 2 各自可独立合并、可回退；批次 1 就算批次 2 不做也有价值（将来任何「壳一层外部 CLI」的插件都用得上）。
@@ -201,7 +201,7 @@ interface proc {
   （e2e 用 `cat` 回显任务）；`maxTurns` 记录不强制（env 无 proc 等价物）；
 - 指引恒注入（guest 无项目 fs、无 env——goal 联动与 KI_ORCHESTRATOR_GUIDE 均不可表达）；
 - 会话切换清图保留（before_agent_start 解析 sessionId）；
-- **默认构建翻转为仅 `rpi-permissions`**（orchestrator 移出默认），CI opt-in 清单加
-  `plugin-rpi-orchestrator`，清单测试同步门控。
+- **默认构建翻转为仅 `kiqi-permissions`**（orchestrator 移出默认），CI opt-in 清单加
+  `plugin-kiqi-orchestrator`，清单测试同步门控。
 - 教训一条（写给下次）：批量编辑脚本必须逐条落盘——统一落盘 + 中途断言失败 = 静默丢整批改动
   （本次 orchestrator guest 的 900 行工作文件就是这样丢的）。

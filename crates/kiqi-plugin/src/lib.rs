@@ -28,7 +28,7 @@
 //!
 //! # Native plugins are still supported
 //!
-//! The `cdylib` (`rpi-plugin-sdk`) channel stays for the **development loop**
+//! The `cdylib` (`kiqi-plugin-sdk`) channel stays for the **development loop**
 //! (`ki dev` + watch + `/reload`): compile-time plugins cannot be hot-swapped,
 //! so the dylib channel keeps serving iteration while first-party plugins ship
 //! compiled in.
@@ -62,7 +62,7 @@ pub struct ToolOutcome {
     /// Structured payload the host persists with the tool result and hands
     /// back in [`Event::ToolResult`].
     ///
-    /// This is not decoration: `rpi-todo` keeps its whole task list here, so
+    /// This is not decoration: `kiqi-todo` keeps its whole task list here, so
     /// the state rides the session branch and survives fork/switch. Without a
     /// details channel a plugin has to invent its own side file and loses the
     /// branch-scoped semantics.
@@ -235,7 +235,7 @@ impl EventTag {
     ///
     /// The host translates its native `EventTag` to this contract through this
     /// function: the two enumerations are pinned to the same discriminants
-    /// (rpi-cli's `event_tags_match_the_native_abi` test), so no separate table
+    /// (kiqi-cli's `event_tags_match_the_native_abi` test), so no separate table
     /// has to be kept in sync.
     pub fn from_u32(value: u32) -> Option<Self> {
         Some(match value {
@@ -302,7 +302,7 @@ impl Event {
     /// `is_error`), where `result` is a JSON *string* that is parsed here.
     pub fn tool_result(&self) -> Option<ToolResult> {
         // Both tags carry a tool result, exactly as the native
-        // `rpi_plugin_sdk::EventView::tool_result` does: the host fans a
+        // `kiqi_plugin_sdk::EventView::tool_result` does: the host fans a
         // finished tool call out as `ToolExecutionEnd` (the compile-time
         // dispatcher routes that tag to the same handler), so accepting only
         // `ToolResult` silently turned those handlers into no-ops.
@@ -344,7 +344,7 @@ pub struct ToolResult {
 
 impl ToolResult {
     /// The `details` the tool returned - how a plugin carries state that must
-    /// survive fork/switch (rpi-todo keeps its whole task list here).
+    /// survive fork/switch (kiqi-todo keeps its whole task list here).
     pub fn details(&self) -> &Value {
         self.result.get("details").unwrap_or(&Value::Null)
     }

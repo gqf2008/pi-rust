@@ -1,6 +1,6 @@
-# rpi 使用手册
+# ki 使用手册
 
-这是一份面向使用者和扩展作者的 rpi 手册。rpi 是基于 Pi agent 设计的 Rust 原生 coding-agent：核心能力以 crate 形式提供，`rpi` 是开箱即用的 CLI。本文记录当前版本已经实现的命令和行为，随 `rpi-cli` 一起发布。
+这是一份面向使用者和扩展作者的 ki 手册。ki 是基于 Pi agent 设计的 Rust 原生 coding-agent：核心能力以 crate 形式提供，`ki` 是开箱即用的 CLI。本文记录当前版本已经实现的命令和行为，随 `kiqi-cli` 一起发布。
 
 ## 1. 安装
 
@@ -9,9 +9,9 @@
 需要 Rust/Cargo：
 
 ```bash
-cargo install rpi-cli
-rpi --version
-rpi --help
+cargo install kiqi-cli
+ki --version
+ki --help
 ```
 
 从本仓库源码安装开发版本：
@@ -19,10 +19,10 @@ rpi --help
 ```bash
 git clone https://github.com/bigfish1913/pi-rust.git
 cd pi-rust
-cargo install --path crates/rpi-cli --force
+cargo install --path crates/kiqi-cli --force
 ```
 
-`cargo install` 安装的是可执行文件；它不等同于 `rpi install`。后者用于安装由 `rpi-plugin-sdk` 构建的 Rust 动态库扩展。
+`cargo install` 安装的是可执行文件；它不等同于 `ki install`。后者用于安装由 `kiqi-plugin-sdk` 构建的 Rust 动态库扩展。
 
 ### 从源码启动与构建
 
@@ -30,21 +30,21 @@ cargo install --path crates/rpi-cli --force
 
 ```bash
 # 直接启动 CLI
-cargo run -p rpi-cli
+cargo run -p kiqi-cli
 
-# 向 CLI 传递参数（`--` 后的内容属于 rpi）
-cargo run -p rpi-cli -- -p "总结 README.md"
-cargo run -p rpi-cli -- --mode json -p "列出项目中的 crates"
+# 向 CLI 传递参数（`--` 后的内容属于 ki）
+cargo run -p kiqi-cli -- -p "总结 README.md"
+cargo run -p kiqi-cli -- --mode json -p "列出项目中的 crates"
 
 # 构建 release 版本
-cargo build -p rpi-cli --release
+cargo build -p kiqi-cli --release
 ```
 
-构建完成后，Windows 可执行文件位于 `target/release/rpi.exe`，Linux/macOS 下通常为 `target/release/rpi`。也可以把本地 CLI 安装到 Cargo 的 bin 目录后直接使用：
+构建完成后，Windows 可执行文件位于 `target/release/ki.exe`，Linux/macOS 下通常为 `target/release/ki`。也可以把本地 CLI 安装到 Cargo 的 bin 目录后直接使用：
 
 ```bash
-cargo install --path crates/rpi-cli --force
-rpi
+cargo install --path crates/kiqi-cli --force
+ki
 ```
 
 离线示例（不需要 API Key 或网络）可以使用：
@@ -58,21 +58,21 @@ cargo run -p minimal
 交互模式：
 
 ```bash
-rpi
-rpi "解释当前项目的目录结构"
+ki
+ki "解释当前项目的目录结构"
 ```
 
 单次输出模式：
 
 ```bash
-rpi -p "总结 README.md"
-rpi --mode json -p "列出项目的风险"
+ki -p "总结 README.md"
+ki --mode json -p "列出项目的风险"
 ```
 
 通过 `@` 把文件放进第一条消息：
 
 ```bash
-rpi @README.md "给出这个项目的改进建议"
+ki @README.md "给出这个项目的改进建议"
 ```
 
 ## 2. 模型和凭据
@@ -82,24 +82,24 @@ rpi @README.md "给出这个项目的改进建议"
 当多个来源同时存在时，优先级为：
 
 1. `--api-key`
-2. `~/.rpi/auth.json`（由 `rpi auth login` 写入）
-3. `~/.rpi/agent/models.json` 中对应 provider 的 `apiKey`
+2. `~/.ki/auth.json`（由 `ki auth login` 写入）
+3. `~/.ki/agent/models.json` 中对应 provider 的 `apiKey`
 4. 环境变量
 
 Anthropic 使用 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`；OpenAI-compatible provider 使用 `OPENAI_API_KEY`。检查凭据时不会发起网络请求：
 
 ```bash
-rpi auth check
-rpi auth check --provider gateway --json
-rpi auth login
-rpi auth logout
+ki auth check
+ki auth check --provider gateway --json
+ki auth login
+ki auth logout
 ```
 
 不要把密钥写入 Git 仓库或项目文档。
 
 ### 自定义 Provider
 
-配置文件默认是 `~/.rpi/agent/models.json`，也可以通过 `RPI_CODING_AGENT_DIR` 指定 agent 配置目录：
+配置文件默认是 `~/.ki/agent/models.json`，也可以通过 `KI_CODING_AGENT_DIR` 指定 agent 配置目录：
 
 ```jsonc
 {
@@ -127,12 +127,12 @@ rpi auth logout
 选择模型：
 
 ```bash
-rpi --model gateway/custom-claude -p "hello"
-rpi --model openai-gateway/custom-model -p "hello"
-rpi --provider gateway --model custom-claude -p "hello"
+ki --model gateway/custom-claude -p "hello"
+ki --model openai-gateway/custom-model -p "hello"
+ki --provider gateway --model custom-claude -p "hello"
 ```
 
-不传 `--model` 时，rpi 会优先选择已经认证的模型。标准 Anthropic 凭据存在时使用内置默认模型；只有自定义 gateway 已认证时，会选择该 gateway 的第一个可用模型。
+不传 `--model` 时，ki 会优先选择已经认证的模型。标准 Anthropic 凭据存在时使用内置默认模型；只有自定义 gateway 已认证时，会选择该 gateway 的第一个可用模型。
 
 Anthropic 的兼容网关还可以使用：
 
@@ -181,20 +181,20 @@ ANTHROPIC_AUTH_TOKEN=token
 --server [--port <n>] [--bind <ip>]
                         无头服务端（启动时打印 token）
 --connect <host:port>   远程客户端 TUI（零本地资源）
---token <token>         远程认证 token（也支持环境变量 RPI_SERVER_TOKEN）
+--token <token>         远程认证 token（也支持环境变量 KI_SERVER_TOKEN）
 ```
 
 子命令：
 
 ```text
-rpi auth login|check|logout
-rpi events path|tail    检查扩展事件日志（需 RPI_EVENT_LOG=1）
-rpi install <crate>
-rpi uninstall <crate>
-rpi update                 # 更新 rpi CLI 自身
-rpi dev [options]          # 开发 Rust 扩展：编译、watch、热重载
-rpi dev-local [options]    # 只调试当前 Rust 扩展（隔离模式）
-rpi package link|list|unlink # 管理项目本地 Rust 扩展包
+ki auth login|check|logout
+ki events path|tail    检查扩展事件日志（需 KI_EVENT_LOG=1）
+ki install <crate>
+ki uninstall <crate>
+ki update                 # 更新 ki CLI 自身
+ki dev [options]          # 开发 Rust 扩展：编译、watch、热重载
+ki dev-local [options]    # 只调试当前 Rust 扩展（隔离模式）
+ki package link|list|unlink # 管理项目本地 Rust 扩展包
 ```
 
 ### 启动资源清单
@@ -212,8 +212,8 @@ rpi package link|list|unlink # 管理项目本地 Rust 扩展包
 更新后第一次启动新交互会话，会展示自上次阅读以来的新版本说明，后续启动不再重复。
 恢复已有会话时，提示会延后到下一次新会话。
 
-rpi 使用全局 `settings.json` 中的 `lastRpiChangelogVersion` 记录已读版本，避免导入的
-`lastChangelogVersion` 干扰。已有配置缺少 rpi 标记时，只补充展示当前版本一次；首次安装
+ki 使用全局 `settings.json` 中的 `lastKiqiChangelogVersion` 记录已读版本，避免导入的
+`lastChangelogVersion` 干扰。已有配置缺少 ki 标记时，只补充展示当前版本一次；首次安装
 直接建立基线。设置 `collapseChangelog: true` 可显示简短更新提示。
 
 ### 跳到最新消息
@@ -230,12 +230,12 @@ rpi 使用全局 `settings.json` 中的 `lastRpiChangelogVersion` 记录已读�
 把 agent 跑在无头服务端，另一个进程用 TUI 远程驱动。客户端**无任何本地 agent 资源**。
 
 ```bash
-rpi --server --port 9899          # 服务端：启动时打印 token
-rpi --connect 127.0.0.1:9899 --token <token>   # 客户端
+ki --server --port 9899          # 服务端：启动时打印 token
+ki --connect 127.0.0.1:9899 --token <token>   # 客户端
 
 # 或通过环境变量传递 token
-export RPI_SERVER_TOKEN=<token>
-rpi --connect 127.0.0.1:9899
+export KI_SERVER_TOKEN=<token>
+ki --connect 127.0.0.1:9899
 ```
 
 服务端默认开启 token 认证（`--no-token` 可关闭）。客户端支持 `/state`、`/model`、
@@ -245,9 +245,9 @@ rpi --connect 127.0.0.1:9899
 
 ## 4. 内置工具
 
-默认工具包含 Pi 的 `read`、`bash`、`edit`、`write`，以及 rpi 自带的只读 `docs` 文档查询工具。Windows 上还会默认注册 `powershell`。`docs` 可以查询使用手册、扩展开发、Agent 项目结构、Rust 调试和架构说明；`grep`、`find`、`ls` 仍保留为库实现，但不由 CLI 默认注册。
+默认工具包含 Pi 的 `read`、`bash`、`edit`、`write`，以及 ki 自带的只读 `docs` 文档查询工具。Windows 上还会默认注册 `powershell`。`docs` 可以查询使用手册、扩展开发、Agent 项目结构、Rust 调试和架构说明；`grep`、`find`、`ls` 仍保留为库实现，但不由 CLI 默认注册。
 
-可以通过 `.rpi/settings.json` 的 `defaultTools` 字段（或简写 `default_tools`）在未指定
+可以通过 `.ki/settings.json` 的 `defaultTools` 字段（或简写 `default_tools`）在未指定
 `--tools` 时限定启动工具集：
 
 ```json
@@ -259,16 +259,16 @@ rpi --connect 127.0.0.1:9899
 需要限制工具范围时，显式列出 Pi 的四个工具：
 
 ```bash
-rpi --tools read,bash,edit,write,docs -p "检查并修改项目文件"
+ki --tools read,bash,edit,write,docs -p "检查并修改项目文件"
 ```
 
 ## 5. 项目目录和资源优先级
 
-rpi 使用自己的 `.rpi` 目录：
+ki 使用自己的 `.ki` 目录：
 
 ```text
 项目/
-└── .rpi/
+└── .ki/
     ├── settings.json
     ├── SYSTEM.md
     ├── APPEND_SYSTEM.md
@@ -278,9 +278,9 @@ rpi 使用自己的 `.rpi` 目录：
     └── extensions/
 ```
 
-全局资源默认位于 `~/.rpi/agent/`，包括 `settings.json`、`models.json`、`skills/`、`prompts/`、`themes/` 和 `extensions/`。同名资源发生冲突时，项目资源优先于全局资源。
+全局资源默认位于 `~/.ki/agent/`，包括 `settings.json`、`models.json`、`skills/`、`prompts/`、`themes/` 和 `extensions/`。同名资源发生冲突时，项目资源优先于全局资源。
 
-项目级 `.rpi/settings.json` 可以追加资源目录：
+项目级 `.ki/settings.json` 可以追加资源目录：
 
 ```json
 {
@@ -290,79 +290,79 @@ rpi 使用自己的 `.rpi` 目录：
 }
 ```
 
-路径相对于项目根目录；`skills`、`prompts`、`extensions` 是对应 `*Dirs` 字段的简写。自定义目录会与 `.rpi` 和全局约定目录一起加载。全局 `~/.rpi/agent/settings.json` 也支持这些字段，相对路径相对于 agent 目录。
+路径相对于项目根目录；`skills`、`prompts`、`extensions` 是对应 `*Dirs` 字段的简写。自定义目录会与 `.ki` 和全局约定目录一起加载。全局 `~/.ki/agent/settings.json` 也支持这些字段，相对路径相对于 agent 目录。
 
 只加载当前项目的 package/resource、排除全局资源时，使用以下任一等价参数：
 
 ```bash
-rpi --package-only
-rpi --project-only
+ki --package-only
+ki --project-only
 ```
 
-两者都会加载当前项目的 skills、prompts、themes、extensions 和 packages，并读取项目 `.rpi/settings.json`；不会自动加载全局资源。`--local-only` 语义不同，只加载通过 `--extensions-dir` 或 `--extension` 显式指定的扩展。
+两者都会加载当前项目的 skills、prompts、themes、extensions 和 packages，并读取项目 `.ki/settings.json`；不会自动加载全局资源。`--local-only` 语义不同，只加载通过 `--extensions-dir` 或 `--extension` 显式指定的扩展。
 
 配置目录可以重定位：
 
 ```bash
-RPI_CODING_AGENT_DIR=/work/rpi-agent rpi
+KI_CODING_AGENT_DIR=/work/kiqi-agent ki
 ```
 
 会话默认保存到 agent 配置目录下的 sessions；`--no-session` 可使用临时会话。
 
 ## 6. Rust 插件
 
-Rust 原生插件是 `cdylib`，只依赖 `rpi-plugin-sdk`，由 `rpi-extensions` 动态加载：
+Rust 原生插件是 `cdylib`，只依赖 `kiqi-plugin-sdk`，由 `kiqi-extensions` 动态加载：
 
 ```bash
 cargo build -p plugin-stub
-rpi --extensions-dir target/debug -p 'echo "hi"'
+ki --extensions-dir target/debug -p 'echo "hi"'
 ```
 
 从 crates.io 安装：
 
 ```bash
-rpi install rpi-extension-example
-rpi install rpi-extension-example --version 0.1.0
-rpi install rpi-extension-example --force
+ki install kiqi-extension-example
+ki install kiqi-extension-example --version 0.1.0
+ki install kiqi-extension-example --force
 ```
 
 本地开发：
 
 ```bash
-rpi install my-extension --path ../my-rpi-extension --force
+ki install my-extension --path ../my-kiqi-extension --force
 ```
 
 开发扩展项目时使用 watch 模式：
 
 ```bash
-cd ../my-rpi-extension
-rpi dev
-# 多扩展 workspace：rpi dev --package my-extension
-# 只调试当前扩展：rpi dev-local（隔离模式，不加载全局扩展）
+cd ../my-kiqi-extension
+ki dev
+# 多扩展 workspace：ki dev --package my-extension
+# 只调试当前扩展：ki dev-local（隔离模式，不加载全局扩展）
 ```
 
-`rpi dev` 会自动识别 Cargo `cdylib`、首次编译并从 `.rpi/extensions/.dev` 加载版本化产物。源码变化会触发重新编译和热重载；手工执行 `/reload` 也会先重新编译。编译失败时继续保留当前已经加载的版本。
+`ki dev` 会自动识别 Cargo `cdylib`、首次编译并从 `.ki/extensions/.dev` 加载版本化产物。源码变化会触发重新编译和热重载；手工执行 `/reload` 也会先重新编译。编译失败时继续保留当前已经加载的版本。
 
 如果希望把开发好的扩展固定到某个项目，可使用项目包命令：
 
 ```bash
-rpi package link --path ../my-extension --package my-extension
-rpi package list
-# 之后在该项目目录直接运行 rpi 即可加载
-rpi package unlink my-extension
+ki package link --path ../my-extension --package my-extension
+ki package list
+# 之后在该项目目录直接运行 ki 即可加载
+ki package unlink my-extension
 ```
 
-项目包位于 `.rpi/packages/<name>/`，是受信任的本机 Rust 动态库；它不是 npm/Node Pi package。全局安装仍使用 `rpi install`。完整模板和边界规则见在线扩展作者指南：<https://rpi.laofu.online/extension-authoring.md>`，调试技巧见 `docs` 的 `debugging` 主题。
+项目包位于 `.ki/packages/<name>/`，是受信任的本机 Rust 动态库；它不是 npm/Node Pi package。全局安装仍使用 `ki install`。完整模板和边界规则见在线扩展作者指南：<https://ki.laofu.online/extension-authoring.md>`，调试技巧见 `docs` 的 `debugging` 主题。
 
-安装后的动态库位于 `~/.rpi/agent/extensions`（或 `RPI_CODING_AGENT_DIR` 指定的目录），下次启动 rpi 时加载。插件通过稳定 ABI 注册工具、Provider、事件处理器和资源处理器；不要直接依赖 `rpi-cli` 的私有模块。
+安装后的动态库位于 `~/.ki/agent/extensions`（或 `KI_CODING_AGENT_DIR` 指定的目录），下次启动 ki 时加载。插件通过稳定 ABI 注册工具、Provider、事件处理器和资源处理器；不要直接依赖 `kiqi-cli` 的私有模块。
 
 ## 7. SDK 集成
 
-只需要嵌入 Agent 时，依赖 `rpi-agent` 和 `rpi-ai`；需要内置工具时再加入 `rpi-tools`；需要会话、压缩、skills 和上下文文件时加入 `rpi-harness`。
+只需要嵌入 Agent 时，依赖 `kiqi-agent` 和 `kiqi-ai`；需要内置工具时再加入 `kiqi-tools`；需要会话、压缩、skills 和上下文文件时加入 `kiqi-harness`。
 
 ```rust
-use rpi_agent::{Agent, AgentEvent};
-use rpi_ai::providers::faux::faux_provider;
+use kiqi_agent::{Agent, AgentEvent};
+use kiqi_ai::providers::faux::faux_provider;
 
 let model = faux_provider().model("echo");
 let mut agent = Agent::builder(model)
@@ -370,7 +370,7 @@ let mut agent = Agent::builder(model)
     .build();
 
 let mut events = agent.subscribe();
-agent.prompt("Hello from rpi").await?;
+agent.prompt("Hello from ki").await?;
 while let Some(event) = events.recv().await {
     if matches!(event, AgentEvent::AgentEnd { .. }) {
         break;
@@ -378,13 +378,13 @@ while let Some(event) = events.recv().await {
 }
 ```
 
-自定义工具实现 `rpi-agent::AgentTool`；Provider 实现 `rpi-ai::Provider`。使用 `faux provider` 和 `InMemoryExecutionEnv` 可以在没有网络、API key 或真实文件系统的情况下测试 Agent loop。
+自定义工具实现 `kiqi-agent::AgentTool`；Provider 实现 `kiqi-ai::Provider`。使用 `faux provider` 和 `InMemoryExecutionEnv` 可以在没有网络、API key 或真实文件系统的情况下测试 Agent loop。
 
 ## 8. 故障排查
 
 ### 找不到模型或接口报错
 
-运行 `rpi auth check`，确认 provider、`models.json`、环境变量和 `baseUrl`。使用 `--provider` 和完整的 `provider/model` 避免同名模型歧义。接口错误会保留 provider 返回的诊断文本；先检查 endpoint、认证头和模型 ID。
+运行 `ki auth check`，确认 provider、`models.json`、环境变量和 `baseUrl`。使用 `--provider` 和完整的 `provider/model` 避免同名模型歧义。接口错误会保留 provider 返回的诊断文本；先检查 endpoint、认证头和模型 ID。
 
 ### 扩展加载失败
 
@@ -393,23 +393,23 @@ while let Some(event) = events.recv().await {
 ### 扩展事件处理器没触发或启动被中止
 
 ```bash
-export RPI_EVENT_LOG=1
-rpi            # 记录所有扩展事件处理器调用
-rpi events tail   # 跟踪日志；看 result 是 Continue 还是 Error/Abort/Panic/Timeout
+export KI_EVENT_LOG=1
+ki            # 记录所有扩展事件处理器调用
+ki events tail   # 跟踪日志；看 result 是 Continue 还是 Error/Abort/Panic/Timeout
 ```
 
-日志默认在 `~/.rpi/logs/events.jsonl`（可用 `RPI_EVENT_LOG_PATH` 覆盖）。如果
+日志默认在 `~/.ki/logs/events.jsonl`（可用 `KI_EVENT_LOG_PATH` 覆盖）。如果
 `BeforeTuiStart` 阶段有扩展返回 veto（`EVENT_HANDLER_ABORT`），CLI 以退出码 `3`
 中止启动并打印原因。
 
 ### 资源没有出现在欢迎页
 
-确认文件位于 `.rpi`（或兼容的 `.pi`）或全局 `~/.rpi/agent`。使用 `rpi --debug-system-prompt` 查看最终系统提示词、skills 和资源计数；同名资源优先检查 `.rpi` 是否覆盖了 `.pi`。
+确认文件位于 `.ki`（或兼容的 `.pi`）或全局 `~/.ki/agent`。使用 `ki --debug-system-prompt` 查看最终系统提示词、skills 和资源计数；同名资源优先检查 `.ki` 是否覆盖了 `.pi`。
 
 ### 远程模式连不上
 
-确认服务端已用 `rpi --server --port <port>` 启动且 token 正确（或通过
-`RPI_SERVER_TOKEN` 提供）。客户端是纯显示端，不加载任何本地 provider/工具/扩展；
+确认服务端已用 `ki --server --port <port>` 启动且 token 正确（或通过
+`KI_SERVER_TOKEN` 提供）。客户端是纯显示端，不加载任何本地 provider/工具/扩展；
 会话文件在服务端。
 
 ## 9. 开发、测试和发布
@@ -425,20 +425,20 @@ cargo test --workspace
 发布 crate 时按依赖顺序：
 
 ```text
-rpi-telemetry → rpi-ai → rpi-agent → rpi-tools → rpi-harness →
-rpi-plugin-sdk → rpi-extensions → rpi-tui → rpi-cli
+kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness →
+kiqi-plugin-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
 ```
 
 发布前更新版本号和 `docs/release-vX.Y.Z.md`，确认 README、官网 `website/data/docs.json` 和本手册中的命令一致。官网是静态站点，文档文件提交到仓库后仍需按项目部署流程重新部署。
 
 ## 10. 文档查询入口
 
-- 在线文档：<https://rpi.laofu.online/docs.html>
+- 在线文档：<https://ki.laofu.online/docs.html>
 - 源码仓库：<https://github.com/bigfish1913/pi-rust>
-- Rust API：<https://docs.rs/rpi-agent>、<https://docs.rs/rpi-plugin-sdk>
+- Rust API：<https://docs.rs/kiqi-agent>、<https://docs.rs/kiqi-plugin-sdk>
 
-- Package 与扩展作者指南：<https://rpi.laofu.online/extension-authoring.md>
+- Package 与扩展作者指南：<https://ki.laofu.online/extension-authoring.md>
 - 远程模式：<docs/remote/user-guide.md>
-- Rust 扩展与 agent 调试：`rpi` 内 `docs` 工具的 `debugging` 主题
+- Rust 扩展与 agent 调试：`ki` 内 `docs` 工具的 `debugging` 主题
 
 当在线文档和已安装版本不一致时，以对应版本的 Git tag 和仓库内文档为准。

@@ -7,9 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "rpi-goal ported to the kiqi wasm ABI (plugin-data state, inject, TurnEnd hook)"
+description = "kiqi-goal ported to the kiqi wasm ABI (plugin-data state, inject, TurnEnd hook)"
 readme = "README.md"
-keywords = ["rpi", "kiqi", "wasm", "plugin", "goal"]
+keywords = ["ki", "kiqi", "wasm", "plugin", "goal"]
 categories = ["development-tools"]
 
 [lib]

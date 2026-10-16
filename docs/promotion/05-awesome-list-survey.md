@@ -38,12 +38,12 @@ Rule, quoted from its contributing guide:
 > more people aware of those projects.
 
 Measured: **32 stars**, forks 4, subscribers 0. Peak crate downloads **1112**
-(`rpi-telemetry`), then `rpi-ai` 1032, `rpi-agent` 913, `rpi-plugin-sdk` 837,
-`rpi-tools` 710, `rpi-harness` 628, `rpi-tui` 531, `rpi-extensions` 523,
-`rpi-cli` 469.
+(`kiqi-telemetry`), then `kiqi-ai` 1032, `kiqi-agent` 913, `kiqi-plugin-sdk` 837,
+`kiqi-tools` 710, `kiqi-harness` 628, `kiqi-tui` 531, `kiqi-extensions` 523,
+`kiqi-cli` 469.
 
 All nine were measured. An earlier draft of this file claimed the peak was 913
-from having sampled only three crates — the peak sits in `rpi-telemetry`, not
+from having sampled only three crates — the peak sits in `kiqi-telemetry`, not
 among the crates one would guess. Measure the whole set.
 
 Verdict: not eligible. The entry is already written and waiting in
@@ -179,8 +179,8 @@ of the nine ki crates use it**, despite all nine carrying sensible `keywords`.
 Their current categories are `api-bindings`, `asynchronous`,
 `command-line-interface`, `development-tools`,
 `development-tools::ffi` — none of which is the one a person browsing for an AI
-agent would open. Adding it to `rpi-ai`, `rpi-agent`, `rpi-tools`,
-`rpi-harness` and `rpi-cli` is a one-line change per manifest (crates.io allows
+agent would open. Adding it to `kiqi-ai`, `kiqi-agent`, `kiqi-tools`,
+`kiqi-harness` and `kiqi-cli` is a one-line change per manifest (crates.io allows
 up to five categories, so nothing has to be dropped).
 
 ## How these numbers were taken
@@ -193,12 +193,12 @@ gh api repos/bigfish1913/pi-rust \
   -q '"stars=\(.stargazers_count) created=\(.created_at)"'
 
 # crates.io downloads (a User-Agent is mandatory; without it crates.io 403s)
-curl -s -x "$PROXY" -A 'rpi-promo/1.0 (github.com/bigfish1913/pi-rust)' \
-  https://crates.io/api/v1/crates/rpi-agent | python -c \
+curl -s -x "$PROXY" -A 'kiqi-promo/1.0 (github.com/bigfish1913/pi-rust)' \
+  https://crates.io/api/v1/crates/kiqi-agent | python -c \
   "import sys,json;print(json.load(sys.stdin)['crate']['downloads'])"
 
 # valid crates.io category slugs
-curl -s -x "$PROXY" -A 'rpi-promo/1.0 (github.com/bigfish1913/pi-rust)' \
+curl -s -x "$PROXY" -A 'kiqi-promo/1.0 (github.com/bigfish1913/pi-rust)' \
   'https://crates.io/api/v1/categories?page=1&per_page=100'
 
 # is a list still merging?

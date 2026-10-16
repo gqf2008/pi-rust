@@ -5,9 +5,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
-rpi-agent = { workspace = true }
-rpi-ai = { workspace = true }
-rpi-tools = { workspace = true }
+kiqi-agent = { workspace = true }
+kiqi-ai = { workspace = true }
+kiqi-tools = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }

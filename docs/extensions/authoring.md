@@ -1,7 +1,7 @@
 # ki Rust 扩展开发最佳实践
 
 本文是 ki 创建 Rust `cdylib` 扩展的模型可读规范。扩展是 Rust 原生动态库，
-通过稳定 C ABI（`rpi-plugin-sdk`）注册工具、事件处理器、资源发现、Provider
+通过稳定 C ABI（`kiqi-plugin-sdk`）注册工具、事件处理器、资源发现、Provider
 与渲染器，宿主（`ki` CLI）负责加载与生命周期。创建完整 Agent 项目的默认结构见
 `docs` 的 `agent` 主题；本指南聚焦扩展本身的 ABI 与生命周期。
 
@@ -10,7 +10,7 @@
 | 项目 | Rust 原生扩展 |
 | --- | --- |
 | 安装 | `ki install crate-name`（crates.io 或 `--path`） |
-| 入口 | `rpi_plugin_register` C ABI 符号 |
+| 入口 | `kiqi_plugin_register` C ABI 符号 |
 | 开发反馈 | `ki dev` watch + 热重载；`ki dev-local` 隔离调试 |
 | 静态资源 | `resources_discover` 或随项目放入 `.ki` |
 | 运行环境 | 本机动态库，当前用户权限 |
@@ -23,7 +23,7 @@
 ## 2. 推荐结构
 
 ```text
-my-rpi-extension/
+my-kiqi-extension/
 ├── Cargo.toml
 ├── README.md
 ├── src/
@@ -38,34 +38,34 @@ my-rpi-extension/
 
 ```toml
 [package]
-name = "my-rpi-extension"
+name = "my-kiqi-extension"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/example/my-rpi-extension"
+repository = "https://github.com/example/my-kiqi-extension"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rpi-plugin-sdk = "0.1"
+kiqi-plugin-sdk = "0.1"
 serde_json = "1"
 ```
 
 `cdylib` 是宿主加载的产物；同时保留 `rlib` 便于 Rust 集成测试。扩展边界只依赖
-`rpi-plugin-sdk`，不要依赖 `rpi-cli`、`rpi-extensions` 或 harness 内部模块，
+`kiqi-plugin-sdk`，不要依赖 `kiqi-cli`、`kiqi-extensions` 或 harness 内部模块，
 否则插件会和宿主实现耦合。
 
 ## 3. ABI 入口
 
-宿主只加载统一 C ABI 符号 `rpi_plugin_register`。扩展使用 `export_plugin!`，
+宿主只加载统一 C ABI 符号 `kiqi_plugin_register`。扩展使用 `export_plugin!`，
 通过同一个 `PluginApi` 注册能力并调用 `api.declare` 声明优先级/平台。
 SDK 在注册前检查 `abi_version` 和 `struct_size`；不兼容时返回非零状态，宿主报告加载失败。
 
 ```rust
-rpi_plugin_sdk::export_plugin!(|api| {
+kiqi_plugin_sdk::export_plugin!(|api| {
     if let Some(declare) = api.declare {
-        let status = declare(rpi_plugin_sdk::StbStringRef::from_str(
+        let status = declare(kiqi_plugin_sdk::StbStringRef::from_str(
             r#"{"priority":60,"platforms":["linux"]}"#,
         ));
         if status != 0 {
@@ -117,11 +117,11 @@ rpi_plugin_sdk::export_plugin!(|api| {
 ### 注入到工具参数里的宿主上下文
 
 宿主在把参数交给插件**之前**，会往这次调用的 JSON 参数里加一个保留键
-`__rpi`（`rpi_plugin_sdk::HOST_CONTEXT_KEY`）：
+`__ki`（`kiqi_plugin_sdk::HOST_CONTEXT_KEY`）：
 
 ```json
 { "action": "add", "text": "…",
-  "__rpi": { "cwd": "D:\\Projects\\pi-rust",
+  "__ki": { "cwd": "D:\\Projects\\pi-rust",
              "sessionId": "01adb026-7230-708b-855b-91eab6b056b8" } }
 ```
 
@@ -134,7 +134,7 @@ rpi_plugin_sdk::export_plugin!(|api| {
   取值天然满足；给参数定义 `#[serde(deny_unknown_fields)]` 的结构体会直接失败。
 - 内置工具不走这条路——它们从 harness 直接拿到 `ExecutionToolContext`。
 
-需要"每个会话一份状态"的插件就用 `sessionId` 做键（`rpi-todo` 存
+需要"每个会话一份状态"的插件就用 `sessionId` 做键（`kiqi-todo` 存
 `.ki/todos/<sessionId>.json`，一条会话一个文件），取不到时退回项目级并**在
 回复里说明**，不要编一个共享的伪会话——那正是它要解决的问题。
 
@@ -201,8 +201,8 @@ ki 会通过 Cargo metadata 识别当前 `cdylib`，首次编译后把版本化�
 多扩展 workspace 必须明确选择 package：
 
 ```bash
-ki dev --package rpi-todo
-ki dev -P rpi-webfetch
+ki dev --package kiqi-todo
+ki dev -P kiqi-webfetch
 ```
 
 其他模式：
@@ -211,7 +211,7 @@ ki dev -P rpi-webfetch
 ki dev --release
 ki dev --no-watch
 ki dev-local
-ki dev --package rpi-todo -- --model gateway/model
+ki dev --package kiqi-todo -- --model gateway/model
 ```
 
 调试单个扩展时使用 `ki dev-local`（等价于 `ki dev --local-only`）。它只加载当前
@@ -229,14 +229,14 @@ TUI 中执行 `/reload` 会强制重新运行 Cargo build，再加载新阶段�
 
 ```bash
 # 在目标项目目录执行；--path 可指向另一个扩展源码目录
-ki package link --path ../my-rpi-extension --package my-rpi-extension
+ki package link --path ../my-kiqi-extension --package my-kiqi-extension
 ki package list
 
 # 之后在目标项目目录直接启动 ki 即可加载
 ki
 
 # 删除项目包
-ki package unlink my-rpi-extension
+ki package unlink my-kiqi-extension
 ```
 
 项目包保存在 `.ki/packages/<name>/`，动态库位于其 `extensions/` 子目录；同一目录
@@ -302,8 +302,8 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 
 - `cargo fmt --check`、`cargo clippy --all-targets`、`cargo test` 通过。
 - `crate-type` 包含 `cdylib`，使用 `export_plugin!` 导出
-  `rpi_plugin_register`。
-- 依赖已发布的 `rpi-plugin-sdk` 兼容版本，不链接宿主私有 crate。
+  `kiqi_plugin_register`。
+- 依赖已发布的 `kiqi-plugin-sdk` 兼容版本，不链接宿主私有 crate。
 - `ki dev --no-watch` 能编译、加载并注册预期工具。
 - `ki install <crate> --force` 的干净安装路径通过。
 - Linux/macOS/Windows 构建由 CI 验证，README 标明支持矩阵。
@@ -341,7 +341,7 @@ OAuth callback 使用版本化 JSON action envelope。支持的动作是 `begin`
 `refresh` 和 `revoke`，但 action input 和平台流程完全由扩展定义。OAuth token 属于
 敏感信息：不得写入普通事件、模型消息、工具结果、调试日志或错误文本。插件拥有
 自己产生的输出字符串，宿主通过注册时提供的 `plugin_free_string` 回收。插件应使用
-RPI 的 provider-scoped credential bridge，而不是自行把 token 写入项目目录。
+KI 的 provider-scoped credential bridge，而不是自行把 token 写入项目目录。
 
 宿主只实现标准 interaction/credential/success/error response；浏览器、device-code、
 PKCE、state、callback 解析和平台 token 映射全部属于扩展。API key fallback 继续保留，
@@ -379,7 +379,7 @@ PKCE、state、callback 解析和平台 token 映射全部属于扩展。API key
 都属于扩展实现。非零返回码会被宿主转换为结构化错误，token 不能进入 agent
 transcript、普通插件事件或日志。
 
-`rpi-extensions` 提供 `list_oauth_providers` 和 `request_oauth` 两个宿主侧入口。
+`kiqi-extensions` 提供 `list_oauth_providers` 和 `request_oauth` 两个宿主侧入口。
 它们只允许调用已经注册且 manifest `id` 匹配的 provider，并在读取插件输出后立即
 调用插件提供的 `plugin_free_string`。宿主只做 opaque input 转发和标准 response
 校验，不包含任何平台 provider 特判。

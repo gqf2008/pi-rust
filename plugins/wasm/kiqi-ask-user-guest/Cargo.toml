@@ -7,9 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "rpi-ask-user ported to wasm: interactive dialogs over the ui capability"
+description = "kiqi-ask-user ported to wasm: interactive dialogs over the ui capability"
 readme = "README.md"
-keywords = ["rpi", "kiqi", "wasm", "plugin", "ask-user"]
+keywords = ["ki", "kiqi", "wasm", "plugin", "ask-user"]
 categories = ["development-tools"]
 
 [lib]

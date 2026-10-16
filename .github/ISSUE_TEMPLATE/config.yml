@@ -7,7 +7,7 @@ contact_links:
     url: https://github.com/bigfish1913/pi-rust/discussions
     about: Ask in Discussions — bug reports and feature requests use the forms above.
   - name: Documentation
-    url: https://rpi.laofu.online/docs.html
+    url: https://ki.laofu.online/docs.html
     about: User guide, SDK docs, and the extension authoring guide.
   - name: Extension packages
     url: https://github.com/pi-rust/rpi-package

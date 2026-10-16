@@ -2,8 +2,29 @@
 
 ## 这个仓库是什么
 
-`ki`（crate 前缀 `rpi-`）：一个 Rust 编码代理。仓库由 **`gqf2008/pi-rust`** 维护，
+`ki`（crate 前缀 `kiqi-`）：一个 Rust 编码代理。仓库由 **`gqf2008/pi-rust`** 维护，
 开发在 `fork` 远端、`main` 分支上推进。
+
+## 命名（改名已完成，勿回退）
+
+命令行是 **`ki`**，项目名是 **`kiqi`**。2026-10 的改名把 crate / 插件 / wasm guest
+目录、package 名、feature（`plugin-kiqi-*`）、Rust 路径（`kiqi_*`）、插件 id、
+文件名、运行时目录（`.ki/`）与资源（`.ki/skills/`）统一到了 `kiqi-`。
+
+`git grep -i rpi` 只应命中这三类，**不要**「顺手清干净」：
+
+1. **外部项目名**：`pi-rust/rpi-package`（被收编插件的来源 registry，~30 个文件里
+   用作溯源路径）、`@juicesharp/rpiv-todo`（第三方 npm 包）。改名会伪造出处、打断链接。
+2. **有意保留的旧数据/旧配置读取**，每处都在原位标注了 `legacy trace` 与失败模式：
+   `rpi.value`（`crates/kiqi-harness/src/session/values.rs`）、更新缓存的
+   `#[serde(alias = "rpi")]`（`crates/kiqi-cli/src/updates.rs`）、
+   `KI_*` 对 `RPI_*` 的回退（`plugins/kiqi-langfuse`、`plugins/kiqi-permissions`）。
+   删掉它们会静默丢数据或静默忽略用户已配置的路径。
+3. **历史记录**：CHANGELOG 旧条目、设计文档里的旧 worktree 名等。
+
+`website/data/packages.json` 里的 `"author"` 标签、包名、`install` 命令与
+`repository` 路径已统一为 `kiqi-`（main 里这一组本来就是全统一的 `rpi-`），
+只有仓库名 `pi-rust/rpi-package` 作为外部标识保留。
 
 ## 上游已分叉，与本项目无关（**重要，勿误判**）
 
@@ -29,12 +50,12 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
 cargo test  --workspace --locked
 # 可选 feature（有 wasm 版的插件都不在默认构建里）必须单独跑，否则它们会腐烂：
-cargo test -p rpi-cli --lib --locked --features plugin-rpi-todo,plugin-rpi-lens,plugin-rpi-webfetch,plugin-rpi-websearch,plugin-rpi-subagents,plugin-rpi-goal,plugin-rpi-plan-mode,plugin-rpi-ask-user,plugin-rpi-langfuse
+cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-lens,plugin-kiqi-webfetch,plugin-kiqi-websearch,plugin-kiqi-subagents,plugin-kiqi-goal,plugin-kiqi-plan-mode,plugin-kiqi-ask-user,plugin-kiqi-langfuse
 # 文档快照（改了 CHANGELOG.md / README.md 等必须重跑，CI 会比对）
 sh scripts/sync-embedded-docs.sh
 ```
 
-注意：`cargo test -p rpi-cli` 会改写 `crates/rpi-cli/.ki/goals.json`（运行时状态被提交进仓库），
+注意：`cargo test -p kiqi-cli` 会改写 `crates/kiqi-cli/.ki/goals.json`（运行时状态被提交进仓库），
 跑完记得 `git checkout --`。wasm guest 只对 `wasm32-wasip2` 链接，**guest crate 里不写单测**，
 行为一律由 `crates/kiqi-plugin-host/tests/e2e.rs` 从宿主侧验证。
 
@@ -42,11 +63,11 @@ sh scripts/sync-embedded-docs.sh
 
 | 通道 | 形态 | 适用 |
 |---|---|---|
-| **编译期** `plugins/rpi-*` | `kiqi_plugin::Plugin` trait（进程内、无沙箱），另带 cdylib 面供 `ki dev` 热载 | 一方插件 |
+| **编译期** `plugins/kiqi-*` | `kiqi_plugin::Plugin` trait（进程内、无沙箱），另带 cdylib 面供 `ki dev` 热载 | 一方插件 |
 | **wasm** `plugins/wasm/kiqi-*-guest` | 组件模型 + `plugins/kiqi-plugin.wit` 契约，跑在 wasmtime 沙箱里，按授权拿能力 | 第三方；契约版本见 WIT 的 `package` 行 |
 
-**默认构建只编入没有 wasm 版的插件**（当前仅 `rpi-permissions`——`rpi-orchestrator` 已随 §6.34 迁 opt-in、`rpi-codegraph` 随 `proc` 迁 wasm）。
-有 guest 的那些都是 `--features plugin-rpi-<name>`，或用 `ki insmod --build plugins/wasm/kiqi-<name>-guest`
+**默认构建只编入没有 wasm 版的插件**（当前仅 `kiqi-permissions`——`kiqi-orchestrator` 已随 §6.34 迁 opt-in、`kiqi-codegraph` 随 `proc` 迁 wasm）。
+有 guest 的那些都是 `--features plugin-kiqi-<name>`，或用 `ki insmod --build plugins/wasm/kiqi-<name>-guest`
 装上 wasm 版。**新增/改插件能力时，两侧（trait 面与 WIT 面）必须一起改**，
 差异要写进 guest README，不许藏。
 

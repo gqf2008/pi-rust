@@ -9,7 +9,7 @@ authors.workspace = true
 repository.workspace = true
 description = "Representative langfuse port to wasm: trace/generation spans flushed over net-http"
 readme = "README.md"
-keywords = ["rpi", "kiqi", "wasm", "plugin", "langfuse"]
+keywords = ["ki", "kiqi", "wasm", "plugin", "langfuse"]
 categories = ["development-tools"]
 
 [lib]

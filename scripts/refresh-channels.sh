@@ -27,8 +27,8 @@ note() { echo "» $*"; }
 
 cd "$(git rev-parse --show-toplevel)"
 
-OLD=$(grep -m1 -oE '"version": "[0-9.]+"' packaging/scoop/rpi.json | grep -oE '[0-9.]+')
-[[ -n "$OLD" ]] || die "could not read the current version from packaging/scoop/rpi.json"
+OLD=$(grep -m1 -oE '"version": "[0-9.]+"' packaging/scoop/ki.json | grep -oE '[0-9.]+')
+[[ -n "$OLD" ]] || die "could not read the current version from packaging/scoop/ki.json"
 [[ "$OLD" != "$VERSION" ]] || { note "manifests already at $VERSION"; exit 0; }
 
 tmp=$(mktemp -d)
@@ -57,10 +57,10 @@ sha() {
   awk '{print $1}' "$file" | tr 'A-F' 'a-f'
 }
 
-LINUX_X64="rpi-$TAG-x86_64-unknown-linux-gnu.tar.gz"
-LINUX_ARM="rpi-$TAG-aarch64-unknown-linux-gnu.tar.gz"
-MAC_ARM="rpi-$TAG-aarch64-apple-darwin.tar.gz"
-WIN_X64="rpi-$TAG-x86_64-pc-windows-msvc.zip"
+LINUX_X64="kiqi-$TAG-x86_64-unknown-linux-gnu.tar.gz"
+LINUX_ARM="kiqi-$TAG-aarch64-unknown-linux-gnu.tar.gz"
+MAC_ARM="kiqi-$TAG-aarch64-apple-darwin.tar.gz"
+WIN_X64="kiqi-$TAG-x86_64-pc-windows-msvc.zip"
 
 SHA_LINUX_X64=$(sha "$LINUX_X64")
 SHA_LINUX_ARM=$(sha "$LINUX_ARM")
@@ -71,36 +71,36 @@ SHA_WIN_X64=$(sha "$WIN_X64")
 # Homebrew: version + URLs + the three sha256 lines (order in file:
 # apple-darwin, linux aarch64, linux x86_64).
 # --------------------------------------------------------------------------
-note "packaging/homebrew/rpi.rb"
-mapfile -t OLD_BREW < <(grep -oE 'sha256 "[0-9a-f]+"' packaging/homebrew/rpi.rb | grep -oE '[0-9a-f]{64}')
+note "packaging/homebrew/ki.rb"
+mapfile -t OLD_BREW < <(grep -oE 'sha256 "[0-9a-f]+"' packaging/homebrew/ki.rb | grep -oE '[0-9a-f]{64}')
 [[ "${#OLD_BREW[@]}" -eq 3 ]] || die "expected 3 sha256 lines in the Homebrew formula"
-perl -pi -e "s/version \"$OLD\"/version \"$VERSION\"/; s/v$OLD/v$VERSION/g" packaging/homebrew/rpi.rb
-perl -pi -e "s/${OLD_BREW[0]}/$SHA_MAC_ARM/" packaging/homebrew/rpi.rb
-perl -pi -e "s/${OLD_BREW[1]}/$SHA_LINUX_ARM/" packaging/homebrew/rpi.rb
-perl -pi -e "s/${OLD_BREW[2]}/$SHA_LINUX_X64/" packaging/homebrew/rpi.rb
+perl -pi -e "s/version \"$OLD\"/version \"$VERSION\"/; s/v$OLD/v$VERSION/g" packaging/homebrew/ki.rb
+perl -pi -e "s/${OLD_BREW[0]}/$SHA_MAC_ARM/" packaging/homebrew/ki.rb
+perl -pi -e "s/${OLD_BREW[1]}/$SHA_LINUX_ARM/" packaging/homebrew/ki.rb
+perl -pi -e "s/${OLD_BREW[2]}/$SHA_LINUX_X64/" packaging/homebrew/ki.rb
 
 # --------------------------------------------------------------------------
 # Scoop
 # --------------------------------------------------------------------------
-note "packaging/scoop/rpi.json"
-OLD_SCOOP=$(grep -m1 -oE '"hash": "[0-9a-fA-F]+"' packaging/scoop/rpi.json | grep -oE '[0-9a-fA-F]{64}')
+note "packaging/scoop/ki.json"
+OLD_SCOOP=$(grep -m1 -oE '"hash": "[0-9a-fA-F]+"' packaging/scoop/ki.json | grep -oE '[0-9a-fA-F]{64}')
 [[ -n "$OLD_SCOOP" ]] || die "could not read the Scoop hash"
-perl -pi -e "s/\"version\": \"$OLD\"/\"version\": \"$VERSION\"/; s/v$OLD/v$VERSION/g; s/$OLD_SCOOP/$SHA_WIN_X64/" packaging/scoop/rpi.json
+perl -pi -e "s/\"version\": \"$OLD\"/\"version\": \"$VERSION\"/; s/v$OLD/v$VERSION/g; s/$OLD_SCOOP/$SHA_WIN_X64/" packaging/scoop/ki.json
 
 # --------------------------------------------------------------------------
 # winget
 # --------------------------------------------------------------------------
 note "packaging/winget/*.yaml"
 DATE=$(date -u +%Y-%m-%d)
-OLD_WINGET=$(grep -m1 -oE 'InstallerSha256: [0-9A-Fa-f]+' packaging/winget/bigfish1913.rpi.installer.yaml | grep -oE '[0-9A-Fa-f]{64}')
+OLD_WINGET=$(grep -m1 -oE 'InstallerSha256: [0-9A-Fa-f]+' packaging/winget/bigfish1913.ki.installer.yaml | grep -oE '[0-9A-Fa-f]{64}')
 [[ -n "$OLD_WINGET" ]] || die "could not read the winget InstallerSha256"
 WIN_UPPER=$(printf '%s' "$SHA_WIN_X64" | tr 'a-f' 'A-F')
 perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/; s/v$OLD/v$VERSION/g; s/$OLD_WINGET/$WIN_UPPER/; s/ReleaseDate: [0-9-]+/ReleaseDate: $DATE/" \
-  packaging/winget/bigfish1913.rpi.installer.yaml
+  packaging/winget/bigfish1913.ki.installer.yaml
 perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/; s/v$OLD/v$VERSION/g" \
-  packaging/winget/bigfish1913.rpi.locale.en-US.yaml
+  packaging/winget/bigfish1913.ki.locale.en-US.yaml
 perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/" \
-  packaging/winget/bigfish1913.rpi.yaml
+  packaging/winget/bigfish1913.ki.yaml
 
 # --------------------------------------------------------------------------
 # Site data: the "current release" card + the version string.

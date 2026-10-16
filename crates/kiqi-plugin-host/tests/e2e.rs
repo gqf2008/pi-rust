@@ -157,12 +157,12 @@ fn loads_calls_streams_denies_and_unloads() {
     assert!(after.to_string().contains("unloaded"), "got {after}");
 }
 
-/// The first real wasm plugin: `rpi-todo`. It proves the structured `details`
+/// The first real wasm plugin: `kiqi-todo`. It proves the structured `details`
 /// state channel and `session-read` (restoring from the branch) end to end.
 #[test]
 fn todo_guest_restores_from_the_session_branch() {
     let wasm = todo_wasm();
-    let plugin = WasmPlugin::load("rpi-todo", &wasm).expect("load the todo component");
+    let plugin = WasmPlugin::load("kiqi-todo", &wasm).expect("load the todo component");
     assert_eq!(plugin.tools()[0].name, "todo");
 
     let session = FixedSession {
@@ -281,7 +281,7 @@ fn session_tree_restores_from_a_swapped_branch() {
     }
 
     let wasm = todo_wasm();
-    let plugin = WasmPlugin::load("rpi-todo", &wasm).expect("load the todo component");
+    let plugin = WasmPlugin::load("kiqi-todo", &wasm).expect("load the todo component");
 
     let session = SwappingSession {
         branch: Mutex::new(branch_with("branch A todo")),
@@ -501,7 +501,7 @@ fn langfuse_subset_builds_a_trace_and_flushes_it_over_net_http() {
         }),
         ..Default::default()
     };
-    let plugin = WasmPlugin::load_with_grants("rpi-langfuse", &wasm, grants).expect("load");
+    let plugin = WasmPlugin::load_with_grants("kiqi-langfuse", &wasm, grants).expect("load");
     assert!(plugin
         .tools()
         .iter()
@@ -803,13 +803,13 @@ impl kiqi_plugin::UiApi for ScriptedUi {
     }
 }
 
-/// `rpi-ask-user` on wasm: a question round-trips through the host dialog and
+/// `kiqi-ask-user` on wasm: a question round-trips through the host dialog and
 /// the answer rides the `details` channel.
 #[test]
 fn ask_user_round_trips_through_the_host_dialog() {
     let wasm = ask_user_wasm();
     let plugin =
-        WasmPlugin::load_with_grants("rpi-ask-user", &wasm, Grants::default()).expect("load");
+        WasmPlugin::load_with_grants("kiqi-ask-user", &wasm, Grants::default()).expect("load");
     assert!(plugin.tools().iter().any(|tool| tool.name == "ask_user"));
 
     let ui = ScriptedUi::new(DialogMode::Answer(serde_json::json!({ "text": "7897" })));
@@ -880,7 +880,7 @@ fn ask_user_round_trips_through_the_host_dialog() {
 fn ask_user_reports_cancellation() {
     let wasm = ask_user_wasm();
     let plugin =
-        WasmPlugin::load_with_grants("rpi-ask-user", &wasm, Grants::default()).expect("load");
+        WasmPlugin::load_with_grants("kiqi-ask-user", &wasm, Grants::default()).expect("load");
     let ui = ScriptedUi::new(DialogMode::Cancel);
     let log = NullLog;
     let caps = HostCaps {
@@ -917,7 +917,7 @@ fn ask_user_reports_cancellation() {
 fn ask_user_honours_timeout() {
     let wasm = ask_user_wasm();
     let plugin =
-        WasmPlugin::load_with_grants("rpi-ask-user", &wasm, Grants::default()).expect("load");
+        WasmPlugin::load_with_grants("kiqi-ask-user", &wasm, Grants::default()).expect("load");
     let ui = ScriptedUi::new(DialogMode::Pending);
     let log = NullLog;
     let caps = HostCaps {
@@ -1306,15 +1306,15 @@ fn exec_times_out_at_the_grants_budget() {
     );
 }
 
-/// `rpi-codegraph` ported to wasm: the model still sees the same eight tools
+/// `kiqi-codegraph` ported to wasm: the model still sees the same eight tools
 /// with the same schemas; `init`/`sync` and the MCP session go through the
 /// host's `exec`/`proc` grants instead of spawning processes itself.
 #[test]
 fn codegraph_guest_declares_the_eight_tools() {
     let wasm = build_guest("kiqi-codegraph-guest", "kiqi_codegraph_guest.wasm");
     let plugin =
-        WasmPlugin::load_with_grants("rpi-codegraph", &wasm, Grants::default()).expect("load");
-    assert_eq!(plugin.id(), "rpi-codegraph");
+        WasmPlugin::load_with_grants("kiqi-codegraph", &wasm, Grants::default()).expect("load");
+    assert_eq!(plugin.id(), "kiqi-codegraph");
 
     let mut names: Vec<String> = plugin.tools().into_iter().map(|tool| tool.name).collect();
     names.sort();
@@ -1398,7 +1398,7 @@ fn codegraph_guest_probes_the_index_then_needs_the_codegraph_grant() {
     ] {
         let wasm = build_guest("kiqi-codegraph-guest", "kiqi_codegraph_guest.wasm");
         let plugin =
-            WasmPlugin::load_with_grants("rpi-codegraph", &wasm, grants.clone()).expect("load");
+            WasmPlugin::load_with_grants("kiqi-codegraph", &wasm, grants.clone()).expect("load");
         let error = plugin
             .call(
                 "codegraph_status",
@@ -1451,7 +1451,7 @@ fn codegraph_guest_live_session_when_asked() {
         .expect("temp project");
     let wasm = build_guest("kiqi-codegraph-guest", "kiqi_codegraph_guest.wasm");
     let plugin = WasmPlugin::load_with_grants(
-        "rpi-codegraph",
+        "kiqi-codegraph",
         &wasm,
         Grants {
             exec: Some(ExecGrant {
@@ -1489,7 +1489,7 @@ fn codegraph_guest_live_session_when_asked() {
     );
 }
 
-/// `rpi-orchestrator` ported to wasm, driven hermetically with `cat` as the
+/// `kiqi-orchestrator` ported to wasm, driven hermetically with `cat` as the
 /// child program: the task rides stdin, `cat` echoes it back, so a whole wave
 /// can complete without any real agent.
 #[test]
@@ -1498,7 +1498,7 @@ fn orchestrator_guest_runs_a_wave_via_cat() {
 
     let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
     let plugin = WasmPlugin::load_with_grants(
-        "rpi-orchestrator",
+        "kiqi-orchestrator",
         &wasm,
         Grants {
             proc: Some(ProcGrant {
@@ -1510,7 +1510,7 @@ fn orchestrator_guest_runs_a_wave_via_cat() {
         },
     )
     .expect("load");
-    assert_eq!(plugin.id(), "rpi-orchestrator");
+    assert_eq!(plugin.id(), "kiqi-orchestrator");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     let sink = RecordingSink {
@@ -1582,7 +1582,7 @@ fn orchestrator_guest_subagent_round_trips_via_cat() {
 
     let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
     let plugin = WasmPlugin::load_with_grants(
-        "rpi-orchestrator",
+        "kiqi-orchestrator",
         &wasm,
         Grants {
             proc: Some(ProcGrant {
@@ -1615,7 +1615,7 @@ fn orchestrator_guest_subagent_round_trips_via_cat() {
 
     // Without the grant the same call is denied with the remediation.
     let bare =
-        WasmPlugin::load_with_grants("rpi-orchestrator", &wasm, Grants::default()).expect("load");
+        WasmPlugin::load_with_grants("kiqi-orchestrator", &wasm, Grants::default()).expect("load");
     let denied = bare
         .call(
             "subagent",
@@ -1635,7 +1635,7 @@ fn orchestrator_guest_subagent_round_trips_via_cat() {
 fn orchestrator_guest_session_switch_clears_the_plan() {
     let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
     let plugin =
-        WasmPlugin::load_with_grants("rpi-orchestrator", &wasm, Grants::default()).expect("load");
+        WasmPlugin::load_with_grants("kiqi-orchestrator", &wasm, Grants::default()).expect("load");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     let sink = RecordingSink {
@@ -1681,7 +1681,7 @@ fn orchestrator_guest_gates_guidance_on_the_active_goal() {
     let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
     let project = tempfile::tempdir().expect("project tempdir");
     let plugin = WasmPlugin::load_with_options(
-        "rpi-orchestrator",
+        "kiqi-orchestrator",
         &wasm,
         Grants {
             fs: Some(FsGrant {
@@ -1753,7 +1753,7 @@ fn orchestrator_guest_guidance_needs_the_fs_grant() {
     )
     .expect("write");
     let plugin = WasmPlugin::load_with_options(
-        "rpi-orchestrator",
+        "kiqi-orchestrator",
         &wasm,
         Grants::default(),
         kiqi_plugin_host::Options {
@@ -1794,7 +1794,7 @@ fn goal_guest_output_turns_the_orchestrator_guidance_on() {
     let goal_wasm = goal_component.path().join("plugin.wasm");
     std::fs::copy(&goal_artifact, &goal_wasm).expect("copy the goal guest");
     let goal_plugin = WasmPlugin::load_with_options(
-        "rpi-goal",
+        "kiqi-goal",
         &goal_wasm,
         goal_fs_grant(),
         kiqi_plugin_host::Options {
@@ -1826,7 +1826,7 @@ fn goal_guest_output_turns_the_orchestrator_guidance_on() {
     let orchestrator_artifact =
         build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
     let orchestrator = WasmPlugin::load_with_options(
-        "rpi-orchestrator",
+        "kiqi-orchestrator",
         &orchestrator_artifact,
         Grants {
             fs: Some(FsGrant {
@@ -2340,14 +2340,14 @@ fn exec_does_not_hang_when_the_command_leaves_a_background_child() {
     );
 }
 
-/// `rpi-webfetch` ported to wasm: the tool's own URL policy runs in the guest,
+/// `kiqi-webfetch` ported to wasm: the tool's own URL policy runs in the guest,
 /// and where it may actually go is the user's grant — checked before any network
 /// access, so this stays hermetic.
 #[test]
 fn webfetch_guest_keeps_its_url_policy_and_needs_the_grant() {
     let wasm = build_guest("kiqi-webfetch-guest", "kiqi_webfetch_guest.wasm");
-    let plugin = WasmPlugin::load("rpi-webfetch", &wasm).expect("load");
-    assert_eq!(plugin.id(), "rpi-webfetch");
+    let plugin = WasmPlugin::load("kiqi-webfetch", &wasm).expect("load");
+    assert_eq!(plugin.id(), "kiqi-webfetch");
     assert!(
         plugin.tools().iter().any(|tool| tool.name == "webfetch"),
         "the tool is declared: {:?}",
@@ -2396,12 +2396,12 @@ fn webfetch_guest_keeps_its_url_policy_and_needs_the_grant() {
     assert!(denied.to_string().contains("denied"), "got {denied}");
 }
 
-/// `rpi-lens` ported to wasm: the check runs through the host's `exec`
+/// `kiqi-lens` ported to wasm: the check runs through the host's `exec`
 /// capability with a `project` cwd scope, so `git diff --check` runs against
 /// the project directory — and without the grant the tool degrades to a clear
 /// deny instead of running.
 #[test]
-fn rpi_lens_guest_runs_checks_in_the_project_directory() {
+fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
     use kiqi_plugin_host::{ExecCwd, ExecGrant};
 
     // The test needs `git` for real (the fixture init below and the guest's
@@ -2415,11 +2415,11 @@ fn rpi_lens_guest_runs_checks_in_the_project_directory() {
         .map(|status| !status.success())
         .unwrap_or(true)
     {
-        eprintln!("skipping rpi_lens_guest_runs_checks_in_the_project_directory: no git on PATH");
+        eprintln!("skipping kiqi_lens_guest_runs_checks_in_the_project_directory: no git on PATH");
         return;
     }
 
-    let wasm = build_guest("kiqi-rpi-lens-guest", "kiqi_rpi_lens_guest.wasm");
+    let wasm = build_guest("kiqi-lens-guest", "kiqi_lens_guest.wasm");
     let project = tempfile::tempdir().expect("project tempdir");
     let init = Command::new("git")
         .args(["init", "--quiet"])
@@ -2436,7 +2436,7 @@ fn rpi_lens_guest_runs_checks_in_the_project_directory() {
 
     // Granted with the project scope: the diff check runs in the project dir.
     let plugin = WasmPlugin::load_with_options(
-        "rpi-lens",
+        "kiqi-lens",
         &wasm,
         Grants {
             exec: Some(ExecGrant {
@@ -2452,7 +2452,7 @@ fn rpi_lens_guest_runs_checks_in_the_project_directory() {
         },
     )
     .expect("load");
-    assert_eq!(plugin.id(), "rpi-lens");
+    assert_eq!(plugin.id(), "kiqi-lens");
     assert!(
         plugin.tools().iter().any(|tool| tool.name == "code_lens"),
         "the tool is declared: {:?}",
@@ -2523,7 +2523,7 @@ fn rpi_lens_guest_runs_checks_in_the_project_directory() {
     // emits it (with a trailing slash) is accepted, and `git diff --check`
     // runs read-only in the repo the test process sits in.
     let plugin = WasmPlugin::load_with_grants(
-        "rpi-lens",
+        "kiqi-lens",
         &wasm,
         Grants {
             exec: Some(ExecGrant {
@@ -2556,7 +2556,7 @@ fn rpi_lens_guest_runs_checks_in_the_project_directory() {
     let scoped_wasm = dir.path().join("plugin.wasm");
     std::fs::copy(&wasm, &scoped_wasm).expect("copy the guest next to a data dir");
     let plugin = WasmPlugin::load_with_grants(
-        "rpi-lens",
+        "kiqi-lens",
         &scoped_wasm,
         Grants {
             exec: Some(ExecGrant {
@@ -2586,7 +2586,7 @@ fn rpi_lens_guest_runs_checks_in_the_project_directory() {
     // The advice must name BOTH commands the tool can run — `ki plugin grant`
     // replaces the whole exec policy, so advice naming only the denied command
     // would steer the user into revoking the other one.
-    let plugin = WasmPlugin::load_with_grants("rpi-lens", &wasm, Grants::default()).expect("load");
+    let plugin = WasmPlugin::load_with_grants("kiqi-lens", &wasm, Grants::default()).expect("load");
     let denied = plugin
         .call(
             "code_lens",
@@ -2601,7 +2601,7 @@ fn rpi_lens_guest_runs_checks_in_the_project_directory() {
         "the deny names the missing grant: {denied}"
     );
     assert!(
-        denied.contains("grant rpi-lens exec --command cargo --command git"),
+        denied.contains("grant kiqi-lens exec --command cargo --command git"),
         "the remediation advice covers every command the tool needs: {denied}"
     );
 }
@@ -2690,14 +2690,14 @@ impl kiqi_plugin::InjectApi for PlanSessionHost {
     }
 }
 
-/// `rpi-plan-mode` ported to wasm: entering swaps the tool set through
+/// `kiqi-plan-mode` ported to wasm: entering swaps the tool set through
 /// `session-control`, completing restores it and persists the plan through
 /// `inject.append-custom-entry`, and `/plan show` reads it back.
 #[test]
 fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
     let wasm = build_guest("kiqi-plan-mode-guest", "kiqi_plan_mode_guest.wasm");
-    let plugin = WasmPlugin::load("rpi-plan-mode", &wasm).expect("load");
-    assert_eq!(plugin.id(), "rpi-plan-mode");
+    let plugin = WasmPlugin::load("kiqi-plan-mode", &wasm).expect("load");
+    assert_eq!(plugin.id(), "kiqi-plan-mode");
     assert!(plugin
         .tools()
         .iter()
@@ -2754,10 +2754,10 @@ fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
 }
 
 // ---------------------------------------------------------------------------
-// rpi-websearch: guest-side argument policy, then the grant gates the fetch.
+// kiqi-websearch: guest-side argument policy, then the grant gates the fetch.
 // ---------------------------------------------------------------------------
 
-/// `rpi-websearch` ported to wasm: the query validation is the guest's own (it
+/// `kiqi-websearch` ported to wasm: the query validation is the guest's own (it
 /// runs before any fetch), and the two hosts it calls — DuckDuckGo and Wikipedia
 /// — are the user's grant's to allow. No network is touched: the guest's own
 /// argument policy answers first, and a granted-less fetch is refused by the
@@ -2766,8 +2766,8 @@ fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
 fn websearch_guest_validates_in_the_guest_and_needs_the_grant() {
     let wasm = build_guest("kiqi-websearch-guest", "kiqi_websearch_guest.wasm");
     let plugin =
-        WasmPlugin::load_with_grants("rpi-websearch", &wasm, Grants::default()).expect("load");
-    assert_eq!(plugin.id(), "rpi-websearch");
+        WasmPlugin::load_with_grants("kiqi-websearch", &wasm, Grants::default()).expect("load");
+    assert_eq!(plugin.id(), "kiqi-websearch");
     assert!(
         plugin.tools().iter().any(|tool| tool.name == "websearch"),
         "the tool is declared: {:?}",
@@ -2815,7 +2815,7 @@ fn websearch_guest_validates_in_the_guest_and_needs_the_grant() {
 
     // A grant for some unrelated host still does not cover api.duckduckgo.com.
     let other = WasmPlugin::load_with_grants(
-        "rpi-websearch",
+        "kiqi-websearch",
         &wasm,
         Grants {
             net_http: Some(NetHttpGrant {
@@ -2859,7 +2859,7 @@ fn websearch_guest_live_search_when_asked() {
         }),
         ..Grants::default()
     };
-    let plugin = WasmPlugin::load_with_grants("rpi-websearch", &wasm, grants).expect("load");
+    let plugin = WasmPlugin::load_with_grants("kiqi-websearch", &wasm, grants).expect("load");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     let sink = RecordingSink {
@@ -2885,17 +2885,17 @@ fn websearch_guest_live_search_when_asked() {
 }
 
 // ---------------------------------------------------------------------------
-// rpi-subagents: a pure envelope tool, no capabilities at all.
+// kiqi-subagents: a pure envelope tool, no capabilities at all.
 // ---------------------------------------------------------------------------
 
-/// `rpi-subagents` ported to wasm: pure logic, no capabilities. The guest must
+/// `kiqi-subagents` ported to wasm: pure logic, no capabilities. The guest must
 /// emit the *same* delegation envelope bytes the compile-time plugin emits, so
 /// the envelope is compared field-order-and-value, byte for byte.
 #[test]
 fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
     let wasm = build_guest("kiqi-subagents-guest", "kiqi_subagents_guest.wasm");
-    let plugin = WasmPlugin::load("rpi-subagents", &wasm).expect("load");
-    assert_eq!(plugin.id(), "rpi-subagents");
+    let plugin = WasmPlugin::load("kiqi-subagents", &wasm).expect("load");
+    assert_eq!(plugin.id(), "kiqi-subagents");
 
     let tool = plugin
         .tools()
@@ -2925,7 +2925,7 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
     assert!(!outcome.is_error);
     assert_eq!(
         text_of(&outcome),
-        r#"{"kind":"rpi-delegation","task":"review","role":"worker","maxTurns":32,"timeoutSeconds":1800,"recursive":false}"#
+        r#"{"kind":"kiqi-delegation","task":"review","role":"worker","maxTurns":32,"timeoutSeconds":1800,"recursive":false}"#
     );
     assert_eq!(outcome.details, serde_json::Value::Null);
 
@@ -2940,7 +2940,7 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
         .expect("call with defaults");
     assert_eq!(
         text_of(&defaults),
-        r#"{"kind":"rpi-delegation","task":"x","role":"worker","maxTurns":8,"timeoutSeconds":300,"recursive":false}"#
+        r#"{"kind":"kiqi-delegation","task":"x","role":"worker","maxTurns":8,"timeoutSeconds":300,"recursive":false}"#
     );
 
     // A role is carried through verbatim.
@@ -3005,7 +3005,7 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
 }
 
 // ---------------------------------------------------------------------------
-// rpi-goal: the project file (compiled shape), inject, TurnEnd hook.
+// kiqi-goal: the project file (compiled shape), inject, TurnEnd hook.
 // ---------------------------------------------------------------------------
 
 /// A host that records what the goal guest injects, so the port's
@@ -3062,7 +3062,7 @@ fn load_goal_guest(grants: Grants) -> (tempfile::TempDir, tempfile::TempDir, Was
     let wasm = component.path().join("plugin.wasm");
     std::fs::copy(&artifact, &wasm).expect("copy the guest next to its component dir");
     let plugin = WasmPlugin::load_with_options(
-        "rpi-goal",
+        "kiqi-goal",
         &wasm,
         grants,
         kiqi_plugin_host::Options {
@@ -3173,7 +3173,7 @@ fn goal_injection_carries_the_orchestration_hint_only_when_its_tools_exist() {
 #[test]
 fn goal_guest_writes_the_project_file_in_the_compiled_shape() {
     let (component, project, plugin) = load_goal_guest(goal_fs_grant());
-    assert_eq!(plugin.id(), "rpi-goal");
+    assert_eq!(plugin.id(), "kiqi-goal");
     assert!(plugin.tools().iter().any(|tool| tool.name == "goal"));
     assert!(plugin
         .commands()
@@ -3358,7 +3358,7 @@ fn goal_guest_migrates_the_pre_scope_store() {
     std::fs::write(data.join("goals.json"), legacy.to_string()).expect("seed the pre-scope store");
 
     let plugin = WasmPlugin::load_with_options(
-        "rpi-goal",
+        "kiqi-goal",
         &wasm,
         goal_fs_grant(),
         kiqi_plugin_host::Options {
