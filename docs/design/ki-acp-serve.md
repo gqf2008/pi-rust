@@ -222,7 +222,40 @@ ABB 已有一个 4710 行的 ACP 客户端。它对 agent 的六点硬假设（�
 stdio/失败面纪律全盘继承（§6）。
 
 **待定**：
-- 官方 crate 分发模型实测结论（批次 1 出，决定 tick 兜底是否保留）；
-- `Suspended` → stopReason 的准确命名（批次 1 核对预算语义）；
-- 多会话共享进程的插件宿主语义上限（只读共享无碍；若出现会话间干扰再立门）；
-- zed 注册是否进 `ki acp serve` 默认行为（现按 one-shot 子命令设计）。
+- ~~官方 crate 分发模型实测结论~~（✅ 批次 1 已收敛，见 §12）；
+- ~~`Suspended` → stopReason 的准确命名~~（✅ 批次 1 落定：`end_turn` + stderr 说明，
+  deferred resume 留批次 2+）；
+- ~~多会话共享进程的插件宿主语义上限~~（✅ 批次 1 落定：**每进程一个活跃会话**——
+  编译期插件事件 sink 是进程级 last-writer-wins（`rpi-extensions::compiled`），第二个并发
+  `session::build` 会抢走第一会话的插件事件，且插件按进程 cwd 取路径。多会话需先做
+  sink 仲裁/按会话扩展世界，是独立设计活）；
+- zed 注册是否进 `ki acp serve` 默认行为（现按 one-shot 子命令设计）；
+- ABB 客户端 `protocolVersion: 2` 握手：crate 的 v1 守卫在 handler 之前硬拒非 V1 并把
+  应答版本回写为 V1，ki 不对抗守卫 ⇒ ABB 侧要么重试协商到 1、要么 ki 批次 3 自定义
+  initialize 路径——批次 3 实测定。
+
+## 12. 批次 1 状态（2026-10-16，完成）
+
+提交 `9482790`（分支 `feat/acp-serve`，已 ff-合入 main）。交付：`crates/rpi-cli/src/acp/`
+（mod/sessions/projection/diag，1551 行）+ app.rs 接线 + 依赖引入；20 个进程内测试
+（投影单测、stopReason 映射表、TurnState/守卫语义、6 个 duplex e2e——FauxProvider
+脚本 provider，含 cancel-during-prompt 突变验证）。门禁全绿：workspace 1899 通过/0 失败、
+features 门 538 通过、fmt/docs 快照干净。
+
+**§4.4 验证项实测结论**：官方 crate 3.3.0 的分发是**串行内联**（读循环逐帧 await
+handler，`incoming_actor.rs:72,101-160`；文档明言回调期间不处理其他消息），逃生口是
+`ConnectionTo::spawn` 任务池（与读循环并行的 task_actor）。批次 1 照搬 abb 修正形状：
+prompt handler 内联抢 `in_flight` → 移交 `Responder` 进 spawn → 立即 `Ok(())`；
+cancel 内联秒达；**100ms tick 兜底确认必要**——lane 在 run 注册前（`acquire_run` 之前的
+`NoActiveRun` 窗口）会吞掉单次 abort，三镜头对抗审查用实证探针独立复现（同 burst
+cancel 10/10 全量跑完仍答 cancelled），修复为 tick 重发 abort 直到 run 接收，并把
+同 burst 测试强化为断言流被截断（原测试在坏/好两个世界都绿，遮住了缺陷）。
+
+**审查轮战果**：8 条发现（去重后 5 个独立问题）全部核实修复——同 burst cancel 丢失
+（高危）、Lagged 排干中断（低）、Failed-后-cancel 必须答 cancelled 而非 error（协议
+MUST，`was_cancelled` 判定提到 outcome 之前）、`additional_directories` 静默忽略违反
+第一刀解析立场（改为 -32602 响亮拒绝）、EOF 收尾的 abort 宽限机制是死代码（连接
+future 先于 close 回调被 drop，机制移除、注释修正）。
+
+**遗留到批次 2**：`session/request_permission`（UiDialogMailbox 桥）、`session/load`
+回放、zed 注册；**批次 3**：ABB 客户端实测（§7 六点对表 + V1 握手裁决）。
