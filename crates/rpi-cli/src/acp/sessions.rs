@@ -49,6 +49,12 @@ pub(crate) struct SessionParams {
     /// ABB sends; design doc §4.7 "systemPrompt 收下"). Appended to the base
     /// system prompt through the same `--append-system-prompt` channel.
     pub(crate) system_prompt_append: Option<String>,
+    /// MCP servers the client supplied on `session/new`/`session/load`
+    /// (`mcpServers`, stdio only — HTTP/SSE is refused at decode). Decoded to
+    /// the host config shape so the build seam starts them exactly like the
+    /// settings-configured ones; POLICY 1: the client's request IS the
+    /// authorization, so no project-trust gate applies here.
+    pub(crate) mcp_servers: Vec<rpi_mcp::ServerConfig>,
 }
 
 /// Which session the factory should build: a fresh one (`session/new`, the
@@ -84,6 +90,11 @@ pub(crate) struct LiveSession {
     /// The dialog pump started once a connection exists to carry the outbound
     /// permission requests (`start_dialog_pump`).
     pub(crate) dialogs: Option<Arc<DialogPump>>,
+    /// Whether the ACP client advertised the `notices` session capability.
+    /// The boundary drain forwards MCP resource-update notices as user-facing
+    /// `SessionUpdate::Notice`s only when this is set (the schema's rule).
+    /// Copied from the connection snapshot at session activation.
+    pub(crate) client_notices: bool,
 }
 
 impl LiveSession {
@@ -103,6 +114,9 @@ impl LiveSession {
             reload_context: deps.reload_context,
             ui_dialog: deps.ui_dialog,
             dialogs: None,
+            // Overwritten by the activation handlers from the connection's
+            // initialize snapshot (the factory knows nothing of the client).
+            client_notices: false,
         }
     }
 
@@ -296,10 +310,16 @@ async fn build_session(
     if let Some(append) = params.system_prompt_append {
         args.append_system_prompt.push(append);
     }
-    let (harness, event_rx, reload_context) =
-        crate::session::build_with_selection(&resolved, &args, &cwd, project_trusted, selection)
-            .await
-            .map_err(|error| format!("harness build failed: {error}"))?;
+    let (harness, event_rx, reload_context) = crate::session::build_with_selection(
+        &resolved,
+        &args,
+        &cwd,
+        project_trusted,
+        selection,
+        &params.mcp_servers,
+    )
+    .await
+    .map_err(|error| format!("harness build failed: {error}"))?;
     // A plugin declaring `{"ownsStdio": true}` owns this process's stdio (it
     // is an ACP/MCP stdio server itself). The TUI/RPC arms detect this after
     // load and yield the streams (`app.rs` post-load stdin claim); an ACP

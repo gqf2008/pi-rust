@@ -226,18 +226,22 @@ pub async fn build(
     BuildError,
 > {
     let selection = select_session(args, cwd);
-    build_with_selection(resolved, args, cwd, project_trusted, selection).await
+    build_with_selection(resolved, args, cwd, project_trusted, selection, &[]).await
 }
 
 /// [`build`] with an explicit session selection — the ACP `session/load` path
 /// restores a specific ki session regardless of the parsed args (which a serve
-/// process never parses anyway).
+/// process never parses anyway). `client_mcp_servers` carries the MCP servers
+/// an ACP client supplied on `session/new`/`session/load` (`mcpServers`,
+/// already decoded and validated by the ACP layer); every other caller passes
+/// `&[]` — non-ACP sessions run the settings-configured servers alone.
 pub async fn build_with_selection(
     resolved: &ResolvedModel,
     args: &Args,
     cwd: &Path,
     project_trusted: bool,
     selection: SessionSelection,
+    client_mcp_servers: &[rpi_mcp::ServerConfig],
 ) -> Result<
     (
         AgentHarness,
@@ -385,11 +389,18 @@ pub async fn build_with_selection(
     // stop the session from building.
     //
     // With `--no-tools` the session exposes nothing, so don't spawn servers it
-    // could never use.
+    // could never use. Client-supplied servers landing here are named loudly —
+    // the client asked for them and must hear that they did not start.
     let mcp_manager = if args.no_tools {
+        for server in client_mcp_servers {
+            eprintln!(
+                "warning: mcp: client-supplied server {} ignored: the session runs with --no-tools",
+                server.name
+            );
+        }
         Arc::new(rpi_mcp::McpManager::empty())
     } else {
-        start_mcp_manager(cwd, project_trusted).await
+        start_mcp_manager(cwd, project_trusted, client_mcp_servers).await
     };
     merge_mcp_tools(&mut tools, &mcp_manager, args);
 
@@ -2044,8 +2055,13 @@ fn build_tools(ctx: &ExecutionToolContext, args: &Args) -> Vec<HarnessTool> {
 /// policy (`--tools`/`--exclude-tools`/`--no-tools`) and collision gate as every
 /// other tool source. Called LAST in both `build` and `/reload` so an MCP tool
 /// can never silently shadow a built-in, extension or plugin tool — a collision
-/// is skipped with a warning.
-fn merge_mcp_tools(tools: &mut Vec<HarnessTool>, mcp: &rpi_mcp::McpManager, args: &Args) {
+/// is skipped with a warning. `pub(crate)`: the ACP e2e tests mirror this exact
+/// merge in their harness-building factories.
+pub(crate) fn merge_mcp_tools(
+    tools: &mut Vec<HarnessTool>,
+    mcp: &rpi_mcp::McpManager,
+    args: &Args,
+) {
     let mut taken: HashSet<String> = tools
         .iter()
         .map(|tool| tool.tool.schema().name.clone())
@@ -2081,7 +2097,14 @@ fn merge_mcp_tools(tools: &mut Vec<HarnessTool>, mcp: &rpi_mcp::McpManager, args
 /// notice is ONE batched custom entry (the goal-guest injection precedent); it
 /// becomes a user message on the next context build. Reading the resource is
 /// on demand (`{server}__read_resource`) — the notice never carries content.
-pub(crate) async fn drain_mcp_boundary(harness: &AgentHarness, mcp: &rpi_mcp::McpManager) {
+///
+/// Returns the drained (server, uri) notices so a caller with a user-facing
+/// channel (ACP `SessionUpdate::Notice`) can forward them; non-ACP callers
+/// ignore the result. The model copy above is the only copy those callers had.
+pub(crate) async fn drain_mcp_boundary(
+    harness: &AgentHarness,
+    mcp: &rpi_mcp::McpManager,
+) -> Vec<rpi_mcp::McpNotice> {
     let batch = mcp.take_notices();
     if !batch.is_empty() {
         let message = rpi_mcp::notice_message(&batch);
@@ -2096,6 +2119,7 @@ pub(crate) async fn drain_mcp_boundary(harness: &AgentHarness, mcp: &rpi_mcp::Mc
     if mcp.refresh_if_stale().await {
         replace_mcp_tools(harness, mcp).await;
     }
+    batch.notices
 }
 
 /// Replace exactly the MCP-contributed tools in the harness registry.
@@ -2242,13 +2266,20 @@ where
 
 /// Start the session's host-level MCP servers and return the manager.
 ///
-/// Servers come from the global `settings.json` plus the project's; a
-/// project entry overrides a same-named global one, and the whole project block
-/// is honored only when the project is trusted (a project server spawns a
-/// process on its author's say-so). Every rejected, skipped or failed server is
-/// reported on stderr — nothing disappears silently — and a failure never stops
-/// the session from building.
-async fn start_mcp_manager(cwd: &Path, project_trusted: bool) -> Arc<rpi_mcp::McpManager> {
+/// Servers come from three sources, merged in that order of specificity:
+/// the global `settings.json`, the project's, and (batch 3) the servers the
+/// ACP client supplied on `session/new`/`session/load` — POLICY 1: the ACP
+/// client is the user's own editor, so its request IS the authorization and
+/// the project-trust gate does not apply to it. A client-supplied entry
+/// replaces a same-named settings entry (the session request is the more
+/// specific configuration); the displaced entry is reported on stderr.
+/// Every rejected, skipped or failed server is reported on stderr — nothing
+/// disappears silently — and a failure never stops the session from building.
+async fn start_mcp_manager(
+    cwd: &Path,
+    project_trusted: bool,
+    client_servers: &[rpi_mcp::ServerConfig],
+) -> Arc<rpi_mcp::McpManager> {
     let global = crate::settings::load_settings().unwrap_or_default();
     let (global_servers, mut issues) = rpi_mcp::parse_servers(global.mcp_servers.as_ref());
 
@@ -2259,9 +2290,25 @@ async fn start_mcp_manager(cwd: &Path, project_trusted: bool) -> Arc<rpi_mcp::Mc
         issues.extend(project_issues);
     }
 
-    let (merged, merge_issues) =
+    let (mut merged, merge_issues) =
         rpi_mcp::merge_servers(global_servers, project_servers, project_trusted);
     issues.extend(merge_issues);
+
+    if !client_servers.is_empty() {
+        let client_names: HashSet<String> = client_servers.iter().map(|s| s.name.clone()).collect();
+        merged.retain(|server| {
+            if client_names.contains(&server.name) {
+                eprintln!(
+                    "warning: mcp: settings-defined server {} replaced by the client-supplied one for this session",
+                    server.name
+                );
+                false
+            } else {
+                true
+            }
+        });
+        merged.extend(client_servers.iter().cloned());
+    }
 
     let (manager, start_issues) = rpi_mcp::McpManager::start(&merged, cwd).await;
     issues.extend(start_issues);

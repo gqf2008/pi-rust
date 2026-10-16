@@ -43,8 +43,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   `notifications/resources/updated`, a light notice (server + uri) reaches the
   model, which reads on demand; subscription lifetime follows upstream semantics
   (idempotent subscribe, reconnect restore, unsubscribe-failure transport
-  retirement). HTTP servers, ACP-supplied `mcpServers`, and prompts/sampling
-  remain later batches.
+  retirement). ACP clients can supply `mcpServers` at
+  `session/new` and `session/load` too: stdio entries are accepted directly
+  (the editor's request is the user's authorization) and each acceptance is
+  logged loudly, HTTP/SSE variants are refused until that transport lands, and
+  resource updates reach notice-capable clients as user-facing
+  `SessionUpdate::Notice`s. HTTP transport and prompts/sampling remain later
+  batches.
 - **`fs` grants carry a scope (grant-model change; the ABI stays 0.7.1 — no WIT change)**: `ki plugin grant <id> fs --cwd project`
   opts a plugin into reading and writing the project tree (same scope as
   `exec`/`proc`); the default stays the plugin's own data directory, and legacy

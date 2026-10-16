@@ -62,10 +62,16 @@ const TERMINAL_DRAIN: Duration = Duration::from_millis(250);
 /// needs a fixed wakeup source (abb's 100ms tick, design doc §4.4).
 const CANCEL_ABORT_TICK: Duration = Duration::from_millis(100);
 
-/// Shared server state: the one live session plus its factory.
+/// Shared server state: the one live session, its factory, and the client
+/// capability snapshot `initialize` left behind (one connection = one client).
 struct ServerShared {
     live: Option<LiveSession>,
     factory: SessionFactory,
+    /// Whether the client advertised the `notices` session capability
+    /// ([`ClientSessionCapabilities::notices`]): user-facing
+    /// `SessionUpdate::Notice`s are only sent when this is set (the schema's
+    /// own rule). Copied onto each live session at activation.
+    client_notices: bool,
 }
 
 type SharedServer = Arc<Mutex<ServerShared>>;
@@ -139,8 +145,10 @@ pub(crate) async fn run_server(
     let shared: SharedServer = Arc::new(Mutex::new(ServerShared {
         live: None,
         factory,
+        client_notices: false,
     }));
 
+    let shared_init = Arc::clone(&shared);
     let shared_new = Arc::clone(&shared);
     let shared_load = Arc::clone(&shared);
     let shared_prompt = Arc::clone(&shared);
@@ -150,9 +158,9 @@ pub(crate) async fn run_server(
         .builder()
         .name("ki")
         .on_receive_request(
-            async |request: InitializeRequest,
-                   responder: Responder<InitializeResponse>,
-                   _cx: ConnectionTo<Client>| {
+            async move |request: InitializeRequest,
+                        responder: Responder<InitializeResponse>,
+                        _cx: ConnectionTo<Client>| {
                 // ki speaks v1 only, and in this crate build — the workspace
                 // does not enable `unstable_protocol_v2` — `ProtocolCompat`
                 // is a no-op: nothing validates the client's version or
@@ -169,6 +177,19 @@ pub(crate) async fn run_server(
                         request.protocol_version
                     );
                 }
+                // Snapshot the notices advertisement (one connection = one
+                // client): the boundary drain forwards MCP resource-update
+                // notices as user-facing `SessionUpdate::Notice`s only when
+                // the client declared it can present them (schema rule:
+                // "Agents MUST only send this update when the Client
+                // advertised ClientSessionCapabilities::notices").
+                let notices = request
+                    .client_capabilities
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.notices.is_some());
+                diag::diagln!("initialize: client notices advertised = {notices}");
+                shared_init.lock().unwrap().client_notices = notices;
                 responder.respond(
                     InitializeResponse::new(ProtocolVersion::V1)
                         .agent_capabilities(AgentCapabilities::new().load_session(true)),
@@ -255,29 +276,111 @@ async fn close_live_session(shared: &SharedServer) {
     }
 }
 
+/// Decodes the client-supplied `mcpServers` (design doc §4.7, batch 3,
+/// POLICY 1). The ACP client is the user's own editor, so a stdio server is
+/// accepted directly — the client's request IS the authorization — and each
+/// acceptance is logged loudly on stderr. HTTP/SSE variants are refused until
+/// a batch implements them; a name that could not namespace tools, an empty
+/// command, or two same-named entries are parameter errors, never silent
+/// drops (abb lesson 7).
+fn decode_client_mcp_servers(
+    servers: &[agent_client_protocol::schema::v1::McpServer],
+) -> Result<Vec<rpi_mcp::ServerConfig>, String> {
+    use agent_client_protocol::schema::v1::McpServer;
+    let mut out = Vec::new();
+    for server in servers {
+        let stdio = match server {
+            McpServer::Stdio(stdio) => stdio,
+            McpServer::Http(http) => {
+                return Err(format!(
+                    "mcpServers: server {} uses the HTTP transport ({}); HTTP/SSE MCP transport is not implemented",
+                    http.name, http.url
+                ));
+            }
+            McpServer::Sse(sse) => {
+                return Err(format!(
+                    "mcpServers: server {} uses the SSE transport ({}); HTTP/SSE MCP transport is not implemented",
+                    sse.name, sse.url
+                ));
+            }
+            // The schema enum is `#[non_exhaustive]`; a future variant is a
+            // parameter we cannot honor, not a silent skip.
+            _ => {
+                return Err("mcpServers: unsupported server transport variant".to_string());
+            }
+        };
+        if !rpi_mcp::config::valid_server_name(&stdio.name) {
+            return Err(format!(
+                "mcpServers: invalid server name {:?}; the name must be non-empty ASCII letters, digits, '-' or '_' without the tool separator '__'",
+                stdio.name
+            ));
+        }
+        if out
+            .iter()
+            .any(|s: &rpi_mcp::ServerConfig| s.name == stdio.name)
+        {
+            return Err(format!("mcpServers: duplicate server name {}", stdio.name));
+        }
+        let command = stdio.command.to_string_lossy().into_owned();
+        if command.is_empty() {
+            return Err(format!(
+                "mcpServers: server {} has an empty command",
+                stdio.name
+            ));
+        }
+        let mut env = std::collections::BTreeMap::new();
+        for variable in &stdio.env {
+            env.insert(variable.name.clone(), variable.value.clone());
+        }
+        // enabled implied (the client named it because it wants it), the
+        // default per-call timeout, no config-driven subscriptions (there is
+        // no ACP verb for them; subscriptions stay host/config-driven).
+        out.push(rpi_mcp::ServerConfig {
+            name: stdio.name.clone(),
+            transport: rpi_mcp::Transport::Stdio(rpi_mcp::StdioTransport {
+                command,
+                args: stdio.args.clone(),
+                env,
+                cwd: None,
+            }),
+            enabled: true,
+            timeout: std::time::Duration::from_secs(rpi_mcp::config::DEFAULT_TIMEOUT_SECS),
+            subscribe: Vec::new(),
+        });
+        // The loud acceptance record (POLICY 1). Unconditional stderr — the
+        // one log line a user can grep when auditing what their editor asked
+        // the agent to spawn. stdout stays protocol-clean.
+        eprintln!(
+            "[ki mcp] accepted client-supplied server {} ({} {})",
+            stdio.name,
+            stdio.command.display(),
+            stdio.args.join(" ")
+        );
+    }
+    Ok(out)
+}
+
 async fn handle_session_new(
     shared: &SharedServer,
     request: NewSessionRequest,
     responder: Responder<NewSessionResponse>,
     cx: ConnectionTo<Client>,
 ) {
-    // First-cut parameter parsing is loud, never silently ignoring (abb
-    // lesson): ki's MCP runs through its own configuration.
-    if !request.mcp_servers.is_empty() {
-        diag::diagln!(
-            "session/new rejected: {} mcp_servers entries",
-            request.mcp_servers.len()
-        );
-        let _ = responder.respond_with_error(Error::new(
-            ERR_INVALID_PARAMS,
-            "ki does not accept session-level MCP servers; MCP runs through ki's own configuration",
-        ));
-        return;
-    }
-    // Same stance: additional workspace roots cannot be honored in batch 1
-    // (the harness and its plugins are rooted at cwd alone), so a multi-root
-    // client granting them must hear it now instead of watching tools silently
-    // fail on paths it believed were in scope.
+    // Client-supplied MCP servers (batch 3, POLICY 1): stdio entries are
+    // accepted (each acceptance logged loudly), anything ki cannot honor is a
+    // parameter error — never a silently dropped server.
+    let client_mcp_servers = match decode_client_mcp_servers(&request.mcp_servers) {
+        Ok(servers) => servers,
+        Err(message) => {
+            diag::diagln!("session/new rejected: {message}");
+            let _ = responder.respond_with_error(Error::new(ERR_INVALID_PARAMS, message));
+            return;
+        }
+    };
+    // Same stance: additional workspace roots cannot be honored (the harness
+    // and its plugins are rooted at cwd alone), so a multi-root client granting
+    // them must hear it now instead of watching tools silently fail on paths it
+    // believed were in scope.
     if !request.additional_directories.is_empty() {
         diag::diagln!(
             "session/new rejected: {} additional_directories entries",
@@ -308,7 +411,7 @@ async fn handle_session_new(
 
     // Design doc §4.7: `systemPrompt` 收下, never silently dropped (abb
     // lesson 7). The pinned v1 schema carries it only through `_meta`.
-    let params = match system_prompt_params(request.meta.as_ref()) {
+    let mut params = match system_prompt_params(request.meta.as_ref()) {
         Ok(params) => params,
         Err(message) => {
             diag::diagln!("session/new rejected: {message}");
@@ -316,12 +419,18 @@ async fn handle_session_new(
             return;
         }
     };
+    params.mcp_servers = client_mcp_servers;
 
     let cwd = request.cwd;
     diag::diagln!("session/new cwd={}", cwd.display());
     match factory(&cwd, params, sessions::SessionRequest::New).await {
         Ok(deps) => {
             let mut session = LiveSession::new(deps);
+            // The client's notices advertisement (initialize) rides on the
+            // live session: the boundary drain forwards MCP resource-update
+            // notices as user-facing `SessionUpdate::Notice`s only when the
+            // client said it can present them.
+            session.client_notices = shared.lock().unwrap().client_notices;
             // The dialog pump starts with the session: a plugin can ask a
             // permission on the very first turn, so the mailbox must be live
             // before the session id is ever handed out.
@@ -368,20 +477,17 @@ async fn handle_session_load(
         return;
     };
 
-    // Same first-cut stance as session/new, word for word: honoring neither is
-    // possible with the harness rooted at cwd alone, and silent drops are the
-    // failure mode this layer exists to prevent (abb lesson 7).
-    if !request.mcp_servers.is_empty() {
-        diag::diagln!(
-            "session/load rejected: {} mcp_servers entries",
-            request.mcp_servers.len()
-        );
-        let _ = responder.respond_with_error(Error::new(
-            ERR_INVALID_PARAMS,
-            "ki does not accept session-level MCP servers; MCP runs through ki's own configuration",
-        ));
-        return;
-    }
+    // Client-supplied MCP servers on load: the same decode and the same
+    // policy as session/new, word for word — stdio accepted loudly, the rest
+    // a parameter error, never a silent drop (abb lesson 7).
+    let client_mcp_servers = match decode_client_mcp_servers(&request.mcp_servers) {
+        Ok(servers) => servers,
+        Err(message) => {
+            diag::diagln!("session/load rejected: {message}");
+            let _ = responder.respond_with_error(Error::new(ERR_INVALID_PARAMS, message));
+            return;
+        }
+    };
     if !request.additional_directories.is_empty() {
         diag::diagln!(
             "session/load rejected: {} additional_directories entries",
@@ -398,7 +504,7 @@ async fn handle_session_load(
     // runs the prompt its client configured instead of a silently dropped one
     // (abb lesson 7). The factory applies it on the load path through the same
     // `--append-system-prompt` channel as on a fresh session.
-    let params = match system_prompt_params(request.meta.as_ref()) {
+    let mut params = match system_prompt_params(request.meta.as_ref()) {
         Ok(params) => params,
         Err(message) => {
             diag::diagln!("session/load rejected: {message}");
@@ -406,6 +512,7 @@ async fn handle_session_load(
             return;
         }
     };
+    params.mcp_servers = client_mcp_servers;
 
     // The ACP id derives from the ki session id ("ki-<uuidv7>"); anything that
     // is not that shape is unknown. Answered BEFORE any factory call so a
@@ -464,6 +571,9 @@ async fn handle_session_load(
     {
         Ok(deps) => {
             let mut session = LiveSession::new(deps);
+            // Same notices gate as session/new — a loaded session forwards
+            // MCP resource-update notices on the same terms.
+            session.client_notices = shared.lock().unwrap().client_notices;
             // A loaded session can ask permissions too: same pump as a fresh
             // one, before the replay and the response hand the id over.
             session.start_dialog_pump(cx.clone());
@@ -538,6 +648,7 @@ fn system_prompt_params(
     match value.get("append").and_then(|append| append.as_str()) {
         Some(text) => Ok(sessions::SessionParams {
             system_prompt_append: Some(text.to_string()),
+            ..Default::default()
         }),
         None => Err(
             "unsupported _meta.systemPrompt shape; ki accepts {\"append\": <string>}".to_string(),
@@ -574,11 +685,12 @@ async fn handle_prompt(
                         .reload_context
                         .as_ref()
                         .map(|ctx| Arc::clone(&ctx.mcp)),
+                    session.client_notices,
                 )),
             },
         }
     };
-    let (token, lane, events, turn, harness, mcp) = match began {
+    let (token, lane, events, turn, harness, mcp, client_notices) = match began {
         Ok(parts) => parts,
         Err((code, message)) => {
             diag::diagln!("session/prompt rejected: {message}");
@@ -636,6 +748,7 @@ async fn handle_prompt(
         guard,
         harness,
         mcp,
+        client_notices,
     )) {
         // Spawn is only refused while the connection is shutting down; the
         // dropped future releases the guard, and the client is already gone.
@@ -658,12 +771,18 @@ async fn drive_turn(
     guard: InFlightGuard,
     harness: AgentHarness,
     mcp: Option<Arc<rpi_mcp::McpManager>>,
+    client_notices: bool,
 ) -> agent_client_protocol::Result<()> {
     // Between-turn boundary, run-side: notices gathered since the last turn
     // append NOW, before `prompt_text` starts — the run's context build then
     // includes them in THIS turn, instead of a turn later.
     if let Some(mcp) = &mcp {
-        crate::session::drain_mcp_boundary(&harness, mcp).await;
+        forward_mcp_notices(
+            &cx,
+            &session_id,
+            client_notices,
+            crate::session::drain_mcp_boundary(&harness, mcp).await,
+        );
     }
     // A clone survives for the decision below: a cancel landing in the gap
     // between the flag swap and the guard drop trips this token, and the
@@ -726,7 +845,12 @@ async fn drive_turn(
     // is over, so the entry cannot splice between the run's entries and the
     // client's next prompt sees it in its context build.
     if let Some(mcp) = &mcp {
-        crate::session::drain_mcp_boundary(&harness, mcp).await;
+        forward_mcp_notices(
+            &cx,
+            &session_id,
+            client_notices,
+            crate::session::drain_mcp_boundary(&harness, mcp).await,
+        );
     }
     let was_cancelled = turn.consume_cancelled() || decision_token.is_cancelled();
     // Release the turn slot BEFORE answering: a client that pipelines the next
@@ -885,6 +1009,43 @@ fn send_updates(cx: &ConnectionTo<Client>, session_id: &SessionId, updates: Vec<
             diag::diagln!("session/update send failed: {error}");
         }
     }
+}
+
+/// Forwards the MCP resource-update notices a boundary drain yielded as
+/// user-facing `SessionUpdate::Notice`s — but only when the client advertised
+/// the `notices` session capability (the schema's own rule; the fallback for a
+/// client without it would be an ordinary agent message, and ki's model copy —
+/// the batched transcript entry `drain_mcp_boundary` appended — already serves
+/// that role, so nothing extra is sent). The Notice is fire-and-forget user
+/// information; the model's copy is unchanged, so there is no double delivery.
+fn forward_mcp_notices(
+    cx: &ConnectionTo<Client>,
+    session_id: &SessionId,
+    client_notices: bool,
+    notices: Vec<rpi_mcp::McpNotice>,
+) {
+    if !client_notices || notices.is_empty() {
+        return;
+    }
+    let updates = notices
+        .into_iter()
+        .map(|notice| {
+            // _meta {server, uri}: a client can key on the pair without
+            // parsing the description.
+            let mut meta = agent_client_protocol::schema::v1::Meta::new();
+            meta.insert("server".into(), serde_json::json!(notice.server));
+            meta.insert("uri".into(), serde_json::json!(notice.uri));
+            SessionUpdate::Notice(
+                agent_client_protocol::schema::v1::Notice::new(
+                    agent_client_protocol::schema::v1::NoticeSeverity::Info,
+                    "Resource updated",
+                )
+                .description(format!("server {}: {}", notice.server, notice.uri))
+                .meta(meta),
+            )
+        })
+        .collect();
+    send_updates(cx, session_id, updates);
 }
 
 #[cfg(test)]
@@ -1646,16 +1807,70 @@ mod tests {
         result.expect("client failed");
     }
 
+    #[test]
+    fn client_mcp_servers_decode_stdio_and_refuse_http() {
+        use agent_client_protocol::schema::v1::{
+            EnvVariable, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
+        };
+
+        let stdio = McpServer::Stdio(
+            McpServerStdio::new("docs", "/usr/bin/mcp-docs")
+                .args(vec!["--stdio".to_string()])
+                .env(vec![EnvVariable::new("TOKEN", "s3cret")]),
+        );
+        let decoded = decode_client_mcp_servers(&[stdio]).expect("stdio decodes");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].name, "docs");
+        assert!(decoded[0].enabled);
+        match &decoded[0].transport {
+            rpi_mcp::Transport::Stdio(stdio) => {
+                assert_eq!(stdio.command, "/usr/bin/mcp-docs");
+                assert_eq!(stdio.args, vec!["--stdio".to_string()]);
+                assert_eq!(stdio.env.get("TOKEN").map(String::as_str), Some("s3cret"));
+            }
+            other => panic!("expected a stdio transport, got {other:?}"),
+        }
+
+        for refused in [
+            McpServer::Http(McpServerHttp::new("web", "https://example.invalid/mcp")),
+            McpServer::Sse(McpServerSse::new("sse", "https://example.invalid/sse")),
+        ] {
+            let error = decode_client_mcp_servers(&[refused]).expect_err("must be refused");
+            assert!(error.contains("not implemented"), "{error}");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn mcp_servers_are_rejected_and_unknown_sessions_fail() {
+    async fn mcp_servers_are_accepted_and_unknown_sessions_still_fail() {
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
         let result = run_client(
             faux_factory("ok", 1000.0),
             updates_tx,
             None,
             async move |cx: ConnectionTo<Agent>| {
-                // mcp_servers non-empty → invalid params, before any session.
-                let rejected =
+                // HTTP/SSE MCP transports are not implemented: a loud -32602
+                // until they land (stdio is the only transport ki speaks).
+                let error =
+                    cx.send_request(NewSessionRequest::new(std::env::temp_dir()).mcp_servers(
+                        vec![agent_client_protocol::schema::v1::McpServer::Http(
+                            agent_client_protocol::schema::v1::McpServerHttp::new(
+                                "web",
+                                "https://example.invalid/mcp",
+                            ),
+                        )],
+                    ))
+                    .block_task()
+                    .await
+                    .expect_err("http mcp servers should be refused");
+                assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
+
+                // Stdio mcp_servers are ACCEPTED (batch 3, POLICY 1: the ACP
+                // client is the user's own editor, so its request is the
+                // authorization). The test factory ignores the server list, so
+                // what is pinned here is the contract — the request succeeds and
+                // a session exists — while the real start path is covered by the
+                // rpi-mcp e2e and the decode unit test.
+                let accepted =
                     cx.send_request(NewSessionRequest::new(std::env::temp_dir()).mcp_servers(
                         vec![agent_client_protocol::schema::v1::McpServer::Stdio(
                             agent_client_protocol::schema::v1::McpServerStdio::new(
@@ -1665,9 +1880,9 @@ mod tests {
                         )],
                     ))
                     .block_task()
-                    .await;
-                let error = rejected.expect_err("mcp_servers should be refused");
-                assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
+                    .await
+                    .expect("stdio mcp_servers should be accepted (policy 1)");
+                assert!(!accepted.session_id.0.is_empty());
 
                 // additional_directories non-empty → invalid params too (never
                 // silently ignored: the session is rooted at cwd alone).
@@ -2185,7 +2400,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn load_rejects_session_level_mcp_and_additional_directories() {
+    async fn load_accepts_mcp_servers_and_still_rejects_additional_directories() {
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
         let result = run_client(
             refusing_factory(),
@@ -2194,6 +2409,11 @@ mod tests {
             async move |cx: ConnectionTo<Agent>| {
                 init_only(&cx).await?;
                 let sid = SessionId::from(format!("ki-{}", uuid::Uuid::new_v4()));
+                // mcp_servers on load are accepted now (batch 3, POLICY 1).
+                // This fixture stores no session for the id, so the request must
+                // fall THROUGH the MCP policy and fail at the existence
+                // pre-check instead — pinning that the old policy rejection is
+                // gone while unknown ids still fail loudly.
                 let error = cx
                     .send_request(
                         LoadSessionRequest::new(sid.clone(), std::env::temp_dir()).mcp_servers(
@@ -2207,11 +2427,9 @@ mod tests {
                     )
                     .block_task()
                     .await
-                    .expect_err("mcp_servers on load must be refused");
+                    .expect_err("an unknown session id must still fail");
                 assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
-                assert!(error
-                    .message
-                    .contains("MCP runs through ki's own configuration"));
+                assert!(error.message.contains("unknown sessionId"));
                 let error = cx
                     .send_request(
                         LoadSessionRequest::new(sid, std::env::temp_dir()).additional_directories(
