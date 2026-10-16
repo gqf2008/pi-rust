@@ -837,3 +837,23 @@ CLI `grant fs --cwd project` 的 JSON 往返有单测钉住。
 - `.wasm` 是否需要签名/摘要校验（防替换；「免签名分发」是卖点，但「防篡改」另说）？
 - 插件配置来源（`~/.ki/agent/plugins/<id>.json` 还是走 WIT）？
 - `wasm32-wasip2` 工具链版本锁定策略（生产要钉版本）。
+
+### 6.36 goal→orchestrator 联动在 wasm 层恢复（2026-10-16，option B）
+
+背景：§6.31 把 goal 状态搬进沙箱 data 目录，代价是编译期 orchestrator 的 goal 联动失效
+（它读 `<cwd>/.ki/goals.json`）；wasm orchestrator guest 只好改为**无条件**注入
+「## Subagent orchestration」指南——装上就唠叨，而不是有目标才提醒。业主裁定恢复原语义。
+
+做法（零宿主改动，用 §6.35 的 `fs --cwd project`）：goal guest 的状态源搬回
+`<cwd>/.ki/goals.json`（编译期同款形状 `{"active":…,"archived":[…]}`）；orchestrator
+guest 以同授权读该文件并门控（编译期 `active_goal_from` 语义：active 非空且非 paused；
+缺失/损坏 fail-closed）。编译期的 `KI_ORCHESTRATOR_GUIDE` env 覆盖项如实去掉（guest 无环境）。
+
+如实记录的差异：① `fs` 接口只有 read/write/read-dir，**没有 rename**——写为原地截断而
+非编译期的原子 tmp+rename（爆炸半径收敛为单个项目）；② 迁移分支在发货布局下**不可达**
+（fs 单一 scope：新授权指向项目树，旧数据目录在 `~/.ki` 之下），升级即从空开始，注释与
+README 均如实陈述；③ 旧包升级不会自动改 fs scope——升级后需
+`ki plugin grant <id> fs --cwd project`（`--yes` 只授"已声明未授"的能力）。
+
+e2e（`crates/kiqi-plugin-host/tests/e2e.rs`）新增端到端联动测试：把 goal guest 的**真实
+输出**喂给 orchestrator guest，断言指南开关跟随 goal 状态。
