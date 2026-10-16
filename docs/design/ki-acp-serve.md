@@ -282,9 +282,10 @@ macOS settings 路径按 Zed 文档修正为 `~/.config/zed/`（rpi-acp 的 Appl
 路径是错的）。
 
 **新待定（harness 层，独立设计活）**：
-- `abort()` 在 run 注册前（`acquire_run` 之前）的拒绝被静默丢弃——ACP 层只能以 100ms
-  tick 重发兜底，modes.rs 同型单次 abort 同样会丢；深层修法在 harness 置 pending-abort
-  标志、`acquire_run` 时检查，让所有嵌入方免于各自补丁；
+- ~~`abort()` 在 run 注册前（`acquire_run` 之前）的拒绝被静默丢弃~~（✅ 2026-10-16 已修：
+  harness 引入「启动窗口」——`StartingWindow{lane,id}` 绑归属，abort 只 latch 自己窗口、
+  `acquire_run` 只消费自己窗口 id，run 以预取消状态起步；空闲 abort 仍严格 no-op。ACP 侧
+  100ms tick 与 modes.rs 单发 abort 从此只是冗余保险。见提交 `1a1a31d`）；
 - TurnState 与 harness `acquire_run` 双份「单运行」不变量会漂移——根因是 harness 不暴露
   per-run 取消句柄。
 
