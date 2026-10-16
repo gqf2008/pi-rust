@@ -22,8 +22,9 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   a JSON-RPC error; a client cancel always answers `cancelled`), restart-stable
   session ids a later load restores with the full transcript streamed back
   before the response, and stderr-only diagnostics (`KI_ACP_DEBUG` traces
-  method flow). Permission dialogs (`session/request_permission`) are a later
-  batch. `ki acp install-zed` / `ki acp print-zed` register ki in Zed's
+  method flow). Permission dialogs bridge ki's plugin UI prompts to
+  `session/request_permission` (question-shaped dialogs are cancelled on their
+  original request id, never reinterpreted). `ki acp install-zed` / `ki acp print-zed` register ki in Zed's
   settings.json with a comment-preserving JSONC splice (a `.ki-bak` backup is
   kept on first change), and `ki dev acp serve` refuses loudly instead of
   pretending the dev extension session applies.

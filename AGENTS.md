@@ -45,7 +45,7 @@ sh scripts/sync-embedded-docs.sh
 | **编译期** `plugins/rpi-*` | `kiqi_plugin::Plugin` trait（进程内、无沙箱），另带 cdylib 面供 `ki dev` 热载 | 一方插件 |
 | **wasm** `plugins/wasm/kiqi-*-guest` | 组件模型 + `plugins/kiqi-plugin.wit` 契约，跑在 wasmtime 沙箱里，按授权拿能力 | 第三方；契约版本见 WIT 的 `package` 行 |
 
-**默认构建只编入没有 wasm 版的插件**（当前：`rpi-orchestrator`、`rpi-permissions`、`rpi-codegraph`）。
+**默认构建只编入没有 wasm 版的插件**（当前仅 `rpi-permissions`——`rpi-orchestrator` 已随 §6.34 迁 opt-in、`rpi-codegraph` 随 `proc` 迁 wasm）。
 有 guest 的那些都是 `--features plugin-rpi-<name>`，或用 `ki insmod --build plugins/wasm/kiqi-<name>-guest`
 装上 wasm 版。**新增/改插件能力时，两侧（trait 面与 WIT 面）必须一起改**，
 差异要写进 guest README，不许藏。

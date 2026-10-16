@@ -127,7 +127,7 @@ rpi-mcp-adapter 插件，暂不接受会话级注入」），宁可报错也不�
 
 | 方法 | v1 | 说明 |
 |---|---|---|
-| `initialize` | ✅ | `protocolVersion` 回显客户端值（crate 惯例）；能力如实声明：`loadSession` 批次 2 前 false；不声明 auth |
+| `initialize` | ✅ | 应答 `protocolVersion: 1`（本端只讲 v1；实测 ABB 的 v2 请求照常接受，见 §7）；能力如实声明：`loadSession` true、不声明 auth |
 | `authenticate`/`logout` | 容忍 | 凭据走 ki 自己的配置（`~/.ki/agent/auth.json`、env），无 ACP auth；stray 调用回 `{}`（rpi-acp 先例） |
 | `session/new` | ✅ | §4.7 参数立场；每会话一个 harness |
 | `session/prompt` | ✅ | ContentBlock 提文本（`prompt_text` 语义照搬 rpi-acp）；spawn 回合 task |
@@ -178,7 +178,7 @@ ABB 已有一个 4710 行的 ACP 客户端。它对 agent 的六点硬假设（�
 
 | ABB 假设 | ki 立场 |
 |---|---|
-| `protocolVersion: 2` 协商 | 回显客户端值（crate 惯例）——批次 3 实测 |
+| `protocolVersion: 2` 协商 | **已实测无冲突**（2026-10-16）：v1 守卫在 `unstable_protocol_v2` feature 门后未启用；ABB 的 v2 initialize 照常成功、应答 1，ABB 不读应答版本 |
 | `_meta.steering.supported` 如实声明，声明是扩展方法的唯一闸门，禁止错误码探测 | ki 不声明 steering，不实现 `_session/steering`——自洽 |
 | 受限会话 fail-closed：`_meta.abbSandbox` 缺失即拒建受限会话 | ki 不声明 sandbox ⇒ ABB 的受限会话会被 ABB 侧拒——**这是 ABB 的决策点，不是 ki 缺陷**；普通会话零改动可用 |
 | stopReason 白名单内 | §5.4 映射表对表 |
@@ -230,9 +230,11 @@ stdio/失败面纪律全盘继承（§6）。
   `session::build` 会抢走第一会话的插件事件，且插件按进程 cwd 取路径。多会话需先做
   sink 仲裁/按会话扩展世界，是独立设计活）；
 - zed 注册是否进 `ki acp serve` 默认行为（现按 one-shot 子命令设计）；
-- ABB 客户端 `protocolVersion: 2` 握手：crate 的 v1 守卫在 handler 之前硬拒非 V1 并把
-  应答版本回写为 V1，ki 不对抗守卫 ⇒ ABB 侧要么重试协商到 1、要么 ki 批次 3 自定义
-  initialize 路径——批次 3 实测定。
+- ~~ABB 客户端 `protocolVersion: 2` 握手~~（✅ 2026-10-16 探针实测：**冲突不存在**——
+  v1 守卫整个在 `unstable_protocol_v2` feature 门后，ki 只启 `stdio`，编译进去的是
+  放行空壳（`protocol_compat.rs:1-46`）；ABB 原版 v2 initialize 照常成功、应答 1，
+  ABB 不读应答版本。**注意**：日后若启用该 feature，守卫会激活、ABB 的 2 将被拒，
+  届时必须连带配 `protocol_router().with_v1(...)`）。
 
 ## 12. 批次 1 状态（2026-10-16，完成）
 
@@ -291,3 +293,17 @@ macOS settings 路径按 Zed 文档修正为 `~/.config/zed/`（rpi-acp 的 Appl
 （`take_pending` → permission 形状经 `cx.send_request(...).block_task()` 往返 →
 `respond`/`cancel` 回 mailbox；`purpose=question` 一律取消回原 id、永不重标）；
 `session/cancel` 与 EOF 路径必达 `cancel_all`/`detach`（否则插件 poll 挂死，测试钉死）。
+
+**wave 2 完成**（提交 `d6e0be5`，已 ff-合入 main）：`crates/rpi-cli/src/acp/dialogs.rs`
+（552 行）——映射层 + 每会话 DialogPump 落地如上；`session/cancel` 扩展
+`pump.cancel_all`，close 先 detach 再派 SessionShutdown，load 同样起泵。acp 套件 68 个
+测试；门禁：workspace 1947 通过/0 失败、features 门 586 通过/0 失败。
+
+审查轮 2 条发现：「`$/cancel_request` 义务无测试钉住」被**实证突变驳回**——删
+`abort_tasks` 后 `session_cancel_tells_the_client_over_the_wire` 以
+"no $/cancel_request reached the client" 红掉，义务早已被钉死（审查者的突变分析结论
+错误）；「任务先完成后注册」竞态属实并修复（占位槽与句柄填充在同一把注册表锁下完成）。
+
+**批次 2 至此完成**。批次 3 剩余：ABB 侧部署接线（其命令解析硬接线随包 agent，换解析
+目标即可）+ 一轮真实会话实测记录；ki 侧实测**零代码改动**（探针已证 initialize /
+session/new / EOF 全通，应答见 §7 表）。Zed 真机手测仍待人工。
