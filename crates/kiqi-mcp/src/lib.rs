@@ -8,18 +8,21 @@
 //! The pieces:
 //! * [`config`] — the `mcpServers` shape (reused from the retired adapter),
 //!   validation, and global/project merge;
-//! * [`manager`] — connect, handshake, enumerate tools and resources, run the
-//!   resource-subscription lifecycle, and reap the process tree on shutdown;
+//! * [`manager`] — connect (stdio child or HTTP/Streamable session), handshake,
+//!   enumerate tools and resources, run the resource-subscription lifecycle,
+//!   and reap the process tree / delete the HTTP session on shutdown;
 //! * [`tool`] — the `AgentTool` adapters (one per discovered tool, plus one
 //!   `{server}__read_resource` per server advertising resources) and MCP
 //!   content → ki content mapping;
 //! * [`notice`] — the bounded, coalescing mailbox behind the light-notice
 //!   product semantic: a `notifications/resources/updated` delivers a
-//!   (server, uri) notice, never an automatic content read.
+//!   (server, uri) notice, never an automatic content read. `autoRead` uris are
+//!   the explicit opt-in that also carries content.
 //!
 //! Nothing is written to stdout from this crate; diagnostics go to stderr.
 
 pub mod config;
+mod http;
 pub mod manager;
 mod notice;
 mod tool;

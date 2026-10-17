@@ -50,10 +50,11 @@ pub(crate) struct SessionParams {
     /// system prompt through the same `--append-system-prompt` channel.
     pub(crate) system_prompt_append: Option<String>,
     /// MCP servers the client supplied on `session/new`/`session/load`
-    /// (`mcpServers`, stdio only — HTTP/SSE is refused at decode). Decoded to
-    /// the host config shape so the build seam starts them exactly like the
-    /// settings-configured ones; POLICY 1: the client's request IS the
-    /// authorization, so no project-trust gate applies here.
+    /// (`mcpServers`, stdio and Streamable HTTP — the legacy SSE variant is
+    /// refused at decode). Decoded to the host config shape so the build seam
+    /// starts them exactly like the settings-configured ones; POLICY 1: the
+    /// client's request IS the authorization, so no project-trust gate applies
+    /// here.
     pub(crate) mcp_servers: Vec<kiqi_mcp::ServerConfig>,
 }
 

@@ -1,11 +1,12 @@
 //! Connection lifecycle for ki's host-level MCP client.
 //!
-//! One [`ServerHandle`] per configured stdio server owns the child process and
-//! its `rmcp` client; the [`McpManager`] owns the handles for the lifetime of a
-//! session. Servers are connected (initialize handshake + `tools/list`) when the
-//! session is built — that is where their tool schemas must exist, because the
-//! harness is built with them — and the connection then lives across every tool
-//! call and turn until [`McpManager::shutdown`].
+//! One [`ServerHandle`] per configured server — a stdio child process or an
+//! HTTP/Streamable session — owns the transport and its `rmcp` client; the
+//! [`McpManager`] owns the handles for the lifetime of a session. Servers are
+//! connected (initialize handshake + `tools/list`) when the session is built —
+//! that is where their tool schemas must exist, because the harness is built
+//! with them — and the connection then lives across every tool call and turn
+//! until [`McpManager::shutdown`].
 //!
 //! Two behaviors inherited from the retired adapter, both deliberate:
 //! * a server that fails to connect is **skipped**, loudly, and never poisons
@@ -23,10 +24,14 @@
 //! `{server}__read_resource`; reads happen **on demand** — the product
 //! semantic for `notifications/resources/updated` is a light notice (server +
 //! uri) into a shared [`McpNoticeMailbox`], never an automatic read of the
-//! content. The adapter's injection (auto-read + turn-end batch) is
-//! deliberately not ported; its delivery-lifetime and restore semantics are
-//! (see [`ServerHandle::subscribe_uri`], [`ServerHandle::unsubscribe_uri`] and
-//! [`restore_subscriptions`]).
+//! content. The one opt-in exception is a uri listed in the server's
+//! `autoRead` config: the boundary drain reads it and appends the text to the
+//! notice entry. An HTTP server is a real notification source: rmcp keeps the
+//! standalone GET SSE stream open, so updates flow exactly like stdio.
+//! (The adapter's blanket auto-read + turn-end batch is not ported; its
+//! delivery-lifetime and restore semantics are — see
+//! [`ServerHandle::subscribe_uri`], [`ServerHandle::unsubscribe_uri`] and
+//! [`restore_subscriptions`].)
 //!
 //! Subscription state lives per server *alongside* the connection
 //! (`ServerShared`), not inside it: a `peer()` re-init builds a fresh handler
@@ -35,12 +40,13 @@
 //! each [`ServerHandle`] is constructed from exactly one config, so a changed
 //! identity is a new handle with a fresh (empty) subscription set.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use http::{HeaderName, HeaderValue};
 use kiqi_agent::AgentTool;
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
@@ -51,11 +57,14 @@ use rmcp::model::{
 };
 use rmcp::service::{NotificationContext, PeerRequestOptions, RunningService};
 use rmcp::transport::async_rw::AsyncRwTransport;
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+};
 use rmcp::{Peer, RoleClient, ServiceError, ServiceExt};
 use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::config::{ServerConfig, StdioTransport, Transport};
+use crate::config::{HttpTransport, ServerConfig, StdioTransport, Transport};
 use crate::notice::McpNoticeMailbox;
 use crate::tool::{McpResourceToolAdapter, McpToolAdapter};
 
@@ -91,8 +100,9 @@ const MAX_RESOURCE_PAGES: usize = 100;
 /// buffer it reuses without a cap — the codec's `max_length` is never consulted
 /// on the read path — so an oversized, or never newline-terminated, frame would
 /// otherwise grow ki's memory without bound. 16 MiB matches the retired
-/// adapter's stdio line cap.
-const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+/// adapter's stdio line cap. The HTTP client enforces the same bound per
+/// response/event.
+pub(crate) const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 /// The longest tool name a provider accepts. Anthropic and OpenAI both require
 /// `^[A-Za-z0-9_-]{1,64}$`; ki sends the expanded `{server}__{tool}` name
@@ -139,6 +149,23 @@ pub(crate) fn bound_resource_text(mut out: String) -> String {
     out
 }
 
+/// Flatten a serialized `ReadResourceResult` to text for an `autoRead` notice.
+/// Blobs become an honest one-line description rather than megabytes of
+/// base64; the whole result is bounded like every other resource text.
+fn resource_text(value: &Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(items) = value.get("contents").and_then(Value::as_array) {
+        for item in items {
+            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                parts.push(text.to_string());
+            } else if let Some(blob) = item.get("blob").and_then(Value::as_str) {
+                parts.push(format!("[blob, {} base64 chars]", blob.len()));
+            }
+        }
+    }
+    bound_resource_text(parts.join("\n"))
+}
+
 /// A tool discovered from a server, with its native (namespaced) name.
 #[derive(Debug, Clone)]
 pub(crate) struct DiscoveredTool {
@@ -166,6 +193,11 @@ type SubscriptionToken = Arc<AtomicU64>;
 struct ServerShared {
     subscriptions: Mutex<BTreeMap<String, SubscriptionToken>>,
     stale: StaleFlags,
+    /// Set by the HTTP client when the server's session id changed: rmcp
+    /// transparently re-initialized after a 404, and the new server session
+    /// carries none of the old resource subscriptions. The next
+    /// [`ServerHandle::ensure_live`] restores them in place.
+    http_session_rotated: Arc<AtomicBool>,
 }
 
 /// Per-server freshness flags set by `notifications/tools/list_changed` and
@@ -382,10 +414,17 @@ pub(crate) struct ServerHandle {
     mailbox: Arc<McpNoticeMailbox>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     stopped: AtomicBool,
+    /// Cancelled by `shutdown`: an in-flight request must fail promptly
+    /// instead of waiting out its own timeout while teardown runs.
+    shutdown: tokio_util::sync::CancellationToken,
     /// The child's process-group id (== its pid, since it is the group leader).
     /// `0` when the platform has no process-group wrapper (windows uses a job
-    /// object, which reaps descendants on close instead).
+    /// object, which reaps descendants on close instead) or when the transport
+    /// is HTTP.
     pgid: AtomicU32,
+    /// `httpIdleTimeout` from ki's settings, applied when building an HTTP
+    /// client (the provider-side policy). Ignored by stdio transports.
+    http_idle_timeout_ms: Option<i64>,
 }
 
 impl ServerHandle {
@@ -395,11 +434,8 @@ impl ServerHandle {
         config: ServerConfig,
         cwd: &Path,
         mailbox: Arc<McpNoticeMailbox>,
+        http_idle_timeout_ms: Option<i64>,
     ) -> Result<Self, String> {
-        let stdio = match &config.transport {
-            Transport::Stdio(stdio) => stdio.clone(),
-            Transport::Http(_) => return Err("http transport is not supported yet".to_string()),
-        };
         let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
         let shared = Arc::new(ServerShared::default());
         // The connect budget covers the whole handshake + listing, so a server
@@ -407,12 +443,12 @@ impl ServerHandle {
         let (client, pgid, tools, advertises_resources, description) = tokio::time::timeout(
             config.timeout,
             connect_and_list(
-                &config.name,
-                &stdio,
+                &config,
                 cwd,
                 &stderr_tail,
                 Arc::clone(&shared),
                 Arc::clone(&mailbox),
+                http_idle_timeout_ms,
             ),
         )
         .await
@@ -433,7 +469,9 @@ impl ServerHandle {
             mailbox,
             stderr_tail,
             stopped: AtomicBool::new(false),
+            shutdown: tokio_util::sync::CancellationToken::new(),
             pgid: AtomicU32::new(pgid.unwrap_or(0)),
+            http_idle_timeout_ms,
         })
     }
 
@@ -492,18 +530,48 @@ impl ServerHandle {
         guard: &mut Option<Client>,
         skip_restore_uri: Option<&str>,
     ) -> Result<(Peer<RoleClient>, bool), String> {
+        // Consume the re-init flag on BOTH paths: a reconnect restores every
+        // subscription anyway, so leaving it set would restore twice (a
+        // duplicate-rejecting server would then reject the second subscribe).
+        let session_rotated = self
+            .shared
+            .http_session_rotated
+            .swap(false, Ordering::AcqRel);
         if let Some(client) = guard.as_ref() {
             // `is_transport_closed` flips as soon as the service task ends
             // (child died / stdout EOF), which is the real liveness signal —
             // `RunningService::is_closed` only tracks explicit shutdown.
             if !client.peer().is_transport_closed() {
+                // The transport stayed up but the server session it speaks to
+                // was replaced (rmcp's transparent 404 re-init). MCP
+                // subscriptions are per session, so the fresh session has
+                // none: restore them here, in place, rather than leaving the
+                // old map looking subscribed. Restore ALL uris (no skip):
+                // `subscribe_uri` short-circuits on an existing entry, so
+                // skipping the caller's uri would leave it unsubscribed on the
+                // new session.
+                if session_rotated {
+                    if let Err(error) = restore_subscriptions(
+                        client.peer(),
+                        &self.config.name,
+                        &self.shared.subscriptions,
+                        &self.mailbox,
+                        None,
+                        self.config.timeout,
+                    )
+                    .await
+                    {
+                        // Keep the flag: the next call retries the restore.
+                        self.shared
+                            .http_session_rotated
+                            .store(true, Ordering::Release);
+                        return Err(error);
+                    }
+                }
                 return Ok((client.peer().clone(), false));
             }
         }
-        let stdio = match &self.config.transport {
-            Transport::Stdio(stdio) => stdio.clone(),
-            Transport::Http(_) => return Err("http transport is not supported yet".to_string()),
-        };
+        let transport = &self.config.transport;
         eprintln!(
             "[ki mcp] server {} connection lost; re-initializing on next use",
             self.config.name
@@ -512,11 +580,13 @@ impl ServerHandle {
             self.config.timeout,
             spawn_client(
                 &self.config.name,
-                &stdio,
+                transport,
                 &self.cwd,
                 &self.stderr_tail,
                 Arc::clone(&self.shared),
                 Arc::clone(&self.mailbox),
+                self.http_idle_timeout_ms,
+                self.config.timeout,
             ),
         )
         .await
@@ -770,6 +840,10 @@ impl ServerHandle {
     /// Close the connection and kill the server process tree. Idempotent.
     async fn shutdown(&self) {
         self.stopped.store(true, Ordering::Release);
+        // Release in-flight requests first: they race this token in
+        // `send_request`, so teardown is not held up by a request whose reply
+        // will never arrive.
+        self.shutdown.cancel();
         // Late notifications must not deliver: clear the delivery lifetimes and
         // the queued notices BEFORE the connection closes. (The handler dies
         // with the client, but an update already inside dispatch would
@@ -938,13 +1012,25 @@ impl McpManager {
     pub fn empty() -> Self {
         Self::default()
     }
-    /// Connect every enabled, supported server and enumerate its tools.
+    /// Connect every enabled server and enumerate its tools.
     ///
     /// Returns the manager plus one issue string per server that was skipped or
-    /// partially degraded (disabled, HTTP, connect/handshake failure, a malformed
+    /// partially degraded (disabled, connect/handshake failure, a malformed
     /// tool, a failed config-driven subscribe). The caller prints them — nothing
     /// is dropped silently.
     pub async fn start(servers: &[ServerConfig], cwd: &Path) -> (Self, Vec<String>) {
+        Self::start_with_http_policy(servers, cwd, None).await
+    }
+
+    /// [`McpManager::start`] with the provider-side HTTP policy applied to HTTP
+    /// servers: `http_idle_timeout_ms` is ki's `httpIdleTimeout` setting (`0`
+    /// disables idle expiry, `None` keeps the library default). Proxy
+    /// resolution always follows ki's environment, exactly like the providers.
+    pub async fn start_with_http_policy(
+        servers: &[ServerConfig],
+        cwd: &Path,
+        http_idle_timeout_ms: Option<i64>,
+    ) -> (Self, Vec<String>) {
         let mailbox = Arc::new(McpNoticeMailbox::new());
         let mut configured_names = Vec::new();
         let mut handles = Vec::new();
@@ -958,14 +1044,14 @@ impl McpManager {
                 ));
                 continue;
             }
-            if let Transport::Http(http) = &config.transport {
-                issues.push(format!(
-                    "mcp server {}: http transport ({}) not supported in this build, skipped",
-                    config.name, http.url
-                ));
-                continue;
-            }
-            match ServerHandle::connect(config.clone(), cwd, Arc::clone(&mailbox)).await {
+            match ServerHandle::connect(
+                config.clone(),
+                cwd,
+                Arc::clone(&mailbox),
+                http_idle_timeout_ms,
+            )
+            .await
+            {
                 Ok(handle) => {
                     let handle = Arc::new(handle);
                     // Config-driven auto-subscribe, after the handshake. One
@@ -1080,6 +1166,77 @@ impl McpManager {
         self.mailbox.take()
     }
 
+    /// Boundary drain with the `autoRead` opt-in applied: a notice whose uri a
+    /// server lists in `autoRead` is read through that server's connection now,
+    /// and the text rides the notice entry (bounded at [`MAX_RESOURCE_TEXT`]).
+    /// Every other notice stays a light pointer. A failed read degrades to the
+    /// light notice — the update is still delivered, loudly degraded.
+    pub async fn take_notices_with_auto_read(&self) -> crate::notice::McpNoticeBatch {
+        let mut batch = self.mailbox.take();
+        // ONE deadline for the whole batch. A per-read timeout alone multiplies
+        // by the number of notices (up to `MAX_NOTICE_ENTRIES`), so a server
+        // that stops responding would stall a turn boundary for N x timeout --
+        // and the boundary is never inside the caller's cancel token. The
+        // budget is the largest per-call timeout among the servers that will
+        // actually be read, so the batch never waits longer than one server
+        // timeout no matter how many updates queued.
+        let budget = batch
+            .notices
+            .iter()
+            .filter_map(|notice| {
+                let handle = self
+                    .servers
+                    .iter()
+                    .find(|handle| handle.server_name() == notice.server)?;
+                handle
+                    .config
+                    .auto_read
+                    .iter()
+                    .any(|uri| uri == &notice.uri)
+                    .then(|| handle.tool_timeout())
+            })
+            .max();
+        let deadline = budget.map(|budget| tokio::time::Instant::now() + budget);
+        for notice in &mut batch.notices {
+            let Some(handle) = self
+                .servers
+                .iter()
+                .find(|handle| handle.server_name() == notice.server)
+            else {
+                continue;
+            };
+            if !handle.config.auto_read.iter().any(|uri| uri == &notice.uri) {
+                continue;
+            }
+            let Some(deadline) = deadline else {
+                continue;
+            };
+            let signal = tokio_util::sync::CancellationToken::new();
+            let outcome =
+                tokio::time::timeout_at(deadline, read_resource(handle, &notice.uri, &signal))
+                    .await;
+            match outcome {
+                Ok(Ok(value)) => notice.content = Some(resource_text(&value)),
+                Ok(Err(CallError::Failed(error))) => eprintln!(
+                    "[ki mcp] server {}: autoRead {} failed ({error}); delivering the light notice",
+                    notice.server, notice.uri
+                ),
+                Ok(Err(CallError::Cancelled)) => eprintln!(
+                    "[ki mcp] server {}: autoRead {} was cancelled; delivering the light notice",
+                    notice.server, notice.uri
+                ),
+                Err(_) => {
+                    let budget_secs = budget.map(|budget| budget.as_secs()).unwrap_or(0);
+                    eprintln!(
+                        "[ki mcp] server {}: autoRead {} timed out (batch budget {}s); delivering the light notice",
+                        notice.server, notice.uri, budget_secs
+                    );
+                }
+            }
+        }
+        batch
+    }
+
     /// How many notices are currently queued, WITHOUT draining them (drain
     /// with [`McpManager::take_notices`]). Lets a caller wait for a push to
     /// have landed before acting on the mailbox.
@@ -1129,18 +1286,30 @@ impl McpManager {
     }
 }
 
-/// Spawn the child, complete the initialize handshake, enumerate tools and
-/// (when advertised) describe the resource surface for the read tool.
+/// Connect the configured transport, complete the initialize handshake,
+/// enumerate tools and (when advertised) describe the resource surface for the
+/// read tool.
 #[allow(clippy::type_complexity)]
 async fn connect_and_list(
-    server: &str,
-    stdio: &StdioTransport,
+    config: &ServerConfig,
     cwd: &Path,
     stderr_tail: &Arc<Mutex<VecDeque<String>>>,
     shared: Arc<ServerShared>,
     mailbox: Arc<McpNoticeMailbox>,
+    http_idle_timeout_ms: Option<i64>,
 ) -> Result<(Client, Option<u32>, Vec<DiscoveredTool>, bool, String), String> {
-    let (client, pgid) = spawn_client(server, stdio, cwd, stderr_tail, shared, mailbox).await?;
+    let server = config.name.as_str();
+    let (client, pgid) = spawn_client(
+        server,
+        &config.transport,
+        cwd,
+        stderr_tail,
+        shared,
+        mailbox,
+        http_idle_timeout_ms,
+        config.timeout,
+    )
+    .await?;
     let advertises_resources = client
         .peer()
         .peer_info()
@@ -1173,11 +1342,43 @@ async fn connect_and_list(
     }
 }
 
+/// Connect the configured transport. Stdio spawns a child process; HTTP hands
+/// rmcp's streamable-HTTP worker a repo-owned reqwest client (see `src/http.rs`)
+/// and lets rmcp own the session/SSE protocol.
+#[allow(clippy::too_many_arguments)]
+async fn spawn_client(
+    server: &str,
+    transport: &Transport,
+    cwd: &Path,
+    stderr_tail: &Arc<Mutex<VecDeque<String>>>,
+    shared: Arc<ServerShared>,
+    mailbox: Arc<McpNoticeMailbox>,
+    http_idle_timeout_ms: Option<i64>,
+    request_timeout: Duration,
+) -> Result<(Client, Option<u32>), String> {
+    match transport {
+        Transport::Stdio(stdio) => {
+            spawn_stdio_client(server, stdio, cwd, stderr_tail, shared, mailbox).await
+        }
+        Transport::Http(http) => {
+            spawn_http_client(
+                server,
+                http,
+                shared,
+                mailbox,
+                http_idle_timeout_ms,
+                request_timeout,
+            )
+            .await
+        }
+    }
+}
+
 /// Spawn the child and complete initialize + notifications/initialized.
 ///
 /// Returns the running client and the child's process-group id (see
 /// [`ServerHandle::pgid`]).
-async fn spawn_client(
+async fn spawn_stdio_client(
     server: &str,
     stdio: &StdioTransport,
     cwd: &Path,
@@ -1272,6 +1473,76 @@ async fn spawn_client(
         .await
         .map_err(|error| format!("initialize: {error}"))?;
 
+    Ok((verify_protocol(client).await?, pgid))
+}
+
+/// Start one HTTP server through rmcp's streamable-HTTP worker.
+///
+/// The worker owns the protocol state machine (session id, protocol-version
+/// header, standalone GET SSE, 404 re-init + replay, DELETE on exit); ki owns
+/// the HTTP client, so the dependency stays on reqwest 0.12 and the response
+/// cap applies.
+async fn spawn_http_client(
+    server: &str,
+    http: &HttpTransport,
+    shared: Arc<ServerShared>,
+    mailbox: Arc<McpNoticeMailbox>,
+    http_idle_timeout_ms: Option<i64>,
+    request_timeout: Duration,
+) -> Result<(Client, Option<u32>), String> {
+    // Validate/build BEFORE logging the URL: a URL rejected for embedding
+    // credentials must never reach stderr.
+    let http_client = crate::http::KiHttpClient::new(
+        &http.url,
+        http_idle_timeout_ms,
+        Some(request_timeout),
+        Arc::clone(&shared.http_session_rotated),
+    )?;
+    eprintln!("[ki mcp] starting server {server} (http): {}", http.url);
+    // Config entries carry `headers` verbatim (adapter parity). rmcp's config
+    // wants a bearer token WITHOUT the "Bearer " prefix, so a conventional
+    // Authorization header is split out; every other header passes through.
+    let mut auth_header = None;
+    let mut custom_headers = HashMap::new();
+    for (name, value) in &http.headers {
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|error| format!("invalid HTTP header name {name:?}: {error}"))?;
+        if header_name == http::header::AUTHORIZATION {
+            if let Some(token) = value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+            {
+                auth_header = Some(token.to_string());
+                continue;
+            }
+        }
+        let header_value = HeaderValue::from_str(value)
+            .map_err(|error| format!("invalid value for HTTP header {name:?}: {error}"))?;
+        custom_headers.insert(header_name, header_value);
+    }
+    let mut config = StreamableHttpClientTransportConfig::with_uri(http.url.as_str());
+    if let Some(token) = auth_header {
+        config = config.auth_header(token);
+    }
+    if !custom_headers.is_empty() {
+        config = config.custom_headers(custom_headers);
+    }
+    let transport = StreamableHttpClientTransport::with_client(http_client, config);
+    let handler = KiClientHandler {
+        info: client_info(),
+        server: server.to_string(),
+        shared,
+        mailbox,
+    };
+    let client = handler
+        .serve(transport)
+        .await
+        .map_err(|error| format!("initialize: {error}"))?;
+    Ok((verify_protocol(client).await?, None))
+}
+
+/// Refuse a connection whose negotiated protocol revision ki has not verified.
+async fn verify_protocol(client: Client) -> Result<Client, String> {
     if let Some(info) = client.peer().peer_info() {
         let negotiated = info.protocol_version.as_str().to_string();
         if !ACCEPTED_PROTOCOL_VERSIONS.contains(&negotiated.as_str()) {
@@ -1282,7 +1553,7 @@ async fn spawn_client(
             ));
         }
     }
-    Ok((client, pgid))
+    Ok(client)
 }
 
 /// ki's client identity + requested protocol version for the initialize request.
@@ -1514,6 +1785,7 @@ async fn send_request(
     let peer = tokio::select! {
         biased;
         _ = signal.cancelled() => return Err(CallError::Cancelled),
+        _ = handle.shutdown.cancelled() => return Err(CallError::Cancelled),
         result = handle.peer() => {
             result.map_err(|error| CallError::Failed(handle.decorate(error)))?
         }
@@ -1523,6 +1795,7 @@ async fn send_request(
     let handle_req = tokio::select! {
         biased;
         _ = signal.cancelled() => return Err(CallError::Cancelled),
+        _ = handle.shutdown.cancelled() => return Err(CallError::Cancelled),
         result = peer.send_cancellable_request(request, options) => {
             result.map_err(|error| CallError::Failed(handle.decorate(error.to_string())))?
         }
@@ -1532,6 +1805,7 @@ async fn send_request(
     let request_id = handle_req.id.clone();
     let raw: Result<ServerResult, rmcp::ServiceError> = tokio::select! {
         biased;
+        _ = handle.shutdown.cancelled() => return Err(CallError::Cancelled),
         _ = signal.cancelled() => {
             if let Some(notification) = cancellation(request_id) {
                 let _ = peer.send_notification(notification).await;

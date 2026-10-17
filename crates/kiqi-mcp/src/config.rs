@@ -28,9 +28,8 @@ pub const MAX_TIMEOUT_SECS: u64 = 300;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transport {
     Stdio(StdioTransport),
-    /// Parsed so an HTTP entry in a user's file is a *valid* definition rather
-    /// than a parse error. Batch 1 has no HTTP transport; the manager skips
-    /// these with a loud warning (HTTP/SSE is batch 2).
+    /// An HTTP server, served over the MCP Streamable HTTP transport
+    /// (`src/http.rs` supplies the reqwest client; rmcp owns the protocol).
     Http(HttpTransport),
 }
 
@@ -44,7 +43,7 @@ pub struct StdioTransport {
     pub cwd: Option<String>,
 }
 
-/// HTTP server definition (parsed, not yet served — see [`Transport::Http`]).
+/// HTTP server definition served over the MCP Streamable HTTP transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpTransport {
     pub url: String,
@@ -63,6 +62,11 @@ pub struct ServerConfig {
     /// host/config-driven, and the restore-on-reconnect machinery keeps them
     /// alive for the session.
     pub subscribe: Vec<String>,
+    /// Resource uris whose updates are read eagerly at the boundary instead of
+    /// delivering the light (server, uri) notice. Opt-in per server: the
+    /// product semantic stays "notice, not content" unless the user lists the
+    /// uri here.
+    pub auto_read: Vec<String>,
 }
 
 /// The raw entry as it appears in `mcpServers.<name>`. Every field is optional
@@ -89,6 +93,8 @@ struct RawServer {
     timeout_seconds: Option<u64>,
     #[serde(default)]
     subscribe: Option<Vec<String>>,
+    #[serde(default)]
+    auto_read: Option<Vec<String>>,
 }
 
 /// A server name must be non-empty ASCII `[A-Za-z0-9_-]` WITHOUT the tool-name
@@ -102,6 +108,25 @@ pub fn valid_server_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Validate an HTTP server URL: `http`/`https`, a host, and NO embedded
+/// credentials. reqwest turns `user:password@` into a Basic Authorization
+/// header on every request (a credential channel ki does not document), and
+/// the URL is logged — so it is refused here, at every entry point, before it
+/// can be printed.
+pub fn validate_http_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|error| format!("invalid `url`: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("`url` must use http or https".to_string());
+    }
+    if parsed.host_str().is_none() {
+        return Err("`url` has no host".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("`url` must not embed credentials (user:password@host)".to_string());
+    }
+    Ok(())
 }
 
 /// Parse and validate the whole `mcpServers` block.
@@ -169,6 +194,7 @@ fn parse_one(name: &str, entry: &serde_json::Value) -> Result<ServerConfig, Stri
         if url.is_empty() {
             return Err("`url` is empty".to_string());
         }
+        validate_http_url(url)?;
         Transport::Http(HttpTransport {
             url: url.to_string(),
             headers: raw.headers.unwrap_or_default(),
@@ -187,6 +213,20 @@ fn parse_one(name: &str, entry: &serde_json::Value) -> Result<ServerConfig, Stri
             subscribe.push(uri.to_string());
         }
     }
+    // Same rule for `autoRead`: a uri is matched verbatim against a
+    // notification's uri before a `resources/read` goes on the wire.
+    let mut auto_read = Vec::new();
+    if let Some(uris) = raw.auto_read {
+        for uri in uris {
+            let uri = uri.trim();
+            if uri.is_empty() {
+                return Err("`autoRead` contains an empty uri".to_string());
+            }
+            if !auto_read.contains(&uri.to_string()) {
+                auto_read.push(uri.to_string());
+            }
+        }
+    }
 
     Ok(ServerConfig {
         name: name.to_string(),
@@ -194,6 +234,7 @@ fn parse_one(name: &str, entry: &serde_json::Value) -> Result<ServerConfig, Stri
         enabled: raw.enabled.unwrap_or(true),
         timeout,
         subscribe,
+        auto_read,
     })
 }
 
@@ -306,6 +347,34 @@ mod tests {
     }
 
     #[test]
+    fn a_url_with_embedded_credentials_is_rejected() {
+        // reqwest would turn `alice:s3cret@` into Basic auth and the URL is
+        // logged, so the entry is refused instead — and the issue must not
+        // echo the password.
+        let (servers, issues) = parse(json!({
+            "remote": { "url": "https://alice:s3cret@example.test/mcp" }
+        }));
+        assert!(servers.is_empty());
+        assert_eq!(issues.len(), 1, "issues: {issues:?}");
+        assert!(
+            issues[0].contains("must not embed credentials"),
+            "issues: {issues:?}"
+        );
+        assert!(!issues[0].contains("s3cret"), "issues: {issues:?}");
+    }
+
+    #[test]
+    fn a_non_http_url_is_rejected() {
+        let (servers, issues) = parse(json!({ "remote": { "url": "ws://example.test/mcp" } }));
+        assert!(servers.is_empty());
+        assert_eq!(issues.len(), 1);
+        assert!(
+            issues[0].contains("must use http or https"),
+            "issues: {issues:?}"
+        );
+    }
+
+    #[test]
     fn server_names_containing_the_tool_separator_are_rejected() {
         // `a__b` would make owns_tool_name parse `a__b__t` as server `a` (the
         // namespace half is matched by splitting on the FIRST `__`) — the
@@ -382,6 +451,7 @@ mod tests {
             enabled: true,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             subscribe: Vec::new(),
+            auto_read: Vec::new(),
         }
     }
 
@@ -438,5 +508,24 @@ mod tests {
         let (servers, issues) = parse(json!({ "plain": { "command": "srv" } }));
         assert!(issues.is_empty());
         assert!(servers[0].subscribe.is_empty());
+        assert!(servers[0].auto_read.is_empty());
+    }
+
+    #[test]
+    fn auto_read_uris_are_trimmed_deduped_and_empty_ones_reject_the_entry() {
+        let (servers, issues) = parse(json!({
+            "docs": {
+                "command": "srv",
+                "autoRead": ["file:///a.md", "  file:///a.md  ", "file:///b.md"]
+            },
+            "bad": { "command": "srv", "autoRead": ["   "] }
+        }));
+        assert_eq!(servers.len(), 1);
+        assert_eq!(
+            servers[0].auto_read,
+            vec!["file:///a.md".to_string(), "file:///b.md".to_string()]
+        );
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("`autoRead` contains an empty uri"));
     }
 }

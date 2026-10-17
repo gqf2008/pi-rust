@@ -33,8 +33,8 @@ use std::time::Duration;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, AuthenticateRequest, AuthenticateResponse, CancelNotification, ContentBlock,
     InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, LogoutRequest,
-    LogoutResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
-    SessionId, SessionNotification, SessionUpdate, StopReason,
+    LogoutResponse, McpCapabilities, NewSessionRequest, NewSessionResponse, PromptRequest,
+    PromptResponse, SessionId, SessionNotification, SessionUpdate, StopReason,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Error, Responder, Stdio};
@@ -191,8 +191,14 @@ pub(crate) async fn run_server(
                 diag::diagln!("initialize: client notices advertised = {notices}");
                 shared_init.lock().unwrap().client_notices = notices;
                 responder.respond(
-                    InitializeResponse::new(ProtocolVersion::V1)
-                        .agent_capabilities(AgentCapabilities::new().load_session(true)),
+                    InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
+                        AgentCapabilities::new()
+                            .load_session(true)
+                            // Stdio is always served; Streamable HTTP landed in
+                            // batch 4. The legacy SSE transport is not
+                            // implemented, so it stays false.
+                            .mcp_capabilities(McpCapabilities::new().http(true).sse(false)),
+                    ),
                 )
             },
             agent_client_protocol::on_receive_request!(),
@@ -277,29 +283,75 @@ async fn close_live_session(shared: &SharedServer) {
 }
 
 /// Decodes the client-supplied `mcpServers` (design doc §4.7, batch 3,
-/// POLICY 1). The ACP client is the user's own editor, so a stdio server is
+/// POLICY 1). The ACP client is the user's own editor, so a server it names is
 /// accepted directly — the client's request IS the authorization — and each
-/// acceptance is logged loudly on stderr. HTTP/SSE variants are refused until
-/// a batch implements them; a name that could not namespace tools, an empty
-/// command, or two same-named entries are parameter errors, never silent
-/// drops (abb lesson 7).
+/// acceptance is logged loudly on stderr. Stdio and Streamable HTTP are served;
+/// the legacy SSE variant is refused with -32602 (ki does not implement it).
+/// A name that could not namespace tools, an empty command/url, or two
+/// same-named entries are parameter errors, never silent drops (abb lesson 7).
 fn decode_client_mcp_servers(
     servers: &[agent_client_protocol::schema::v1::McpServer],
 ) -> Result<Vec<kiqi_mcp::ServerConfig>, String> {
     use agent_client_protocol::schema::v1::McpServer;
     let mut out = Vec::new();
     for server in servers {
-        let stdio = match server {
-            McpServer::Stdio(stdio) => stdio,
+        let (name, transport, acceptance) = match server {
+            McpServer::Stdio(stdio) => {
+                let command = stdio.command.to_string_lossy().into_owned();
+                if command.is_empty() {
+                    return Err(format!(
+                        "mcpServers: server {} has an empty command",
+                        stdio.name
+                    ));
+                }
+                let mut env = std::collections::BTreeMap::new();
+                for variable in &stdio.env {
+                    env.insert(variable.name.clone(), variable.value.clone());
+                }
+                (
+                    stdio.name.clone(),
+                    kiqi_mcp::Transport::Stdio(kiqi_mcp::StdioTransport {
+                        command,
+                        args: stdio.args.clone(),
+                        env,
+                        cwd: None,
+                    }),
+                    format!("{} {}", stdio.command.display(), stdio.args.join(" ")),
+                )
+            }
             McpServer::Http(http) => {
-                return Err(format!(
-                    "mcpServers: server {} uses the HTTP transport ({}); HTTP/SSE MCP transport is not implemented",
-                    http.name, http.url
-                ));
+                let url = http.url.trim();
+                if url.is_empty() {
+                    return Err(format!("mcpServers: server {} has an empty url", http.name));
+                }
+                // Refuse before the loud acceptance log below: a URL with
+                // embedded credentials must never be printed to stderr, and
+                // reqwest would turn it into Basic auth.
+                kiqi_mcp::config::validate_http_url(url)
+                    .map_err(|error| format!("mcpServers: server {}: {error}", http.name))?;
+                let mut headers = std::collections::BTreeMap::new();
+                for header in &http.headers {
+                    let header_name = header.name.trim();
+                    if header_name.is_empty() {
+                        return Err(format!(
+                            "mcpServers: server {} has an HTTP header with an empty name",
+                            http.name
+                        ));
+                    }
+                    headers.insert(header_name.to_string(), header.value.clone());
+                }
+                (
+                    http.name.clone(),
+                    kiqi_mcp::Transport::Http(kiqi_mcp::HttpTransport {
+                        url: url.to_string(),
+                        headers,
+                    }),
+                    url.to_string(),
+                )
             }
             McpServer::Sse(sse) => {
                 return Err(format!(
-                    "mcpServers: server {} uses the SSE transport ({}); HTTP/SSE MCP transport is not implemented",
+                    "mcpServers: server {} uses the legacy SSE transport ({}); ki speaks Streamable HTTP — use the http variant",
                     sse.name, sse.url
                 ));
             }
@@ -309,53 +361,30 @@ fn decode_client_mcp_servers(
                 return Err("mcpServers: unsupported server transport variant".to_string());
             }
         };
-        if !kiqi_mcp::config::valid_server_name(&stdio.name) {
+        if !kiqi_mcp::config::valid_server_name(&name) {
             return Err(format!(
-                "mcpServers: invalid server name {:?}; the name must be non-empty ASCII letters, digits, '-' or '_' without the tool separator '__'",
-                stdio.name
+                "mcpServers: invalid server name {name:?}; the name must be non-empty ASCII letters, digits, '-' or '_' without the tool separator '__'"
             ));
         }
-        if out
-            .iter()
-            .any(|s: &kiqi_mcp::ServerConfig| s.name == stdio.name)
-        {
-            return Err(format!("mcpServers: duplicate server name {}", stdio.name));
-        }
-        let command = stdio.command.to_string_lossy().into_owned();
-        if command.is_empty() {
-            return Err(format!(
-                "mcpServers: server {} has an empty command",
-                stdio.name
-            ));
-        }
-        let mut env = std::collections::BTreeMap::new();
-        for variable in &stdio.env {
-            env.insert(variable.name.clone(), variable.value.clone());
+        if out.iter().any(|s: &kiqi_mcp::ServerConfig| s.name == name) {
+            return Err(format!("mcpServers: duplicate server name {name}"));
         }
         // enabled implied (the client named it because it wants it), the
-        // default per-call timeout, no config-driven subscriptions (there is
-        // no ACP verb for them; subscriptions stay host/config-driven).
+        // default per-call timeout, no config-driven subscriptions or
+        // auto-reads (there is no ACP verb for them; both stay host/config
+        // driven).
         out.push(kiqi_mcp::ServerConfig {
-            name: stdio.name.clone(),
-            transport: kiqi_mcp::Transport::Stdio(kiqi_mcp::StdioTransport {
-                command,
-                args: stdio.args.clone(),
-                env,
-                cwd: None,
-            }),
+            name: name.clone(),
+            transport,
             enabled: true,
             timeout: std::time::Duration::from_secs(kiqi_mcp::config::DEFAULT_TIMEOUT_SECS),
             subscribe: Vec::new(),
+            auto_read: Vec::new(),
         });
         // The loud acceptance record (POLICY 1). Unconditional stderr — the
         // one log line a user can grep when auditing what their editor asked
-        // the agent to spawn. stdout stays protocol-clean.
-        eprintln!(
-            "[ki mcp] accepted client-supplied server {} ({} {})",
-            stdio.name,
-            stdio.command.display(),
-            stdio.args.join(" ")
-        );
+        // the agent to spawn/contact. stdout stays protocol-clean.
+        eprintln!("[ki mcp] accepted client-supplied server {name} ({acceptance})");
     }
     Ok(out)
 }
@@ -1808,9 +1837,9 @@ mod tests {
     }
 
     #[test]
-    fn client_mcp_servers_decode_stdio_and_refuse_http() {
+    fn client_mcp_servers_decode_stdio_and_http_and_refuse_sse() {
         use agent_client_protocol::schema::v1::{
-            EnvVariable, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
+            EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
         };
 
         let stdio = McpServer::Stdio(
@@ -1818,8 +1847,12 @@ mod tests {
                 .args(vec!["--stdio".to_string()])
                 .env(vec![EnvVariable::new("TOKEN", "s3cret")]),
         );
-        let decoded = decode_client_mcp_servers(&[stdio]).expect("stdio decodes");
-        assert_eq!(decoded.len(), 1);
+        let http = McpServer::Http(
+            McpServerHttp::new("web", " https://example.invalid/mcp ")
+                .headers(vec![HttpHeader::new("Authorization", "Bearer t0k")]),
+        );
+        let decoded = decode_client_mcp_servers(&[stdio, http]).expect("stdio + http decode");
+        assert_eq!(decoded.len(), 2);
         assert_eq!(decoded[0].name, "docs");
         assert!(decoded[0].enabled);
         match &decoded[0].transport {
@@ -1830,14 +1863,27 @@ mod tests {
             }
             other => panic!("expected a stdio transport, got {other:?}"),
         }
-
-        for refused in [
-            McpServer::Http(McpServerHttp::new("web", "https://example.invalid/mcp")),
-            McpServer::Sse(McpServerSse::new("sse", "https://example.invalid/sse")),
-        ] {
-            let error = decode_client_mcp_servers(&[refused]).expect_err("must be refused");
-            assert!(error.contains("not implemented"), "{error}");
+        // The url is trimmed and headers are carried verbatim; the manager
+        // turns a conventional Authorization header into rmcp's bearer token.
+        match &decoded[1].transport {
+            kiqi_mcp::Transport::Http(http) => {
+                assert_eq!(http.url, "https://example.invalid/mcp");
+                assert_eq!(
+                    http.headers.get("Authorization").map(String::as_str),
+                    Some("Bearer t0k")
+                );
+            }
+            other => panic!("expected an http transport, got {other:?}"),
         }
+
+        // The legacy SSE transport stays refused: ki speaks Streamable HTTP.
+        let error = decode_client_mcp_servers(&[McpServer::Sse(McpServerSse::new(
+            "sse",
+            "https://example.invalid/sse",
+        ))])
+        .expect_err("sse must be refused");
+        assert!(error.contains("legacy SSE"), "{error}");
+        assert!(error.contains("Streamable HTTP"), "{error}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1848,40 +1894,34 @@ mod tests {
             updates_tx,
             None,
             async move |cx: ConnectionTo<Agent>| {
-                // HTTP/SSE MCP transports are not implemented: a loud -32602
-                // until they land (stdio is the only transport ki speaks).
-                let error =
-                    cx.send_request(NewSessionRequest::new(std::env::temp_dir()).mcp_servers(
-                        vec![agent_client_protocol::schema::v1::McpServer::Http(
-                            agent_client_protocol::schema::v1::McpServerHttp::new(
-                                "web",
-                                "https://example.invalid/mcp",
+                // Stdio and Streamable HTTP mcp_servers are ACCEPTED (batch 3,
+                // POLICY 1: the ACP client is the user's own editor, so its
+                // request is the authorization; HTTP landed in batch 4). The
+                // legacy SSE variant stays a loud -32602 (see the decode unit
+                // test). The test factory ignores the server list, so what is
+                // pinned here is the contract — the request succeeds and a
+                // session exists — while the real start path is covered by the
+                // kiqi-mcp e2e tests and the decode unit test.
+                let accepted = cx
+                    .send_request(
+                        NewSessionRequest::new(std::env::temp_dir()).mcp_servers(vec![
+                            agent_client_protocol::schema::v1::McpServer::Stdio(
+                                agent_client_protocol::schema::v1::McpServerStdio::new(
+                                    "test",
+                                    "/bin/true",
+                                ),
                             ),
-                        )],
-                    ))
+                            agent_client_protocol::schema::v1::McpServer::Http(
+                                agent_client_protocol::schema::v1::McpServerHttp::new(
+                                    "web",
+                                    "https://example.invalid/mcp",
+                                ),
+                            ),
+                        ]),
+                    )
                     .block_task()
                     .await
-                    .expect_err("http mcp servers should be refused");
-                assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
-
-                // Stdio mcp_servers are ACCEPTED (batch 3, POLICY 1: the ACP
-                // client is the user's own editor, so its request is the
-                // authorization). The test factory ignores the server list, so
-                // what is pinned here is the contract — the request succeeds and
-                // a session exists — while the real start path is covered by the
-                // kiqi-mcp e2e and the decode unit test.
-                let accepted =
-                    cx.send_request(NewSessionRequest::new(std::env::temp_dir()).mcp_servers(
-                        vec![agent_client_protocol::schema::v1::McpServer::Stdio(
-                            agent_client_protocol::schema::v1::McpServerStdio::new(
-                                "test",
-                                "/bin/true",
-                            ),
-                        )],
-                    ))
-                    .block_task()
-                    .await
-                    .expect("stdio mcp_servers should be accepted (policy 1)");
+                    .expect("stdio + http mcp_servers should be accepted (policy 1)");
                 assert!(!accepted.session_id.0.is_empty());
 
                 // additional_directories non-empty → invalid params too (never
@@ -1982,6 +2022,14 @@ mod tests {
         assert!(
             init.agent_capabilities.load_session,
             "initialize must advertise loadSession once session/load exists"
+        );
+        assert!(
+            init.agent_capabilities.mcp_capabilities.http,
+            "initialize must advertise HTTP MCP support (streamable HTTP landed in batch 4)"
+        );
+        assert!(
+            !init.agent_capabilities.mcp_capabilities.sse,
+            "the legacy SSE transport is not implemented and must not be advertised"
         );
         Ok(())
     }

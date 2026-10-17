@@ -2108,7 +2108,9 @@ pub(crate) async fn drain_mcp_boundary(
     harness: &AgentHarness,
     mcp: &kiqi_mcp::McpManager,
 ) -> Vec<kiqi_mcp::McpNotice> {
-    let batch = mcp.take_notices();
+    // The autoRead opt-in is applied here: configured uris are read now and
+    // their text rides the batched entry; every other notice stays a pointer.
+    let batch = mcp.take_notices_with_auto_read().await;
     if !batch.is_empty() {
         let message = kiqi_mcp::notice_message(&batch);
         if let Err(error) = harness.session().append_message(message).await {
@@ -2216,6 +2218,10 @@ async fn replace_mcp_tools(harness: &AgentHarness, mcp: &kiqi_mcp::McpManager) {
 /// advisory BEFORE `McpManager::shutdown`: shutdown purges the mailbox, so a
 /// flush after it would be empty by construction.
 pub(crate) fn flush_mcp_notices_to_stderr(mcp: &kiqi_mcp::McpManager) {
+    // Raw drain: teardown is not a place to issue fresh `resources/read`s — the
+    // connection is about to close, and the notice is a diagnostic here, not a
+    // model-facing entry. Content-bearing (autoRead) notices keep what the
+    // boundary drain already read.
     let batch = mcp.take_notices();
     if batch.is_empty() {
         return;
@@ -2313,7 +2319,9 @@ async fn start_mcp_manager(
         merged.extend(client_servers.iter().cloned());
     }
 
-    let (manager, start_issues) = kiqi_mcp::McpManager::start(&merged, cwd).await;
+    let (manager, start_issues) =
+        kiqi_mcp::McpManager::start_with_http_policy(&merged, cwd, global.http_idle_timeout_ms())
+            .await;
     issues.extend(start_issues);
 
     for issue in &issues {

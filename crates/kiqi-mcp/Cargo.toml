@@ -15,21 +15,36 @@ keywords = ["agent", "llm", "ai", "mcp"]
 categories = ["api-bindings", "development-tools"]
 
 [dependencies]
-kiqi-ai = { workspace = true }
+kiqi-ai = { workspace = true, features = ["providers"] }
 kiqi-agent = { workspace = true }
 # Pinned to the rmcp 1.x line (same as ABB). `default-features = false` keeps the
 # server side, macros and every transport except the stdio child-process one out
 # of the build. Bumping the minor here is a deliberate act: rmcp's typed model
 # churns across versions, which is why every wire value is marshalled through
 # `serde_json` rather than read off the typed fields.
+#
+# `transport-streamable-http-client` is the client-side half only: it brings
+# rmcp's session/SSE worker machinery and the `StreamableHttpClient` trait, NOT
+# rmcp's reqwest client (whose transport pins reqwest 0.13, a second major next
+# to ki's 0.12). The reqwest implementation lives in `src/http.rs`.
 rmcp = { version = "1.8", default-features = false, features = [
     "client",
     "transport-child-process",
+    "transport-streamable-http-client",
 ] }
 # Same version line rmcp resolves (`process-wrap = "9"`, feature `tokio1`). Used
 # to wrap the child in a process group (unix) / job object (windows) so `kill`
 # reaps the whole server process tree, not just the leader.
 process-wrap = { version = "9", features = ["tokio1"] }
+# HTTP transport. reqwest arrives through kiqi-ai's `providers` feature (the
+# same builder, proxy resolution and idle-timeout policy as the providers), so
+# this stays on reqwest 0.12. `sse-stream` is the type rmcp's client trait
+# speaks; `http` mirrors the header types rmcp's trait uses.
+reqwest = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+http = "1"
+sse-stream = "0.2"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
@@ -39,7 +54,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 kiqi-agent = { workspace = true }
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "process"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "process", "net", "io-util"] }
 tokio-util = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

@@ -3,7 +3,10 @@
 //! Product semantic (deliberately different from the retired adapter): a
 //! resource update produces a **light notice** — server name + uri, never the
 //! content. Content is re-read on demand through the `{server}__read_resource`
-//! tool, by the model or the host. Nothing here ever issues a `resources/read`.
+//! tool, by the model or the host. The one exception is opt-in: a uri listed in
+//! a server's `autoRead` config is read at the boundary drain, and its text
+//! rides the notice entry (bounded). The mailbox itself never issues a read; it
+//! only carries what the drain put there.
 //!
 //! The mailbox is bounded and coalescing: a newer update for an already-pending
 //! uri REPLACES the pending one (the pending notice carried no content, so the
@@ -27,6 +30,11 @@ pub struct McpNotice {
     pub server: String,
     /// The resource uri, verbatim from the notification.
     pub uri: String,
+    /// Content read eagerly at the boundary because the uri is listed in the
+    /// server's `autoRead` config. `None` is the default (light) notice; the
+    /// content is already bounded at `MAX_RESOURCE_TEXT` with the usual
+    /// truncation marker.
+    pub content: Option<String>,
 }
 
 /// What [`McpNoticeMailbox::take`] hands back: the coalesced notices plus how
@@ -86,6 +94,7 @@ impl McpNoticeMailbox {
         inner.entries.push_back(McpNotice {
             server: server.to_string(),
             uri: uri.to_string(),
+            content: None,
         });
     }
 
@@ -136,11 +145,26 @@ pub const NOTICE_CUSTOM_TYPE: &str = "mcp-resource-notice";
 
 /// Render a drained batch as the text of ONE batched transcript entry: a
 /// header, one `server: uri` line per notice, and the suppressed count when
-/// nonzero. Never contains resource content — reading happens on demand.
+/// nonzero. A notice with `content` (only `autoRead` uris ever have one) adds
+/// it as an indented block; every other notice stays a pointer and reading
+/// happens on demand.
 pub fn notice_entry_text(batch: &McpNoticeBatch) -> String {
-    let mut text = String::from("MCP resources updated (content not auto-read; read with `<server>__read_resource` if needed):");
+    let mut text = String::from("MCP resources updated:");
+    // Only `autoRead` uris carry content; point at the on-demand read tool for
+    // every notice that stayed a light pointer (a mixed batch gets both).
+    if batch.notices.iter().any(|notice| notice.content.is_none()) {
+        text.push_str(
+            " (resources without content were not auto-read; read with `<server>__read_resource` if needed)",
+        );
+    }
     for notice in &batch.notices {
         text.push_str(&format!("\n- {}: {}", notice.server, notice.uri));
+        if let Some(content) = &notice.content {
+            for line in content.lines() {
+                text.push_str("\n  ");
+                text.push_str(line);
+            }
+        }
     }
     if batch.suppressed > 0 {
         text.push_str(&format!("\n({} update(s) suppressed)", batch.suppressed));
@@ -271,10 +295,12 @@ mod tests {
                 McpNotice {
                     server: "docs".into(),
                     uri: "file:///a.md".into(),
+                    content: None,
                 },
                 McpNotice {
                     server: "code".into(),
                     uri: "mem://x".into(),
+                    content: None,
                 },
             ],
             suppressed: 2,
@@ -294,10 +320,38 @@ mod tests {
             notices: vec![McpNotice {
                 server: "docs".into(),
                 uri: "file:///a.md".into(),
+                content: None,
             }],
             suppressed: 0,
         };
         let text = notice_entry_text(&batch);
         assert!(!text.contains("suppressed"), "got {text:?}");
+    }
+
+    #[test]
+    fn auto_read_content_rides_the_entry_as_an_indented_block() {
+        let batch = McpNoticeBatch {
+            notices: vec![
+                McpNotice {
+                    server: "docs".into(),
+                    uri: "file:///a.md".into(),
+                    content: Some("line one\nline two".into()),
+                },
+                McpNotice {
+                    server: "docs".into(),
+                    uri: "file:///b.md".into(),
+                    content: None,
+                },
+            ],
+            suppressed: 0,
+        };
+        let text = notice_entry_text(&batch);
+        assert!(
+            text.contains("- docs: file:///a.md\n  line one\n  line two"),
+            "got {text:?}"
+        );
+        assert!(text.contains("- docs: file:///b.md"), "got {text:?}");
+        // The light notice stays a pointer: no fabricated content block.
+        assert_eq!(text.matches("  line one").count(), 1);
     }
 }

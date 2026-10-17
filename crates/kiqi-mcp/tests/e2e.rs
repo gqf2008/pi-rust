@@ -448,10 +448,12 @@ async fn failing_handshake_is_skipped_loudly_and_does_not_kill_the_session() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn http_server_is_parsed_but_skipped_in_this_build() {
+async fn unreachable_http_server_is_skipped_loudly() {
     let tmp = tempfile::tempdir().unwrap();
     let value = json!({
-        "remote": { "url": "https://example.test/mcp", "headers": { "Authorization": "x" } }
+        // Port 9 (discard) on loopback: the connect is refused immediately, so
+        // this test stays offline and fast while exercising the real HTTP path.
+        "remote": { "url": "http://127.0.0.1:9/mcp", "timeoutSeconds": 5 }
     });
     let (servers, issues) = parse_servers(Some(&value));
     assert!(issues.is_empty(), "config issues: {issues:?}");
@@ -459,8 +461,10 @@ async fn http_server_is_parsed_but_skipped_in_this_build() {
     let (manager, issues) = McpManager::start(&servers, tmp.path()).await;
     assert_eq!(manager.tool_adapters().len(), 0);
     assert!(
-        issues.iter().any(|issue| issue.contains("http transport")),
-        "expected an http-skip notice, got {issues:?}"
+        issues
+            .iter()
+            .any(|issue| issue.contains("remote") && issue.contains("skipped")),
+        "expected a loud http skip, got {issues:?}"
     );
     manager.shutdown().await;
 }
@@ -666,7 +670,8 @@ async fn update_pushed_during_the_subscribe_handshake_is_accepted() {
         batch.notices,
         vec![kiqi_mcp::McpNotice {
             server: "docs".into(),
-            uri: "mem://alpha".into()
+            uri: "mem://alpha".into(),
+            content: None,
         }],
         "the racing first update was dropped — the mark must precede the RPC"
     );
