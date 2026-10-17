@@ -12,6 +12,10 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 ## [Unreleased]
 
 ### Added
+- **An active goal points the model at the orchestrator**: the goal guest's
+  context injection now appends 「用 `plan` 写 DAG、`dispatch` 跑、节点交给
+  `subagent`。」 when those tools are on the session's tool face (and stays
+  silent otherwise).
 
 - **`ki acp serve` — a host-level Agent Client Protocol server**: point any ACP
   client (Zed, ABB) at `ki` as an external coding agent over stdio JSON-RPC

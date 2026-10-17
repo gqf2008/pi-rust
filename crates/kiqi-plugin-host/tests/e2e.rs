@@ -3085,6 +3085,87 @@ fn goal_caps<'a>(host: &'a GoalInjectHost, log: &'a NullLog) -> HostCaps<'a> {
     }
 }
 
+/// A `SessionRead` whose tool face the test controls.
+struct ToolFaceSession {
+    tools: Vec<String>,
+}
+
+impl kiqi_plugin::SessionRead for ToolFaceSession {
+    fn active_tools(&self) -> Vec<String> {
+        self.tools.clone()
+    }
+    fn system_prompt(&self) -> String {
+        String::new()
+    }
+    fn thinking_level(&self) -> String {
+        String::new()
+    }
+    fn cli_flag(&self, _name: &str) -> Option<String> {
+        None
+    }
+    fn session_branch(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+}
+
+/// The goal→orchestrator coupling at the prompt level: an active goal's
+/// injection tells the model how to advance it (plan → dispatch → subagent) —
+/// but only when those tools are actually on the session's tool face. Naming
+/// tools from an install without the orchestrator would send the model hunting.
+#[test]
+fn goal_injection_carries_the_orchestration_hint_only_when_its_tools_exist() {
+    const HINT: &str = "用 `plan` 写 DAG";
+
+    let null_log = NullLog;
+    let host = GoalInjectHost::default();
+    let (_component, _project, plugin) = load_goal_guest(goal_fs_grant());
+    let with_orchestrator = ToolFaceSession {
+        tools: vec!["plan".into(), "dispatch".into(), "subagent".into()],
+    };
+    let caps = HostCaps {
+        session: Some(&with_orchestrator),
+        control: None,
+        inject: Some(&host),
+        ui: None,
+        log: &null_log,
+        cancel: None,
+    };
+    plugin
+        .call(
+            "goal",
+            &serde_json::json!({"action": "start", "title": "hinted"}),
+            &caps,
+            &RecordingSink {
+                blocks: Mutex::new(Vec::new()),
+            },
+        )
+        .expect("start the goal");
+    let injected = host.messages.lock().unwrap()[0].to_string();
+    assert!(
+        injected.contains(HINT),
+        "the active-goal injection must carry the orchestration hint: {injected}"
+    );
+
+    let host_bare = GoalInjectHost::default();
+    let (_component2, _project2, plugin2) = load_goal_guest(goal_fs_grant());
+    let bare = goal_caps(&host_bare, &null_log); // session: None → empty tool face
+    plugin2
+        .call(
+            "goal",
+            &serde_json::json!({"action": "start", "title": "bare"}),
+            &bare,
+            &RecordingSink {
+                blocks: Mutex::new(Vec::new()),
+            },
+        )
+        .expect("start the goal");
+    let injected_bare = host_bare.messages.lock().unwrap()[0].to_string();
+    assert!(
+        !injected_bare.contains(HINT),
+        "no hint when the orchestration tools are absent: {injected_bare}"
+    );
+}
+
 /// The core port: `goal` records state in `<project>/.ki/goals.json` in the
 /// compiled shape (`{active, archived}`), and the lifecycle moves the goal
 /// between the active slot and the archive. The plugin data directory is not a

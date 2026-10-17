@@ -396,6 +396,18 @@ fn append_custom_message(host: &dyn GoalHost, goal: &Goal, text: String) -> Resu
 /// Append the goal's current state as a generic custom message. The host stores
 /// it as an ordinary message entry and the generic context builder forwards it
 /// to the model; no goal-specific host projector is required.
+/// The orchestration nudge injected with an *active* goal. Emitted only when
+/// the orchestrator's tools are actually on the session's tool face — naming
+/// tools that are not installed would send the model hunting for nothing.
+const ORCHESTRATION_HINT: &str =
+    "推进方式：用 `plan` 写 DAG、`dispatch` 跑、节点交给 `subagent`。";
+
+fn orchestration_hint() -> Option<&'static str> {
+    let tools = session_read::active_tools();
+    let present = |name: &str| tools.iter().any(|tool| tool == name);
+    (present("plan") && present("dispatch") && present("subagent")).then_some(ORCHESTRATION_HINT)
+}
+
 fn append_goal_custom_message(host: &dyn GoalHost, goal: &Goal) -> Result<(), String> {
     let tag = match goal.status.as_str() {
         "paused" => "⏸️ Paused goal",
@@ -408,6 +420,10 @@ fn append_goal_custom_message(host: &dyn GoalHost, goal: &Goal) -> Result<(), St
         format!("{tag}: {}.{hint}", goal.title)
     } else {
         format!("{tag}: {} — {}.{hint}", goal.title, notes)
+    };
+    let text = match (goal.status.as_str(), orchestration_hint()) {
+        ("active", Some(hint)) => format!("{text}\n{hint}"),
+        _ => text,
     };
     append_custom_message(host, goal, text)
 }

@@ -96,6 +96,12 @@ Stated, not hidden:
    text block with `details` null; the guest splits it — human-readable text
    into the block, the structured envelope into `tool-result.details` — so the
    model-visible text differs between the tiers (the details gain structure).
+8. **The active-goal injection carries an orchestration hint, conditionally.**
+   With an active goal the injected custom message gains
+   「推进方式：用 `plan` 写 DAG、`dispatch` 跑、节点交给 `subagent`。」— but only
+   when the session's tool face actually carries all three tools (read through
+   `session-read.active-tools`). An install without the orchestrator stays
+   silent rather than naming tools the model cannot call.
 
 The budget arithmetic, action dispatch, command grammar, fingerprint dedupe and
 rendering are the compile-time logic, kept in the guest.
