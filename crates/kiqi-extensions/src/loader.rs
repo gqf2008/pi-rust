@@ -405,10 +405,13 @@ impl ExtensionSession {
         Arc::clone(&self.keepalive)
     }
 
-    /// The merged registry snapshot (tools/commands/handlers) the cdylib tier
-    /// registered. Borrowed view for
-    /// iterating tools/commands; for an owned share (e.g. handing to the
-    /// emitter) use [`snapshot_arc`](Self::snapshot_arc).
+    /// The merged registry snapshot (tools/commands/handlers) the registry tier
+    /// registered. Borrowed view for iterating tools/commands; for an owned
+    /// share (e.g. handing to the emitter) use [`snapshot_arc`](Self::snapshot_arc).
+    ///
+    /// Always `Some` for sessions this module builds, including a dylib-free
+    /// [`none`](Self::none) (an empty registry); [`snapshot_arc`](Self::snapshot_arc)
+    /// carries the reason the `Option` is not collapsed away.
     pub fn snapshot(&self) -> Option<&RegistrySnapshot> {
         self.snapshot.as_deref()
     }

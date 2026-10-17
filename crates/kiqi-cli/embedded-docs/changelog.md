@@ -194,7 +194,10 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   delivered nothing to any plugin (goal's turn budget never charged; todo and
   plan-mode never restored). A dylib-free session now carries an empty registry,
   so the funnels — which fan out to the compiled/wasm sink unconditionally —
-  are entered.
+  are entered. One consequence worth naming: `--no-extensions` now only shuts
+  the cdylib tier. Compiled-in plugins (goal's turn budget, todo and plan-mode
+  restoration, Langfuse) and wasm guests still receive events on such a run,
+  because that tier belongs to the host rather than to the cdylib loader.
 
 
 ## [0.4.1] - 2026-10-14
