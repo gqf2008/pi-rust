@@ -22,6 +22,7 @@ invariants do not move with `std.Io`; only the plumbing names below do.
 
 | File | Contract | Traps covered |
 |---|---|---|
+| `HANDOFF.md` | 交接说明：阅读顺序、不变量、0.17 实测面、架构立场、语义真源 | — |
 | `turn_dispatch.zig` | ACP turn: synchronous in-flight claim → spawn worker → responder hand-off; cancel is a no-op when idle and **never lost** when it races the start | porting-traps §1–3 |
 | `process_tree.zig` | MCP stdio server / subagent: `setpgid` at spawn; TERM the group, grace poll, KILL the group, then reap the direct child | porting-traps §8 |
 
