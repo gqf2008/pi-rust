@@ -18,7 +18,7 @@
 2. **有意保留的旧数据/旧配置读取**，每处都在原位标注了 `legacy trace` 与失败模式：
    `rpi.value`（`crates/kiqi-harness/src/session/values.rs`）、更新缓存的
    `#[serde(alias = "rpi")]`（`crates/kiqi-cli/src/updates.rs`）、
-   `KI_*` 对 `RPI_*` 的回退（`plugins/kiqi-langfuse`、`plugins/kiqi-permissions`）。
+   `KI_*` 对 `RPI_*` 的回退（`plugins/kiqi-langfuse`、`plugins/kiqi-permissions`、`crates/kiqi-cli/src/permissions.rs`）。
    删掉它们会静默丢数据或静默忽略用户已配置的路径。
 3. **历史记录**：CHANGELOG 旧条目、设计文档里的旧 worktree 名等。
 
@@ -50,7 +50,7 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
 cargo test  --workspace --locked
 # 可选 feature（有 wasm 版的插件都不在默认构建里）必须单独跑，否则它们会腐烂：
-cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-lens,plugin-kiqi-webfetch,plugin-kiqi-websearch,plugin-kiqi-subagents,plugin-kiqi-goal,plugin-kiqi-plan-mode,plugin-kiqi-ask-user,plugin-kiqi-langfuse
+cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-lens,plugin-kiqi-webfetch,plugin-kiqi-websearch,plugin-kiqi-subagents,plugin-kiqi-goal,plugin-kiqi-plan-mode,plugin-kiqi-ask-user,plugin-kiqi-langfuse,plugin-kiqi-permissions
 # 文档快照（改了 CHANGELOG.md / README.md 等必须重跑，CI 会比对）
 sh scripts/sync-embedded-docs.sh
 ```
@@ -66,7 +66,7 @@ sh scripts/sync-embedded-docs.sh
 | **编译期** `plugins/kiqi-*` | `kiqi_plugin::Plugin` trait（进程内、无沙箱），另带 cdylib 面供 `ki dev` 热载 | 一方插件 |
 | **wasm** `plugins/wasm/kiqi-*-guest` | 组件模型 + `plugins/kiqi-plugin.wit` 契约，跑在 wasmtime 沙箱里，按授权拿能力 | 第三方；契约版本见 WIT 的 `package` 行 |
 
-**默认构建只编入没有 wasm 版的插件**（当前仅 `kiqi-permissions`——`kiqi-orchestrator` 已随 §6.34 迁 opt-in、`kiqi-codegraph` 随 `proc` 迁 wasm）。
+**默认构建不再编入任何一方插件**：权限策略已宿主化（`crates/kiqi-cli/src/permissions.rs`），`kiqi-permissions` 与其余插件一样改为 `--features plugin-kiqi-<name>` 或装 wasm guest（保留一个版本；`kiqi-orchestrator` 已随 §6.34 迁 opt-in、`kiqi-codegraph` 随 `proc` 迁 wasm）。
 有 guest 的那些都是 `--features plugin-kiqi-<name>`，或用 `ki insmod --build plugins/wasm/kiqi-<name>-guest`
 装上 wasm 版。**新增/改插件能力时，两侧（trait 面与 WIT 面）必须一起改**，
 差异要写进 guest README，不许藏。

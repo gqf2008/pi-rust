@@ -106,12 +106,12 @@ pkg-fmt = "tgz"
 pkg-fmt = "zip"
 
 [features]
-# Only the plugins without a wasm port stay compiled in by default: every
-# `plugins/kiqi-*` that has a `plugins/wasm/kiqi-*-guest` counterpart is opt-in
-# now (`--features plugin-kiqi-<name>`, or install the wasm guest with
-# `ki insmod`). The crates, their features, their cdylib faces and their tests
-# all stay; CI builds every one of them so none rots.
-default = ["clipboard", "plugin-wasm", "plugin-kiqi-permissions"]
+# Every first-party plugin is opt-in now (`--features plugin-kiqi-<name>`, or
+# install the wasm guest with `ki insmod`). The crates, their features, their
+# cdylib faces and their tests all stay; CI builds every one of them so none
+# rots. Permission policy is host-owned (`src/permissions.rs`); the compiled
+# `kiqi-permissions` plugin stays behind its feature for one release.
+default = ["clipboard", "plugin-wasm"]
 # Loads `plugins/<id>/plugin.wasm` through `kiqi-plugin-host` (wasmtime). Off
 # only for builds that want the leaner binary without the wasm tier.
 plugin-wasm = ["dep:kiqi-plugin-host"]

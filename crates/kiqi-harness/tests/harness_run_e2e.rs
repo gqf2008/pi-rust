@@ -2073,6 +2073,30 @@ async fn replayable_harness_full(
     hang_at: usize,
     retry: RetryPolicy,
 ) -> AgentHarness {
+    replayable_harness_full_with_hook(
+        session,
+        replay,
+        calls,
+        allow_existing_session,
+        provider,
+        hang_at,
+        retry,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn replayable_harness_full_with_hook(
+    session: Session,
+    replay: ToolReplay,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    allow_existing_session: bool,
+    provider: Arc<FauxProvider>,
+    hang_at: usize,
+    retry: RetryPolicy,
+    before_tool_call: Option<kiqi_agent::BeforeToolCall>,
+) -> AgentHarness {
     let model = provider.default_model().clone();
     let env = Arc::new(InMemoryExecutionEnv::new());
     let env_dyn: Arc<dyn kiqi_tools::ExecutionEnv> = env.clone();
@@ -2105,7 +2129,7 @@ async fn replayable_harness_full(
         to_provider_messages: None,
         entry_projectors: Default::default(),
         agent_emitter: None,
-        before_tool_call: None,
+        before_tool_call,
         after_tool_call: None,
         transform_context: None,
         entry_transforms: Vec::new(),
@@ -2141,6 +2165,16 @@ async fn crash_inside_tool(replay: ToolReplay) -> (Vec<kiqi_ai::types::ToolResul
 async fn crash_inside_tool_with(
     recorded_replay: ToolReplay,
     recovery_replay: ToolReplay,
+) -> (Vec<kiqi_ai::types::ToolResultMessage>, usize) {
+    crash_inside_tool_with_hook(recorded_replay, recovery_replay, None).await
+}
+
+/// Same, with a `before_tool_call` hook installed on the reopened harness so a
+/// test can observe whether recovery consults it.
+async fn crash_inside_tool_with_hook(
+    recorded_replay: ToolReplay,
+    recovery_replay: ToolReplay,
+    before_tool_call: Option<kiqi_agent::BeforeToolCall>,
 ) -> (Vec<kiqi_ai::types::ToolResultMessage>, usize) {
     let script = FauxScript::new().with_tool_call("flaky_read", serde_json::json!({}));
     let session = replay_session();
@@ -2181,12 +2215,15 @@ async fn crash_inside_tool_with(
 
     // Reopen with the tool registered: recovery can only replay a call whose
     // tool it knows about.
-    let recovered = replayable_harness(
+    let recovered = replayable_harness_full_with_hook(
         session,
         recovery_replay,
         Arc::clone(&calls),
         true,
         FauxProvider::new(FauxScript::new().with_text("unused")),
+        1,
+        RetryPolicy::default(),
+        before_tool_call,
     )
     .await;
     let entries = recovered
@@ -2248,6 +2285,46 @@ async fn a_replayable_tool_is_re_run_and_its_real_result_recovered() {
     assert!(
         joined.find("REAL RESULT").unwrap() < joined.find("[recovered]").unwrap(),
         "the tool's own output must come first, with the marker after it: {joined:?}"
+    );
+}
+
+/// A replay must go through `before_tool_call`, or a policy added while the
+/// process was down would not apply to the recovered call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_policy_blocking_a_replay_is_enforced() {
+    let hook: kiqi_agent::BeforeToolCall = Arc::new(|ctx, _signal| {
+        let name = ctx.tool_call.name.clone();
+        Box::pin(async move {
+            if name == "flaky_read" {
+                Some(kiqi_agent::BeforeToolCallResult {
+                    block: true,
+                    reason: Some("deny added while the process was down".to_string()),
+                    terminate: false,
+                    args: None,
+                })
+            } else {
+                None
+            }
+        })
+    });
+    let (results, calls) =
+        crash_inside_tool_with_hook(ToolReplay::Safe, ToolReplay::Safe, Some(hook)).await;
+    assert_eq!(
+        calls, 1,
+        "a call blocked by the policy must not reach the tool during replay"
+    );
+    let result = results.first().expect("a tool result must be recorded");
+    assert!(
+        result.is_error,
+        "a blocked replay is recorded as an error, not a fabricated result"
+    );
+    let text = match result.content.first() {
+        Some(kiqi_ai::types::Content::Text(text)) => text.text.clone(),
+        other => panic!("expected text content, got {other:?}"),
+    };
+    assert!(
+        text.contains("not replayed") && text.contains("deny added while the process was down"),
+        "the result must carry the block reason, got {text:?}"
     );
 }
 

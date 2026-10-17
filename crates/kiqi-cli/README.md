@@ -104,8 +104,9 @@ agent work happens on the server. See
 
 ## Default tools
 
-The CLI loads the Pi-compatible `read`, `write`, `edit` and `bash` tools.
-Additional implementations (`grep`, `find`, `ls`, `docs`, `powershell`) remain
+The CLI loads the Pi-compatible `read`, `write`, `edit` and `bash` tools, the
+read-only `docs` lookup, and the host-owned `permissions` policy tool.
+Additional implementations (`grep`, `find`, `ls`, `powershell`) remain
 available in the [`kiqi-tools`](https://crates.io/crates/kiqi-tools) library and
 through the `default_tools` setting.
 

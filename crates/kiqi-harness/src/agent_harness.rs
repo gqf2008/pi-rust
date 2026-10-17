@@ -42,8 +42,8 @@ use tokio_util::sync::CancellationToken;
 use kiqi_agent::message::AgentMessage;
 use kiqi_agent::{
     run_agent_loop, run_agent_loop_from_assistant, AfterToolCall, AfterToolResults, AgentContext,
-    AgentEmitter, AgentEvent, AgentLoopConfig, AgentTool, BeforeToolCall, ConvertToLlm, QueueMode,
-    ShouldStopAfterTurnContext, StreamFn, TransformContext,
+    AgentEmitter, AgentEvent, AgentLoopConfig, AgentTool, BeforeToolCall, BeforeToolCallContext,
+    ConvertToLlm, QueueMode, ShouldStopAfterTurnContext, StreamFn, TransformContext,
 };
 use kiqi_ai::types::{
     AssistantMessage, Content, DeferredHandle, StopReason, ThinkingLevel, Usage, UserContent,
@@ -781,6 +781,7 @@ impl AgentHarness {
                 "main",
                 &options.tools,
                 &CancellationToken::new(),
+                options.before_tool_call.as_ref(),
                 !died_awaiting_retry,
             )
             .await?;
@@ -2122,6 +2123,7 @@ impl AgentHarness {
         run_id: &str,
         tools: &[HarnessTool],
         signal: &CancellationToken,
+        before_tool_call: Option<&BeforeToolCall>,
         salvage_failed_attempts: bool,
     ) -> HarnessResult<Vec<AgentMessage>> {
         // The `tool_started` records hold what a replay needs and the frames do
@@ -2165,13 +2167,26 @@ impl AgentHarness {
             let unresolved =
                 crate::frame_progress::unknown_tool_outcomes(session, lane, &partial).await?;
             let timestamp = partial.timestamp;
+            // The hook needs the assistant message a replay belongs to; keep a
+            // copy for it while the message itself becomes the interrupted
+            // entry.
+            let assistant = partial.clone();
             messages.push(AgentMessage::Assistant(Box::new(
                 crate::frame_progress::interrupted_message(partial),
             )));
             for outcome in unresolved {
                 resolved.insert(outcome.tool_call_id.clone());
                 messages.push(
-                    Self::resolve_tool_call(tools, signal, &recorded, &outcome, timestamp).await,
+                    Self::resolve_tool_call(
+                        tools,
+                        signal,
+                        before_tool_call,
+                        &assistant,
+                        &recorded,
+                        &outcome,
+                        timestamp,
+                    )
+                    .await,
                 );
             }
         }
@@ -2195,8 +2210,16 @@ impl AgentHarness {
             for outcome in unresolved {
                 if resolved.insert(outcome.tool_call_id.clone()) {
                     messages.push(
-                        Self::resolve_tool_call(tools, signal, &recorded, &outcome, timestamp)
-                            .await,
+                        Self::resolve_tool_call(
+                            tools,
+                            signal,
+                            before_tool_call,
+                            &partial,
+                            &recorded,
+                            &outcome,
+                            timestamp,
+                        )
+                        .await,
                     );
                 }
             }
@@ -2283,6 +2306,8 @@ impl AgentHarness {
     async fn resolve_tool_call(
         tools: &[HarnessTool],
         signal: &CancellationToken,
+        before_tool_call: Option<&BeforeToolCall>,
+        assistant_message: &AssistantMessage,
         recorded: &std::collections::BTreeMap<String, ToolStartedRecord>,
         outcome: &crate::frame_progress::UnknownToolOutcome,
         timestamp: i64,
@@ -2302,6 +2327,53 @@ impl AgentHarness {
         let (Some(frame), Some(tool)) = (frame, tool) else {
             return crate::frame_progress::interrupted_tool_result(outcome, timestamp);
         };
+
+        // A replay runs a tool the model already asked for, but its outcome was
+        // never recorded. The policy in force now must still apply: a rule
+        // added while the process was down would otherwise be bypassed by the
+        // recovery path. `read`/`docs` are replay-safe because they have no
+        // side effects, not because they are exempt from the gate.
+        if let Some(hook) = before_tool_call {
+            let tool_call = match kiqi_ai::types::Content::tool_call(
+                &outcome.tool_call_id,
+                &outcome.tool_name,
+                frame.effective_args.clone(),
+            ) {
+                Content::ToolCall(call) => call,
+                _ => unreachable!("Content::tool_call constructs a tool call"),
+            };
+            let context = AgentContext::new(Vec::new());
+            let blocked = hook(
+                BeforeToolCallContext {
+                    assistant_message,
+                    tool_call: &tool_call,
+                    args: &frame.effective_args,
+                    context: &context,
+                },
+                signal.child_token(),
+            )
+            .await
+            .filter(|result| result.block);
+            if let Some(blocked) = blocked {
+                let reason = blocked
+                    .reason
+                    .unwrap_or_else(|| "blocked by the host tool-call policy".to_string());
+                return AgentMessage::ToolResult(Box::new(kiqi_ai::types::ToolResultMessage {
+                    role: kiqi_ai::types::ToolResultRole,
+                    tool_call_id: outcome.tool_call_id.clone(),
+                    tool_name: outcome.tool_name.clone(),
+                    content: vec![Content::text(format!(
+                        "Tool `{}` was not replayed: {reason}",
+                        outcome.tool_name
+                    ))],
+                    details: None,
+                    usage: None,
+                    added_tool_names: Vec::new(),
+                    is_error: true,
+                    timestamp,
+                }));
+            }
+        }
 
         let replayed = tool
             .tool
@@ -2362,6 +2434,7 @@ impl AgentHarness {
         lane: &str,
         tools: &[HarnessTool],
         signal: &CancellationToken,
+        before_tool_call: Option<&BeforeToolCall>,
         salvage_failed_attempts: bool,
     ) -> HarnessResult<()> {
         let open = session
@@ -2414,6 +2487,7 @@ impl AgentHarness {
             &run_id,
             tools,
             signal,
+            before_tool_call,
             salvage_failed_attempts,
         )
         .await
@@ -3055,6 +3129,7 @@ impl AgentHarness {
         // Recovery runs before the source leaf is snapshotted, so the salvaged
         // messages are part of the base history this run builds on.
         let recovery_tools = self.get_tools().await?;
+        let recovery_hook = self.inner.lock().unwrap().before_tool_call.clone();
         // `true`: a run starting here retries through its own retry loop, so a
         // leftover failed attempt is settled the ordinary way.
         Self::finish_interrupted_operation(
@@ -3062,6 +3137,7 @@ impl AgentHarness {
             &self.lane,
             &recovery_tools,
             &signal,
+            recovery_hook.as_ref(),
             true,
         )
         .await?;
@@ -3679,6 +3755,7 @@ impl AgentHarness {
                     frame_recorder.run_id(),
                     &snap.tools,
                     &signal,
+                    snap.before_tool_call.as_ref(),
                     // The retry loop just finished; anything left is settled.
                     true,
                 )
@@ -3774,6 +3851,7 @@ impl AgentHarness {
         let (run_id, signal, _idle) = self.acquire_run(OperationKind::Compaction, window.id())?;
         let _run_lease = ActiveRunLease { harness: self };
         let recovery_tools = self.get_tools().await?;
+        let recovery_hook = self.inner.lock().unwrap().before_tool_call.clone();
         // `true`: a run starting here retries through its own retry loop, so a
         // leftover failed attempt is settled the ordinary way.
         Self::finish_interrupted_operation(
@@ -3781,6 +3859,7 @@ impl AgentHarness {
             &self.lane,
             &recovery_tools,
             &signal,
+            recovery_hook.as_ref(),
             true,
         )
         .await?;

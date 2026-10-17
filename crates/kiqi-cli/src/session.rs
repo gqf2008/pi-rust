@@ -20,10 +20,10 @@
 //! - **No `ModelRuntime`/multi-provider registry.** The resolver supports the
 //!   built-in Anthropic/OpenAI-compatible providers and `models.json`, but
 //!   runtime catalog mutation remains outside this layer.
-//! - **Built-in tools**: `read`, `bash`, `edit`, `write`, and the read-only
-//!   `docs` lookup tool. The former kiqi-only `grep`, `find`, `ls`, and
-//!   `powershell` tools remain library modules but are not registered by the
-//!   CLI.
+//! - **Built-in tools**: `read`, `bash`, `edit`, `write`, the read-only
+//!   `docs` lookup tool, and the host-owned `permissions` policy tool. The
+//!   former kiqi-only `grep`, `find`, `ls`, and `powershell` tools remain
+//!   library modules but are not registered by the CLI.
 //! - **Session restore (`-c`/`-r`/`--session`)** is *partially* supported: a
 //!   fresh session is always created. The harness's `create` rejects sessions
 //!   that already have records unless `allow_existing_session` is enabled.
@@ -67,7 +67,7 @@ use kiqi_extensions::{
 };
 
 /// The coding tools registered by the CLI by default.
-pub const BUILTIN_TOOL_NAMES: &[&str] = &["read", "bash", "edit", "write", "docs"];
+pub const BUILTIN_TOOL_NAMES: &[&str] = &["read", "bash", "edit", "write", "docs", "permissions"];
 
 /// The default coding system prompt. A condensed port of the TS
 /// `packages/coding-agent/src/core/system-prompt.ts` base prompt.
@@ -344,7 +344,7 @@ pub async fn build_with_selection(
     // loaders below (borrowed); clone one branch so both hold a reference.
     let ctx = ExecutionToolContext::new(env_dyn.clone(), Some(mut_env));
 
-    let mut tools = build_tools(&ctx, args);
+    let mut tools = build_tools(&ctx, args, cwd);
 
     // ---- Extensions (Part B2) ----
     // Load cdylib plugins from the resolved extension dirs, merge their tools
@@ -738,6 +738,8 @@ pub async fn build_with_selection(
     let before_tool_call = Some(extension_tool_call_hook(
         Arc::clone(&extension_session_cell),
         ui_dialog_mailbox.clone(),
+        cwd.to_path_buf(),
+        project_trusted,
     ));
 
     let options = AgentHarnessOptions {
@@ -905,6 +907,8 @@ pub async fn build_with_selection(
 fn extension_tool_call_hook(
     sessions: ExtensionSessionCell,
     ui_dialog: kiqi_extensions::UiDialogMailbox,
+    cwd: PathBuf,
+    project_trusted: bool,
 ) -> kiqi_agent::BeforeToolCall {
     Arc::new(move |ctx: kiqi_agent::BeforeToolCallContext<'_>, signal| {
         let session = sessions
@@ -915,8 +919,28 @@ fn extension_tool_call_hook(
         let tool_call_id = ctx.tool_call.id.clone();
         let tool_name = ctx.tool_call.name.clone();
         let params = ctx.args.clone();
+        let policy_cwd = cwd.clone();
         Box::pin(async move {
-            // Compiled plugins' gate runs first: it is local and synchronous, so
+            // Host policy runs before any plugin. A compiled or cdylib plugin
+            // must not be able to widen the host's rules, and a local deny
+            // needs no approval dialog. The file is re-read per call, so
+            // `/reload` and an external edit take effect without a cache. A
+            // project-local policy is only honored when the project is trusted,
+            // matching the settings/resource/extension gates.
+            if let Some(reason) = crate::permissions::blocking_reason_for(
+                &policy_cwd,
+                project_trusted,
+                &tool_name,
+                &params,
+            ) {
+                return Some(kiqi_agent::BeforeToolCallResult {
+                    block: true,
+                    reason: Some(reason),
+                    terminate: false,
+                    args: None,
+                });
+            }
+            // Compiled plugins' gate runs next: it is local and synchronous, so
             // a veto arrives without opening an approval dialog. A rewrite is
             // carried into the native dispatch so neither path sees stale args.
             let compiled = crate::plugins::probe_tool_call(&tool_call_id, &tool_name, &params);
@@ -933,6 +957,26 @@ fn extension_tool_call_hook(
                 _ => None,
             };
             let effective = replacement.clone().unwrap_or_else(|| params.clone());
+            // A plugin rewrite is applied after the host's first evaluation, so
+            // re-run the host policy on the arguments that will actually be
+            // executed. Otherwise a `Replace` could turn a call the policy
+            // denies into an allowed one (e.g. rewrite a `git push` command
+            // into `git status`, which the deny rule does not match).
+            if replacement.is_some() {
+                if let Some(reason) = crate::permissions::blocking_reason_for(
+                    &policy_cwd,
+                    project_trusted,
+                    &tool_name,
+                    &effective,
+                ) {
+                    return Some(kiqi_agent::BeforeToolCallResult {
+                        block: true,
+                        reason: Some(format!("{reason} (after a plugin argument rewrite)")),
+                        terminate: false,
+                        args: None,
+                    });
+                }
+            }
             let reason = match session {
                 Ok(session) => {
                     kiqi_extensions::dispatch_tool_call_event(
@@ -1616,7 +1660,7 @@ where
     // on top, mirroring `build`.
     let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
     let tool_ctx = kiqi_tools::ExecutionToolContext::new(env_dyn.clone(), Some(mut_env));
-    let mut tools = build_tools(&tool_ctx, &effective_args);
+    let mut tools = build_tools(&tool_ctx, &effective_args, &ctx.cwd);
     merge_extension_tools(
         &mut tools,
         &extension_session,
@@ -1984,7 +2028,7 @@ pub fn bash_options() -> kiqi_tools::tools::bash::BashToolOptions {
     }
 }
 
-fn build_tools(ctx: &ExecutionToolContext, args: &Args) -> Vec<HarnessTool> {
+fn build_tools(ctx: &ExecutionToolContext, args: &Args, cwd: &Path) -> Vec<HarnessTool> {
     if args.no_tools {
         return Vec::new();
     }
@@ -2019,6 +2063,12 @@ fn build_tools(ctx: &ExecutionToolContext, args: &Args) -> Vec<HarnessTool> {
         (
             "docs",
             HarnessTool::new(create_docs_tool()).with_replay(ToolReplay::Safe),
+        ),
+        (
+            "permissions",
+            HarnessTool::new(crate::permissions::create_permissions_tool(
+                cwd.to_path_buf(),
+            )),
         ),
     ];
 
@@ -3255,15 +3305,17 @@ mod tests {
         kiqi_plugin_sdk::EVENT_HANDLER_ABORT
     }
 
-    async fn invoke_test_tool_hook(
+    async fn invoke_tool_hook(
         hook: &kiqi_agent::BeforeToolCall,
+        tool: &str,
+        args: serde_json::Value,
     ) -> Option<kiqi_agent::BeforeToolCallResult> {
         let message = kiqi_ai::providers::faux::faux_assistant_message(
             "approval",
             kiqi_ai::types::StopReason::ToolUse,
         );
         let kiqi_ai::types::Content::ToolCall(call) =
-            kiqi_ai::types::Content::tool_call("call", "read", serde_json::json!({"path":"x"}))
+            kiqi_ai::types::Content::tool_call("call", tool, args)
         else {
             unreachable!()
         };
@@ -3279,11 +3331,136 @@ mod tests {
         .await
     }
 
+    async fn invoke_test_tool_hook(
+        hook: &kiqi_agent::BeforeToolCall,
+    ) -> Option<kiqi_agent::BeforeToolCallResult> {
+        invoke_tool_hook(hook, "read", serde_json::json!({"path": "x"})).await
+    }
+
+    /// A project directory with an empty policy file, so a policy test never
+    /// falls through to the developer's real global `permissions.json`.
+    fn hook_project() -> (tempfile::TempDir, std::path::PathBuf) {
+        let project = tempfile::TempDir::new().unwrap();
+        let policy = project.path().join(".ki").join("permissions.json");
+        std::fs::create_dir_all(policy.parent().unwrap()).unwrap();
+        std::fs::write(&policy, r#"{"permissions":{}}"#).unwrap();
+        (project, policy)
+    }
+
+    #[tokio::test]
+    async fn host_permission_gate_blocks_and_allow_lists_restrict() {
+        let (project, policy) = hook_project();
+        std::fs::write(
+            &policy,
+            r#"{"permissions":{"allow":["Bash(git *)"],"deny":["Bash(git push *)"]}}"#,
+        )
+        .unwrap();
+        let hook = extension_tool_call_hook(
+            Arc::new(Mutex::new(ExtensionSession::none())),
+            kiqi_extensions::UiDialogMailbox::new(),
+            project.path().to_path_buf(),
+            true,
+        );
+
+        // Deny wins, and the reason names both the rule and the tool.
+        let result = invoke_tool_hook(
+            &hook,
+            "bash",
+            serde_json::json!({"command": "git push origin main"}),
+        )
+        .await
+        .expect("the deny rule blocks");
+        assert!(result.block);
+        let reason = result.reason.unwrap();
+        assert!(reason.contains("Bash(git push *)"), "got {reason}");
+        assert!(reason.contains("bash"), "got {reason}");
+
+        // A matching allow rule runs.
+        assert!(
+            invoke_tool_hook(&hook, "bash", serde_json::json!({"command": "git status"}))
+                .await
+                .is_none()
+        );
+
+        // An unmatched call is restricted while the allow list exists.
+        let result = invoke_tool_hook(&hook, "bash", serde_json::json!({"command": "rm -rf /"}))
+            .await
+            .expect("the allow list restricts");
+        assert!(result.block);
+        assert!(result.reason.unwrap().contains("allow"));
+
+        // No allow rule names `read`, so it keeps the default-allow behavior.
+        assert!(
+            invoke_tool_hook(&hook, "read", serde_json::json!({"path": "src/main.rs"}))
+                .await
+                .is_none()
+        );
+
+        // An edit is visible to the next call without rebuilding the hook —
+        // the same property that makes `/reload` pick up policy changes.
+        std::fs::write(&policy, r#"{"permissions":{}}"#).unwrap();
+        assert!(invoke_tool_hook(
+            &hook,
+            "bash",
+            serde_json::json!({"command": "git push origin main"})
+        )
+        .await
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn host_permission_gate_ignores_an_untrusted_project_policy() {
+        // Isolate the global lookup so the developer's real policy cannot
+        // affect or receive this test.
+        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let previous = std::env::var_os("KI_AGENT_DIR");
+        let global = tempfile::TempDir::new().unwrap();
+        std::env::set_var("KI_AGENT_DIR", global.path());
+
+        let (project, policy) = hook_project();
+        std::fs::write(&policy, r#"{"permissions":{"deny":["Bash(*)"]}}"#).unwrap();
+        let make_hook = |project_trusted: bool| {
+            extension_tool_call_hook(
+                Arc::new(Mutex::new(ExtensionSession::none())),
+                kiqi_extensions::UiDialogMailbox::new(),
+                project.path().to_path_buf(),
+                project_trusted,
+            )
+        };
+
+        // An untrusted project's policy is project-controlled input: ignore it.
+        assert!(invoke_tool_hook(
+            &make_hook(false),
+            "bash",
+            serde_json::json!({"command": "echo hi"})
+        )
+        .await
+        .is_none());
+        // The same session with project trust enforces it.
+        assert!(invoke_tool_hook(
+            &make_hook(true),
+            "bash",
+            serde_json::json!({"command": "echo hi"})
+        )
+        .await
+        .is_some());
+
+        match previous {
+            Some(value) => std::env::set_var("KI_AGENT_DIR", value),
+            None => std::env::remove_var("KI_AGENT_DIR"),
+        }
+    }
+
     #[tokio::test]
     async fn tool_call_hook_uses_reloaded_session_and_newly_discovered_gate() {
+        let (project_guard, _policy) = hook_project();
         let sessions = Arc::new(Mutex::new(ExtensionSession::none()));
-        let hook =
-            extension_tool_call_hook(sessions.clone(), kiqi_extensions::UiDialogMailbox::new());
+        let hook = extension_tool_call_hook(
+            sessions.clone(),
+            kiqi_extensions::UiDialogMailbox::new(),
+            project_guard.path().to_path_buf(),
+            true,
+        );
         assert!(invoke_test_tool_hook(&hook).await.is_none());
         for name in ["first-gate", "reloaded-gate"] {
             let mut registry = kiqi_extensions::ExtensionRegistry::new();
@@ -3539,7 +3716,7 @@ mod tests {
         let env_dyn: Arc<dyn kiqi_tools::ExecutionEnv> = env.clone();
         let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
         let context = ExecutionToolContext::new(env_dyn, Some(mut_env));
-        let tools = build_tools(&context, &Args::default());
+        let tools = build_tools(&context, &Args::default(), Path::new("."));
 
         let replay_of = |name: &str| {
             tools
@@ -3572,16 +3749,18 @@ mod tests {
         let env_dyn: Arc<dyn kiqi_tools::ExecutionEnv> = env.clone();
         let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
         let context = ExecutionToolContext::new(env_dyn, Some(mut_env));
-        let names: Vec<String> = build_tools(&context, &Args::default())
+        let names: Vec<String> = build_tools(&context, &Args::default(), Path::new("."))
             .iter()
             .map(|tool| tool.tool.schema().name.clone())
             .collect();
 
-        // `docs` is a default capability; the legacy kiqi-only lookup tools stay
-        // unregistered. Asserted by membership (not exact equality) because
-        // `powershell` is Windows-only and `settings.json#defaultTools` may
-        // narrow the set in a developer's environment.
+        // `docs` and the host-owned `permissions` policy tool are default
+        // capabilities; the legacy kiqi-only lookup tools stay unregistered.
+        // Asserted by membership (not exact equality) because `powershell` is
+        // Windows-only and `settings.json#defaultTools` may narrow the set in a
+        // developer's environment.
         assert!(names.contains(&"docs".to_string()));
+        assert!(names.contains(&"permissions".to_string()));
         for legacy in ["grep", "find", "ls"] {
             assert!(
                 !names.contains(&legacy.to_string()),

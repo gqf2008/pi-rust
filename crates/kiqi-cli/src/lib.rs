@@ -53,6 +53,7 @@ pub mod llama_command;
 pub mod model_registry;
 pub mod modes;
 pub mod packages;
+pub mod permissions;
 pub mod plugin_cli;
 pub mod plugins;
 pub mod provider;

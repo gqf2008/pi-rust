@@ -1344,10 +1344,13 @@ mod tests {
     fn every_compiled_plugin_exposes_its_tools_and_schemas() {
         let hosts = load_hosts();
         let ids: Vec<&str> = hosts.iter().map(|h| h.id()).collect();
-        // Only the plugins without a wasm port are compiled in by default; the
-        // rest are opt-in features (CI builds every configuration). Each push
-        // names the feature that brings the plugin back.
-        let mut expected_ids: Vec<&str> = vec!["kiqi-permissions"];
+        // No compiled plugin is in the default build any more: permission
+        // policy moved into the host, and the plugin crate is opt-in for one
+        // release. Each push names the feature that brings a plugin back.
+        #[allow(unused_mut)]
+        let mut expected_ids: Vec<&str> = Vec::new();
+        #[cfg(feature = "plugin-kiqi-permissions")]
+        expected_ids.push("kiqi-permissions");
         #[cfg(feature = "plugin-kiqi-todo")]
         expected_ids.push("kiqi-todo");
         #[cfg(feature = "plugin-kiqi-lens")]
@@ -1394,7 +1397,10 @@ mod tests {
             .into_iter()
             .map(|t| t.name)
             .collect();
-        let mut expected_tools: Vec<&str> = vec!["permissions"];
+        #[allow(unused_mut)]
+        let mut expected_tools: Vec<&str> = Vec::new();
+        #[cfg(feature = "plugin-kiqi-permissions")]
+        expected_tools.push("permissions");
         #[cfg(feature = "plugin-kiqi-orchestrator")]
         {
             expected_tools.push("subagent");
@@ -1540,13 +1546,24 @@ mod tests {
     #[test]
     fn registry_exposes_the_first_party_plugins() {
         let plugins = load_all();
-        // The default build registers only the plugins without a wasm port.
-        for always in ["kiqi-permissions"] {
-            assert!(
-                plugins.iter().any(|entry| entry.id == always),
-                "{always} is compiled in by default; got {:?}",
-                plugins.iter().map(|e| e.id).collect::<Vec<_>>()
-            );
+        // No plugin is in the default build any more: permission policy moved
+        // into the host (`crate::permissions`). Assert the registry is still
+        // coherent (no duplicate ids) so `plugins` is used in every config.
+        let mut ids: Vec<&str> = plugins.iter().map(|entry| entry.id).collect();
+        let registered = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), registered, "duplicate plugin id in registry");
+
+        #[cfg(feature = "plugin-kiqi-permissions")]
+        {
+            let permissions = plugins
+                .iter()
+                .find(|entry| entry.id == "kiqi-permissions")
+                .expect("the feature is on, so kiqi-permissions is registered");
+            let tools = permissions.plugin.tools();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].name, "permissions");
         }
 
         #[cfg(feature = "plugin-kiqi-todo")]
