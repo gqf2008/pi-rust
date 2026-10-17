@@ -537,15 +537,22 @@ fn editor_change_source_separates_tui_writes_from_typing() {
 fn programmatic_mark_is_consumed_even_with_no_subscriber() {
     use std::sync::atomic::Ordering;
     let state = test_tui_state();
-    assert!(
-        state
-            .extension_session
-            .lock()
-            .unwrap()
+    // The precondition is "nobody subscribes", not "no snapshot": a dylib-free
+    // session carries an empty registry (which is also what keeps the event
+    // gates open for the compiled/wasm tiers). The guard is scoped: the drain
+    // below re-locks the session cell and std's mutex is not reentrant.
+    let nobody_subscribes = {
+        let session = state.extension_session.lock().unwrap();
+        let snapshot = session
             .snapshot_arc()
-            .is_none(),
-        "this test relies on nobody subscribing"
-    );
+            .expect("a dylib-free session carries an empty registry");
+        snapshot
+            .handlers_for(rpi_plugin_sdk::EventTag::SessionStart)
+            .is_empty()
+            && snapshot.before_agent_start().is_empty()
+            && snapshot.resources_discover().is_empty()
+    };
+    assert!(nobody_subscribes, "this test relies on nobody subscribing");
 
     state.editor_text.push(rpi_extensions::EditorTextEdit {
         text: "draft".to_string(),

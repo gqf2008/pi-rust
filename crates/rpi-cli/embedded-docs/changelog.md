@@ -160,6 +160,19 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   percent-encoded too.
 
 
+### Fixed
+
+- **Plugin events survive a dylib-free install**: the whole plugin event surface
+  (`session_start`/`session_shutdown`, turn end, tool events, the session tree,
+  UI prompt boundaries) was gated on the cdylib tier being non-empty — the host
+  matches on `ExtensionSession::snapshot_arc()` before entering the dispatch
+  funnels, and that answered `None` when no cdylibs loaded, so a wasm-only `ki`
+  delivered nothing to any plugin (goal's turn budget never charged; todo and
+  plan-mode never restored). A dylib-free session now carries an empty registry,
+  so the funnels — which fan out to the compiled/wasm sink unconditionally —
+  are entered.
+
+
 ## [0.4.1] - 2026-10-14
 
 ### Added

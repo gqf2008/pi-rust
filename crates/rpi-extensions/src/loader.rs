@@ -380,11 +380,20 @@ impl ExtensionSession {
         }
     }
 
-    /// An empty session (no plugins loaded — `--no-extensions` or no dirs found).
+    /// An empty session (no cdylibs loaded — `--no-extensions` or no dirs found).
+    ///
+    /// Carries an **empty registry**, not `None`: the session is only the
+    /// cdylib-handler tier, and the event fan-out hangs off the snapshot the
+    /// host threads into `translate`'s funnels — which call the compiled/wasm
+    /// sink unconditionally, precisely so a `ki` with no dylibs still delivers
+    /// events. A `None` snapshot therefore used to gate every event call site
+    /// off (a wasm-only install delivered nothing, not even to `on_event`).
     pub fn none() -> Self {
         Self {
             keepalive: Arc::new(PluginKeepalive::new(Vec::new(), None)),
-            snapshot: None,
+            snapshot: Some(Arc::new(
+                crate::registry::ExtensionRegistry::new().snapshot(),
+            )),
             loaded_paths: Vec::new(),
             action_bridge: None,
         }
@@ -396,8 +405,8 @@ impl ExtensionSession {
         Arc::clone(&self.keepalive)
     }
 
-    /// The merged registry snapshot (tools/commands/handlers), if any plugin
-    /// loaded. `None` when no plugins loaded successfully. Borrowed view for
+    /// The merged registry snapshot (tools/commands/handlers) the cdylib tier
+    /// registered. Borrowed view for
     /// iterating tools/commands; for an owned share (e.g. handing to the
     /// emitter) use [`snapshot_arc`](Self::snapshot_arc).
     pub fn snapshot(&self) -> Option<&RegistrySnapshot> {
@@ -408,6 +417,12 @@ impl ExtensionSession {
     /// must keep the snapshot alive beyond this session local — notably the
     /// [`ExtensionEmitter`](crate::ExtensionEmitter) installed into
     /// `AgentHarnessOptions.agent_emitter`.
+    ///
+    /// Always `Some` for sessions this module builds, including a dylib-free
+    /// [`none`](Self::none) (an empty registry). The event call sites match on
+    /// this value to decide whether to enter `translate`'s funnels at all, and
+    /// those funnels reach the compiled/wasm sink unconditionally — so treating
+    /// "no cdylibs" as `None` used to switch the whole plugin event surface off.
     pub fn snapshot_arc(&self) -> Option<Arc<RegistrySnapshot>> {
         self.snapshot.clone()
     }

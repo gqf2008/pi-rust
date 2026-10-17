@@ -155,6 +155,38 @@ mod tests {
         clear_compiled_event_sink();
     }
 
+    /// The gate that swallowed every event on a dylib-free machine: the host's
+    /// event call sites match on `ExtensionSession::snapshot_arc()` before
+    /// entering `translate`'s funnels, and `none()` used to answer `None` — so a
+    /// wasm-only install never reached even the compiled/wasm fan-out the
+    /// funnels call unconditionally. A dylib-free session must therefore present
+    /// a dispatchable (empty) registry.
+    #[test]
+    fn a_dylib_free_session_carries_a_dispatchable_snapshot() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        set_compiled_event_sink(Arc::new(move |_tag, _payload| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            CompiledVerdict::Continue
+        }));
+
+        let snapshot = crate::ExtensionSession::none()
+            .snapshot_arc()
+            .expect("a dylib-free session carries an empty registry, never None");
+        assert!(
+            !crate::translate::dispatch_empty_event(&snapshot, EventTag::SessionStart),
+            "no cdylib handler subscribes"
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a ki with no dylibs must still fan events into the compiled/wasm sink"
+        );
+
+        clear_compiled_event_sink();
+    }
+
     #[test]
     fn tool_payloads_become_camel_case_json() {
         let call = StablePluginEvent::tool_call(
