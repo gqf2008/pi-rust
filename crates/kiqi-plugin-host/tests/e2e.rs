@@ -31,21 +31,27 @@ impl Log for NullLog {
 }
 
 /// Build one guest crate for `wasm32-wasip2` and return the component.
+///
+/// `--target-dir` is passed explicitly: a machine-level `build.target-dir` (or
+/// `CARGO_TARGET_DIR`) would otherwise move the artifact away from the path
+/// this helper returns, and the test would fail on a machine where it cannot be
+/// reproduced from the repo alone.
 fn build_guest(crate_dir: &str, artifact: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let manifest = root.join("plugins/wasm").join(crate_dir).join("Cargo.toml");
+    let target_dir = root.join("plugins/wasm/target");
     let status = Command::new(env!("CARGO"))
         .args(["build", "--manifest-path"])
         .arg(&manifest)
-        .args(["--target", "wasm32-wasip2", "--release"])
+        .args(["--target", "wasm32-wasip2", "--release", "--target-dir"])
+        .arg(&target_dir)
         .status()
         .unwrap_or_else(|error| panic!("run cargo build for {crate_dir}: {error}"));
     assert!(
         status.success(),
         "building {crate_dir} failed; is the `wasm32-wasip2` target installed?"
     );
-    root.join("plugins/wasm/target/wasm32-wasip2/release")
-        .join(artifact)
+    target_dir.join("wasm32-wasip2/release").join(artifact)
 }
 
 fn fixture_wasm() -> PathBuf {
