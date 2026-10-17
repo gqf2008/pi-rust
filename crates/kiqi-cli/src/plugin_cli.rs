@@ -510,7 +510,11 @@ fn install(args: &[String]) -> i32 {
 /// would break the guess). This is the "install a guest" half of the wasm
 /// tier: with the plugins that have a guest no longer compiled in, getting one
 /// must be one command, not a remembered target path.
-fn build_guest(dir: &Path) -> Result<PathBuf, String> {
+///
+/// `pub(crate)` so the wasm tests in [`crate::plugins`] build their fixtures the
+/// same way: a hard-coded `plugins/wasm/target/...` silently breaks on a
+/// machine whose cargo config points `build.target-dir` elsewhere.
+pub(crate) fn build_guest(dir: &Path) -> Result<PathBuf, String> {
     let manifest = dir.join("Cargo.toml");
     if !manifest.is_file() {
         return Err(format!("{} has no Cargo.toml", dir.display()));
@@ -1087,16 +1091,8 @@ mod tests {
     #[test]
     fn install_rejects_exec_flags_for_a_component_without_exec() {
         let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let manifest = workspace.join("plugins/wasm/kiqi-webfetch-guest/Cargo.toml");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(&manifest)
-            .args(["--target", "wasm32-wasip2", "--release"])
-            .status()
+        let wasm = build_guest(&workspace.join("plugins/wasm/kiqi-webfetch-guest"))
             .expect("build the webfetch guest");
-        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
-        let wasm =
-            workspace.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_webfetch_guest.wasm");
 
         let agent = tempfile::tempdir().unwrap();
         let code = install_into(
@@ -1129,16 +1125,8 @@ mod tests {
     #[test]
     fn install_and_uninstall_round_trip() {
         let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let manifest = workspace.join("plugins/wasm/kiqi-conformance-guest/Cargo.toml");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(&manifest)
-            .args(["--target", "wasm32-wasip2", "--release"])
-            .status()
+        let wasm = build_guest(&workspace.join("plugins/wasm/kiqi-conformance-guest"))
             .expect("build the conformance guest");
-        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
-        let wasm =
-            workspace.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm");
 
         let agent = tempfile::tempdir().unwrap();
         let root = agent.path();
@@ -1197,16 +1185,8 @@ mod tests {
     #[test]
     fn insmod_and_rmmod_round_trip() {
         let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let manifest = workspace.join("plugins/wasm/kiqi-conformance-guest/Cargo.toml");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(&manifest)
-            .args(["--target", "wasm32-wasip2", "--release"])
-            .status()
+        let wasm = build_guest(&workspace.join("plugins/wasm/kiqi-conformance-guest"))
             .expect("build the conformance guest");
-        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
-        let wasm =
-            workspace.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm");
 
         let agent = tempfile::tempdir().unwrap();
         let root = agent.path();
@@ -1335,16 +1315,8 @@ mod tests {
     #[test]
     fn declared_surfaces_include_the_guests_flags_and_shortcuts() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let manifest = root.join("plugins/wasm/kiqi-conformance-guest/Cargo.toml");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(&manifest)
-            .args(["--target", "wasm32-wasip2", "--release"])
-            .status()
+        let wasm = build_guest(&root.join("plugins/wasm/kiqi-conformance-guest"))
             .expect("build the conformance guest");
-        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
-        let wasm =
-            root.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm");
         let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants(
             "conformance",
             &wasm,

@@ -1207,6 +1207,17 @@ mod tests {
         fn log(&self, _level: LogLevel, _message: &str) {}
     }
 
+    /// Build a guest fixture through the same path `ki plugin insmod --build`
+    /// uses: the artifact is located from cargo's JSON output, so a
+    /// machine-level `build.target-dir` cannot make the test look in the wrong
+    /// place (a hard-coded `plugins/wasm/target/...` did exactly that).
+    #[cfg(feature = "plugin-wasm")]
+    fn build_guest(crate_dir: &str) -> std::path::PathBuf {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        crate::plugin_cli::build_guest(&root.join("plugins/wasm").join(crate_dir))
+            .expect("build the guest fixture")
+    }
+
     /// The whole path: registry -> harness tool list -> adapter -> plugin call
     /// -> result. This is the one that proves a compiled-in plugin is usable,
     /// not merely loadable.
@@ -2116,25 +2127,13 @@ mod tests {
     #[cfg(feature = "plugin-wasm")]
     #[test]
     fn wasm_plugins_are_discovered_and_registered() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let manifest = root.join("plugins/wasm/kiqi-conformance-guest/Cargo.toml");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(&manifest)
-            .args(["--target", "wasm32-wasip2", "--release"])
-            .status()
-            .expect("build the conformance guest");
-        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
+        let wasm = build_guest("kiqi-conformance-guest");
 
         // Lay it out the way the loader expects: plugins/<id>/plugin.wasm.
         let plugins_dir = tempfile::tempdir().unwrap();
         let package = plugins_dir.path().join("conformance");
         std::fs::create_dir_all(&package).unwrap();
-        std::fs::copy(
-            root.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm"),
-            package.join("plugin.wasm"),
-        )
-        .unwrap();
+        std::fs::copy(wasm, package.join("plugin.wasm")).unwrap();
 
         let hosts = load_wasm_hosts(plugins_dir.path());
         let host = hosts
@@ -2184,16 +2183,7 @@ mod tests {
             start.elapsed().as_nanos() / u128::from(iterations)
         }
 
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let manifest = root.join("plugins/wasm/kiqi-todo-guest/Cargo.toml");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(&manifest)
-            .args(["--target", "wasm32-wasip2", "--release"])
-            .status()
-            .expect("build the todo guest");
-        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
-        let wasm_path = root.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_todo_guest.wasm");
+        let wasm_path = build_guest("kiqi-todo-guest");
         let wasm_plugin = kiqi_plugin_host::WasmPlugin::load_with_grants(
             "kiqi-todo",
             &wasm_path,
@@ -2458,17 +2448,7 @@ mod tests {
     #[cfg(feature = "plugin-wasm")]
     #[test]
     fn wasm_non_tool_surfaces_reach_the_session_wiring() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let manifest = root.join("plugins/wasm/kiqi-conformance-guest/Cargo.toml");
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(&manifest)
-            .args(["--target", "wasm32-wasip2", "--release"])
-            .status()
-            .expect("build the conformance guest");
-        assert!(status.success(), "is the `wasm32-wasip2` target installed?");
-        let wasm =
-            root.join("plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm");
+        let wasm = build_guest("kiqi-conformance-guest");
         let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants(
             "conformance",
             &wasm,

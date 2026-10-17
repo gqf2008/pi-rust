@@ -176,6 +176,27 @@ R3/R4/R7 可合并成一次「goal 提示的可读性与覆盖」清理。
 
 `ask_user` 的 `panicked during call` 仍未修，保持待查。
 
+### R8 的扩展：同一缺陷的另外 7 处
+
+`cargo test --workspace --locked` 暴露 kiqi-cli 里 7 处「测试自建 guest」也写死了
+`<root>/plugins/wasm/target/...`，默认 feature 下直接失败：
+
+```
+plugin_cli::tests::{install_rejects_exec_flags_for_a_component_without_exec,
+  install_and_uninstall_round_trip, insmod_and_rmmod_round_trip,
+  declared_surfaces_include_the_guests_flags_and_shortcuts}
+plugins::tests::{wasm_plugins_are_discovered_and_registered,
+  wasm_non_tool_surfaces_reach_the_session_wiring,
+  wasm_call_overhead_stays_within_the_compiled_paths_ballpark}
+→ error: .../plugins/wasm/target/wasm32-wasip2/release/kiqi_conformance_guest.wasm is not a file
+```
+
+改法：复用生产版 `crate::plugin_cli::build_guest`（它从 `cargo build
+--message-format=json` 的 artifact 事件取路径，本来就不猜 target-dir），
+`plugins::tests` 加一个按 crate 目录取产物的薄包装。修复后 `cargo test --workspace
+--locked` 全绿（kiqi-cli lib：584 passed / 1 ignored）。
+
+
 门禁实跑（本机，`wasm32-wasip2` 已装）：
 
 ```bash
