@@ -144,7 +144,18 @@ cargo test -p kiqi-plugin-host --test e2e --locked goal_injection_carries
 本次审查中调用 `ask_user` 工具（`kiqi_ask_user_guest`）时宿主报
 `plugin kiqi_ask_user_guest panicked during call`，工具调用直接失败，无法向用户提问。
 按 `4ad87ef` 的修法，wasm guest 现在能收到事件面了；此处失败发生在 `call` 路径，
-与事件漏斗不同源，需要单独复现定位。**未在本轮修**，记为待查项。
+与事件漏斗不同源。
+
+**已定位并修复（`c42f95e`，发生在本记录之后）**：`CompiledToolAdapter::execute` 在
+带 tokio 上下文的线程上同步调 guest，而 guest 的对话框轮询用 WASI 时钟
+（`std::thread::sleep`），wasmtime 的同步等待走 `Handle::block_on`——在 tokio 线程上
+（含 `spawn_blocking`）直接 panic：`Cannot start a runtime from within a runtime`，
+外层 `PluginHost` 的 `catch_unwind` 把它包成上面那句
+`panicked during call`。判据：`crates/kiqi-cli/src/plugins.rs:536` 的
+`spawn_plugin_call` 把调用移到普通 `std::thread`，回归测试
+`plugin_calls_run_outside_the_tokio_context`（`plugins.rs:1884`）断言驱动线程无 tokio
+上下文；`cargo test -p kiqi-cli --lib plugins::tests::plugin_calls_run_outside_the_tokio_context`
+→ 1 passed。故这一项**不是待查**，本记录写的时候修复尚未落地。
 
 ## 建议动作
 
