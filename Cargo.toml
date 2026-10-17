@@ -77,6 +77,7 @@ thiserror = "1"
 tracing = "0.1"
 
 # Misc
+sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "v7"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 base64 = "0.22"

@@ -1160,17 +1160,45 @@ pub fn load_hosts() -> Vec<PluginHost> {
     hosts
 }
 
+/// Check a component against its digest sidecar before it is loaded.
+///
+/// `Ok(None)` means verified, `Ok(Some(_))` means the sidecar is absent (an
+/// install that predates digests still works), and `Err(diagnostic)` means the
+/// sidecar disagrees or cannot be read — the caller skips the plugin rather
+/// than running bytes the recorded expectation does not match.
+#[cfg(feature = "plugin-wasm")]
+fn digest_gate(wasm: &std::path::Path) -> Result<Option<&'static str>, String> {
+    use crate::plugin_cli::DigestStatus;
+    match crate::plugin_cli::digest_status(wasm) {
+        Ok(DigestStatus::Ok { .. }) => Ok(None),
+        Ok(DigestStatus::Missing) => Ok(Some("missing")),
+        Ok(DigestStatus::Mismatch { recorded, actual }) => Err(format!(
+            "digest mismatch for {}: sidecar says {recorded}, file is {actual}; skipped \
+             (reinstall to replace it)",
+            wasm.display()
+        )),
+        Err(error) => Err(format!(
+            "cannot verify {}: {error}; skipped",
+            wasm.display()
+        )),
+    }
+}
+
 /// Discover `plugins/<id>/plugin.wasm` under `plugins_dir` and load each behind
 /// the same [`Plugin`] seam as the compiled-in ones.
 ///
 /// A plugin that fails to load (bad component, refused grants, missing WASI
-/// import) is reported and skipped rather than taking the session down.
+/// import) is reported and skipped rather than taking the session down. A
+/// component whose digest sidecar disagrees is skipped the same way: the
+/// recorded digest is the only expectation there is, so unverified bytes never
+/// run.
 #[cfg(feature = "plugin-wasm")]
 pub fn load_wasm_hosts(plugins_dir: &std::path::Path) -> Vec<PluginHost> {
     let Ok(entries) = std::fs::read_dir(plugins_dir) else {
         return Vec::new();
     };
     let mut hosts = Vec::new();
+    let mut unverified: Vec<String> = Vec::new();
     for entry in entries.flatten() {
         if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
             continue;
@@ -1189,12 +1217,45 @@ pub fn load_wasm_hosts(plugins_dir: &std::path::Path) -> Vec<PluginHost> {
         if !wasm.is_file() {
             continue;
         }
+        let missing_sidecar = match digest_gate(&wasm) {
+            Ok(None) => false,
+            Ok(Some(_)) => true,
+            Err(error) => {
+                eprintln!("plugin `{id}`: {error}");
+                continue;
+            }
+        };
         match kiqi_plugin_host::WasmPlugin::load(&id, &wasm) {
-            Ok(plugin) => hosts.push(PluginHost::untrusted(id, Box::new(plugin))),
+            Ok(plugin) => {
+                // Only a plugin that actually made it into `hosts` may be
+                // called "loaded unverified": a failed load is reported by the
+                // line above and must not be counted as loaded here.
+                if missing_sidecar {
+                    unverified.push(id.clone());
+                }
+                hosts.push(PluginHost::untrusted(id, Box::new(plugin)));
+            }
             Err(error) => eprintln!("plugin `{id}`: {error}"),
         }
     }
+    // One warning for the whole discovery pass, not one per plugin: old
+    // installs keep working, but never silently.
+    if !unverified.is_empty() {
+        eprintln!("{}", missing_sidecar_warning(&unverified));
+    }
     hosts
+}
+
+/// The aggregate missing-sidecar warning, kept separate so the wording can be
+/// asserted without capturing stderr.
+#[cfg(feature = "plugin-wasm")]
+fn missing_sidecar_warning(unverified: &[String]) -> String {
+    format!(
+        "warning: {} wasm plugin(s) have no digest sidecar and loaded unverified: {}. \
+         Reinstall them with `ki insmod` to record one.",
+        unverified.len(),
+        unverified.join(", ")
+    )
 }
 
 #[cfg(test)]
@@ -2162,6 +2223,100 @@ mod tests {
             other => panic!("unexpected block {other:?}"),
         };
         assert!(text.contains("ui="), "got {text}");
+    }
+
+    /// A sidecar that disagrees with the component makes the loader skip it:
+    /// the recorded digest is the only expectation there is, so the tampered
+    /// bytes never run, and the diagnostic names the path and both digests.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn wasm_digest_mismatch_skips_the_plugin() {
+        let wasm = build_guest("kiqi-conformance-guest");
+        let plugins_dir = tempfile::tempdir().unwrap();
+        let package = plugins_dir.path().join("tampered");
+        std::fs::create_dir_all(&package).unwrap();
+        let component = package.join("plugin.wasm");
+        std::fs::copy(&wasm, &component).unwrap();
+        let recorded = crate::plugin_cli::write_digest_sidecar(&component).unwrap();
+
+        let mut bytes = std::fs::read(&component).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        std::fs::write(&component, &bytes).unwrap();
+
+        let diagnostic = digest_gate(&component).unwrap_err();
+        assert!(
+            diagnostic.contains(&component.display().to_string()),
+            "names the path: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(&recorded),
+            "names the recorded digest: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(&crate::plugin_cli::sha256_hex(&bytes)),
+            "names the actual digest: {diagnostic}"
+        );
+        assert!(
+            load_wasm_hosts(plugins_dir.path())
+                .iter()
+                .all(|host| host.id() != "tampered"),
+            "a mismatched component is never loaded"
+        );
+    }
+
+    /// An install that predates sidecars still loads (old installs keep
+    /// working); the gate reports it so the loader can warn once, loudly.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn wasm_missing_digest_sidecar_still_loads() {
+        let wasm = build_guest("kiqi-conformance-guest");
+        let plugins_dir = tempfile::tempdir().unwrap();
+        let package = plugins_dir.path().join("legacy");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::copy(wasm, package.join("plugin.wasm")).unwrap();
+
+        assert_eq!(
+            digest_gate(&package.join("plugin.wasm")).unwrap(),
+            Some("missing")
+        );
+        assert!(
+            load_wasm_hosts(plugins_dir.path())
+                .iter()
+                .any(|host| host.id() == "legacy"),
+            "an install without a sidecar still loads"
+        );
+        // The load path must warn, not merely load: assert the exact summary
+        // the caller prints, so deleting the warning cannot leave the suite
+        // green.
+        let warning = missing_sidecar_warning(&["legacy".to_string()]);
+        assert!(
+            warning.contains("1 wasm plugin(s)")
+                && warning.contains("loaded unverified: legacy")
+                && warning.contains("ki insmod"),
+            "the missing-sidecar warning names the plugin and the remedy: {warning}"
+        );
+    }
+
+    /// A plugin that fails to load is not counted as "loaded unverified".
+    /// `missing_sidecar_warning` only ever receives ids that are in `hosts`,
+    /// and a corrupt component (here: not a component at all) must stay out.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn wasm_failed_load_is_not_counted_as_unverified() {
+        let plugins_dir = tempfile::tempdir().unwrap();
+        let package = plugins_dir.path().join("broken");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("plugin.wasm"), b"not a component").unwrap();
+
+        assert_eq!(
+            digest_gate(&package.join("plugin.wasm")).unwrap(),
+            Some("missing")
+        );
+        assert!(
+            load_wasm_hosts(plugins_dir.path()).is_empty(),
+            "a corrupt component without a sidecar is skipped, not loaded"
+        );
     }
 
     /// Gate §6.3.8: quantify the wasm sandbox tax and keep it from exploding.

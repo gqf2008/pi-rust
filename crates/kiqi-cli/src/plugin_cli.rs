@@ -8,6 +8,8 @@
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use kiqi_plugin::grants::{
     agent_dir, grants_path, installed_plugins, plugin_dir_at, ExecCwd, GrantOptions, Grants,
 };
@@ -64,12 +66,37 @@ fn show(id: Option<&str>) -> i32 {
         Ok(text) => println!("{text}"),
         Err(error) => eprintln!("error: {error}"),
     }
+    print_digest(id);
     // Declarations, not grants: what the plugin claims it contributes. This is
     // the consumer for `flags`/`shortcuts`, whose runtime paths are
     // `SessionRead::cli_flag` and an `Input` event respectively — the
     // declaration itself is only ever read here.
     print_declared(id);
     0
+}
+
+/// Print the component's recorded digest and whether the file still matches.
+/// Compiled-in plugins have no `plugin.wasm`, so nothing is printed for them.
+fn print_digest(id: &str) {
+    let Some(dir) = kiqi_plugin::grants::plugin_dir(id) else {
+        return;
+    };
+    let wasm = dir.join("plugin.wasm");
+    if wasm.is_file() {
+        println!("\n{}", digest_report(&wasm));
+    }
+}
+
+/// One line of digest state; split from printing so it can be asserted on.
+fn digest_report(wasm: &Path) -> String {
+    match digest_status(wasm) {
+        Ok(DigestStatus::Ok { recorded }) => format!("digest: {recorded} (ok)"),
+        Ok(DigestStatus::Mismatch { recorded, actual }) => {
+            format!("digest: {recorded} (mismatch; file is {actual})")
+        }
+        Ok(DigestStatus::Missing) => "digest: missing sidecar (unverified)".to_string(),
+        Err(error) => format!("digest: cannot verify ({error})"),
+    }
 }
 
 /// List a plugin's declared surfaces, or say why nothing could be listed.
@@ -569,6 +596,81 @@ pub(crate) fn build_guest(dir: &Path) -> Result<PathBuf, String> {
     })
 }
 
+/// Name suffix of the digest sidecar written next to a component.
+pub(crate) const DIGEST_SUFFIX: &str = ".sha256";
+
+/// Where a component's digest sidecar lives: `plugin.wasm.sha256` beside
+/// `plugin.wasm`.
+pub(crate) fn digest_sidecar_path(wasm: &Path) -> PathBuf {
+    let mut name = wasm.file_name().unwrap_or_default().to_os_string();
+    name.push(DIGEST_SUFFIX);
+    wasm.with_file_name(name)
+}
+
+/// Lowercase hex SHA-256 of `bytes`.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn file_sha256_hex(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    Ok(sha256_hex(&bytes))
+}
+
+/// Record `wasm`'s current digest in its sidecar and return the hex.
+pub(crate) fn write_digest_sidecar(wasm: &Path) -> Result<String, String> {
+    let hex = file_sha256_hex(wasm)?;
+    let path = digest_sidecar_path(wasm);
+    std::fs::write(&path, format!("{hex}\n"))
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
+    Ok(hex)
+}
+
+/// The digest recorded in the sidecar, or `None` when there is no sidecar.
+fn read_digest_sidecar(wasm: &Path) -> Result<Option<String>, String> {
+    let path = digest_sidecar_path(wasm);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(
+            text.lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase(),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("read {}: {error}", path.display())),
+    }
+}
+
+/// How a component compares to its recorded digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DigestStatus {
+    Ok { recorded: String },
+    Mismatch { recorded: String, actual: String },
+    Missing,
+}
+
+/// Verify a component against its sidecar.
+///
+/// This is corruption/integrity checking, not anti-tamper: whoever can rewrite
+/// `plugin.wasm` can rewrite the sidecar beside it. Detached signatures
+/// (provenance) need a distribution channel to be worth anything, so they are
+/// deliberately not pretended here.
+pub(crate) fn digest_status(wasm: &Path) -> Result<DigestStatus, String> {
+    let Some(recorded) = read_digest_sidecar(wasm)? else {
+        return Ok(DigestStatus::Missing);
+    };
+    let actual = file_sha256_hex(wasm)?;
+    if recorded == actual {
+        Ok(DigestStatus::Ok { recorded })
+    } else {
+        Ok(DigestStatus::Mismatch { recorded, actual })
+    }
+}
+
 /// [`install`] against an explicit agent root (`None` = the environment's).
 ///
 /// Taking the root as a parameter is why no test has to write `KI_AGENT_DIR`
@@ -749,6 +851,15 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
     if let Err(error) = std::fs::copy(wasm, &target) {
         eprintln!("error: install {}: {error}", target.display());
         return 1;
+    }
+    // Record the digest of the bytes actually written (the copy), not of the
+    // source file, so the sidecar describes what the loader will read.
+    match write_digest_sidecar(&target) {
+        Ok(hex) => eprintln!("digest: {hex}"),
+        Err(error) => {
+            eprintln!("error: record digest for {}: {error}", target.display());
+            return 1;
+        }
     }
 
     // Only capabilities this plugin declares that are not already granted need a
@@ -1149,7 +1260,16 @@ mod tests {
             Some(root),
         );
         assert_eq!(code, 0);
-        assert!(root.join("plugins/conformance/plugin.wasm").is_file());
+        let installed = root.join("plugins/conformance/plugin.wasm");
+        assert!(installed.is_file());
+        // The sidecar records the digest of the bytes actually installed.
+        let sidecar = std::fs::read_to_string(digest_sidecar_path(&installed))
+            .expect("install writes plugin.wasm.sha256");
+        let expected: String = Sha256::digest(std::fs::read(&installed).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(sidecar.trim(), expected, "one lowercase-hex line");
         let grants = Grants::load_for_at(root, "conformance");
         assert_eq!(
             grants.granted(),
@@ -1305,6 +1425,71 @@ mod tests {
         {
             assert!(!approve_new_capabilities(false, true, answer), "{answer:?}");
         }
+    }
+
+    /// The sidecar is the exact bytes' SHA-256, lowercase hex, one line.
+    #[test]
+    fn digest_sidecar_records_sha256_of_the_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = dir.path().join("plugin.wasm");
+        let bytes = b"\0asm not really a component";
+        std::fs::write(&wasm, bytes).unwrap();
+
+        let recorded = write_digest_sidecar(&wasm).unwrap();
+        let expected: String = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(recorded, expected);
+        let text = std::fs::read_to_string(digest_sidecar_path(&wasm)).unwrap();
+        assert_eq!(text.trim(), expected);
+        assert_eq!(text.lines().count(), 1, "one line, no extras");
+        assert_eq!(digest_status(&wasm).unwrap(), DigestStatus::Ok { recorded });
+    }
+
+    /// A changed byte is a mismatch; a file with no sidecar is `Missing`.
+    #[test]
+    fn digest_status_detects_mismatch_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = dir.path().join("plugin.wasm");
+        std::fs::write(&wasm, b"component").unwrap();
+        assert_eq!(digest_status(&wasm).unwrap(), DigestStatus::Missing);
+
+        let recorded = write_digest_sidecar(&wasm).unwrap();
+        std::fs::write(&wasm, b"tampered").unwrap();
+        assert_eq!(
+            digest_status(&wasm).unwrap(),
+            DigestStatus::Mismatch {
+                recorded,
+                actual: sha256_hex(b"tampered"),
+            }
+        );
+
+        std::fs::remove_file(digest_sidecar_path(&wasm)).unwrap();
+        assert_eq!(digest_status(&wasm).unwrap(), DigestStatus::Missing);
+    }
+
+    /// `ki plugin show` states which of the three cases applies, and names both
+    /// digests when they disagree.
+    #[test]
+    fn digest_report_states_ok_mismatch_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = dir.path().join("plugin.wasm");
+        std::fs::write(&wasm, b"component").unwrap();
+        assert!(digest_report(&wasm).contains("missing sidecar"));
+
+        let recorded = write_digest_sidecar(&wasm).unwrap();
+        let ok = digest_report(&wasm);
+        assert!(ok.contains(&recorded) && ok.contains("ok"), "{ok}");
+
+        std::fs::write(&wasm, b"tampered").unwrap();
+        let bad = digest_report(&wasm);
+        assert!(bad.contains("mismatch"), "{bad}");
+        assert!(bad.contains(&recorded), "{bad} names the recorded digest");
+        assert!(
+            bad.contains(&sha256_hex(b"tampered")),
+            "{bad} names the actual digest"
+        );
     }
 
     /// `ki plugin show` is the consumer for the `flags`/`shortcuts`
