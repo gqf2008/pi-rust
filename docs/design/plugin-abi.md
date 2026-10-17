@@ -832,6 +832,12 @@ CLI `grant fs --cwd project` 的 JSON 往返有单测钉住。
 
 ## 7. 待定
 
+> 2026-10-17（销账一半）：已实现 **SHA-256 sidecar**——`ki insmod`/`ki plugin install` 写
+> `plugin.wasm.sha256`，加载前校验（不匹配/不可读 → 跳过并报错；缺失 → 加载 + 汇总警告），
+> `ki plugin show` 展示状态。**定性为完整性/损坏检测，不是防篡改**（能改 wasm 者同样能改
+> sidecar）。**detached 签名（provenance）仍待定**：等有第三方分发渠道再做，届时才需要信任根。
+
+
 - ~~wasmtime 依赖很重：独立 crate 还是 feature 开关？~~ → 已定：**独立 crate `kiqi-plugin-host` +
   `plugin-wasm` feature（默认开）**；`ki` 因此带上 wasmtime，要精简就关 feature。
 - `.wasm` 是否需要签名/摘要校验（防替换；「免签名分发」是卖点，但「防篡改」另说）？

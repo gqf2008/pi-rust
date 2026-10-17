@@ -32,6 +32,12 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   the ported plugins came from) and `@juicesharp/rpiv-todo`.
 
 ### Added
+- **Installed wasm plugins carry a SHA-256 sidecar**: `ki insmod` writes
+  `plugin.wasm.sha256`, load verifies it before wasmtime sees the component
+  (mismatch skips the plugin with the expected and actual digests; a missing
+  sidecar still loads with one aggregate warning), and `ki plugin show`
+  reports the verification state. Integrity/corruption only — signatures are
+  deferred until there is a third-party distribution channel.
 - **MCP over HTTP/Streamable works**: HTTP `mcpServers` connect through rmcp's
   session/SSE worker with a repo-owned reqwest client (one reqwest major in the
   tree), bounded responses (16 MiB), same-origin redirects only, and resource
