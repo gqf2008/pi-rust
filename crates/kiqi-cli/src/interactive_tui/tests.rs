@@ -547,7 +547,7 @@ fn programmatic_mark_is_consumed_even_with_no_subscriber() {
             .snapshot_arc()
             .expect("a dylib-free session carries an empty registry");
         snapshot
-            .handlers_for(rpi_plugin_sdk::EventTag::SessionStart)
+            .handlers_for(kiqi_plugin_sdk::EventTag::SessionStart)
             .is_empty()
             && snapshot.before_agent_start().is_empty()
             && snapshot.resources_discover().is_empty()
