@@ -114,6 +114,7 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 
 | 项 | 说明 |
 |---|---|
+| **permissions 已由宿主策略取代** | 2026-10-17：策略存宿主的 `permissions.json`（同一文件/形状/全局-项目优先级），`before_tool_call` 真正强制（此前编译期插件只是一个 `permissions` 工具，**从未自动拦截**）。`plugin-kiqi-permissions` 移出默认构建、crate 保留 opt-in。方向：宿主持有宿主策略（原「信任倒置」的正解）。 |
 | ~~**`exec` 的 cwd 策略挡住 `kiqi-lens`**~~ | ✅ 已解（§6.30）：exec 授权带 `cwd`（`plugin-data` 默认 / `project`）与 `timeout-seconds`（默认 30s、上限 300s）；`kiqi-lens` 已移植为 `kiqi-lens-guest`。 |
 | Windows 不回收后台孙进程 | 用了 unix 进程组；Windows 需 job object，成本高，代码里已注明 |
 | `flags` 声明只有 `ki plugin show` 在读 | 取值路径是 `SessionRead::cli_flag`（通用 `--foo=bar`），声明本身是诊断用 |

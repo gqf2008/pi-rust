@@ -32,6 +32,12 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   the ported plugins came from) and `@juicesharp/rpiv-todo`.
 
 ### Added
+- **Permission policy is enforced by the host**: `permissions.json` (project
+  `.ki/`, legacy `.pi/`, then the global agent dir) is evaluated in
+  `before_tool_call` before any tool runs — explicit deny rules block, an allow
+  list restricts, and the policy file itself cannot be written by the agent.
+  Until now the plugin only offered a `permissions` tool, so deny rules were
+  advisory; `kiqi-permissions` leaves the default build (opt-in feature kept).
 - **Installed wasm plugins carry a SHA-256 sidecar**: `ki insmod` writes
   `plugin.wasm.sha256`, load verifies it before wasmtime sees the component
   (mismatch skips the plugin with the expected and actual digests; a missing
