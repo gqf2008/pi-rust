@@ -4,8 +4,8 @@
 //! reaps only the direct child; grandchildren survive unless killed via the
 //! process group. Kill the group while the pgid still belongs to us (the
 //! child is unreaped, so its pid cannot be reused), then reap the direct
-//! child. Syscall faces verified with `zig test` on 0.16.0; the 0.17 std.Io
-//! layer owns fd plumbing, not process control (see README).
+//! child. Verified with `zig test` on Zig 0.17.0; std.Io owns fd plumbing,
+//! not process control (see README).
 const std = @import("std");
 
 pub const ProcTree = struct {
@@ -30,7 +30,7 @@ pub const ProcTree = struct {
 
     /// True while any member of the group exists (SIG 0 probe).
     pub fn groupAlive(self: *ProcTree) bool {
-        if (std.posix.kill(-self.pid, @enumFromInt(0))) |_| return true else |err| {
+        if (std.posix.kill(-self.pid, @fromBackingInt(@intCast(0)))) |_| return true else |err| {
             return err != std.posix.KillError.ProcessNotFound;
         }
     }
@@ -50,7 +50,7 @@ pub const ProcTree = struct {
 };
 
 fn sleepMs(ms: u64) void {
-    // 0.16 moved thread sleep under std.Io; poll with an empty fd set is the
+    // std.Io owns sleeps; poll with an empty fd set is the
     // stable portable primitive (and is exactly what a real wait loop does
     // when it is also watching the child).
     _ = std.posix.poll(&[_]std.posix.pollfd{}, @intCast(ms)) catch {};

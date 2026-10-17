@@ -1,8 +1,8 @@
 //! Skeleton: ACP turn dispatch — guard + spawn + cancel-before-registration.
 //!
 //! Contract from docs/design/porting-traps.md 1-3. Layout/semantics are the
-//! point; names follow Zig 0.16.0, where `zig test` on this file passes. The
-//! rewrite targets 0.17 (std.Io migration) - keep the invariants, adapt names.
+//! point; verified with `zig test` on Zig 0.17.0, the rewrite's target
+//! toolchain. Keep the invariants; only API names move under std.Io.
 const std = @import("std");
 
 pub const TurnState = struct {
@@ -92,7 +92,7 @@ test "same-burst cancel is not lost: pre-aborted start" {
     var state = TurnState{};
     try testing.expect(state.begin());
     state.cancel(); // cancel lands before the worker is scheduled
-    const steps = [_]StepFn{noopStep} ** 64;
+    const steps: [64]StepFn = @splat(&noopStep);
     var turn = Turn{ .state = &state };
     try testing.expectEqual(Outcome.aborted, turn.run(&steps));
     state.release();

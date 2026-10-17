@@ -5,17 +5,18 @@ references, not shippable code**: they encode the invariants that were expensive
 get right in `ki` (Rust), so the Zig rewrite can start from a working control-flow
 skeleton instead of rediscovering the traps.
 
-**Verification status.** All tests below pass on the toolchain installed on this
-machine, **Zig 0.16.0** (`zig version`):
+**Verification status.** Both files compile and their tests pass on the toolchain
+installed on this machine, **Zig 0.17.0** (`zig version`) — the same version the
+rewrite targets (user, 2026-10-17):
 
 ```bash
-zig test turn_dispatch.zig     # All 2 tests passed
-zig test process_tree.zig      # All 1 tests passed
+zig test turn_dispatch.zig                             # All 2 tests passed
+zig test process_tree.zig                              # All 1 tests passed
+zig fmt --check turn_dispatch.zig process_tree.zig     # clean
 ```
 
-The rewrite itself **targets Zig 0.17** (user, 2026-10-17). The skeletons deliberately
-stay on the narrow, long-stable process/signal layer so the 0.16 → 0.17 move only
-touches the plumbing described at the end of this file — the invariants do not move.
+The skeletons deliberately stay on the narrow process/signal layer, so the
+invariants do not move with `std.Io`; only the plumbing names below do.
 
 ## Files
 
@@ -53,20 +54,21 @@ touches the plumbing described at the end of this file — the invariants do not
 - The child gets an **explicit minimal environment** (`PATH=/usr/bin:/bin` in the
   test). Never inherit provider keys or proxy variables into an MCP server.
 
-## 0.16 → 0.17 adaptation points (observed, not guessed)
+## 0.17 surface actually used (observed, not guessed)
 
-Everything here was hit while getting these files to compile on 0.16.0; expect the
-same or a further move under `std.Io` in 0.17.
+Every row came from real `zig test` output while porting the skeletons from
+0.16.0 to 0.17.0 — these are the APIs a rewrite reaches for first.
 
-| Wanted | 0.16 reality | What the skeletons use |
+| Wanted | 0.17 reality | What the skeletons use |
 |---|---|---|
 | `std.posix.fork` | gone | `std.c.fork()` (returns `pid_t`, `-1` on error) |
 | `std.posix.setpgid` | gone | `std.c.setpgid(pid, pgid) c_int` |
 | `std.posix.execveZ` | gone | `std.c.execve(path, argv, envp) c_int` |
 | `std.posix.waitpid` | gone | `std.c.waitpid(pid, ?*c_int, options) pid_t`; `std.c.W.NOHANG` |
 | `std.posix.exit` | gone | `std.c._exit(code) noreturn` |
-| `std.Thread.sleep` | gone | `std.posix.poll(&[_]std.posix.pollfd{}, timeout_ms)` |
-| `std.posix.kill` / `std.posix.SIG` | **present** | kept — typed `KillError` (`ProcessNotFound`) is what `groupAlive` needs |
+| `std.Thread.sleep` | gone (sleeps belong to `std.Io`) | `std.posix.poll(&[_]std.posix.pollfd{}, timeout_ms)` |
+| `std.posix.kill` / `std.posix.SIG` | **present** | kept — the typed `KillError` (`ProcessNotFound`) is what `groupAlive` needs |
+| array repeat `T{v} ** N` | **gone** (parses as a binary `*`) | `@splat(&noopStep)` for a comptime array fill; a loop when the element is not comptime-known |
 | `std.fs` `realpathAlloc` / `readFileAlloc` | absent in this shape | not used; keep fs work out of the control-plane skeletons |
 | `std.c.environ` | `[*:null]?[*:0]u8` | never relied on — `spawn` takes `envp` explicitly |
 
