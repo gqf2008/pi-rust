@@ -393,9 +393,6 @@ fn append_custom_message(host: &dyn GoalHost, goal: &Goal, text: String) -> Resu
     host.append_message(&message)
 }
 
-/// Append the goal's current state as a generic custom message. The host stores
-/// it as an ordinary message entry and the generic context builder forwards it
-/// to the model; no goal-specific host projector is required.
 /// The orchestration nudge injected with an *active* goal. Emitted only when
 /// the orchestrator's tools are actually on the session's tool face — naming
 /// tools that are not installed would send the model hunting for nothing.
@@ -408,22 +405,34 @@ fn orchestration_hint() -> Option<&'static str> {
     (present("plan") && present("dispatch") && present("subagent")).then_some(ORCHESTRATION_HINT)
 }
 
+/// Append the goal's current state as a generic custom message. The host stores
+/// it as an ordinary message entry and the generic context builder forwards it
+/// to the model; no goal-specific host projector is required.
 fn append_goal_custom_message(host: &dyn GoalHost, goal: &Goal) -> Result<(), String> {
-    let tag = match goal.status.as_str() {
-        "paused" => "⏸️ Paused goal",
-        "complete" => "✅ Goal completed",
-        _ => "🎯 Active goal",
+    // One `match` yields both the tag and whether the orchestration nudge may
+    // follow, so adding a status cannot pick up a tag while skipping the guard.
+    let (tag, hint_allowed) = match goal.status.as_str() {
+        "active" => ("🎯 Active goal", true),
+        "paused" => ("⏸️ Paused goal", false),
+        "complete" => ("✅ Goal completed", false),
+        // Unknown/legacy status: keep the neutral tag, never the nudge.
+        _ => ("🎯 Active goal", false),
     };
     let notes = goal.notes.trim();
-    let hint = goal.budget_hint();
+    let budget = goal.budget_hint();
     let text = if notes.is_empty() {
-        format!("{tag}: {}.{hint}", goal.title)
+        format!("{tag}: {}.{budget}", goal.title)
     } else {
-        format!("{tag}: {} — {}.{hint}", goal.title, notes)
+        format!("{tag}: {} — {}.{budget}", goal.title, notes)
     };
-    let text = match (goal.status.as_str(), orchestration_hint()) {
-        ("active", Some(hint)) => format!("{text}\n{hint}"),
-        _ => text,
+    let nudge = if hint_allowed {
+        orchestration_hint()
+    } else {
+        None
+    };
+    let text = match nudge {
+        Some(nudge) => format!("{text}\n{nudge}"),
+        None => text,
     };
     append_custom_message(host, goal, text)
 }

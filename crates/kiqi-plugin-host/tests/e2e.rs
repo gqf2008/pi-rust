@@ -3152,9 +3152,40 @@ fn goal_injection_carries_the_orchestration_hint_only_when_its_tools_exist() {
         "the active-goal injection must carry the orchestration hint: {injected}"
     );
 
+    // A status that is no longer `active` must drop the nudge even though the
+    // orchestrator tools are still on the tool face.
+    plugin
+        .call(
+            "goal",
+            &serde_json::json!({"action": "pause"}),
+            &caps,
+            &RecordingSink {
+                blocks: Mutex::new(Vec::new()),
+            },
+        )
+        .expect("pause the goal");
+    let paused = host.messages.lock().unwrap()[1].to_string();
+    assert!(paused.contains("Paused goal"), "paused tag: {paused}");
+    assert!(
+        !paused.contains(HINT),
+        "a paused goal must not carry the orchestration hint: {paused}"
+    );
+
+    // The live site is an install *without* the orchestrator but with other
+    // tools: the tool face is not empty, it just lacks plan/dispatch/subagent.
     let host_bare = GoalInjectHost::default();
     let (_component2, _project2, plugin2) = load_goal_guest(goal_fs_grant());
-    let bare = goal_caps(&host_bare, &null_log); // session: None → empty tool face
+    let without_orchestrator = ToolFaceSession {
+        tools: vec!["bash".into(), "read".into(), "edit".into()],
+    };
+    let bare = HostCaps {
+        session: Some(&without_orchestrator),
+        control: None,
+        inject: Some(&host_bare),
+        ui: None,
+        log: &null_log,
+        cancel: None,
+    };
     plugin2
         .call(
             "goal",
