@@ -126,7 +126,10 @@ impl Component for HStack {
 
             let basis = entry.options.basis.unwrap_or(max_line_width);
             let min_size = entry.options.min_size;
-            let max_size = entry.options.max_size.unwrap_or(width);
+            // A degenerate width (an uninitialised pty, a tiny resize) must not
+            // invert the bounds: `clamp` panics on `min > max`, and the child is
+            // allowed to overflow the available width instead.
+            let max_size = entry.options.max_size.unwrap_or(width).max(min_size);
 
             let basis = basis.clamp(min_size, max_size);
 
@@ -267,5 +270,25 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("Hello"));
         assert!(lines[0].contains("World"));
+    }
+
+    /// An unsized pty (width 0) or a resize to nothing must not panic the
+    /// layout: `min_size: 1` used to invert the clamp bounds (`min > max`) and
+    /// abort the TUI.
+    #[test]
+    fn render_survives_a_degenerate_width() {
+        let hstack = HStack::new();
+        hstack.add_child_with_options(
+            Arc::new(Text::new("status", 0, 0)),
+            StackEntryOptions {
+                basis: None,
+                grow: 0,
+                shrink: 1,
+                min_size: 1,
+                max_size: None,
+            },
+        );
+        let lines = hstack.render(0);
+        assert!(!lines.is_empty());
     }
 }

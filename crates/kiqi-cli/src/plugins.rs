@@ -557,6 +557,33 @@ impl kiqi_plugin::Log for StderrLog {
 /// The counterpart of `PluginToolAdapter` for compiled-in plugins: same
 /// `AgentTool` surface, but the call is a plain Rust method - no `PluginApi`,
 /// no handle, no `free_string`, no keepalive.
+/// Drive one plugin call on a plain thread — with **no** tokio context — and
+/// hand the result back through a oneshot.
+///
+/// The wasm guest's WASI waits (a dialog poll's `sleep`, for one) run through
+/// wasmtime's sync-mode `Handle::block_on`, which panics if the calling thread
+/// carries a tokio context. `spawn_blocking` threads do carry one; a plain
+/// `std::thread` does not. The async half only awaits the result.
+fn spawn_plugin_call<T, F>(
+    label: &str,
+    work: F,
+) -> Result<tokio::sync::oneshot::Receiver<T>, kiqi_agent::error::AgentError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name(format!("plugin-call {label}"))
+        .spawn(move || {
+            let _ = tx.send(work());
+        })
+        .map_err(|error| {
+            kiqi_agent::error::AgentError::tool(format!("spawn plugin call thread: {error}"))
+        })?;
+    Ok(rx)
+}
+
 pub struct CompiledToolAdapter {
     host: std::sync::Arc<PluginHost>,
     name: String,
@@ -632,13 +659,28 @@ impl kiqi_agent::agent_tool::AgentTool for CompiledToolAdapter {
         signal: tokio_util::sync::CancellationToken,
         on_update: std::sync::Arc<dyn Fn(kiqi_agent::types::ToolResultPartial) + Send + Sync>,
     ) -> Result<kiqi_agent::types::AgentToolResult, kiqi_agent::error::AgentError> {
-        let sink = UpdateSink { on_update };
-        let probe = HarnessCancel(signal);
-        let mut caps = self.caps.caps();
-        caps.cancel = Some(&probe);
-        let outcome = self
-            .host
-            .call_tool(&self.name, &params, &caps, &sink)
+        // Run the guest call on a plain thread: wasm guests reach WASI (the
+        // ask-user dialog wait sleeps through `std::thread::sleep`), and
+        // wasmtime's sync mode implements waits with `Handle::block_on`, which
+        // panics ("Cannot start a runtime from within a runtime") on any thread
+        // that carries a tokio context — `spawn_blocking` threads included. A
+        // plain thread has none, so wasmtime can spin its own runtime.
+        let host = std::sync::Arc::clone(&self.host);
+        let name = self.name.clone();
+        let label = name.clone();
+        let owned_caps = self.caps.clone();
+        let rx = spawn_plugin_call(&label, move || {
+            let sink = UpdateSink { on_update };
+            let probe = HarnessCancel(signal);
+            let mut caps = owned_caps.caps();
+            caps.cancel = Some(&probe);
+            host.call_tool(&name, &params, &caps, &sink)
+        })?;
+        let outcome = rx
+            .await
+            .map_err(|_| {
+                kiqi_agent::error::AgentError::tool("plugin call thread ended without a result")
+            })?
             .map_err(|error| kiqi_agent::error::AgentError::tool(error.to_string()))?;
 
         let content = outcome
@@ -1823,6 +1865,20 @@ mod tests {
     /// events to `kiqi-todo`, `kiqi-langfuse`, and the rest.
     /// Uses the compiled kiqi-todo as the plugin under test, so it runs in the
     /// configuration CI builds (`--features plugin-kiqi-todo`), not the default.
+    /// wasmtime's sync WASI waits call `Handle::block_on`, which panics on a
+    /// thread that carries a tokio context (`spawn_blocking` threads do). The
+    /// driver must therefore be a plain thread — the ask-user dialog's poll
+    /// sleep is the call that surfaced this.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plugin_calls_run_outside_the_tokio_context() {
+        let rx = spawn_plugin_call("probe", || tokio::runtime::Handle::try_current().is_err())
+            .expect("thread spawns");
+        assert!(
+            rx.await.expect("the call returns"),
+            "plugin calls must run outside every tokio context"
+        );
+    }
+
     #[cfg(feature = "plugin-kiqi-todo")]
     #[test]
     fn kiqi_extensions_dispatch_reaches_compiled_plugins() {
