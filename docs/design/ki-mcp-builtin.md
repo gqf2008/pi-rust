@@ -165,3 +165,31 @@ ki 只投递通知（业主裁定）。
 
 **剩余**：HTTP/Streamable + SSE 传输（届时 HTTP 订阅自然解锁）、prompts/sampling（明确不做）、
 `autoRead` 配置项（若要把部分资源改为程序自动读）。
+
+## 12. 批次 4 状态（2026-10-17，完成）：HTTP/Streamable 传输
+
+提交 `4eef4d5`（分支 `feat/mcp-http`，ff 合入 main）。选型按侦察结论的 option d：
+保留 rmcp 的会话/SSE 状态机（`transport-streamable-http-client`，**不开** `-reqwest`
+变体），由仓库自实现 `StreamableHttpClient`（`crates/kiqi-mcp/src/http.rs`，近逐字移植
+rmcp 0.13 的 reqwest 实现）——整棵树仍是唯一 reqwest 0.12.28（`cargo tree -i reqwest`
+核实），不引入第二个大版本与 aws-lc-rs。
+
+客户端纪律：16MiB 总上限（含 Content-Length、流式读取、POST-SSE 回复与 GET 流单事件；
+裸 CR/LF/CRLF 均按行终止）、同源重定向（跨源拒绝且不接触目标）、typed 401/403、
+404=SessionExpired、URL 拒绝内嵌 userinfo 且日志不打印完整 URL；代理/超时沿用
+`kiqi_ai::http` builder（`httpIdleTimeout` 经 `start_with_http_policy` 接入）。
+
+订阅在 HTTP 上解锁：standalone GET SSE 的 `resources/updated` 进 `McpNoticeMailbox`；
+**404 重初始化后恢复订阅**（审查高危——rmcp 就地 reinit 不会重建 ki 侧订阅，修复补了
+恢复路径）。`autoRead`（每 server 可选 uri 列表）：命中者在边界读取全文（20k 截断）并入
+通知条目，整批有总时限、超时降级轻通知。
+
+ACP：`session/new`/`session/load` 接受 `McpServer::Http`（headers 透传、接受即响亮记录），
+`Sse` 维持 -32602；`initialize` 声明 `mcpCapabilities.http=true`。
+
+测试：进程内 loopback 假 HTTP peer（JSON/SSE、GET SSE、订阅、404 过期、DELETE、分块与
+SSE 超限、跨源重定向、会话头校验）+ 5 个 http e2e；19 个 stdio e2e 与 44 单测保持全绿；
+代理环境变量下测试 hermetic（loopback 绕行）。审查 11 条（1 高危/2 中/8 低）全部修复。
+
+**剩余**：legacy SSE 传输（ACP `Sse` 变体）仍不做；prompts/sampling 不做；`.wasm` 签名与
+permissions 宿主化各自立批（见 §7 / 侦察记录）。

@@ -32,6 +32,12 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   the ported plugins came from) and `@juicesharp/rpiv-todo`.
 
 ### Added
+- **MCP over HTTP/Streamable works**: HTTP `mcpServers` connect through rmcp's
+  session/SSE worker with a repo-owned reqwest client (one reqwest major in the
+  tree), bounded responses (16 MiB), same-origin redirects only, and resource
+  subscriptions over the standalone GET stream (restored after a 404 session
+  expiry). `autoRead` lists let chosen uris deliver their content with the
+  notice; ACP clients may supply HTTP servers at `session/new`.
 - **An active goal points the model at the orchestrator**: the goal guest's
   context injection now appends 「用 `plan` 写 DAG、`dispatch` 跑、节点交给
   `subagent`。」 when those tools are on the session's tool face (and stays
