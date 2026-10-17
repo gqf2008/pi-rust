@@ -24,7 +24,6 @@ invariants do not move with `std.Io`; only the plumbing names below do.
 |---|---|---|
 | `turn_dispatch.zig` | ACP turn: synchronous in-flight claim → spawn worker → responder hand-off; cancel is a no-op when idle and **never lost** when it races the start | porting-traps §1–3 |
 | `process_tree.zig` | MCP stdio server / subagent: `setpgid` at spawn; TERM the group, grace poll, KILL the group, then reap the direct child | porting-traps §8 |
-| `skeletons.zig` | earlier combined draft of both (superseded by the two files above; kept only until it is deleted) | — |
 
 ## Invariants the skeletons pin
 
