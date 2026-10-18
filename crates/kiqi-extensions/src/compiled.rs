@@ -32,9 +32,20 @@ pub enum CompiledVerdict {
     Claimed,
 }
 
-/// Receives one dispatched event as `(wire tag, JSON payload)` and reports what
-/// the compiled plugins decided.
-pub type CompiledEventSink = Arc<dyn Fn(u32, Value) -> CompiledVerdict + Send + Sync>;
+/// Whether a dispatch may wait for a busy plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchMode {
+    /// Advisory fan-out (`dispatch_to_handlers`, lifecycle): a plugin that is
+    /// mid-call is skipped rather than waited for.
+    Observe,
+    /// Routing fan-out (claiming dispatchers): the verdict decides control
+    /// flow, so the call waits — failing open would drop a veto.
+    Claiming,
+}
+
+/// Receives one dispatched event as `(mode, wire tag, JSON payload)` and
+/// reports what the compiled plugins decided.
+pub type CompiledEventSink = Arc<dyn Fn(DispatchMode, u32, Value) -> CompiledVerdict + Send + Sync>;
 
 static SINK: OnceLock<RwLock<Option<CompiledEventSink>>> = OnceLock::new();
 
@@ -59,17 +70,27 @@ pub fn clear_compiled_event_sink() {
     *sink_slot().write().unwrap() = None;
 }
 
-/// Fan one stable event out to the compiled plugins, if a sink is installed.
+/// Fan one stable event out to the compiled/wasm plugins, if a sink is
+/// installed. Observe fan-out: a busy plugin is skipped, never waited for.
 ///
 /// Called from the same dispatch funnels the cdylib handlers go through, so a
-/// compiled plugin sees exactly the events a native one would — and, for the
-/// routing dispatchers, its verdict counts the same way.
-pub(crate) fn dispatch(event: &StablePluginEvent) -> CompiledVerdict {
+/// plugin sees exactly the events a native one would.
+pub(crate) fn dispatch_observe(event: &StablePluginEvent) -> CompiledVerdict {
+    dispatch_with(DispatchMode::Observe, event)
+}
+
+/// Routing variant: the caller acts on the verdict, so a busy plugin is waited
+/// for rather than skipped.
+pub(crate) fn dispatch_claiming(event: &StablePluginEvent) -> CompiledVerdict {
+    dispatch_with(DispatchMode::Claiming, event)
+}
+
+fn dispatch_with(mode: DispatchMode, event: &StablePluginEvent) -> CompiledVerdict {
     let slot = sink_slot().read().unwrap();
     let Some(sink) = slot.as_ref() else {
         return CompiledVerdict::Continue;
     };
-    sink(event.tag as u32, event_payload(event))
+    sink(mode, event.tag as u32, event_payload(event))
 }
 
 /// The JSON payload the compile-time contract carries.
@@ -120,10 +141,10 @@ mod tests {
     #[test]
     fn a_sink_observes_data_and_empty_events() {
         let _guard = TEST_LOCK.lock().unwrap();
-        let seen: Arc<Mutex<Vec<(u32, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen: Arc<Mutex<Vec<(DispatchMode, u32, Value)>>> = Arc::new(Mutex::new(Vec::new()));
         let record = Arc::clone(&seen);
-        set_compiled_event_sink(Arc::new(move |tag, payload| {
-            record.lock().unwrap().push((tag, payload));
+        set_compiled_event_sink(Arc::new(move |mode, tag, payload| {
+            record.lock().unwrap().push((mode, tag, payload));
             CompiledVerdict::Continue
         }));
 
@@ -143,12 +164,16 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert!(
             seen.iter()
-                .any(|(tag, payload)| *tag == 15 && payload["prompt"] == "hi"),
-            "the data payload must arrive parsed: {seen:?}"
+                .any(|(mode, tag, payload)| *mode == DispatchMode::Observe
+                    && *tag == 15
+                    && payload["prompt"] == "hi"),
+            "the data payload must arrive parsed and marked observe: {seen:?}"
         );
         assert!(
             seen.iter()
-                .any(|(tag, payload)| *tag == 2 && payload.is_null()),
+                .any(|(mode, tag, payload)| *mode == DispatchMode::Observe
+                    && *tag == 2
+                    && payload.is_null()),
             "the empty lifecycle payload must arrive null: {seen:?}"
         );
         drop(seen);
@@ -166,7 +191,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap();
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&hits);
-        set_compiled_event_sink(Arc::new(move |_tag, _payload| {
+        set_compiled_event_sink(Arc::new(move |_mode, _tag, _payload| {
             counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             CompiledVerdict::Continue
         }));
@@ -218,7 +243,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap();
         clear_compiled_event_sink();
         let event = StablePluginEvent::empty(EventTag::SessionStart);
-        assert_eq!(dispatch(&event), CompiledVerdict::Continue);
+        assert_eq!(dispatch_observe(&event), CompiledVerdict::Continue);
     }
 
     /// `SessionTree` rides the empty-event funnel (no payload on every tier —
@@ -236,7 +261,14 @@ mod tests {
     #[test]
     fn a_claimed_verdict_reaches_the_routing_dispatcher() {
         let _guard = TEST_LOCK.lock().unwrap();
-        set_compiled_event_sink(Arc::new(|_, _| CompiledVerdict::Claimed));
+        set_compiled_event_sink(Arc::new(|mode, _, _| {
+            assert_eq!(
+                mode,
+                DispatchMode::Claiming,
+                "routing dispatch must ask the blocking face"
+            );
+            CompiledVerdict::Claimed
+        }));
         // No native handlers at all: the compiled verdict alone must decide.
         assert!(crate::translate::dispatch_data_event_claiming(
             None,

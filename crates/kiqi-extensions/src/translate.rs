@@ -342,7 +342,7 @@ pub fn dispatch_to_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEve
     // The verdict is ignored here on purpose: this is the observe fan-out, and
     // the native path does not act on `CLAIMED` either (only the routing
     // dispatchers do).
-    let _ = crate::compiled::dispatch(event);
+    let _ = crate::compiled::dispatch_observe(event);
     // Staleness guard: a stale registry (swapped-out session) does nothing.
     if !crate::registry::assert_active(snapshot.active_flag()) {
         return;
@@ -611,7 +611,7 @@ pub fn dispatch_data_event_claiming(
     // Compiled plugins are asked first and unconditionally: they are not gated on
     // a native subscription, and a claim stands on its own.
     let compiled_claimed =
-        crate::compiled::dispatch(&event) == crate::compiled::CompiledVerdict::Claimed;
+        crate::compiled::dispatch_claiming(&event) == crate::compiled::CompiledVerdict::Claimed;
     let Some(snapshot) = snapshot else {
         free_dispatched_event(&event);
         return compiled_claimed;
@@ -727,7 +727,7 @@ pub async fn dispatch_lifecycle_event(
     // would otherwise never deliver `SessionStart`/`SessionShutdown`). The
     // verdict has no lifecycle meaning here — a compiled plugin cannot veto (the
     // contract's `EventAction` has no abort, unlike the native `ABORT` code).
-    let _ = crate::compiled::dispatch(&StablePluginEvent::empty(tag));
+    let _ = crate::compiled::dispatch_observe(&StablePluginEvent::empty(tag));
     // Staleness guard: a stale registry (swapped-out session) does nothing.
     if !crate::registry::assert_active(snapshot.active_flag()) {
         return None;

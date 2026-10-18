@@ -1595,6 +1595,38 @@ impl WasmPlugin {
     }
 }
 
+impl WasmPlugin {
+    /// Shared body of the two `on_event` faces: call the guest with the call
+    /// lock already held (blocking) or skipped (observe).
+    fn dispatch_event(
+        &self,
+        guard: &mut Option<Inner>,
+        event: &Event,
+        caps: &HostCaps<'_>,
+    ) -> EventAction {
+        let Some(inner) = guard.as_mut() else {
+            return EventAction::Continue;
+        };
+        let wit = to_wit_event(event);
+        let _context = install_context(None, caps);
+        let result = inner
+            .guest
+            .kiqi_plugin_plugin_api()
+            .call_on_event(&mut inner.store, &wit);
+        clear_context();
+        // A `proc` handle lives for this call and nothing beyond it.
+        inner.store.data_mut().reap_procs();
+        match result {
+            Ok(WitEventAction::Continue) => EventAction::Continue,
+            Ok(WitEventAction::Claimed) => EventAction::Claimed,
+            Err(trap) => {
+                eprintln!("[kiqi-plugin] {}: on-event trapped: {trap}", self.id);
+                EventAction::Continue
+            }
+        }
+    }
+}
+
 impl Drop for WasmPlugin {
     fn drop(&mut self) {
         self.unload();
@@ -1816,26 +1848,20 @@ impl PluginTrait for WasmPlugin {
 
     fn on_event(&self, event: &Event, caps: &HostCaps<'_>) -> EventAction {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(inner) = guard.as_mut() else {
-            return EventAction::Continue;
+        self.dispatch_event(&mut guard, event, caps)
+    }
+
+    /// Observe fan-out. A guest call such as `ask_user` holds `inner` while it
+    /// waits for the user, and the same user must click the dialog that opens
+    /// from this very dispatch — blocking here would deadlock the TUI. Observe
+    /// events are advisory, so a busy guest simply misses this one.
+    fn try_on_event(&self, event: &Event, caps: &HostCaps<'_>) -> EventAction {
+        let mut guard = match self.inner.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => return EventAction::Continue,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         };
-        let wit = to_wit_event(event);
-        let _context = install_context(None, caps);
-        let result = inner
-            .guest
-            .kiqi_plugin_plugin_api()
-            .call_on_event(&mut inner.store, &wit);
-        clear_context();
-        // A `proc` handle lives for this call and nothing beyond it.
-        inner.store.data_mut().reap_procs();
-        match result {
-            Ok(WitEventAction::Continue) => EventAction::Continue,
-            Ok(WitEventAction::Claimed) => EventAction::Claimed,
-            Err(trap) => {
-                eprintln!("[kiqi-plugin] {}: on-event trapped: {trap}", self.id);
-                EventAction::Continue
-            }
-        }
+        self.dispatch_event(&mut guard, event, caps)
     }
 
     fn shutdown(&self) {

@@ -863,3 +863,27 @@ README 均如实陈述；③ 旧包升级不会自动改 fs scope——升级后
 
 e2e（`crates/kiqi-plugin-host/tests/e2e.rs`）新增端到端联动测试：把 goal guest 的**真实
 输出**喂给 orchestrator guest，断言指南开关跟随 goal 状态。
+
+### 6.37 观察事件不再等待等待用户的 guest（2026-10-18）
+
+现场：一个长达 13MB 的 TUI 会话在模型调用 `ask_user` 后停在 `Working…` 36 分钟，
+Esc 无响应。进程采样显示按键线程永久阻塞在一个 std mutex 上；会话文件最后一条是
+`tool_started(ask_user)`，之后没有任何记录。
+
+根因（实核）：`ask_user` 的 wasm guest 在 `call_tool` 里 open→poll 等待用户，整个
+调用期间持有 `WasmPlugin.inner`；而 TUI 的按键线程在打开选择框**之前**先调用
+`dispatch_ui_prompt_event(UiPromptStart)`（`open_selector_with_view` 第一步），
+它经 `dispatch_to_handlers` → `compiled::dispatch` → `dispatch_to_compiled` 走到
+**每一个** wasm host 的 `on_event`，后者 `self.inner.lock()` 阻塞——按钮线程被自己
+要问的那个用户卡住，对话框永远不会出现。
+
+修法：把分发拆成两种语义。观察面（`dispatch_to_handlers`、lifecycle）用
+`Plugin::try_on_event`——默认退回 `on_event`，wasm host 覆盖为 `try_lock`，忙碌即
+跳过（观察事件是建议性的，丢一条优于挂死 UI）；决定控制流的 claiming 面
+（`dispatch_data_event_claiming`）继续用阻塞的 `on_event`，不允许 fail-open。
+
+残留限制：claiming 面仍可能等一个长期 wasm 调用结束（工具审批场景没有 `ask_user`
+这种无限等待，属于可接受的有界等待）。回归测试：
+`kiqi-plugin-host/tests/e2e.rs::observe_events_skip_a_guest_that_is_waiting_on_the_ui`
+（真实 ask_user guest，断言 observe 2 秒内返回 Continue），以及 kiqi-cli 的
+`observe_dispatch_does_not_wait_for_a_busy_plugin`（模式选择）。

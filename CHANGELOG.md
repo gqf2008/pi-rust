@@ -11,6 +11,19 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A wasm `ask_user` dialog no longer deadlocks the TUI.** The observe event
+  fan-out (including `UiPromptStart`, which the key loop dispatches right before
+  it opens the dialog) called every wasm host's `on_event`; a guest call such as
+  `ask_user` holds that plugin's call lock while it waits for the user, so the
+  dispatch waited forever — the dialog never opened, the run showed `Working…`
+  indefinitely, and Esc stopped responding (observed: 36 minutes). Observe
+  dispatches now use a non-blocking `try_on_event` that skips a busy guest; the
+  claiming fan-out that decides control flow keeps the blocking call.
+  Regression test:
+  `observe_events_skip_a_guest_that_is_waiting_on_the_ui` (plugin-host e2e).
+
 ### Changed
 
 - **The `rpi-*` → `kiqi-*` rename is finished.** Every crate, plugin and wasm

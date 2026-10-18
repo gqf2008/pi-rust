@@ -397,12 +397,13 @@ pub fn install_compiled_event_sink(caps: OwnedCaps) {
         *guard = Some(caps.clone());
     }
     let hosts = compiled_plugin_hosts();
-    let sink: kiqi_extensions::CompiledEventSink = std::sync::Arc::new(move |tag, payload| {
-        let Some(tag) = kiqi_plugin::EventTag::from_u32(tag) else {
-            return kiqi_extensions::CompiledVerdict::Continue;
-        };
-        dispatch_to_compiled(&hosts, &caps, tag, payload)
-    });
+    let sink: kiqi_extensions::CompiledEventSink =
+        std::sync::Arc::new(move |mode, tag, payload| {
+            let Some(tag) = kiqi_plugin::EventTag::from_u32(tag) else {
+                return kiqi_extensions::CompiledVerdict::Continue;
+            };
+            dispatch_to_compiled(&hosts, &caps, tag, payload, mode)
+        });
     kiqi_extensions::set_compiled_event_sink(sink);
 }
 
@@ -416,6 +417,7 @@ pub(crate) fn dispatch_to_compiled(
     caps: &OwnedCaps,
     tag: kiqi_plugin::EventTag,
     payload: serde_json::Value,
+    mode: kiqi_extensions::DispatchMode,
 ) -> kiqi_extensions::CompiledVerdict {
     let event = kiqi_plugin::Event::new(tag, payload);
     let caps = caps.caps();
@@ -431,12 +433,17 @@ pub(crate) fn dispatch_to_compiled(
     };
     let mut verdict = kiqi_extensions::CompiledVerdict::Continue;
     for host in &asked {
+        // Observe fan-out runs on the UI key loop and must not wait for a guest
+        // that is itself waiting on the user (`ask_user` holds the wasm call
+        // lock while its dialog is open). Claiming fan-out decides control flow
+        // and keeps the blocking call.
+        let action = match mode {
+            kiqi_extensions::DispatchMode::Observe => host.try_on_event(&event, &caps),
+            kiqi_extensions::DispatchMode::Claiming => host.on_event(&event, &caps),
+        };
         // `Replace` counts as claimed: the plugin took the event, but the carried
         // payload has no host channel to travel down.
-        if !matches!(
-            host.on_event(&event, &caps),
-            kiqi_plugin::EventAction::Continue
-        ) {
+        if !matches!(action, kiqi_plugin::EventAction::Continue) {
             verdict = kiqi_extensions::CompiledVerdict::Claimed;
         }
     }
@@ -885,6 +892,16 @@ impl PluginHost {
         caps: &HostCaps<'_>,
     ) -> kiqi_plugin::EventAction {
         self.guard("on-event", || self.plugin.on_event(event, caps))
+            .unwrap_or(kiqi_plugin::EventAction::Continue)
+    }
+
+    /// Observe-only fan-out: never waits for a plugin that is mid-call.
+    pub fn try_on_event(
+        &self,
+        event: &kiqi_plugin::Event,
+        caps: &HostCaps<'_>,
+    ) -> kiqi_plugin::EventAction {
+        self.guard("on-event", || self.plugin.try_on_event(event, caps))
             .unwrap_or(kiqi_plugin::EventAction::Continue)
     }
 
@@ -2588,6 +2605,7 @@ mod tests {
                 &caps,
                 kiqi_plugin::EventTag::Input,
                 serde_json::json!({ "key": "f8" }),
+                kiqi_extensions::DispatchMode::Claiming,
             ),
             kiqi_extensions::CompiledVerdict::Claimed,
             "the plugin declared f8, so it is asked and its claim counts"
@@ -2598,6 +2616,7 @@ mod tests {
                 &caps,
                 kiqi_plugin::EventTag::Input,
                 serde_json::json!({ "key": "f9" }),
+                kiqi_extensions::DispatchMode::Claiming,
             ),
             kiqi_extensions::CompiledVerdict::Continue,
             "an undeclared key must not reach the plugin at all"
@@ -2608,9 +2627,60 @@ mod tests {
                 &caps,
                 kiqi_plugin::EventTag::SessionStart,
                 serde_json::Value::Null,
+                kiqi_extensions::DispatchMode::Observe,
             ),
             kiqi_extensions::CompiledVerdict::Continue,
             "a lifecycle event is observed but not claimed"
+        );
+    }
+
+    /// Observe fan-out must go through `try_on_event` (a busy guest is skipped,
+    /// not waited for); claiming fan-out must keep the blocking call.
+    #[test]
+    fn observe_dispatch_does_not_wait_for_a_busy_plugin() {
+        struct Split;
+        impl kiqi_plugin::Plugin for Split {
+            fn id(&self) -> &str {
+                "split"
+            }
+            fn on_event(
+                &self,
+                _: &kiqi_plugin::Event,
+                _: &HostCaps<'_>,
+            ) -> kiqi_plugin::EventAction {
+                kiqi_plugin::EventAction::Continue
+            }
+            fn try_on_event(
+                &self,
+                _: &kiqi_plugin::Event,
+                _: &HostCaps<'_>,
+            ) -> kiqi_plugin::EventAction {
+                kiqi_plugin::EventAction::Claimed
+            }
+        }
+        let host = std::sync::Arc::new(PluginHost::new("split", Box::new(Split)));
+        let caps = empty_caps();
+        assert_eq!(
+            dispatch_to_compiled(
+                &[host.clone()],
+                &caps,
+                kiqi_plugin::EventTag::SessionStart,
+                serde_json::Value::Null,
+                kiqi_extensions::DispatchMode::Observe,
+            ),
+            kiqi_extensions::CompiledVerdict::Claimed,
+            "observe must use try_on_event"
+        );
+        assert_eq!(
+            dispatch_to_compiled(
+                &[host],
+                &caps,
+                kiqi_plugin::EventTag::SessionStart,
+                serde_json::Value::Null,
+                kiqi_extensions::DispatchMode::Claiming,
+            ),
+            kiqi_extensions::CompiledVerdict::Continue,
+            "claiming must use the blocking on_event"
         );
     }
 

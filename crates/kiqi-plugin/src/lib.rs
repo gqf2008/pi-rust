@@ -605,6 +605,18 @@ pub trait Plugin: Send + Sync + 'static {
         EventAction::Continue
     }
 
+    /// Observe-only variant that must never wait for a busy plugin.
+    ///
+    /// The observe fan-out runs on the UI's key loop, and a plugin call can be
+    /// waiting on the same user the UI is about to prompt (`ask_user` holds the
+    /// wasm call lock for as long as the dialog is open). A blocking observe
+    /// would therefore deadlock the dialog that would end the wait. Hosts that
+    /// serialize calls (wasm) override this to skip instead of waiting;
+    /// in-process plugins keep the blocking default.
+    fn try_on_event(&self, event: &Event, caps: &HostCaps<'_>) -> EventAction {
+        self.on_event(event, caps)
+    }
+
     /// Best-effort teardown.
     fn shutdown(&self) {}
 }

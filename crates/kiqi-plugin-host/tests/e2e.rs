@@ -917,6 +917,98 @@ fn ask_user_reports_cancellation() {
     );
 }
 
+/// The TUI opens an `ask_user` dialog from the same key loop that runs the
+/// observe event fan-out. While the guest call holds the plugin's call lock
+/// waiting for the user, an observe dispatch must skip instead of waiting:
+/// the only person who can end the wait is the one the UI is trying to ask.
+/// Without the skip this deadlocks the TUI (observed 2026-10-18).
+#[test]
+fn observe_events_skip_a_guest_that_is_waiting_on_the_ui() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let wasm = ask_user_wasm();
+    let plugin = Arc::new(
+        WasmPlugin::load_with_grants("kiqi-ask-user", &wasm, Grants::default()).expect("load"),
+    );
+    let ui = Arc::new(ScriptedUi::new(DialogMode::Pending));
+
+    let ask = {
+        let plugin = plugin.clone();
+        let ui = ui.clone();
+        std::thread::spawn(move || {
+            let log = NullLog;
+            let caps = HostCaps {
+                session: None,
+                control: None,
+                inject: None,
+                ui: Some(ui.as_ref()),
+                log: &log,
+                cancel: None,
+            };
+            let sink = RecordingSink {
+                blocks: Mutex::new(Vec::new()),
+            };
+            plugin.call(
+                "ask_user",
+                &serde_json::json!({ "question": "Which port?" }),
+                &caps,
+                &sink,
+            )
+        })
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ui.ops().contains(&"open".to_string()) {
+        assert!(
+            Instant::now() < deadline,
+            "the guest never opened the dialog: {:?}",
+            ui.ops()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // The guest is now polling for an answer and holds the call lock. The
+    // observe probe must come back on its own.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let observe = {
+        let plugin = plugin.clone();
+        let ui = ui.clone();
+        std::thread::spawn(move || {
+            let log = NullLog;
+            let caps = HostCaps {
+                session: None,
+                control: None,
+                inject: None,
+                ui: Some(ui.as_ref()),
+                log: &log,
+                cancel: None,
+            };
+            let action = plugin.try_on_event(
+                &Event::new(EventTag::SessionStart, serde_json::Value::Null),
+                &caps,
+            );
+            let _ = tx.send(action);
+        })
+    };
+
+    let observed = rx.recv_timeout(Duration::from_secs(2));
+    // Release the blocked call in every outcome so the threads can join.
+    *ui.mode.lock().unwrap() = DialogMode::Cancel;
+    let outcome = ask.join().expect("ask thread").expect("call returns");
+    observe.join().expect("observe thread");
+    let action = match observed {
+        Ok(action) => action,
+        Err(_) => panic!("observe dispatch waited on a guest that is waiting on the UI"),
+    };
+    assert_eq!(
+        action,
+        EventAction::Continue,
+        "a skipped observe is Continue"
+    );
+    assert!(outcome.is_error, "the cancelled ask is an error result");
+}
+
 /// Gate §6.3.4: a `timeout` closes the dialog and fails the ask rather than
 /// waiting forever.
 #[test]
