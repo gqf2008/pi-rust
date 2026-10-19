@@ -102,14 +102,42 @@ pub async fn load_project_context_files(
     cwd: &Path,
     agent_dir: &Path,
 ) -> Vec<ContextFile> {
+    load_project_context_files_with_globals(env, cwd, agent_dir, &[]).await
+}
+
+/// [`load_project_context_files`] plus extra global instruction directories.
+///
+/// `extra_globals` is how `~/.agents` joins the chain without `kiqi-harness`
+/// having to know that convention: the CLI resolves the paths and passes them in.
+/// They are loaded **before** `agent_dir`, so a `~/.agents/AGENTS.md` is the most
+/// general standing instruction and `agent_dir`'s file refines it by coming later
+/// in the concatenation. Missing directories are skipped silently — most machines
+/// do not have `~/.agents` at all.
+pub async fn load_project_context_files_with_globals(
+    env: &Arc<dyn ExecutionEnv>,
+    cwd: &Path,
+    agent_dir: &Path,
+    extra_globals: &[PathBuf],
+) -> Vec<ContextFile> {
     let mut context_files: Vec<ContextFile> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // 0. Extra global roots (e.g. `~/.agents`), most general first.
+    for dir in extra_globals {
+        if let Some(global) = load_context_file_from_dir(env, dir).await {
+            let key = canonical(&global.path);
+            if seen.insert(key) {
+                context_files.push(global);
+            }
+        }
+    }
 
     // 1. Global context (agentDir).
     if let Some(global) = load_context_file_from_dir(env, agent_dir).await {
         let key = canonical(&global.path);
-        seen.insert(key.clone());
-        context_files.push(global);
+        if seen.insert(key.clone()) {
+            context_files.push(global);
+        }
     }
 
     // 2. Ancestor walk cwd → root, unshift-ing so cwd's file is last.
@@ -280,6 +308,69 @@ mod tests {
         let contents: Vec<&str> = files.iter().map(|f| f.content.as_str()).collect();
         // Global first, then root (shallow), then sub (deepest = cwd) last.
         assert_eq!(contents, vec!["GLOBAL", "ROOT", "SUB"]);
+    }
+
+    /// `~/.agents/AGENTS.md` must be the most general instruction and the agent
+    /// dir's file must come after it — otherwise a machine-wide standing rule
+    /// would silently override the ki-specific one.
+    #[tokio::test]
+    async fn extra_global_dirs_load_before_the_agent_dir() {
+        let concrete = InMemoryExecutionEnv::with_cwd(PathBuf::from("/proj"));
+        seed(&concrete, "/home/u/.agents/AGENTS.md", "AGENTS_DIR").await;
+        seed(&concrete, "/home/u/.ki/agent/AGENTS.md", "KI_AGENT_DIR").await;
+        seed(&concrete, "/proj/AGENTS.md", "PROJECT").await;
+        let env: Arc<dyn ExecutionEnv> = Arc::new(concrete);
+
+        let files = load_project_context_files_with_globals(
+            &env,
+            Path::new("/proj"),
+            Path::new("/home/u/.ki/agent"),
+            &[PathBuf::from("/home/u/.agents")],
+        )
+        .await;
+
+        let contents: Vec<&str> = files.iter().map(|f| f.content.as_str()).collect();
+        assert_eq!(contents, vec!["AGENTS_DIR", "KI_AGENT_DIR", "PROJECT"]);
+    }
+
+    /// A missing `~/.agents` is the common case and must not produce an entry or
+    /// an error.
+    #[tokio::test]
+    async fn a_missing_extra_global_dir_is_skipped() {
+        let concrete = InMemoryExecutionEnv::with_cwd(PathBuf::from("/proj"));
+        seed(&concrete, "/proj/AGENTS.md", "PROJECT").await;
+        let env: Arc<dyn ExecutionEnv> = Arc::new(concrete);
+
+        let files = load_project_context_files_with_globals(
+            &env,
+            Path::new("/proj"),
+            Path::new("/absent/agent"),
+            &[PathBuf::from("/absent/.agents")],
+        )
+        .await;
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].content, "PROJECT");
+    }
+
+    /// Two globals pointing at the same file (a symlinked or overridden home)
+    /// must not double the instructions.
+    #[tokio::test]
+    async fn the_same_global_file_is_loaded_once() {
+        let concrete = InMemoryExecutionEnv::with_cwd(PathBuf::from("/proj"));
+        seed(&concrete, "/home/u/.agents/AGENTS.md", "ONCE").await;
+        let env: Arc<dyn ExecutionEnv> = Arc::new(concrete);
+
+        let files = load_project_context_files_with_globals(
+            &env,
+            Path::new("/proj"),
+            Path::new("/home/u/.agents"),
+            &[PathBuf::from("/home/u/.agents")],
+        )
+        .await;
+
+        assert_eq!(files.len(), 1, "the same path must not appear twice");
+        assert_eq!(files[0].content, "ONCE");
     }
 
     #[tokio::test]

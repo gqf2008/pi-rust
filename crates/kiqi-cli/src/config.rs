@@ -107,6 +107,53 @@ pub fn agent_dir() -> Result<PathBuf, ConfigError> {
     Ok(home.join(CONFIG_DIR_NAME).join("agent"))
 }
 
+/// Env override for the user's cross-agent directory (`~/.agents` by default).
+///
+/// Deliberately separate from [`CONFIG_DIR_ENV`]: `~/.agents` is a shared
+/// convention (it also hosts `skills/`), not ki's own config directory, so
+/// relocating ki's agent dir must not silently relocate it.
+pub const AGENTS_DIR_ENV: &str = "KI_AGENTS_DIR";
+
+/// The user's cross-agent directory: `$KI_AGENTS_DIR` when set, else
+/// `~/.agents`.
+///
+/// Returns `None` when no home directory is resolvable. Callers treat a missing
+/// directory as "nothing to load" rather than an error — most machines do not
+/// have one, and that must stay invisible.
+pub fn agents_dir() -> Option<PathBuf> {
+    if let Some(val) = std::env::var_os(AGENTS_DIR_ENV) {
+        let p = PathBuf::from(&val);
+        if p.is_absolute() {
+            return Some(p);
+        }
+        // A relative override would resolve against an unpredictable cwd; ignore
+        // it rather than loading an arbitrary directory as standing instructions.
+        return None;
+    }
+    // An explicit ki-dir override means "use this layout, not the user's". Falling
+    // back to the real `~/.agents` would mix the two environments' standing
+    // instructions — the isolated run would silently inherit the machine owner's
+    // global rules. That is wrong for the isolated case (tests, throwaway agent
+    // dirs) and surprising for a user who relocated ki on purpose. Both can opt
+    // back in with `KI_AGENTS_DIR`.
+    if std::env::var_os(CONFIG_DIR_ENV).is_some() {
+        return None;
+    }
+    // Unit tests must not inherit the developer's machine state. Without this the
+    // crate's own suite reads the real `~/.agents/skills` into every session it
+    // builds — non-hermetic (results depend on the machine) and slow enough to
+    // shift the timing of tests that share process-wide state. Tests that want the
+    // shared directory set `KI_AGENTS_DIR` explicitly.
+    #[cfg(test)]
+    {
+        return None;
+    }
+    #[cfg(not(test))]
+    {
+        dirs::home_dir().map(|home| home.join(".agents"))
+    }
+}
+
 /// The config dir one level above the agent dir (`~/.ki`, or the parent of an
 /// env override). Used by [`migrate_legacy_layout`] to locate the old flat
 /// layout. Returns `None` when the env override has no parent (a root path).
@@ -1723,6 +1770,54 @@ mod tests {
         let dir = agent_dir().unwrap();
         restore_env(CONFIG_DIR_ENV, prev);
         assert_eq!(dir, tmp.path());
+    }
+
+    /// An explicit ki-dir override must NOT drag in the real user's `~/.agents`:
+    /// an isolated run (tests, a throwaway agent dir) would otherwise inherit the
+    /// machine owner's global instructions without anyone asking for it.
+    #[test]
+    fn agents_dir_is_not_read_when_the_ki_dir_is_overridden() {
+        let _guard = env_lock().lock().unwrap();
+        let prev_agent = std::env::var_os(CONFIG_DIR_ENV);
+        let prev_agents = std::env::var_os(AGENTS_DIR_ENV);
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var(CONFIG_DIR_ENV, tmp.path());
+        std::env::remove_var(AGENTS_DIR_ENV);
+        let resolved = agents_dir();
+        restore_env(CONFIG_DIR_ENV, prev_agent);
+        restore_env(AGENTS_DIR_ENV, prev_agents);
+        assert!(
+            resolved.is_none(),
+            "an overridden ki dir must not fall back to the real ~/.agents: {resolved:?}"
+        );
+    }
+
+    /// ...but an explicit `KI_AGENTS_DIR` always wins, so opting back in is one
+    /// variable away.
+    #[test]
+    fn agents_dir_honours_its_own_override() {
+        let _guard = env_lock().lock().unwrap();
+        let prev_agent = std::env::var_os(CONFIG_DIR_ENV);
+        let prev_agents = std::env::var_os(AGENTS_DIR_ENV);
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var(CONFIG_DIR_ENV, tmp.path().join("agent"));
+        std::env::set_var(AGENTS_DIR_ENV, tmp.path().join("shared"));
+        let resolved = agents_dir();
+        restore_env(CONFIG_DIR_ENV, prev_agent);
+        restore_env(AGENTS_DIR_ENV, prev_agents);
+        assert_eq!(resolved, Some(tmp.path().join("shared")));
+    }
+
+    /// A relative `KI_AGENTS_DIR` would resolve against an unpredictable cwd, so
+    /// it is ignored rather than loading an arbitrary directory as instructions.
+    #[test]
+    fn a_relative_agents_dir_override_is_ignored() {
+        let _guard = env_lock().lock().unwrap();
+        let prev = std::env::var_os(AGENTS_DIR_ENV);
+        std::env::set_var(AGENTS_DIR_ENV, "relative/agents");
+        let resolved = agents_dir();
+        restore_env(AGENTS_DIR_ENV, prev);
+        assert!(resolved.is_none(), "got {resolved:?}");
     }
 
     #[test]

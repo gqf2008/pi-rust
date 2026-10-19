@@ -23,9 +23,15 @@
 //! directory drops in and works (the documented intent). Full trust gating is
 //! deferred.
 //!
-//! **Deferred (documented):** `.agents/skills` + `~/.agents/skills`;
-//! shadowed-context-file dedup (`findShadowedContextFile`); full structured
-//! winner/loser collision diagnostics (ki v1 encodes collisions as a
+//! **Cross-agent directories (v1):** project `<cwd>/.agents/skills` and user
+//! `~/.agents/skills` are read in addition to the ki-specific directories, since
+//! `.agents` is a shared convention rather than ki's own config. Precedence is
+//! `.ki` → `.agents` within each scope, project before global, so a ki-local copy
+//! of a skill shadows a cross-agent copy of the same name.
+//!
+//! **Deferred (documented):** shadowed-context-file dedup
+//! (`findShadowedContextFile`); full structured winner/loser collision
+//! diagnostics (ki v1 encodes collisions as a
 //! `SkillDiagnostic`/`PromptTemplateDiagnostic` with a descriptive message).
 
 use std::collections::HashMap;
@@ -42,6 +48,10 @@ use kiqi_tools::env::ExecutionEnv;
 
 /// The project-local ki configuration directory.
 pub const PROJECT_CONFIG_DIR_NAME: &str = ".ki";
+
+/// The cross-agent configuration directory name, used both in a project
+/// (`<cwd>/.agents`) and under the home directory (`~/.agents`).
+pub const AGENTS_DIR_NAME: &str = ".agents";
 
 /// Resolve the preferred project-local resource subdir `<cwd>/.ki/<sub>`.
 pub fn project_dir(cwd: &Path, sub: &str) -> PathBuf {
@@ -278,6 +288,11 @@ pub fn skill_dirs(cwd: &Path) -> Vec<PathBuf> {
         dirs.extend(configured_global_dirs(g.clone(), ResourceKind::Skills));
         dirs.push(g);
     }
+    // `~/.agents/skills` is the least specific source, so it comes last: a ki
+    // skill of the same name shadows a cross-agent one.
+    if let Some(shared) = global_agents_dir("skills") {
+        dirs.push(shared);
+    }
     dirs
 }
 
@@ -288,10 +303,34 @@ pub fn project_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
     project_resource_dirs(cwd, "skills", ResourceKind::Skills)
 }
 
+/// The project's cross-agent resource dir `<cwd>/.agents/<sub>`.
+///
+/// `.agents` is a shared convention (Claude Code, the `skills` ecosystem), not a
+/// ki-specific directory, so it is read in addition to `.ki`. Same v1 rule as
+/// `.ki`: project resources are read without a trust prompt (see the module doc
+/// and `config.rs:349`).
+pub fn project_agents_dir(cwd: &Path, sub: &str) -> PathBuf {
+    cwd.join(AGENTS_DIR_NAME).join(sub)
+}
+
+/// The user's cross-agent resource dir `<agents_dir>/<sub>`, e.g.
+/// `~/.agents/skills`.
+pub fn global_agents_dir(sub: &str) -> Option<PathBuf> {
+    crate::config::agents_dir().map(|d| d.join(sub))
+}
+
 /// Resource directories that do not depend on the current project. Used when
 /// the project trust gate denies local configuration/resources.
 pub fn global_skill_dirs() -> Vec<PathBuf> {
-    global_resource_dirs("skills", ResourceKind::Skills)
+    let mut dirs = global_resource_dirs("skills", ResourceKind::Skills);
+    // The shared `~/.agents/skills` is a user-owned resource, so it stays
+    // available when the *project* is not trusted — that is the whole point of
+    // this list (see the caller in `session.rs`). Only skills: `~/.agents` is not
+    // a place for ki prompts or extensions.
+    if let Some(shared) = global_agents_dir("skills") {
+        dirs.push(shared);
+    }
+    dirs
 }
 
 /// The ordered prompt-template paths for a project: configured paths, then
@@ -357,6 +396,9 @@ fn project_resource_dirs(cwd: &Path, sub: &str, kind: ResourceKind) -> Vec<PathB
     };
     dirs.extend(crate::packages::project_package_dirs(cwd, package_kind));
     dirs.push(project_dir(cwd, sub));
+    // The cross-agent directory follows the ki-specific one: a `.ki` copy wins
+    // over a `.agents` copy of the same skill (first-wins by name downstream).
+    dirs.push(project_agents_dir(cwd, sub));
     dirs
 }
 
@@ -489,6 +531,106 @@ mod tests {
     fn project_dir_uses_kiqi_name() {
         let d = project_dir(Path::new("/proj"), "skills");
         assert_eq!(d, PathBuf::from("/proj/.ki/skills"));
+    }
+
+    /// Discovery is only half the contract: the system prompt must carry the
+    /// skill's **metadata** and never its body. Without this a `~/.agents/skills`
+    /// entry could quietly inflate every request with full instructions.
+    #[tokio::test]
+    async fn a_shared_skill_contributes_metadata_but_not_content() {
+        use kiqi_tools::env::FileSystem;
+
+        let env = std::sync::Arc::new(kiqi_tools::in_memory::InMemoryExecutionEnv::new());
+        let typed = std::sync::Arc::clone(&env);
+        typed
+            .create_dir("/home/u/.agents/skills/example", true, None)
+            .await
+            .unwrap();
+        typed
+            .write_file(
+                "/home/u/.agents/skills/example/SKILL.md",
+                "---\nname: shared-example\ndescription: A skill from the shared directory\n---\nSECRET_BODY_MARKER instructions here.\n".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let result = load_skills_with_precedence(
+            &(std::sync::Arc::clone(&env) as std::sync::Arc<dyn ExecutionEnv>),
+            &[PathBuf::from("/home/u/.agents/skills")],
+        )
+        .await;
+
+        assert_eq!(
+            result.skills.len(),
+            1,
+            "diagnostics: {:?}",
+            result.diagnostics
+        );
+        let listing = kiqi_harness::skills::format_skills_for_system_prompt(&result.skills);
+        assert!(listing.contains("<name>shared-example</name>"), "{listing}");
+        assert!(
+            listing.contains("A skill from the shared directory"),
+            "{listing}"
+        );
+        assert!(
+            listing.contains(".agents/skills/example/SKILL.md"),
+            "the listing must point at the file so it can be read on demand: {listing}"
+        );
+        assert!(
+            !listing.contains("SECRET_BODY_MARKER"),
+            "the skill body must NOT enter the system prompt (progressive loading): {listing}"
+        );
+        // The body is still available for the on-demand path.
+        assert!(result.skills[0].content.contains("SECRET_BODY_MARKER"));
+    }
+
+    #[test]
+    fn the_shared_global_skill_dir_is_under_agents() {
+        // Whatever the home directory resolves to, the shared global skill dir is
+        // the `.agents/skills` one (not `.ki/agent/skills`).
+        if let Some(dir) = global_agents_dir("skills") {
+            assert!(dir.ends_with(".agents/skills"), "got {dir:?}");
+        }
+    }
+
+    #[test]
+    fn project_agents_dir_uses_the_shared_convention() {
+        let d = project_agents_dir(Path::new("/proj"), "skills");
+        assert_eq!(d, PathBuf::from("/proj/.agents/skills"));
+    }
+
+    /// The project skill list must carry both the ki directory and the shared
+    /// one, with `.ki` first so a ki copy shadows a `.agents` copy (first wins by
+    /// name downstream).
+    #[test]
+    fn project_skill_dirs_include_both_conventions_in_order() {
+        let dirs = project_skill_dirs(Path::new("/proj"));
+        let ki = dirs
+            .iter()
+            .position(|d| d == &PathBuf::from("/proj/.ki/skills"))
+            .expect("`.ki/skills` must be present");
+        let shared = dirs
+            .iter()
+            .position(|d| d == &PathBuf::from("/proj/.agents/skills"))
+            .expect("`.agents/skills` must be present");
+        assert!(
+            ki < shared,
+            "`.ki/skills` must come before `.agents/skills`: {dirs:?}"
+        );
+    }
+
+    /// `skill_dirs` must not repeat a directory when the shared and the ki global
+    /// resolve to the same place (e.g. `KI_AGENTS_DIR` pointing at the agent dir).
+    #[test]
+    fn skill_dirs_are_deduplicated() {
+        // Whatever the environment resolves to, no path may appear twice: the
+        // loader reads every entry, so a duplicate would report a false collision.
+        let dirs = skill_dirs(Path::new("/proj"));
+        let mut sorted: Vec<&PathBuf> = dirs.iter().collect();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), dirs.len(), "duplicate skill dirs: {dirs:?}");
     }
 
     #[test]

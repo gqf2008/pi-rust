@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use kiqi_ai::Provider;
 use kiqi_harness::agent_harness::AgentHarness;
-use kiqi_harness::context_files::{format_project_context, load_project_context_files};
+use kiqi_harness::context_files::format_project_context;
 use kiqi_harness::session::memory::{InMemorySessionStorage, SystemClock};
 use kiqi_harness::session::session::DefaultIdGenerator;
 use kiqi_harness::session::types::SessionMetadata;
@@ -572,7 +572,17 @@ pub async fn build_with_selection(
         // none is resolvable, pass the cwd dir so only the ancestor-walk runs
         // (the global step returns None anyway).
         let agent_dir_path = agent_dir.clone().unwrap_or_else(|| cwd.to_path_buf());
-        let files = load_project_context_files(&env_dyn, cwd, &agent_dir_path).await;
+        // `~/.agents/AGENTS.md` is the user's cross-agent standing instruction; it
+        // loads before the ki-specific agent dir (most general first).
+        let extra_globals: Vec<std::path::PathBuf> =
+            crate::config::agents_dir().into_iter().collect();
+        let files = kiqi_harness::context_files::load_project_context_files_with_globals(
+            &env_dyn,
+            cwd,
+            &agent_dir_path,
+            &extra_globals,
+        )
+        .await;
         context_paths.extend(
             files
                 .iter()
@@ -1545,7 +1555,15 @@ where
     } else {
         let agent_dir = crate::config::agent_dir().ok();
         let agent_dir_path = agent_dir.unwrap_or_else(|| ctx.cwd.clone());
-        load_project_context_files(&env_dyn, &ctx.cwd, &agent_dir_path).await
+        let extra_globals: Vec<std::path::PathBuf> =
+            crate::config::agents_dir().into_iter().collect();
+        kiqi_harness::context_files::load_project_context_files_with_globals(
+            &env_dyn,
+            &ctx.cwd,
+            &agent_dir_path,
+            &extra_globals,
+        )
+        .await
     };
     let context_block = format_project_context(&context_files);
 
