@@ -368,6 +368,31 @@ fn run_with_limits(
             text
         ));
     }
+    // A zero exit with nothing on stdout is not a success this tool can use.
+    //
+    // `ki -p` writes its answer once, at the end of the run, so an empty stdout
+    // means the child never produced a final message. The common cause is the
+    // run-level turn ceiling (`KI_MAX_TURNS_PER_RUN`, which `child_command` sets
+    // from the node's `maxTurns`): a truncated run still ends `Completed` and
+    // still exits 0 (`kiqi-harness`'s `derive_outcome` treats a budget stop as a
+    // normal exit), so without this check a node that ran out of turns mid-task
+    // would be reported to the orchestrator as `done` with an empty result and
+    // the work would silently vanish.
+    //
+    // Returning `Err` instead makes the truncation visible: the node shows up as
+    // failed, with the child's stderr (where `ki` would report anything it could
+    // say about the run) as the diagnostic.
+    if text.trim().is_empty() {
+        let detail = if stderr_text.trim().is_empty() {
+            "(no stdout, no stderr)".to_string()
+        } else {
+            stderr_text.trim_end().to_string()
+        };
+        return Err(format!(
+            "subagent exited successfully but produced no output; the run may have \
+             hit its turn budget (maxTurns={max_turns}). stderr:\n{detail}"
+        ));
+    }
     Ok(text)
 }
 
@@ -953,6 +978,53 @@ mod tests {
             CHILD_HEARTBEAT_SECS * 3 <= SUBAGENT_STALL_SECS,
             "heartbeat {CHILD_HEARTBEAT_SECS}s is too close to the {SUBAGENT_STALL_SECS}s stall window"
         );
+    }
+
+    /// A run that hits its turn ceiling still exits 0 (`derive_outcome` treats a
+    /// budget stop as a normal exit), and `ki -p` then has no final message to
+    /// print. Reporting that as success would tell the orchestrator `done` for
+    /// work that was cut off — the node would vanish from the board as finished.
+    #[cfg(unix)]
+    #[test]
+    fn a_successful_exit_with_no_output_is_a_failure() {
+        // Exits 0, writes only to stderr, exactly like a truncated run.
+        let script = script_file(
+            "silent-success",
+            "echo 'Stopped after 2 turns in a single run (limit 2)' >&2\nexit 0",
+        );
+
+        let control = Control::default();
+        let result = run_with_limits(&script, "ignored", 8, 60, 30, None, None, &control);
+        let _ = std::fs::remove_file(&script);
+
+        let err = result.expect_err("no output must not be reported as a success");
+        assert!(
+            err.contains("produced no output"),
+            "the error has to name the problem: {err}"
+        );
+        assert!(
+            err.contains("turn budget"),
+            "the error must point at the likely cause: {err}"
+        );
+        assert!(
+            err.contains("Stopped after 2 turns"),
+            "the child's own stderr is the only diagnostic we have: {err}"
+        );
+    }
+
+    /// The counterpart: white-space-only stdout is still nothing. A child that
+    /// prints a newline and exits must not pass as delivered work either.
+    #[cfg(unix)]
+    #[test]
+    fn white_space_output_alone_does_not_count_as_a_result() {
+        let script = script_file("blank-success", "printf '\\n\\n'\nexit 0");
+
+        let control = Control::default();
+        let result = run_with_limits(&script, "ignored", 8, 60, 30, None, None, &control);
+        let _ = std::fs::remove_file(&script);
+
+        let err = result.expect_err("blank output is not a result");
+        assert!(err.contains("produced no output"), "got: {err}");
     }
 
     #[cfg(unix)]
