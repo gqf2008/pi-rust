@@ -159,10 +159,10 @@ pub(super) async fn handle_signal_boundary(
     mcp: &Arc<kiqi_mcp::McpManager>,
     wake_state: &Arc<crate::signal_host::SignalHost>,
     tx: &mpsc::UnboundedSender<TuiMessage>,
-) {
+) -> bool {
     let batch = crate::session::take_mcp_boundary(harness, mcp).await;
     if batch.is_empty() {
-        return;
+        return false;
     }
     crate::session::append_notice_batch(harness, &batch).await;
     let any_auto = batch.notices.iter().any(|notice| {
@@ -200,14 +200,66 @@ pub(super) async fn handle_signal_boundary(
             {
                 eprintln!("warning: mcp: signal wake dropped: the TUI channel is closed");
             }
+            true
         }
-        crate::signal_wake::WakeDecision::Skip(reason) if any_auto => {
-            // Only `auto` servers produce a skip line: with the default `off`,
-            // every notification would otherwise log, which is noise.
-            let servers: Vec<&str> = batch.notices.iter().map(|n| n.server.as_str()).collect();
-            eprintln!("[ki mcp] signal recorded without wake: {reason} (servers={servers:?})");
+        crate::signal_wake::WakeDecision::Skip(reason) => {
+            if any_auto {
+                // Only `auto` servers produce a skip line: with the default
+                // `off`, every notification would otherwise log, which is noise.
+                let servers: Vec<&str> = batch.notices.iter().map(|n| n.server.as_str()).collect();
+                eprintln!("[ki mcp] signal recorded without wake: {reason} (servers={servers:?})");
+            }
+            false
         }
-        crate::signal_wake::WakeDecision::Skip(_) => {}
+    }
+}
+
+/// After a run ends, keep an active goal moving. The goal plugin injects the
+/// goal into context but cannot start runs; without this the session would sit
+/// idle between turns. A signal wake in the same boundary wins (its run already
+/// carries the goal), and user input / Esc always take precedence.
+pub(super) async fn maybe_continue_goal(
+    lane: &Arc<dyn AgentLane>,
+    wake_state: &Arc<crate::signal_host::SignalHost>,
+    tx: &mpsc::UnboundedSender<TuiMessage>,
+) {
+    if wake_state.muted_until_input() {
+        return;
+    }
+    let user_waiting = lane
+        .queued_messages()
+        .await
+        .map(|queued| !queued.steering.is_empty() || !queued.follow_up.is_empty())
+        .unwrap_or(false);
+    if user_waiting {
+        return;
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let Some(goal) = crate::goal_drive::active_goal(&cwd) else {
+        return;
+    };
+    if !goal.can_continue(crate::goal_drive::unix_millis()) {
+        return;
+    }
+    let unbounded = goal.max_turns.is_none() && goal.deadline_ms.is_none();
+    if !wake_state.allow_goal_continuation(&goal.key(), unbounded) {
+        eprintln!(
+            "[ki goal] auto-continue stopped: unbounded goal reached {} host runs",
+            crate::goal_drive::MAX_GOAL_AUTO_RUNS
+        );
+        return;
+    }
+    eprintln!(
+        "[ki goal] auto-continue: {} (turns {})",
+        goal.title, goal.turns_used
+    );
+    if tx
+        .send(TuiMessage::GoalContinue(goal.continuation_prompt()))
+        .is_err()
+    {
+        eprintln!("warning: goal continuation dropped: the TUI channel is closed");
     }
 }
 
@@ -284,7 +336,10 @@ pub(super) async fn handle_agent_event(
             // Same boundary, same reason: MCP resource-update notices gathered
             // during the run append now, never mid-run. The record goes in
             // FIRST (I1); the wake decision only adds a short trigger after it.
-            handle_signal_boundary(harness, mcp, wake_state, tx).await;
+            let woke = handle_signal_boundary(harness, mcp, wake_state, tx).await;
+            if !woke {
+                maybe_continue_goal(lane, wake_state, tx).await;
+            }
             // The run drained the queue; refresh so consumed entries drop out
             // of the pending-messages display.
             refresh_pending_messages(state, lane).await;

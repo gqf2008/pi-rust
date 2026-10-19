@@ -122,6 +122,17 @@ impl SignalHost {
         self.wake.lock().unwrap().record_abort();
     }
 
+    pub(crate) fn muted_until_input(&self) -> bool {
+        self.wake.lock().unwrap().muted_until_input()
+    }
+
+    pub(crate) fn allow_goal_continuation(&self, key: &str, unbounded: bool) -> bool {
+        self.wake
+            .lock()
+            .unwrap()
+            .allow_goal_continuation(key, unbounded)
+    }
+
     pub(crate) fn decide<F>(
         &self,
         batch: &McpNoticeBatch,

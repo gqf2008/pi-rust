@@ -66,6 +66,18 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **An active goal keeps running without a user prompt.** After a run ends,
+  the TUI reads the goal plugin's `active` state (`.ki/goals.json`, read-only)
+  and starts the next run automatically when the goal is still active and has
+  budget left. A goal with `maxTurns`/`maxMinutes` is bounded by the plugin; an
+  unbounded goal is capped at 20 consecutive host continuations. User input,
+  Esc, a paused/completed goal, or a signal wake in the same boundary stops or
+  takes precedence over the continuation.
+- **MCP signal triggers default to acting.** The wake message now tells the
+  agent to take the next useful step when it is within its authorized tools and
+  the current goal, and to ask the user only when the action needs
+  authorization or the intent is genuinely ambiguous. Routine confirmation is
+  explicitly discouraged.
 - **The `rpi-*` → `kiqi-*` rename is finished.** Every crate, plugin and wasm
   guest directory, package name, feature flag (`plugin-rpi-*` →
   `plugin-kiqi-*`), Rust path (`rpi_ai` → `kiqi_ai`), plugin id and file name

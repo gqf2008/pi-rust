@@ -715,6 +715,9 @@ enum TuiMessage {
     /// MUI input event: the same main loop that handles terminal input drains
     /// it (idle) or leaves it for AgentEnd (run active).
     McpInput,
+    /// An active goal still has budget after a run ended: start the next run
+    /// without waiting for the user. The goal itself is already in context.
+    GoalContinue(String),
     /// An MCP resource signal passed the host's arousal budget and should start
     /// a run. The batch's detailed notice entry is already in the transcript;
     /// this is the short external-signal trigger built by `signal_wake`.
@@ -2839,6 +2842,38 @@ pub async fn interactive_tui(
                 if *state.status.lock().unwrap() == RunStatus::Idle {
                     handle_signal_boundary(&harness, &reload_context.mcp, &signal_wake, &tx).await;
                 }
+            }
+            Some(TuiMessage::GoalContinue(prompt)) => {
+                // Same user-priority rule as a signal wake: a queued user
+                // message is the next turn; the goal stays active and will be
+                // continued after that run.
+                let user_waiting = lane
+                    .queued_messages()
+                    .await
+                    .map(|queued| !queued.steering.is_empty() || !queued.follow_up.is_empty())
+                    .unwrap_or(false);
+                if user_waiting {
+                    add_note_message(
+                        &chat_container,
+                        "Goal continuation skipped: user messages are queued.",
+                    );
+                    tui.request_render(false);
+                    continue;
+                }
+                if !state.try_start_working() {
+                    continue;
+                }
+                add_user_message(&chat_container, &prompt);
+                run_prompt_streaming(
+                    &lane,
+                    &prompt,
+                    false,
+                    &tui,
+                    &state,
+                    drain_handle.is_some(),
+                    Vec::new(),
+                )
+                .await;
             }
             Some(TuiMessage::SignalWake(prompt)) => {
                 // User priority (design §5.3): a staged steering/follow-up
