@@ -171,7 +171,11 @@ impl KiHttpClient {
         if let Some(session_id) = session_id {
             request = request.header(HEADER_SESSION_ID, session_id.as_ref());
         }
-        let response = request.json(&message).send().await.map_err(client_error)?;
+        let response = request
+            .json(&message)
+            .send()
+            .await
+            .map_err(|error| send_error(error, self.request_timeout))?;
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             if let Some(header) = response.headers().get(WWW_AUTHENTICATE) {
@@ -290,7 +294,10 @@ impl KiHttpClient {
             request = request.bearer_auth(auth_header);
         }
         request = apply_custom_headers(request, custom_headers)?;
-        let response = request.send().await.map_err(client_error)?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| send_error(error, self.request_timeout))?;
         if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
             return Err(StreamableHttpError::ServerDoesNotSupportSse);
         }
@@ -332,7 +339,10 @@ impl KiHttpClient {
         }
         request = request.header(HEADER_SESSION_ID, session_id.as_ref());
         request = apply_custom_headers(request, custom_headers)?;
-        let response = request.send().await.map_err(client_error)?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| send_error(error, self.request_timeout))?;
         if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
             return Ok(());
         }
@@ -408,6 +418,31 @@ impl StreamableHttpClient for KiHttpClient {
 
 fn client_error(error: reqwest::Error) -> HttpError {
     StreamableHttpError::Client(error)
+}
+
+/// Map a wire failure to the error the caller sees, naming the deadline when the
+/// failure was one.
+///
+/// reqwest's `Display` for an elapsed `.timeout()` is "error sending request for
+/// url (...)" — the cause ("operation timed out") only shows up in the source
+/// chain, which rmcp flattens away. Two deadlines race here: this per-request
+/// wire timeout and rmcp's `PeerRequestOptions::with_timeout`, both set from the
+/// same `timeoutSeconds`. Whichever fires first reports, so a bare reqwest error
+/// made the surfaced message depend on which layer won. Spelling the timeout out
+/// keeps the two paths saying the same thing.
+fn client_timeout_error(timeout: Duration) -> HttpError {
+    StreamableHttpError::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("request timeout after {timeout:?}"),
+    ))
+}
+
+/// [`client_error`], unless the wire gave up on our own deadline.
+fn send_error(error: reqwest::Error, timeout: Option<Duration>) -> HttpError {
+    match timeout {
+        Some(timeout) if error.is_timeout() => client_timeout_error(timeout),
+        _ => client_error(error),
+    }
 }
 
 fn invalid_www_authenticate() -> HttpError {
@@ -643,6 +678,45 @@ mod tests {
         assert!(!is_reserved_header(&HeaderName::from_static(
             "authorization"
         )));
+    }
+
+    /// A per-request timeout must surface as a *timeout*.
+    ///
+    /// reqwest's own `Display` is "error sending request for url (...)" and the
+    /// cause only lives in the source chain, which rmcp flattens. rmcp's
+    /// `PeerRequestOptions::with_timeout` uses the same `timeoutSeconds`, so the
+    /// two deadlines race and the surfaced text used to depend on which fired
+    /// first — the http e2e asserted on "timeout" and flaked when the wire won.
+    #[tokio::test]
+    async fn a_wire_timeout_is_reported_as_a_timeout() {
+        // Accept the connection and never answer: the wire timeout has to fire.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (_stream, _peer) = listener.accept().await.unwrap();
+            // Hold the socket open without writing a response.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let timeout = Duration::from_millis(150);
+        let error = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/mcp"))
+            .timeout(timeout)
+            .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }))
+            .send()
+            .await
+            .expect_err("the peer never answers");
+        assert!(error.is_timeout(), "not a timeout: {error:?}");
+
+        let mapped = send_error(error, Some(timeout));
+        let text = mapped.to_string();
+        assert!(
+            text.contains("timeout"),
+            "the caller must see a timeout, got {text:?}"
+        );
+        assert!(text.contains("150ms"), "got {text:?}");
+
+        server.abort();
     }
 
     #[test]
