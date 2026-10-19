@@ -62,6 +62,9 @@ sh scripts/sync-embedded-docs.sh
 cargo build --locked -p kiqi-todo -p kiqi-lens -p kiqi-webfetch -p kiqi-websearch -p kiqi-subagents -p kiqi-permissions -p kiqi-goal -p kiqi-plan-mode -p kiqi-codegraph -p kiqi-ask-user -p kiqi-langfuse -p kiqi-orchestrator
 # 上面两份清单与 CI 的一致性（CI 也会跑；改任何一侧都要过这条）
 sh scripts/check-feature-parity.sh
+# `plugin-abi.md` 的 §6.x 编号连续性，以及全仓 `§6.N` 引用是否都能落到真实小节
+# （曾经的缺陷：四处引用 §6.34，而它从未被写过）
+sh scripts/check-abi-sections.sh
 ```
 
 注意：goal 测试已用子进程 + tempdir 隔离，跑 `cargo test -p kiqi-cli` 不再改写源码树
