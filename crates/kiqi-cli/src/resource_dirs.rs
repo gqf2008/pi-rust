@@ -289,15 +289,17 @@ pub async fn load_prompt_templates_with_precedence(
 /// The global dir is omitted when `agent_dir()` can't be resolved (no home dir).
 pub fn skill_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = project_skill_dirs(cwd);
-    if let Some(g) = global_dir("skills") {
-        dirs.extend(configured_global_dirs(g.clone(), ResourceKind::Skills));
-        dirs.push(g);
-    }
-    // `~/.agents/skills` is the least specific source, so it comes last: a ki
-    // skill of the same name shadows a cross-agent one.
-    if let Some(shared) = global_agents_dir("skills") {
-        dirs.push(shared);
-    }
+    // Reuse the global list rather than re-deriving it: two hand-written copies of
+    // "which global dirs hold skills" is how `~/.agents/skills` ended up appended
+    // in two places with two different explanations, one of which could drift from
+    // the other without any test noticing.
+    //
+    // The invariant "the global half of `skill_dirs` == `global_skill_dirs()`" is
+    // now guaranteed by *this composition*, not by a test. A test comparing the two
+    // cannot fail by editing one list (both move), and its result depended on
+    // whether `agents_dir()` resolved in the test environment, so it was removed
+    // rather than left looking like protection.
+    dirs.extend(global_skill_dirs());
     dirs
 }
 
@@ -328,10 +330,15 @@ pub fn global_agents_dir(sub: &str) -> Option<PathBuf> {
 /// the project trust gate denies local configuration/resources.
 pub fn global_skill_dirs() -> Vec<PathBuf> {
     let mut dirs = global_resource_dirs("skills", ResourceKind::Skills);
-    // The shared `~/.agents/skills` is a user-owned resource, so it stays
-    // available when the *project* is not trusted — that is the whole point of
-    // this list (see the caller in `session.rs`). Only skills: `~/.agents` is not
-    // a place for ki prompts or extensions.
+    // `~/.agents/skills` comes last: it is the least specific source, so a ki skill
+    // of the same name shadows a cross-agent one.
+    //
+    // It belongs in this list (not just in `skill_dirs`) because it is a
+    // **user-owned** resource: when the *project* is untrusted this list is the only
+    // one consulted (`session.rs` picks it in the `else` branch), and dropping the
+    // user's own shared skills because the project was not trusted would be
+    // backwards. Skills only — `~/.agents` is not a place for ki prompts or
+    // extensions.
     if let Some(shared) = global_agents_dir("skills") {
         dirs.push(shared);
     }
