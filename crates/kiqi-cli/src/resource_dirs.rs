@@ -401,9 +401,18 @@ fn project_resource_dirs(cwd: &Path, sub: &str, kind: ResourceKind) -> Vec<PathB
     };
     dirs.extend(crate::packages::project_package_dirs(cwd, package_kind));
     dirs.push(project_dir(cwd, sub));
-    // The cross-agent directory follows the ki-specific one: a `.ki` copy wins
-    // over a `.agents` copy of the same skill (first-wins by name downstream).
-    dirs.push(project_agents_dir(cwd, sub));
+    // The cross-agent directory follows the ki-specific one, so a `.ki` copy wins
+    // over a `.agents` copy of the same name (first-wins downstream).
+    //
+    // **Skills only.** `.agents` is a convention for standing instructions
+    // (`AGENTS.md`) and `skills/`; it is not a place for ki prompts or extensions,
+    // and loading them from there would accept a directory the convention never
+    // defined — widening what a project can inject while the documents say it does
+    // not. Restricting it here (rather than in each caller) keeps the rule in one
+    // place.
+    if matches!(kind, ResourceKind::Skills) {
+        dirs.push(project_agents_dir(cwd, sub));
+    }
     dirs
 }
 
@@ -620,6 +629,29 @@ mod tests {
         // the `.agents/skills` one (not `.ki/agent/skills`).
         if let Some(dir) = global_agents_dir("skills") {
             assert!(dir.ends_with(".agents/skills"), "got {dir:?}");
+        }
+    }
+
+    /// `.agents` is a convention for `AGENTS.md` + `skills/`. Reading prompts or
+    /// extensions from it would accept a directory that convention never defined,
+    /// and would quietly widen what a project can inject — while the user docs say
+    /// `.agents` supplies only those two things.
+    #[test]
+    fn only_skills_are_loaded_from_the_shared_project_dir() {
+        let skills = project_skill_dirs(Path::new("/proj"));
+        assert!(
+            skills.contains(&PathBuf::from("/proj/.agents/skills")),
+            "{skills:?}"
+        );
+
+        for (label, dirs) in [
+            ("prompts", project_prompt_template_dirs(Path::new("/proj"))),
+            ("extensions", extension_dirs(Path::new("/proj"))),
+        ] {
+            assert!(
+                !dirs.iter().any(|d| d.starts_with("/proj/.agents")),
+                "{label} must not be read from .agents: {dirs:?}"
+            );
         }
     }
 
