@@ -157,6 +157,24 @@ pub fn outcome_exit_code(outcome: &HarnessRunOutcome) -> i32 {
     }
 }
 
+/// The exit code for a finished run, including *why* it ended.
+///
+/// A run stopped by the turn ceiling (`KI_MAX_TURNS_PER_RUN`, which the
+/// orchestrator sets from a node's `maxTurns`) is `Completed` — the loop exited on
+/// its normal path — so [`outcome_exit_code`] alone reports success. For a
+/// delegated subagent that is the worst shape of failure: it exits 0, its output
+/// is a truncated or empty answer, and the scheduler marks the node `done` while
+/// the work is unfinished.
+///
+/// A budget stop exits 1. That is the honest answer to "did this run deliver?" —
+/// no — and it is the only signal a supervising process can see.
+pub fn run_exit_code(outcome: &HarnessRunOutcome, budget_stopped: bool) -> i32 {
+    if budget_stopped {
+        return 1;
+    }
+    outcome_exit_code(outcome)
+}
+
 /// `print` mode: send the initial message (prompt text + inline `@file`
 /// expansions), then any follow-up messages, print the final assistant text,
 /// return the exit code. Mirrors TS `runPrintMode` (text).
@@ -209,7 +227,7 @@ pub async fn print(
             crate::session::drain_mcp_boundary(&harness, &reload_context.mcp).await;
             match lane.prompt_text(&prompt, std::mem::take(&mut images)).await {
                 Ok(result) => {
-                    last_exit = outcome_exit_code(&result.outcome);
+                    last_exit = run_exit_code(&result.outcome, result.budget_stop.is_some());
                     match &result.outcome {
                         HarnessRunOutcome::Completed { final_message, .. }
                         | HarnessRunOutcome::Aborted { final_message, .. } => {
@@ -369,7 +387,7 @@ pub async fn json(
                         agent_done_rx.recv(),
                     )
                     .await;
-                    last_exit = outcome_exit_code(&result.outcome);
+                    last_exit = run_exit_code(&result.outcome, result.budget_stop.is_some());
                     final_outcome = Some(result.outcome);
                 }
                 Err(e) => {
@@ -1702,6 +1720,42 @@ mod tests {
             final_message: assistant("ok", StopReason::Stop),
         };
         assert_eq!(outcome_exit_code(&completed), 0);
+    }
+
+    /// A run stopped by the turn ceiling is `Completed`, so the outcome alone says
+    /// "success". The budget flag has to override it, or a truncated subagent
+    /// exits 0 and the scheduler marks the node `done` with unfinished work.
+    #[test]
+    fn a_budget_stop_exits_non_zero_even_though_the_outcome_is_completed() {
+        let completed = HarnessRunOutcome::Completed {
+            leaf_id: "l".into(),
+            final_entry_id: "e".into(),
+            final_message: assistant("half an answer", StopReason::Stop),
+        };
+        // The plain mapping still says 0 — that is why the second signal exists.
+        assert_eq!(outcome_exit_code(&completed), 0);
+        assert_eq!(
+            run_exit_code(&completed, true),
+            1,
+            "a truncated run must not report success: {completed:?}"
+        );
+        assert_eq!(
+            run_exit_code(&completed, false),
+            0,
+            "a run that was not truncated keeps exit 0"
+        );
+        // A budget stop must not *upgrade* a failure to a success-by-luck path.
+        let failed = HarnessRunOutcome::Failed {
+            leaf_id: "l".into(),
+            error: OperationError {
+                code: "boom".into(),
+                message: "boom".into(),
+            },
+            final_entry_id: None,
+            final_message: None,
+        };
+        assert_eq!(run_exit_code(&failed, false), 1);
+        assert_eq!(run_exit_code(&failed, true), 1);
     }
 
     #[test]

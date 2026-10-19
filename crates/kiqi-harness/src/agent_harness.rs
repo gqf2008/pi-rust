@@ -162,6 +162,15 @@ pub enum NavigationOutcome {
 pub struct RunResult {
     pub run_id: String,
     pub outcome: HarnessRunOutcome,
+    /// Why the run-level turn ceiling stopped this run, when it did.
+    ///
+    /// A budget stop is still a `Completed` outcome — the loop exits on its
+    /// normal path — so this is the only way a caller can tell "the model was
+    /// finished" from "the model ran out of turns mid-task". Without it a
+    /// truncated run is indistinguishable from a finished one at the exit-code
+    /// boundary, and a delegated subagent that ran out of turns is reported as a
+    /// success with no work done.
+    pub budget_stop: Option<crate::run_budget::BudgetStop>,
 }
 
 /// Result of an explicit `compact`. Mirrors TS `CompactionResult`.
@@ -1346,6 +1355,7 @@ impl AgentHarness {
             return Ok(Some(RunResult {
                 run_id: run_id.to_string(),
                 outcome,
+                budget_stop: None,
             }));
         }
         Ok(None)
@@ -1580,6 +1590,7 @@ impl AgentHarness {
                     final_entry_id: entry_id,
                     deferred: message.deferred.clone().unwrap_or(deferred),
                 },
+                budget_stop: None,
             });
         }
 
@@ -1606,6 +1617,7 @@ impl AgentHarness {
                 final_entry_id: entry_id,
                 final_message: message,
             },
+            budget_stop: None,
         })
     }
 
@@ -3281,6 +3293,7 @@ impl AgentHarness {
                     final_entry_id: None,
                     final_message: None,
                 },
+                budget_stop: None,
             });
         }
 
@@ -3372,6 +3385,7 @@ impl AgentHarness {
                                         final_entry_id: None,
                                         final_message: None,
                                     },
+                                    budget_stop: None,
                                 });
                             }
                         }
@@ -3738,6 +3752,9 @@ impl AgentHarness {
         };
 
         // Persist new messages + derive outcome.
+        // Hoisted out of the match so the returned `RunResult` can carry it: the
+        // exit-code decision needs it, and it is decided in the `Ok` arm below.
+        let mut budget_stop: Option<crate::run_budget::BudgetStop> = None;
         let (leaf_id, _final_entry_id, outcome, op_outcome, op_error) = match result {
             Ok(new_messages) => {
                 let cut = post_compaction_cut.load(Ordering::Acquire);
@@ -3753,8 +3770,9 @@ impl AgentHarness {
                 // Bind the reason before awaiting: the `MutexGuard` is not
                 // `Send`, and holding it across `append_message` would make the
                 // whole run future non-`Send`.
-                let budget_stop = run_budget.lock().unwrap().stop();
-                if let Some(stop) = budget_stop {
+                let stop_reason = run_budget.lock().unwrap().stop();
+                budget_stop = stop_reason;
+                if let Some(stop) = stop_reason {
                     let notice = crate::messages::create_custom_message(
                         "runBudget",
                         UserContent::Text(stop.message()),
@@ -3888,7 +3906,11 @@ impl AgentHarness {
             }));
         }
 
-        Ok(RunResult { run_id, outcome })
+        Ok(RunResult {
+            run_id,
+            outcome,
+            budget_stop,
+        })
     }
 
     /// Explicit compaction. Drives `prepare_compaction` + `compact` and
