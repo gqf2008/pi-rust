@@ -36,6 +36,10 @@ const RUNTIME_ACTION_UI_DIALOG: u32 = 17;
 /// Keeps the driver's spin loop from burning a core while the user thinks.
 pub(crate) const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 
+/// Upper bound on how long `ask_user` waits for a human when the model does
+/// not name a shorter timeout. Without this the wait is unbounded.
+const DEFAULT_ANSWER_TIMEOUT_SECS: u64 = 60;
+
 /// Host fn pointers captured once at register time. `runtime_action` lets the
 /// tool drive the UI bridge; `user_data` is the host's opaque context.
 // Reuse the SDK's host-context lifetime and thread-safety contract.
@@ -383,10 +387,19 @@ fn cancel_ui_dialog(host: &dyn AskHost, request_id: &str) {
 // Tool drive
 // ---------------------------------------------------------------------------
 
+/// How long this question may stay open: the model's `timeout`, capped at
+/// [`DEFAULT_ANSWER_TIMEOUT_SECS`]. A question without an explicit `timeout`
+/// used to park here forever, which is what this function exists to prevent.
+fn effective_timeout_secs(requested: Option<u64>) -> u64 {
+    requested
+        .unwrap_or(DEFAULT_ANSWER_TIMEOUT_SECS)
+        .min(DEFAULT_ANSWER_TIMEOUT_SECS)
+}
+
 struct PendingQuestion {
     request_id: String,
     question: AskQuestion,
-    deadline: Option<Instant>,
+    deadline: Instant,
 }
 
 struct AskAnswer {
@@ -516,9 +529,7 @@ fn open_next(drive: &mut Drive, host: &dyn AskHost) -> Result<Option<Value>, Str
         "ui": question.to_ui(None),
     });
     let response = invoke_ui_dialog(host, &request)?;
-    let deadline = question
-        .timeout
-        .map(|seconds| Instant::now() + Duration::from_secs(seconds));
+    let deadline = Instant::now() + Duration::from_secs(effective_timeout_secs(question.timeout));
     drive.pending = Some(PendingQuestion {
         request_id,
         question,
@@ -536,10 +547,7 @@ pub(crate) fn poll_open_question(
     let Some(pending) = drive.pending.as_ref() else {
         return Ok(None);
     };
-    if pending
-        .deadline
-        .is_some_and(|deadline| Instant::now() >= deadline)
-    {
+    if Instant::now() >= pending.deadline {
         let request_id = pending.request_id.clone();
         cancel_ui_dialog(host, &request_id);
         drive.pending = None;
@@ -846,6 +854,26 @@ mod tests {
 
     fn plan(params: Value) -> AskPlan {
         ask(&params).unwrap()
+    }
+
+    #[test]
+    fn effective_timeout_defaults_to_sixty_seconds() {
+        assert_eq!(effective_timeout_secs(None), 60);
+    }
+
+    #[test]
+    fn effective_timeout_honours_a_shorter_request() {
+        assert_eq!(effective_timeout_secs(Some(30)), 30);
+    }
+
+    #[test]
+    fn effective_timeout_clamps_a_longer_request() {
+        assert_eq!(effective_timeout_secs(Some(300)), 60);
+    }
+
+    #[test]
+    fn effective_timeout_keeps_the_boundary_value() {
+        assert_eq!(effective_timeout_secs(Some(60)), 60);
     }
 
     #[test]

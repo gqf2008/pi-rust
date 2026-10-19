@@ -21,6 +21,19 @@ const SCHEMA: &str = r#"{"type":"object","properties":{"question":{"type":"strin
 /// How long a poll sleeps before re-checking the host for an answer.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+/// Upper bound on how long `ask_user` waits for a human when the model does
+/// not name a shorter timeout. Without this the wait is unbounded.
+const DEFAULT_ANSWER_TIMEOUT_SECS: u64 = 60;
+
+/// How long this question may stay open: the model's `timeout`, capped at
+/// [`DEFAULT_ANSWER_TIMEOUT_SECS`]. A question without an explicit `timeout`
+/// used to park here forever, which is what this function exists to prevent.
+fn effective_timeout_secs(requested: Option<u64>) -> u64 {
+    requested
+        .unwrap_or(DEFAULT_ANSWER_TIMEOUT_SECS)
+        .min(DEFAULT_ANSWER_TIMEOUT_SECS)
+}
+
 // ---------------------------------------------------------------------------
 // Typed normalization
 // ---------------------------------------------------------------------------
@@ -306,11 +319,9 @@ fn ask_one(question: &AskQuestion) -> Result<AskAnswer, String> {
     .to_string();
     ui::dialog(&open).map_err(capability_reason)?;
 
-    let deadline = question
-        .timeout
-        .map(|seconds| Instant::now() + Duration::from_secs(seconds));
+    let deadline = Instant::now() + Duration::from_secs(effective_timeout_secs(question.timeout));
     loop {
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if Instant::now() >= deadline {
             let cancel = json!({ "op": "cancel", "requestId": request_id }).to_string();
             let _ = ui::dialog(&cancel);
             return Err("ask timed out".to_string());
