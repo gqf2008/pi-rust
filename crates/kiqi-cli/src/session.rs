@@ -509,9 +509,10 @@ pub async fn build_with_selection(
     // ---- B5b: extension resources_discover ----
     // If any plugin registered a `resources_discover` handler, fan the event out
     // (reason "startup") and collect skill/prompt/theme paths. These plugin-
-    // contributed paths merge WITH the static Part-A dirs (project
-    // `.ki/skills` +
-    // `agent_dir/skills`, etc.) and the loaders re-run over the union — the
+    // contributed paths merge WITH the static Part-A dirs (project `.ki/skills`
+    // and `.agents/skills`, `agent_dir/skills` and `~/.agents/skills`, plus any
+    // configured dirs — see `resource_dirs::skill_dirs`) and the loaders re-run
+    // over the union — the
     // coherence point: a plugin's discovered skills land through the SAME loaders
     // as static skills. Static dirs load FIRST so project skills keep winning name
     // collisions (a plugin must not shadow a project skill of the same name —
