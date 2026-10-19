@@ -75,6 +75,13 @@ jobs:
       - name: Verify the lock file covers every feature offline
         run: sh scripts/check-offline-lock.sh
 
+      # `install.sh` is the `curl | sh` entry point and had no test in any job: the
+      # PowerShell twin is covered by `scripts/tests/install.Tests.ps1` in the
+      # Windows job, but nothing exercised the Unix half. Runs offline — the script's
+      # `--dry-run --version` path prints the platform/version/URL and exits.
+      - name: Test install.sh platform detection
+        run: sh scripts/tests/install-sh.sh
+
       - name: Run workspace tests
         run: cargo test --workspace --locked
 

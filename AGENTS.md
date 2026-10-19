@@ -66,6 +66,8 @@ cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-le
 # Cargo.lock 必须覆盖全部 feature 的依赖（离线可解析）；CI 在线跑，
 # 缺项的后果只会是「CI 卡下载 / 本地离线报错」，两边都不像根因
 sh scripts/check-offline-lock.sh
+# `install.sh` 是 `curl | sh` 的入口，离线可测（`--dry-run --version` 不联网）
+sh scripts/tests/install-sh.sh
 # 文档快照（改了 CHANGELOG.md / README.md 等必须重跑，CI 会比对）
 sh scripts/sync-embedded-docs.sh
 # CI 还会把每个插件单独编成 cdylib（compile-time feature 关闭时的入口），
