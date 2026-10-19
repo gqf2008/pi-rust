@@ -17,6 +17,8 @@ per-read timeouts until every node reaches a terminal state.
 - `waitSeconds: N` kills and fails whatever is still running after N seconds.
 - Absent: the wave waits until it drains, each node bounded by its own
   `timeoutSeconds`.
+- **Esc/abort**: the guest polls `proc.cancel-requested`; a cancelled call
+  kills the remaining children and returns without waiting for the wave.
 
 Mid-wave reshape (add/remove/cancel while a wave is in flight) is therefore
 also gone — reshape between waves works as before.

@@ -1134,6 +1134,13 @@ impl crate::kiqi::plugin::proc::Host for HostState {
         }
     }
 
+    fn cancel_requested(&mut self) -> bool {
+        // The per-call `HostCaps.cancel` probe is installed around the guest
+        // call; outside a tool call there is nothing to cancel.
+        with_caps_context(|caps| caps.cancel.is_some_and(|probe| probe.is_cancelled()))
+            .unwrap_or(false)
+    }
+
     fn close_stdin(&mut self, handle: u32) -> Result<(), CapabilityError> {
         // Dropping the sender ends the writer thread, which closes the pipe:
         // the child observes EOF. Unknown handle = already closed (idempotent).

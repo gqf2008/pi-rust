@@ -2217,6 +2217,38 @@ mod tests {
         assert!(matches!(err, kiqi_plugin::PluginError::UnknownTool(_)));
     }
 
+    /// The wasm orchestrator polls `proc.cancel-requested`; a cancelled tool
+    /// call must return before it spawns anything.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn a_cancelled_wasm_dispatch_returns_immediately() {
+        struct Cancelled;
+        impl kiqi_plugin::CancelProbe for Cancelled {
+            fn is_cancelled(&self) -> bool {
+                true
+            }
+        }
+
+        let wasm = build_guest("kiqi-orchestrator-guest");
+        let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants(
+            "kiqi-orchestrator",
+            &wasm,
+            kiqi_plugin::grants::Grants::default(),
+        )
+        .expect("load the orchestrator guest");
+
+        let silent = Silent;
+        let mut caps = HostCaps::observer(&silent);
+        caps.cancel = Some(&Cancelled);
+        let error = plugin
+            .call("dispatch", &serde_json::json!({}), &caps, &NoProgress)
+            .expect_err("a cancelled dispatch must not run");
+        assert!(
+            error.to_string().contains("cancelled by the host"),
+            "got {error}"
+        );
+    }
+
     /// The wasm tier is wired: a `.wasm` under `plugins/<id>/` is discovered and
     /// registered behind the same [`Plugin`] seam as the compiled-in plugins.
     #[cfg(feature = "plugin-wasm")]

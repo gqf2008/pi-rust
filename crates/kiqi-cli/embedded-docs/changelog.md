@@ -13,6 +13,10 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **Esc can interrupt a wasm `dispatch` wave.** The wasm ABI gains an additive
+  `proc.cancel-requested` host function (same ABI version; old guests are
+  unaffected). The orchestrator guest polls it before and during a wave, kills
+  the remaining children, and returns instead of waiting out `waitSeconds`.
 - **MCP notifications reach an idle session.** The notice mailbox now signals
   a per-session MUI input adapter (`Notify`, not a poll). When idle, the TUI
   main loop drains the mailbox and applies the wake policy; while a run is

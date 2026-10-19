@@ -887,3 +887,34 @@ Esc 无响应。进程采样显示按键线程永久阻塞在一个 std mutex �
 `kiqi-plugin-host/tests/e2e.rs::observe_events_skip_a_guest_that_is_waiting_on_the_ui`
 （真实 ask_user guest，断言 observe 2 秒内返回 Continue），以及 kiqi-cli 的
 `observe_dispatch_does_not_wait_for_a_busy_plugin`（模式选择）。
+
+### 6.36 `proc.cancel-requested`：wasm 工具调用的取消查询（**纯加法，包版本仍 0.7.1**）
+
+wasm 工具调用是同步的：宿主在 `Plugin::call` 里安装 `HostCaps`（含 `cancel` 探针），
+guest 却没有任何接口能看见“用户按了 Esc”。长调用（典型是 orchestrator 的
+`dispatch` 等 `waitSeconds`）因此无法提前收尾。
+
+新增一个 host function：
+
+```wit
+interface proc {
+    /// Whether the current tool call has been cancelled by the host (Esc /
+    /// abort). Long-running guests should poll this and wind down.
+    cancel-requested: func() -> bool;
+}
+```
+
+- **宿主**：`with_caps_context` 读当前调用的 `caps.cancel`，无调用上下文时返回
+  `false`。探针由 kiqi-cli 的 `HarnessCancel`（工具执行的 `CancellationToken`）
+  提供。
+- **guest**：`kiqi-orchestrator-guest` 的 `dispatch` 在启动前和每轮 wave 轮询时
+  检查；命中后 `fail_remaining("cancelled by the host")` 杀掉仍存的子进程并返回。
+  宿主在调用返回时仍会统一收尸，这条只是让长等待提前结束。
+- **兼容性**：这是宿主提供的**新增导入**，旧 guest 不引用它，仍按 0.7.1 实例化；
+  因此包版本不抬，避免让所有已安装 guest 一起失效。
+- **构建**：`plugins/wasm/kiqi-plugin-guest/build.rs` 增加
+  `rerun-if-changed=../../kiqi-plugin.wit`，否则 Cargo 看不到 WIT 变更，缓存里的
+  旧绑定会让 guest 报 `cancel_requested` 不存在。
+
+验证：`crates/kiqi-cli/src/plugins.rs::a_cancelled_wasm_dispatch_returns_immediately`
+（构造一个已取消的探针，断言 wasm `dispatch` 在 spawn 前返回 `cancelled by the host`）。

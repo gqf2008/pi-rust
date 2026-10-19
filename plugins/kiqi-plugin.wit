@@ -301,6 +301,12 @@ interface proc {
     /// Wait up to `timeout-ms` for the child to exit. `none` means still running.
     wait: func(handle: u32, timeout-ms: u64) -> result<option<s32>, capability-error>;
 
+    /// Whether the current tool call has been cancelled by the host (Esc /
+    /// abort). Long-running guests should poll this and wind down; the host
+    /// still reaps every child when the call returns, so this is advisory.
+    /// Additive host function: guests compiled before it existed keep working.
+    cancel-requested: func() -> bool;
+
     /// Close the child's stdin: the child observes EOF and a "task on stdin,
     /// then done" protocol can signal it is time to answer. Idempotent.
     close-stdin: func(handle: u32) -> result<_, capability-error>;

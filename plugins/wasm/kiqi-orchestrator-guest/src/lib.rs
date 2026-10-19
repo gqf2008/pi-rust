@@ -792,6 +792,11 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                 .into(),
         );
     }
+    // Esc/abort: the host cancels the call. Check before spawning anything and
+    // once per wave poll below; the host still reaps every child on return.
+    if proc::cancel_requested() {
+        return Err("cancelled by the host".into());
+    }
 
     // ---- Start the ready set within the concurrency budget. ----
     let started = {
@@ -864,6 +869,10 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
     let wave_deadline = wait_seconds.map(|secs| Instant::now() + Duration::from_secs(secs));
     let mut outputs: HashMap<u32, String> = HashMap::new();
     'wave: loop {
+        if proc::cancel_requested() {
+            fail_remaining("cancelled by the host");
+            break 'wave;
+        }
         // Poll every live child each round. Polling only the head of the list
         // strands siblings: one that finishes while an earlier node is still
         // streaming would never be read or collected, and the `waitSeconds`
