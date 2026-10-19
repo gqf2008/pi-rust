@@ -1215,6 +1215,29 @@ impl Editor {
     }
 
     /// Handle keyboard input.
+    ///
+    /// # Why the key table below is written the way it is
+    ///
+    /// Terminals that do not implement the Kitty Keyboard Protocol and are
+    /// asked to report modified keys as escape sequences fall back to xterm's
+    /// `modifyOtherKeys`, i.e. `CSI 27;modifier;key~` (Ctrl+Backspace is
+    /// `CSI 27;5;127~`). crossterm 0.27 — the version this crate pins — has no
+    /// parser for that form: the `27` leader is routed to its `~`-terminated
+    /// special-key table, misses every entry and the whole sequence is dropped,
+    /// so such a key never reaches this function at all. Supporting it means
+    /// either bypassing crossterm's event reader with our own byte parser or
+    /// bumping crossterm (which drags ratatui along), so we do neither and
+    /// never enable modifyOtherKeys (`terminal.rs` keeps the legacy fallback).
+    /// The arms below therefore cover the encodings that *do* arrive: the C0
+    /// bytes, the CSI-u forms crossterm normalizes, and the codepoints a
+    /// client may hand us directly.
+    ///
+    /// On a terminal that only speaks `modifyOtherKeys`, make it stop doing so
+    /// and let it send plain 0x7F for Backspace:
+    ///
+    /// ```text
+    /// otty config set kitty-keyboard false && otty config reload
+    /// ```
     pub fn handle_key(&self, key: crossterm::event::KeyEvent) -> bool {
         match (key.modifiers, key.code) {
             // Navigation — plain movement clears any active selection;
@@ -1270,6 +1293,20 @@ impl Editor {
 
             // Editing
             (KeyModifiers::NONE, KeyCode::Backspace) => self.backspace(),
+            // The other shapes Backspace actually arrives in. ki enables the
+            // Kitty protocol with flag 4 (report alternate keys), so a chorded
+            // Backspace travels as `CSI 127:8;…u`: with no modifier crossterm
+            // normalizes the 127 to `KeyCode::Backspace`, but its SHIFT
+            // alternate-key path rewrites the key to `Char('\u{8}')` and clears
+            // SHIFT. A legacy terminal sends Ctrl+H as the C0 byte 0x08, which
+            // crossterm reports as `Char('h')` + CONTROL. All of these must
+            // reach `backspace()` — the arms below sit ABOVE the generic
+            // character arm, which would otherwise insert 0x08/0x7F into the
+            // draft as a literal control char.
+            (KeyModifiers::SHIFT, KeyCode::Backspace) => self.backspace(),
+            (KeyModifiers::CONTROL, KeyCode::Char('h')) => self.backspace(),
+            (KeyModifiers::NONE, KeyCode::Char('\u{7f}')) => self.backspace(),
+            (KeyModifiers::NONE, KeyCode::Char('\u{8}')) => self.backspace(),
             (KeyModifiers::NONE, KeyCode::Delete) => self.delete(),
             (KeyModifiers::NONE, KeyCode::Enter)
             | (KeyModifiers::NONE, KeyCode::Char('\n'))
@@ -1337,9 +1374,17 @@ impl Editor {
             // Kill-ring yank (Ctrl+Y) / yank-pop (Alt+Y).
             (KeyModifiers::CONTROL, KeyCode::Char('y')) => self.yank(),
             (KeyModifiers::ALT, KeyCode::Char('y')) => self.yank_pop(),
-            // Delete the word before the cursor, killing it (Alt+Backspace).
+            // Delete the word before the cursor, killing it (Ctrl+W,
+            // Alt+Backspace and Ctrl+Backspace — the same chord on many
+            // layouts).
             (KeyModifiers::CONTROL, KeyCode::Char('w')) => self.kill_word_backward(),
             (KeyModifiers::ALT, KeyCode::Backspace) => self.kill_word_backward(),
+            // Ctrl+Backspace kills the WORD, not one char: Ctrl+W,
+            // Alt+Backspace and Ctrl+Backspace must stay one family with one
+            // meaning (`kill_word_backward`). Binding the single-char
+            // `backspace()` here would give the family two semantics and leave
+            // the plain Backspace arm as the only way to delete one char.
+            (KeyModifiers::CONTROL, KeyCode::Backspace) => self.kill_word_backward(),
             (KeyModifiers::ALT, KeyCode::Char('d')) | (KeyModifiers::ALT, KeyCode::Delete) => {
                 self.kill_word_forward();
             }
@@ -2069,6 +2114,98 @@ l12",
             assert_eq!(submits.load(Ordering::SeqCst), 1, "{code:?} must submit");
             assert_eq!(editor.get_text(), "", "editor cleared after submit");
         }
+    }
+
+    /// The Kitty-protocol encodings of Backspace. With alternate-key reporting
+    /// on, a chorded Backspace arrives as a codepoint (`Char('\u{7f}')` /
+    /// `Char('\u{8}')`) rather than `KeyCode::Backspace`; those used to fall
+    /// through to the generic char arm and be inserted into the draft.
+    #[test]
+    fn backspace_encodings_under_the_kitty_protocol_delete_a_char() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        for (mods, code) in [
+            // Legacy C0 byte 0x08.
+            (KeyModifiers::CONTROL, KeyCode::Char('h')),
+            // DEL / BS handed over as codepoints (no modifier).
+            (KeyModifiers::NONE, KeyCode::Char('\u{7f}')),
+            (KeyModifiers::NONE, KeyCode::Char('\u{8}')),
+            // Shift+Backspace (terminals without alternate-key reporting).
+            (KeyModifiers::SHIFT, KeyCode::Backspace),
+        ] {
+            let editor = Editor::simple();
+            editor.insert("abc");
+            editor.handle_key(KeyEvent::new(code, mods));
+            assert_eq!(
+                editor.get_text(),
+                "ab",
+                "{mods:?} + {code:?} must delete a char, not insert one"
+            );
+        }
+    }
+
+    /// Reverse assertion for the arms above: no control codepoint may survive
+    /// in the buffer (a mis-routed key would "type" 0x08/0x7F into the draft).
+    #[test]
+    fn control_codepoints_never_land_in_the_buffer_as_characters() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        for (mods, code) in [
+            (KeyModifiers::CONTROL, KeyCode::Char('h')),
+            (KeyModifiers::NONE, KeyCode::Char('\u{7f}')),
+            (KeyModifiers::NONE, KeyCode::Char('\u{8}')),
+        ] {
+            let editor = Editor::simple();
+            editor.insert("abc");
+            editor.handle_key(KeyEvent::new(code, mods));
+            let text = editor.get_text();
+            assert!(
+                !text.chars().any(char::is_control),
+                "{mods:?} + {code:?} inserted a control char: {text:?}"
+            );
+        }
+    }
+
+    /// Ctrl+Backspace belongs to the Ctrl+W / Alt+Backspace family: it kills
+    /// the whole word before the cursor (and is undoable like any kill).
+    #[test]
+    fn ctrl_backspace_kills_the_word_before_the_cursor() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let editor = Editor::simple();
+        editor.insert("foo bar");
+        editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+        assert_eq!(editor.get_text(), "foo ", "Ctrl+Backspace kills a word");
+        editor.undo();
+        assert_eq!(editor.get_text(), "foo bar", "the kill is undoable");
+    }
+
+    /// Every Enter encoding submits: `KeyCode::Enter`, bare CR and bare LF.
+    #[test]
+    fn all_enter_encodings_submit() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for code in [KeyCode::Enter, KeyCode::Char('\r'), KeyCode::Char('\n')] {
+            let editor = Editor::simple();
+            let submits = Arc::new(AtomicUsize::new(0));
+            let submits_for_cb = submits.clone();
+            editor.on_submit(Arc::new(move |_text: &str| {
+                submits_for_cb.fetch_add(1, Ordering::SeqCst);
+            }));
+            editor.insert("hello");
+            editor.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+            assert_eq!(submits.load(Ordering::SeqCst), 1, "{code:?} must submit");
+            assert_eq!(editor.get_text(), "", "editor cleared after submit");
+        }
+    }
+
+    /// Reverse assertion: 0x0A arriving as Ctrl+J still inserts a newline and
+    /// must never submit (the new Backspace arms must not disturb this).
+    #[test]
+    fn ctrl_j_inserts_a_newline_and_never_submits() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let editor = Editor::simple();
+        editor.on_submit(Arc::new(|_| panic!("Ctrl+J must not submit")));
+        editor.insert("a");
+        editor.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        assert_eq!(editor.get_text(), "a\n", "Ctrl+J inserts a newline");
     }
     #[test]
     fn test_editor_text() {
