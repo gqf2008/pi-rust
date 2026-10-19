@@ -1,11 +1,10 @@
 # 方案：软中断（Esc 只停当前动作，不终止整轮）
 
-> 状态：**方案（待评审，2026-10-19）**。目标：把 Esc 从“终止整个 run”改为
+> 状态：**阶段 1 已落地（2026-10-19，`4902ab7`）**；阶段 2/3 待做。目标：把 Esc 从“终止整个 run”改为
 > “取消当前工具调用/模型流，保留 run 与 steering 队列”，由 LLM 在看到插入消息后
 > 决定停止、收尾还是继续。
 > 关联：`signal-driven-agent.md` §5（MUI 输入）、`plugin-abi.md` §6.36
 > （wasm `proc.cancel-requested`）、`ki-mcp-builtin.md`。
-> 本文件只写设计，未改代码。
 
 ## 1. 现状（实核）
 
@@ -116,13 +115,32 @@ UI：
 
 ## 5. 分期
 
-| 阶段 | 内容 |
-|---|---|
-| 1 | 工具软中断：`InterruptControl` + `AgentLane::interrupt` + 单/双 Esc |
-| 2 | 流软中断：provider token、Aborted 分支丢弃半条消息并继续 |
-| 3 | UI 提示、审计日志、`InterruptResult` 细化 |
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| 1 | 工具软中断：`InterruptControl` + `AgentLane::interrupt` + 单/双 Esc | **已落地** `f7013cb` + `4902ab7` |
+| 2 | 流软中断：provider token、Aborted 分支丢弃半条消息并继续 | 待做 |
+| 3 | UI 提示、审计日志、`InterruptResult` 细化 | 部分（提示已做） |
 
 阶段 1 先解决最痛的长工具（bash/dispatch）；阶段 2 覆盖“模型正在生成时按 Esc”。
+
+### 5.1 阶段 1 落地记录
+
+| 位置 | 实现 |
+|---|---|
+| `crates/kiqi-agent/src/interrupt.rs` | `InterruptControl`：`install` 发单调 `InstallId`、`clear(id)` 只在 id 仍匹配时清槽（并行工具下 A 后完成不会清掉 B）、`soft_interrupt` 只 cancel 已安装的 child token、`take_soft` 一次性 |
+| `crates/kiqi-agent/src/agent_loop.rs` | `run_one_tool_call` 在 `execute` 前后 install/clear；**clear 后仅当该动作自己的 token 被取消时 `take_soft()`** |
+| `crates/kiqi-harness/src/agent_harness.rs` | `ActiveRun.interrupt`；`AgentLane::interrupt() -> HarnessResult<InterruptResult>`；无 run 返 `Ok(NoActiveRun)`（尽力而为，不像 `abort()` 返错） |
+| `crates/kiqi-cli/src/interactive_tui/state.rs` | `esc_action` / `sync_escape_window` 纯函数：Working + 窗口外 → `SoftInterrupt`，Working + 500ms 内 → `HardAbort`，非 Working → `PassThrough` |
+| `crates/kiqi-cli/src/interactive_tui/events.rs` | `soft_interrupt_run`：不置 `Aborting`、不 `record_abort()`、不还原队列，只落一行 dim 提示 |
+
+两条设计上的判断（评审确认过，后续阶段不要回退）：
+
+1. **`clear` 用 `InstallId` 而非 token 比较**。tokio-util 0.7 的 `CancellationToken`
+   没有 `PartialEq`/`Hash`/指针访问器，`TreeNode` 私有，token 身份在 crate 外不可观测。
+2. **`NothingToInterrupt` 会“上膛”**：该 arm 仍然置 soft 标志，于是**下一个**安装的动作
+   一开始就是已取消状态；因此 CLI 的提示写成 “Nothing in flight right now; the next step
+   will be stopped.”，不能说“没有东西可中断”。阶段 2 把流也 install 之后，这个窗口会
+   收窄到“两个动作之间”，但语义不变。
 
 ## 6. 开放问题
 

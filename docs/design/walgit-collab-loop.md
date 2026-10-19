@@ -192,6 +192,7 @@ cargo test -p kiqi-plugin-host --test e2e --locked goal_injection_carries
 | 1 | `r1-goal-state-isolation` | goal 测试把运行时状态写回源码树（`.ki/goals.json` 被 git 跟踪） | closed | `6204aac` / `2c892f0` |
 | 1 | `r1-ansi-slice-styles` | `slice_by_column` 的 `preserve_styles` 是空参数，裁剪丢色丢光标标记 | closed | `1f90026` / `ce191b2` |
 | 1 | `r1-hung-post-flaky` | `a_hung_post_does_not_wedge_the_worker_for_later_calls` 间歇失败（线缆超时文案不说超时） | closed | `5b741b3` / `b899a05` |
+| 2 | `r2-soft-interrupt-phase1` | 软中断阶段 1：单 Esc 只取消当前工具、run 继续（双 Esc 仍硬取消） | closed | `f7013cb` / `4902ab7` |
 
 第 1 轮三条卡片各走完「issue → status(owner) → worktree → patch → review → 修复 → 再审 →
 merge_result → status closed」。两条实质工作项的第一轮评审都是 `request_changes`
@@ -217,6 +218,23 @@ walgit collab board                              # → closed 8（第 0 轮 5 + 
 walgit collab report --remote walgit | head -1    # → unpushed: 0 (vs walgit)，38/38 entries verified
 git log --oneline -1                             # → b899a05
 ```
+
+第 2 轮只有一张卡片（`r2-soft-interrupt-phase1`），走完了同样的流程，且是第一次
+**实现阶段**：`InterruptControl` 落进 `kiqi-agent`、`AgentLane::interrupt` 落进
+`kiqi-harness`、Esc 分流落进 `kiqi-cli`。首轮评审 `request_changes`，问题是
+UI 提示与标志语义相反（提示说“没有东西可中断”，实际已上膛会取消下一个动作）；
+修在 `4902ab7` 后 `approve`。四条突变各自打红对应断言，写在卡片 note 里。
+
+复验第 2 轮合入后的现状：
+
+```bash
+walgit collab board                              # → closed 9
+walgit collab report --remote walgit | head -1    # → unpushed: 0 (vs walgit)
+git log --oneline -1                             # → 4902ab7
+```
+
+第 2 轮结束后 board 上仍留三条 `open`：两条早期探针（`insert-probe-175642`、
+`restart-probe-175422`）与软中断方案的阶段 2/3（尚未开卡）。
 
 第 1 轮结束后 board 上仍留三条 `open`：软中断方案（`soft-interrupt-design`，已转 `needs-review`）
 与两条早期探针（`insert-probe-175642`、`restart-probe-175422`）。它们是下一轮 recon 的输入，
