@@ -585,6 +585,30 @@ mod tests {
         assert!(result.skills[0].content.contains("SECRET_BODY_MARKER"));
     }
 
+    /// Invocation must resolve relative references against the skill's own
+    /// directory, and that has to hold for a shared `~/.agents/skills` skill too —
+    /// the loader is shared, but only a test keeps it from being specialized to
+    /// ki's own paths later.
+    #[test]
+    fn a_shared_skill_resolves_references_against_its_own_directory() {
+        let skill = kiqi_harness::types::Skill {
+            name: "shared".to_string(),
+            description: "d".to_string(),
+            content: "Run `scripts/do.sh`.".to_string(),
+            file_path: "/home/u/.agents/skills/shared/SKILL.md".to_string(),
+            disable_model_invocation: None,
+        };
+        let invocation = kiqi_harness::skills::format_skill_invocation(&skill, None);
+        assert!(
+            invocation.contains("References are relative to /home/u/.agents/skills/shared."),
+            "got: {invocation}"
+        );
+        assert!(
+            invocation.contains("/home/u/.agents/skills/shared/SKILL.md"),
+            "the block must name the file so it can be re-read: {invocation}"
+        );
+    }
+
     #[test]
     fn the_shared_global_skill_dir_is_under_agents() {
         // Whatever the home directory resolves to, the shared global skill dir is
