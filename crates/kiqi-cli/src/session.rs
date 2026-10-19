@@ -1166,7 +1166,7 @@ pub struct ReloadContext {
     /// Shared MCP-signal state: the wake budget, the durable session mute, and
     /// the attention inbox. Created before the tools (the `signals` tool holds
     /// it) and shared with the TUI boundary and `/signals`.
-    pub signal_host: Arc<crate::signal_host::SignalHost>,
+    pub(crate) signal_host: Arc<crate::signal_host::SignalHost>,
 }
 
 /// Dispatch a no-payload lifecycle event (e.g. `SessionStart`, `SessionShutdown`,

@@ -84,7 +84,7 @@ relevant. Reading the resource itself still uses <server>__read_resource."
     }
 }
 
-pub fn create_signals_tool(host: Arc<SignalHost>) -> Arc<dyn AgentTool> {
+pub(crate) fn create_signals_tool(host: Arc<SignalHost>) -> Arc<dyn AgentTool> {
     Arc::new(SignalsTool::new(host))
 }
 
