@@ -918,6 +918,49 @@ mod tests {
         assert!(!one_edit_apart("--model", "--model-x"));
     }
 
+    /// Every `<value>` flag listed by `--help` must consume its value instead of
+    /// leaving it as a prompt.
+    ///
+    /// This is the failure mode the `--models`/`--model` pair already guards against
+    /// individually ("so `--models sonnet` doesn't swallow `sonnet` as a message"); a
+    /// flag added later without the same care would silently append the value to the
+    /// user's prompt — the model would then be asked to act on a filename or a
+    /// provider id. The list mirrors `--help`; a new valued flag should be added here.
+    #[test]
+    fn every_valued_flag_consumes_its_value() {
+        // (flag, sample value) for each `<value>` flag in --help.
+        let cases: &[(&str, &str)] = &[
+            ("--api-key", "k"),
+            ("--append-system-prompt", "extra"),
+            ("--base-url", "http://x"),
+            ("--connect", "127.0.0.1:1"),
+            ("--export", "/tmp/out.html"),
+            ("--mode", "text"),
+            ("--model", "claude-opus-4-8"),
+            ("--provider", "anthropic"),
+            ("--session", "abc"),
+            ("--session-dir", "/tmp/sd"),
+            ("--system-prompt", "sys"),
+            ("--thinking", "high"),
+            ("--timeout", "30"),
+            ("--token", "t"),
+            ("--tui-mode", "regular"),
+        ];
+        for (flag, value) in cases {
+            let parsed = parse_args(&s(&[flag, value, "-p", "hi"]));
+            assert!(
+                !parsed.messages.iter().any(|m| m == value),
+                "{flag} swallowed its value into messages: {:?}",
+                parsed.messages
+            );
+            assert_eq!(
+                parsed.messages,
+                vec!["hi".to_string()],
+                "{flag} left extra messages behind"
+            );
+        }
+    }
+
     #[test]
     fn parses_basic_prompt() {
         let a = parse_args(&s(&["hello", "world"]));
