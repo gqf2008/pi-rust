@@ -197,5 +197,7 @@ permissions 宿主化各自立批（见 §7 / 侦察记录）。
 ## 13. 信号驱动唤醒（2026-10-19）
 
 通知的宿主侧唤醒策略（`subscribe` 即唤醒意图、预算、**记录与触发分离**、智能体处置）
-见 `signal-driven-agent.md`；阶段 1 已在交互式 TUI 实现。`kiqi-mcp` 仍只负责投递、
-合并与 `autoRead`，唤醒状态在 `crates/kiqi-cli/src/signal_wake.rs`。
+见 `signal-driven-agent.md`；阶段 1 已在交互式 TUI 实现，阶段 2 增加了持久化
+attention inbox、`signals` 工具、会话级静音与顶层 `signals` 默认值。
+`kiqi-mcp` 仍只负责投递、合并与 `autoRead`，唤醒状态在
+`crates/kiqi-cli/src/signal_host.rs` 与 `signal_wake.rs`。

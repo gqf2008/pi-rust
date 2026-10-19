@@ -75,6 +75,16 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   wins, Esc mutes the chain until the next prompt, and no `subscribe` means
   today's behavior is unchanged. `wake: "off"` keeps record-only for an existing
   subscription; print and ACP remain record-only.
+- **MCP signal dispositions are durable (`signals` tool, `/signals`, top-level
+  `signals` defaults)**: signals that wake a session enter a session-value
+  inbox (coalesced by `server`+`uri`, capped at 64). The built-in `signals`
+  tool exposes `list`/`status`/`defer`/`resolve`/`dismiss`/`mute`/`unmute`, so
+  the agent can settle a signal explicitly instead of relying on prose.
+  `/signals [on|off|list]` is the user-facing inspection and mute command; the
+  mute is stored as a session value and survives resume. A top-level `signals`
+  block supplies defaults for every MCP server, with a trusted project
+  overriding field by field (per-server fields still win). `off`/`notify`
+  servers do not enter the inbox.
 - **Permission policy is enforced by the host**: `permissions.json` (project
   `.ki/`, legacy `.pi/`, then the global agent dir) is evaluated in
   `before_tool_call` before any tool runs — explicit deny rules block, an allow
