@@ -4305,14 +4305,20 @@ impl AgentLane for AgentHarness {
     async fn interrupt(&self) -> HarnessResult<InterruptResult> {
         // Take the handle out of the harness lock, then release it: the checks
         // below take `InterruptControl`'s *own* mutex, and no lock of ours is
-        // held across the awaits this `async fn` is allowed to grow.
-        let interrupt = {
+        // held across the awaits this `async fn` is allowed to grow. Traces are
+        // written outside both locks as well — see `kiqi_agent::interrupt_trace`
+        // for why a diagnostic must never put a filesystem write on a held mutex.
+        let active = {
             let inner = self.inner.lock().unwrap();
             match &inner.active_run {
-                Some(active) if active.lane == self.lane => Arc::clone(&active.interrupt),
+                Some(active) if active.lane == self.lane => Some(Arc::clone(&active.interrupt)),
                 // Idle — or the active operation belongs to another lane.
-                _ => return Ok(InterruptResult::NoActiveRun),
+                _ => None,
             }
+        };
+        let Some(interrupt) = active else {
+            kiqi_agent::interrupt_trace::decision("no-run", None);
+            return Ok(InterruptResult::NoActiveRun);
         };
         // An op with no installed action is between actions (or is a
         // compaction, which installs none). `soft_interrupt()` latches the flag
@@ -4325,6 +4331,10 @@ impl AgentLane for AgentHarness {
         // wrong, because `soft_interrupt` cancels that very slot.
         let action = interrupt.current_kind();
         interrupt.soft_interrupt();
+        kiqi_agent::interrupt_trace::decision(
+            if action.is_some() { "soft" } else { "nothing" },
+            action,
+        );
         Ok(match action {
             Some(action) => InterruptResult::Soft { action },
             None => InterruptResult::NothingToInterrupt,

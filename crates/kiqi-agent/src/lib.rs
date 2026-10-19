@@ -19,6 +19,7 @@ pub mod error;
 pub mod events;
 pub mod hooks;
 pub mod interrupt;
+pub mod interrupt_trace;
 pub mod message;
 pub mod queue;
 pub mod stream_fn;

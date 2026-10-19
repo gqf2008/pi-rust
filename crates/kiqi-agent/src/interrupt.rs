@@ -40,6 +40,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::interrupt_trace;
+
 /// Identity of a single [`InterruptControl::install`] call.
 ///
 /// Handed back to the installer so [`InterruptControl::clear`] can tell "my
@@ -113,10 +115,21 @@ impl InterruptControl {
         // the flag and pre-cancels its token, or is already in the slot and gets
         // cancelled below. Either order loses nothing.
         self.soft.store(true, Ordering::SeqCst);
-        let guard = self.current.lock().expect("interrupt lock");
-        if let Some(current) = guard.as_ref() {
-            current.token.cancel();
-        }
+        // Copy what the trace needs and let the guard drop at the end of the
+        // block: the audit line is written *after* the lock is released, because
+        // a filesystem write under this mutex would block every install/clear of
+        // the run on the speed of the disk (see `interrupt_trace`).
+        let kind = {
+            let guard = self.current.lock().expect("interrupt lock");
+            match guard.as_ref() {
+                Some(current) => {
+                    current.token.cancel();
+                    Some(current.kind)
+                }
+                None => None,
+            }
+        };
+        interrupt_trace::press(kind);
     }
 
     /// Register `token` as the current cancellable action; the loop calls this
@@ -130,11 +143,18 @@ impl InterruptControl {
     /// [`take_soft`](Self::take_soft) drains it.
     pub fn install(&self, token: CancellationToken, kind: ActionKind) -> InstallId {
         let id = InstallId(self.next_id.fetch_add(1, Ordering::SeqCst));
-        if self.soft.load(Ordering::SeqCst) {
+        let latched = self.soft.load(Ordering::SeqCst);
+        if latched {
             token.cancel();
         }
         let mut guard = self.current.lock().expect("interrupt lock");
         *guard = Some(Current { id, token, kind });
+        // Release before tracing: `install` runs once per action of every run, so
+        // a slow log path here must not serialize the agent loop.
+        drop(guard);
+        if latched {
+            interrupt_trace::latched_cancelled(kind);
+        }
         id
     }
 
