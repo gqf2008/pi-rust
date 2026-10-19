@@ -677,7 +677,7 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     }
     // Recorded for schema parity; on wasm the child's turn ceiling has no env
     // knob, so it is not enforced (README, difference 3).
-    let _max_turns = clamp(params.get("maxTurns").and_then(Value::as_u64), 8, 1, 32);
+    let max_turns = clamp(params.get("maxTurns").and_then(Value::as_u64), 8, 1, 32);
     let timeout_secs = clamp(
         params.get("timeoutSeconds").and_then(Value::as_u64),
         300,
@@ -761,6 +761,19 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     let text = truncate_output(output);
     if status != 0 {
         return Err(format!("subagent exited with {status}:\n{}", text.trim()));
+    }
+    // A zero exit with nothing on stdout is not a result this tool can use. The
+    // compile-time channel (`plugins/kiqi-orchestrator/src/spawn.rs`) rejects the
+    // same shape for the same reason: `ki -p` prints its answer once, at the end
+    // of the run, so an empty stdout means the child never produced a final
+    // message — most often because the run hit its turn ceiling, which still
+    // ends the run `Completed` with exit 0. Reporting that as `done` would make
+    // truncated work vanish from the board. Keep both channels in step.
+    if text.trim().is_empty() {
+        return Err(format!(
+            "subagent exited successfully but produced no output; the run may have \
+             hit its turn budget (maxTurns={max_turns})."
+        ));
     }
     Ok(types::ToolResult {
         blocks: vec![types::ContentBlock::Text(text.trim().to_string())],
