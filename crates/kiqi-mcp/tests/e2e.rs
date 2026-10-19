@@ -642,6 +642,32 @@ async fn repeated_subscribe_reuses_the_active_remote_subscription() {
     manager.shutdown().await;
 }
 
+/// A configured subscription is the user's opt-in to be told, so the parsed
+/// policy defaults to `auto`; the manager exposes it so the host can budget the
+/// wake. Unknown/failed servers have no policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn signal_policy_defaults_to_auto_for_a_subscribed_server() {
+    let tmp = tempfile::tempdir().unwrap();
+    let value = json!({
+        "docs": {
+            "command": FAKE_SERVER,
+            "args": ["--resources"],
+            "timeoutSeconds": 10,
+            "subscribe": ["mem://alpha"]
+        }
+    });
+    let (servers, issues) = parse_servers(Some(&value));
+    assert!(issues.is_empty(), "config issues: {issues:?}");
+    let (manager, issues) = McpManager::start(&servers, tmp.path()).await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    let policy = manager
+        .signal_config("docs")
+        .expect("a connected server has a policy");
+    assert_eq!(policy.wake, kiqi_mcp::WakeMode::Auto);
+    assert!(manager.signal_config("unknown").is_none());
+    manager.shutdown().await;
+}
+
 /// Mark-before-RPC: the fake server pushes the update BEFORE replying to the
 /// subscribe, so the only way the notice can exist is a lifetime installed
 /// ahead of the RPC.

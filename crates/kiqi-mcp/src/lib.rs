@@ -28,7 +28,8 @@ mod notice;
 mod tool;
 
 pub use config::{
-    merge_servers, parse_servers, HttpTransport, ServerConfig, StdioTransport, Transport,
+    merge_servers, parse_servers, HttpTransport, ServerConfig, SignalsConfig, StdioTransport,
+    Transport, WakeMode,
 };
 pub use manager::{McpManager, READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR};
 pub use notice::{

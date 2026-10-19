@@ -1244,6 +1244,15 @@ impl McpManager {
         self.mailbox.pending_count()
     }
 
+    /// The parsed wake policy for a connected server. `None` for an unknown or
+    /// failed server — it cannot produce notices, so it has nothing to wake.
+    pub fn signal_config(&self, server: &str) -> Option<crate::config::SignalsConfig> {
+        self.servers
+            .iter()
+            .find(|handle| handle.server_name() == server)
+            .map(|handle| handle.config.signals.clone())
+    }
+
     /// Subscribe one server's resource (host/config-driven; no model verb).
     pub async fn subscribe(&self, server: &str, uri: &str) -> Result<(), String> {
         let handle = self

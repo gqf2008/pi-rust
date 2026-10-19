@@ -380,6 +380,9 @@ fn decode_client_mcp_servers(
             timeout: std::time::Duration::from_secs(kiqi_mcp::config::DEFAULT_TIMEOUT_SECS),
             subscribe: Vec::new(),
             auto_read: Vec::new(),
+            // No ACP verb for subscriptions, so a client-supplied server has
+            // no signal source and stays on today's behavior.
+            signals: kiqi_mcp::SignalsConfig::default(),
         });
         // The loud acceptance record (POLICY 1). Unconditional stderr — the
         // one log line a user can grep when auditing what their editor asked

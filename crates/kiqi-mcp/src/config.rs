@@ -24,6 +24,55 @@ pub const MIN_TIMEOUT_SECS: u64 = 1;
 /// `timeoutSeconds` upper clamp (adapter parity).
 pub const MAX_TIMEOUT_SECS: u64 = 300;
 
+/// `signals.minIntervalSeconds` default: how often an `auto` server may wake
+/// the session. New opt-in behavior; no prior value to preserve.
+pub const DEFAULT_MIN_INTERVAL_SECS: u64 = 30;
+/// `signals.maxRunsPerHour` default.
+pub const DEFAULT_MAX_RUNS_PER_HOUR: u32 = 6;
+/// `signals.maxConsecutiveRuns` default: a signal-triggered chain stops here.
+pub const DEFAULT_MAX_CONSECUTIVE_RUNS: u32 = 2;
+const MIN_SIGNAL_INTERVAL_SECS: u64 = 1;
+const MAX_SIGNAL_INTERVAL_SECS: u64 = 3600;
+const MIN_SIGNAL_RUNS_PER_HOUR: u32 = 1;
+const MAX_SIGNAL_RUNS_PER_HOUR: u32 = 60;
+const MIN_SIGNAL_CONSECUTIVE_RUNS: u32 = 1;
+const MAX_SIGNAL_CONSECUTIVE_RUNS: u32 = 20;
+
+/// What a resource-update signal may do to the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WakeMode {
+    /// Record the notice in the transcript; never start a run (today's
+    /// behavior when nothing is configured).
+    #[default]
+    Off,
+    /// Record + surface the notice to the user's client; never start a run.
+    Notify,
+    /// Record + wake the session with a synthetic trigger, subject to the
+    /// host's budget. The agent decides what to do after waking.
+    Auto,
+}
+
+/// Host-side wake policy for one server's resource signals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalsConfig {
+    pub wake: WakeMode,
+    pub min_interval: Duration,
+    pub max_runs_per_hour: u32,
+    pub max_consecutive_runs: u32,
+}
+
+impl Default for SignalsConfig {
+    fn default() -> Self {
+        Self {
+            // No subscription, no signals: the default stays today's behavior.
+            wake: WakeMode::Off,
+            min_interval: Duration::from_secs(DEFAULT_MIN_INTERVAL_SECS),
+            max_runs_per_hour: DEFAULT_MAX_RUNS_PER_HOUR,
+            max_consecutive_runs: DEFAULT_MAX_CONSECUTIVE_RUNS,
+        }
+    }
+}
+
 /// Where a configured server's transport goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transport {
@@ -67,6 +116,11 @@ pub struct ServerConfig {
     /// product semantic stays "notice, not content" unless the user lists the
     /// uri here.
     pub auto_read: Vec<String>,
+    /// What this server's resource-update signals may do. Default is derived
+    /// at parse time: an explicit `subscribe` list is the user's opt-in to be
+    /// told, so it defaults to [`WakeMode::Auto`]; no subscription means
+    /// [`WakeMode::Off`] (today's behavior).
+    pub signals: SignalsConfig,
 }
 
 /// The raw entry as it appears in `mcpServers.<name>`. Every field is optional
@@ -95,6 +149,23 @@ struct RawServer {
     subscribe: Option<Vec<String>>,
     #[serde(default)]
     auto_read: Option<Vec<String>>,
+    #[serde(default)]
+    signals: Option<RawSignals>,
+}
+
+/// `signals` block. Unknown keys are ignored like the rest of the entry; the
+/// numbers are clamped so a typo cannot set the budget to zero or unbounded.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawSignals {
+    #[serde(default)]
+    wake: Option<String>,
+    #[serde(default)]
+    min_interval_seconds: Option<u64>,
+    #[serde(default)]
+    max_runs_per_hour: Option<u32>,
+    #[serde(default)]
+    max_consecutive_runs: Option<u32>,
 }
 
 /// A server name must be non-empty ASCII `[A-Za-z0-9_-]` WITHOUT the tool-name
@@ -228,6 +299,10 @@ fn parse_one(name: &str, entry: &serde_json::Value) -> Result<ServerConfig, Stri
         }
     }
 
+    // Wake policy: subscribing is the explicit "tell me" opt-in, so a
+    // subscription defaults to `auto`; an explicit `signals.wake` overrides.
+    let signals = parse_signals(raw.signals, !subscribe.is_empty())?;
+
     Ok(ServerConfig {
         name: name.to_string(),
         transport,
@@ -235,7 +310,47 @@ fn parse_one(name: &str, entry: &serde_json::Value) -> Result<ServerConfig, Stri
         timeout,
         subscribe,
         auto_read,
+        signals,
     })
+}
+
+fn parse_signals(raw: Option<RawSignals>, subscribed: bool) -> Result<SignalsConfig, String> {
+    let mut config = SignalsConfig {
+        wake: if subscribed {
+            WakeMode::Auto
+        } else {
+            WakeMode::Off
+        },
+        ..SignalsConfig::default()
+    };
+    let Some(raw) = raw else {
+        return Ok(config);
+    };
+    if let Some(wake) = raw.wake {
+        let normalized = wake.trim().to_ascii_lowercase();
+        config.wake = match normalized.as_str() {
+            "off" => WakeMode::Off,
+            "notify" => WakeMode::Notify,
+            "auto" => WakeMode::Auto,
+            other => {
+                return Err(format!(
+                    "`signals.wake` must be one of off/notify/auto (got {other:?})"
+                ))
+            }
+        };
+    }
+    if let Some(seconds) = raw.min_interval_seconds {
+        config.min_interval =
+            Duration::from_secs(seconds.clamp(MIN_SIGNAL_INTERVAL_SECS, MAX_SIGNAL_INTERVAL_SECS));
+    }
+    if let Some(runs) = raw.max_runs_per_hour {
+        config.max_runs_per_hour = runs.clamp(MIN_SIGNAL_RUNS_PER_HOUR, MAX_SIGNAL_RUNS_PER_HOUR);
+    }
+    if let Some(runs) = raw.max_consecutive_runs {
+        config.max_consecutive_runs =
+            runs.clamp(MIN_SIGNAL_CONSECUTIVE_RUNS, MAX_SIGNAL_CONSECUTIVE_RUNS);
+    }
+    Ok(config)
 }
 
 /// Merge the global block with the project block. **Project wins**: a project
@@ -439,6 +554,113 @@ mod tests {
         assert!(issues.is_empty());
     }
 
+    #[test]
+    fn subscription_defaults_wake_to_auto() {
+        let (servers, issues) = parse(json!({
+            "docs": { "command": "srv", "subscribe": ["file:///a.md"] }
+        }));
+        assert!(issues.is_empty(), "issues: {issues:?}");
+        assert_eq!(servers[0].signals.wake, WakeMode::Auto);
+        // The budget defaults are the documented initial values.
+        assert_eq!(
+            servers[0].signals.min_interval,
+            Duration::from_secs(DEFAULT_MIN_INTERVAL_SECS)
+        );
+        assert_eq!(
+            servers[0].signals.max_runs_per_hour,
+            DEFAULT_MAX_RUNS_PER_HOUR
+        );
+        assert_eq!(
+            servers[0].signals.max_consecutive_runs,
+            DEFAULT_MAX_CONSECUTIVE_RUNS
+        );
+    }
+
+    #[test]
+    fn explicit_wake_off_overrides_subscription() {
+        let (servers, issues) = parse(json!({
+            "docs": {
+                "command": "srv",
+                "subscribe": ["file:///a.md"],
+                "signals": { "wake": "off" }
+            }
+        }));
+        assert!(issues.is_empty(), "issues: {issues:?}");
+        assert_eq!(servers[0].signals.wake, WakeMode::Off);
+    }
+
+    #[test]
+    fn absent_subscription_defaults_wake_to_off() {
+        let (servers, issues) = parse(json!({
+            "docs": { "command": "srv" },
+            "tools": { "command": "srv", "signals": { "wake": "auto" } }
+        }));
+        assert!(issues.is_empty(), "issues: {issues:?}");
+        let by_name = |n: &str| servers.iter().find(|s| s.name == n).unwrap();
+        assert_eq!(by_name("docs").signals.wake, WakeMode::Off);
+        // An explicit auto without a subscription is harmless: no notification
+        // can arrive, so the mode never fires.
+        assert_eq!(by_name("tools").signals.wake, WakeMode::Auto);
+    }
+
+    #[test]
+    fn invalid_wake_mode_rejects_the_entry() {
+        let (servers, issues) = parse(json!({
+            "docs": { "command": "srv", "signals": { "wake": "sometimes" } }
+        }));
+        assert!(servers.is_empty());
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("off/notify/auto"), "issues: {issues:?}");
+    }
+
+    #[test]
+    fn signal_numbers_are_clamped() {
+        let (servers, issues) = parse(json!({
+            "low": {
+                "command": "srv",
+                "signals": {
+                    "minIntervalSeconds": 0,
+                    "maxRunsPerHour": 0,
+                    "maxConsecutiveRuns": 0
+                }
+            },
+            "high": {
+                "command": "srv",
+                "signals": {
+                    "minIntervalSeconds": 999_999,
+                    "maxRunsPerHour": 99_999,
+                    "maxConsecutiveRuns": 99_999
+                }
+            }
+        }));
+        assert!(issues.is_empty(), "issues: {issues:?}");
+        let by_name = |n: &str| servers.iter().find(|s| s.name == n).unwrap();
+        assert_eq!(
+            by_name("low").signals.min_interval,
+            Duration::from_secs(MIN_SIGNAL_INTERVAL_SECS)
+        );
+        assert_eq!(
+            by_name("low").signals.max_runs_per_hour,
+            MIN_SIGNAL_RUNS_PER_HOUR
+        );
+        assert_eq!(
+            by_name("low").signals.max_consecutive_runs,
+            MIN_SIGNAL_CONSECUTIVE_RUNS
+        );
+        assert_eq!(
+            by_name("high").signals.min_interval,
+            Duration::from_secs(MAX_SIGNAL_INTERVAL_SECS)
+        );
+        assert_eq!(
+            by_name("high").signals.max_runs_per_hour,
+            MAX_SIGNAL_RUNS_PER_HOUR
+        );
+        assert_eq!(
+            by_name("high").signals.max_consecutive_runs,
+            MAX_SIGNAL_CONSECUTIVE_RUNS
+        );
+    }
+
     fn stdio(name: &str) -> ServerConfig {
         ServerConfig {
             name: name.to_string(),
@@ -452,6 +674,7 @@ mod tests {
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             subscribe: Vec::new(),
             auto_read: Vec::new(),
+            signals: SignalsConfig::default(),
         }
     }
 
