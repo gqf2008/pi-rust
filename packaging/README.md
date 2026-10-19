@@ -39,9 +39,12 @@ Add `-- --dry-run` to print the plan without executing anything.
 `.github/workflows/release-binaries.yml` publishes one archive per target, **with
 the binary at the archive root** and a `.sha256` beside every archive.
 
-The table below records the original four targets. The workflow also builds
-Intel macOS as `kiqi-v<version>-x86_64-apple-darwin.tar.gz`, with a matching
-`.sha256`; this asset is available in releases whose tag includes that target.
+The table below records the original four targets and the digests that v0.3.2
+actually published — asset names changed after it (`kiqi-v…` → `ki-v…`, and the
+version now comes without its `v` prefix; see `refresh-channels.sh`). The workflow
+also builds Intel macOS as `ki-v<version>-x86_64-apple-darwin.tar.gz`, with a
+matching `.sha256`; this asset is available in releases whose tag includes that
+target.
 
 | Target | Asset | sha256 (v0.3.2) |
 | --- | --- | --- |

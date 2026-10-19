@@ -61,6 +61,24 @@ if [ -f "$REFRESH" ]; then
     }
 fi
 
+# --- 1c. Channel manifests must not embed the retired prefix ----------------
+# The manifests carry full URLs, so the rename has to reach them too. Their *repo*
+# and *version* are a separate question (see the `release-target-split` card); this
+# checks only the asset-name prefix owned by release-binaries.yml.
+for manifest in \
+    "$ROOT/packaging/homebrew/ki.rb" \
+    "$ROOT/packaging/scoop/ki.json" \
+    "$ROOT/packaging/winget/bigfish1913.ki.installer.yaml"
+do
+    [ -f "$manifest" ] || continue
+    rel=${manifest#"$ROOT"/}
+    # Comment lines first: the v0.3.2 digests table quotes the old names on purpose.
+    grep -v '^[[:space:]]*#' "$manifest" | grep -q 'kiqi-v' && {
+        echo "FAIL: $rel still embeds 'kiqi-v…' (the workflow uploads 'ki-v…')" >&2
+        status=1
+    }
+done
+
 # --- 2. Pushing goes to `fork`, never `origin` ------------------------------
 grep -q '要推送就推 `fork`' "$AGENTS" || {
     echo "note: AGENTS.md no longer states the push rule; review this test" >&2

@@ -11,7 +11,7 @@ Installers:
   NestedInstallerFiles:
   - RelativeFilePath: ki.exe
     PortableCommandAlias: ki
-  InstallerUrl: https://github.com/bigfish1913/pi-rust/releases/download/v0.3.21/kiqi-v0.3.21-x86_64-pc-windows-msvc.zip
+  InstallerUrl: https://github.com/bigfish1913/pi-rust/releases/download/v0.3.21/ki-v0.3.21-x86_64-pc-windows-msvc.zip
   InstallerSha256: F2B2511AAF8C0B2DFE127E3E04AC796628D985B0B915CFCE9A73A8E472AA8485
 ManifestType: installer
 ManifestVersion: 1.12.0

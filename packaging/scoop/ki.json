@@ -5,7 +5,7 @@
   "license": "MIT",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/bigfish1913/pi-rust/releases/download/v0.3.21/kiqi-v0.3.21-x86_64-pc-windows-msvc.zip",
+      "url": "https://github.com/bigfish1913/pi-rust/releases/download/v0.3.21/ki-v0.3.21-x86_64-pc-windows-msvc.zip",
       "hash": "f2b2511aaf8c0b2dfe127e3e04ac796628d985b0b915cfce9a73a8e472aa8485"
     }
   },
@@ -16,7 +16,7 @@
   "autoupdate": {
     "architecture": {
       "64bit": {
-        "url": "https://github.com/bigfish1913/pi-rust/releases/download/v$version/kiqi-v$version-x86_64-pc-windows-msvc.zip"
+        "url": "https://github.com/bigfish1913/pi-rust/releases/download/v$version/ki-v$version-x86_64-pc-windows-msvc.zip"
       }
     },
     "hash": {
