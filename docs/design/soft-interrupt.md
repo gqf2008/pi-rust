@@ -1,6 +1,6 @@
 # 方案：软中断（Esc 只停当前动作，不终止整轮）
 
-> 状态：**阶段 1、2 已落地（2026-10-19，`4902ab7` / 本卡）**；阶段 3 待做。目标：把 Esc 从“终止整个 run”改为
+> 状态：**阶段 1、2、3 已全部落地（2026-10-19，`4902ab7` / `3fa2aa7` / `cf7e9c5`+`7e9377f`）**。目标：把 Esc 从“终止整个 run”改为
 > “取消当前工具调用/模型流，保留 run 与 steering 队列”，由 LLM 在看到插入消息后
 > 决定停止、收尾还是继续。
 > 关联：`signal-driven-agent.md` §5（MUI 输入）、`plugin-abi.md` §6.36
@@ -119,7 +119,7 @@ UI：
 |---|---|---|
 | 1 | 工具软中断：`InterruptControl` + `AgentLane::interrupt` + 单/双 Esc | **已落地** `f7013cb` + `4902ab7` |
 | 2 | 流软中断：provider token、丢弃半条消息、有排队则续流 | **已落地** 本卡（见 §5.2） |
-| 3 | 审计日志、`InterruptResult` 细化 | 待做（提示已做） |
+| 3 | 审计日志、`InterruptResult` 细化 | **已落地** `cf7e9c5` + `7e9377f`（见 §5.3） |
 
 阶段 1 先解决最痛的长工具（bash/dispatch）；阶段 2 覆盖“模型正在生成时按 Esc”。
 
@@ -173,6 +173,28 @@ UI：
    `a_stream_soft_interrupt_without_a_start_leaves_no_assistant_behind`
    （断言第二次请求的上下文是 `["user","user"]`，且 assistant 的
    `MessageStart`/`MessageEnd` 成对）。
+
+### 5.3 阶段 3 落地记录
+
+| 位置 | 实现 |
+|---|---|
+| `crates/kiqi-agent/src/interrupt.rs` | `ActionKind { Tool, Stream }`；`install(token, kind)` 把它存进 `Current`；`current_kind()` 读取，`has_current()` 定义在它之上——「有没有动作」与「是什么动作」共用一次加锁，不会互相矛盾 |
+| `crates/kiqi-agent/src/agent_loop.rs` | 流请求 install `Stream`、工具调用 install `Tool` |
+| `crates/kiqi-harness/src/agent_harness.rs` | `InterruptResult::Soft { action: ActionKind }`；`interrupt()` 用 `current_kind()` 取代 `has_current()` 并把种类报给 UI |
+| `crates/kiqi-cli/src/interactive_tui/events.rs` | 两条文案 + 纯函数 `soft_interrupt_note(ActionKind)`：「Interrupted the current tool call; …」/「Interrupted the reply; …」 |
+| `crates/kiqi-agent/src/interrupt_trace.rs` | `KI_DEBUG_INTERRUPT=1`（或路径）→ `<temp>/kiqi-interrupt.log`，记 `press installed=<bool> kind=<..>`、`latched-cancelled kind=<..>`、`decision=<soft\|nothing\|no-run> kind=<..>` |
+
+两条不可回退的判断：
+
+1. **第 3 轮那条 `!contains("tool")` 断言必须保持反转后的方向。** 它当时写成「不得出现 tool」是因为
+   `Soft` 不携带信息、一条文案要同时覆盖工具与流；现在 `Soft` 带 `ActionKind`，两条文案各自点名自己的
+   目标。把断言改回去等于退回信息缺失。
+2. **trace 一律在释放锁之后写。** `soft_interrupt` 与 `install` 都在 `InterruptControl` 自己的 mutex 下，
+   而 `install` 每个 run 的每次工具调用与每次流请求都会走一次；在锁内写文件会让一个慢磁盘变成整个
+   agent loop 的停顿。三个调用点都是「先把 kind/installed 拷进局部变量 → drop guard → 再写日志」，
+   模块头与调用点注释都写了这条理由——它是后续改动最容易在「仍能编译」的情况下破坏的约束。
+
+trace 是纯诊断：无人回读、不参与任何返回值或时序、所有 IO 错误被吞掉、env 未设时只花一次 `OnceLock` 查找。
 
 ## 6. 开放问题
 
