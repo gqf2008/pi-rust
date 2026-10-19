@@ -879,6 +879,25 @@ fn models_json_mtime() -> Option<std::time::SystemTime> {
         .and_then(|meta| meta.modified().ok())
 }
 
+/// Sends `TuiMessage::Exit` when it is dropped, which makes a panicking key
+/// worker end the session instead of wedging it.
+///
+/// The dispatch loop runs on a `spawn_blocking` task, and the main loop waits on
+/// `rx.recv()` where this worker is the only sender of `Exit`. A panic therefore
+/// used to kill keyboard input while the render path kept running: the spinner
+/// kept animating, every key was ignored, and nothing ever told the main loop to
+/// stop — the exact shape of the reported hang. `Drop` runs during unwinding, so
+/// installing this guard at the top of the worker turns that permanent stall into
+/// an ordinary exit, with no restructuring of the (very large) loop body.
+struct ExitOnUnwind(mpsc::UnboundedSender<TuiMessage>);
+
+impl Drop for ExitOnUnwind {
+    fn drop(&mut self) {
+        // An unused result means the main loop is already gone; nothing to do.
+        let _ = self.0.send(TuiMessage::Exit);
+    }
+}
+
 /// `model_catalog` is the read-only catalog the `/model` selector displays.
 ///
 /// This implementation mirrors the TypeScript `InteractiveMode` class:
@@ -1745,6 +1764,9 @@ pub async fn interactive_tui(
         .to_ascii_lowercase();
 
     let key_handle = tokio::task::spawn_blocking(move || {
+        // Fires on the normal path too, where `Exit` has already been sent and a
+        // second one is ignored; its job is the unwind path (see the type's doc).
+        let _exit_on_unwind = ExitOnUnwind(tx_for_key.clone());
         let mut last_escape_time = None;
         // The run status `last_escape_time` was armed under. The 500ms
         // double-press window is only meaningful *inside* one status — Working

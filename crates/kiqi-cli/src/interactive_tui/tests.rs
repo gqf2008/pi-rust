@@ -2899,3 +2899,30 @@ fn ask_user_bridge_answers_and_cancels_by_request_id() {
         }))
         .is_err());
 }
+
+/// A panic in the key worker must not leave the session waiting forever.
+///
+/// The main loop blocks on `rx.recv()`, and the key worker is the only producer
+/// of `TuiMessage::Exit`. When that worker panics, the render path keeps going
+/// (spinner animating) while input is dead and nothing ever signals shutdown —
+/// the reported "Esc does nothing, the spinner is still moving" hang.
+///
+/// `ExitOnUnwind` closes that hole by sending `Exit` from `Drop`, which runs
+/// during unwinding. This pins the guard itself, not the 1000-line loop body.
+#[test]
+fn a_panicking_key_worker_still_signals_shutdown() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<super::TuiMessage>();
+
+    // Model the worker: install the guard, then die like a panicking handler.
+    let worker = std::thread::spawn(move || {
+        let _exit_on_unwind = super::ExitOnUnwind(tx);
+        panic!("a handler exploded");
+    });
+    let joined = worker.join();
+
+    assert!(joined.is_err(), "the worker did panic");
+    assert!(
+        matches!(rx.try_recv(), Ok(super::TuiMessage::Exit)),
+        "a panicking worker must send Exit, or the main loop waits forever"
+    );
+}
