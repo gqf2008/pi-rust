@@ -119,7 +119,20 @@ For work that has several steps, or steps that can run in parallel, use the
 
 A subagent starts fresh and cannot see this conversation, so each node's `task`
 must contain everything it needs. Prefer this over hand-rolling the whole
-workflow with `bash`."#;
+workflow with `bash`.
+
+Two defaults are too tight for a real task and must be raised per node:
+
+- `timeoutSeconds` defaults to **300**. A node that runs a build or the full
+  test suite easily exceeds it, and the call then fails with
+  `subagent timed out after 300s`. Set it explicitly (up to 1800) when the task
+touches cargo, a browser, or a long script.
+- `maxTurns` defaults to **8** (max 32). Reading code, editing, running gates,
+  checking mutations, and committing does not fit in 8 turns. A node that runs
+the budget out stops halfway and reports unfinished work as if it were done.
+
+A node that exits early is therefore usually a budget problem, not a logic
+problem: raise the two numbers before suspecting the task text."#;
 
 /// Tri-state read of [`GUIDE_ENV`]: `Some(true)` force on, `Some(false)` force
 /// off, `None` means "decide from the goal state".
@@ -331,6 +344,30 @@ mod tests {
     /// `HOST_ABORT` and the session tracker are process-wide; tests that touch
     /// them must not race. Crate-visible so the `kiqi` face's tests share it.
     pub(crate) static ABORT_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The guidance names the two node defaults that silently truncate real work.
+    /// This is not cosmetic: four delegations in one round each stopped halfway
+    /// because `timeoutSeconds` defaults to 300 s and `maxTurns` to 8, and the
+    /// failure read like a task problem. If the numbers in `graph.rs` ever move,
+    /// this test fails and the text has to move with them.
+    #[test]
+    fn the_guidance_names_the_defaults_that_truncate_a_real_task() {
+        for needle in [
+            "timeoutSeconds",
+            "300",
+            "maxTurns",
+            "8",
+            "subagent timed out after 300s",
+        ] {
+            assert!(
+                GUIDE_SECTION.contains(needle),
+                "the orchestration guidance must mention `{needle}`:\n{GUIDE_SECTION}"
+            );
+        }
+        // The numbers it quotes are the ones the scheduler actually uses.
+        assert_eq!(crate::graph::DEFAULT_TIMEOUT_SECS, 300);
+        assert_eq!(crate::graph::DEFAULT_MAX_TURNS, 8);
+    }
 
     #[test]
     fn guide_env_override_is_tri_state() {
