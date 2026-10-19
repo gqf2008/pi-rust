@@ -15,13 +15,18 @@
 //! module is that caller-side merge: load project dir then global dir, then
 //! dedupe first-wins-by-name so project wins.
 //!
-//! **Trust gate (v1 divergence):** pi gates project `SYSTEM.md` /
-//! `APPEND_SYSTEM.md` (and some project resources) behind
-//! `settingsManager.isProjectTrusted()`. ki v1 has **no trust prompt**
-//! (`config.rs:349`: "does not gate any project resources behind trust in v1"),
-//! so project resources are read unconditionally here. A copied `.ki/`
-//! directory drops in and works (the documented intent). Full trust gating is
-//! deferred.
+//! **Trust gate:** project resource dirs are only *reached* when the session
+//! treats the project as trusted — `session.rs` selects `skill_dirs(cwd)` /
+//! `prompt_template_dirs(cwd)` / `extension_dirs(cwd)` when trusted and the
+//! global-only lists otherwise. There is no interactive trust prompt in v1:
+//! `resolve_project_trust` defaults to `true` and only says otherwise when a
+//! decision was stored for that directory (`config::project_trust_decision`,
+//! `config.rs:536`) or `--no-approve`/`trust_override` says so.
+//!
+//! So the accurate statement is "project resources load by default, and are
+//! skipped once that directory has been marked untrusted" — not "never gated".
+//! (An earlier version of this note quoted a `config.rs:349` line that no longer
+//! exists there; the claim it recorded had drifted from the code.)
 //!
 //! **Cross-agent directories (v1):** project `<cwd>/.agents/skills` and user
 //! `~/.agents/skills` are read in addition to the ki-specific directories, since

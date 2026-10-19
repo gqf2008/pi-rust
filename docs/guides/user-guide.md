@@ -309,7 +309,7 @@ ki 使用自己的 `.ki` 目录：
 - 想在不删除的前提下把某个技能从列表里拿掉：在它的 frontmatter 写 `disable-model-invocation: true`。
   技能仍会被加载、仍可显式调用，只是不进系统提示（实测：`2 loaded (1 model-visible, 1 hidden)`）。
 - `~/.agents` 只用来放 `AGENTS.md` 与 `skills/`；ki 不会从那里找 prompts、themes 或 extensions。
-- 项目 `.agents/skills` 与项目 `.ki/skills` 一样不经项目信任门（v1 约定）：只要你在项目里启动 ki，它就会被读。
+- 项目 `.agents/skills` 与项目 `.ki/skills` 走**同一套**项目级规则：默认加载；当项目被标记为不可信（或传 `--no-approve`）时，项目级目录整体不读，只保留全局。v1 没有交互式信任提示，缺省即信任。
 
 ### 5.2 项目级资源目录
 
