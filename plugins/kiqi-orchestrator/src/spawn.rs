@@ -9,6 +9,21 @@
 //! consumes the next non-flag token as its prompt, so a task beginning with `-`
 //! would be parsed as a flag. Piped stdin becomes the initial prompt
 //! (`kiqi-cli::app::build_initial_message`).
+//!
+//! # Liveness
+//!
+//! `ki -p` writes its final text only when the run ends, so **stdout silence is
+//! not a stall signal** — a child inside a long tool call looks exactly like a
+//! wedged one. Two signals make the difference observable:
+//!
+//! - the child heartbeats on stderr every [`CHILD_HEARTBEAT_SECS`] seconds
+//!   (`KI_HEARTBEAT_SECS`, implemented in `kiqi-cli`'s print mode);
+//! - both readers refresh a shared [`Activity`] clock per chunk, so *any* byte on
+//!   either pipe counts as progress.
+//!
+//! The wait loop then only declares a stall when nothing at all arrived for
+//! [`SUBAGENT_STALL_SECS`]. Ordering is cancellation → wall-clock timeout → stall,
+//! so an explicit cancel never waits for a window.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -49,6 +64,16 @@ pub const HEARTBEAT_SECS_ENV: &str = "KI_HEARTBEAT_SECS";
 /// Env gate for the subagent stage log: `KI_DEBUG_SUBAGENT=1` appends to
 /// `<temp>/kiqi-subagent.log`, any other value is used as the path.
 pub const DEBUG_LOG_ENV: &str = "KI_DEBUG_SUBAGENT";
+
+/// How long the child may produce **nothing** on either pipe before the call is
+/// declared stalled and killed.
+///
+/// This is not a timeout: activity is measured from the last byte read, and the
+/// child heartbeats every [`CHILD_HEARTBEAT_SECS`] seconds, so a genuinely long
+/// task keeps resetting the clock. The window only exists to bound the failure
+/// mode where the child is wedged with no output at all — two measured hangs sat
+/// for 17 and 29 minutes.
+pub const SUBAGENT_STALL_SECS: u64 = 180;
 
 /// How often the wait loop snapshots the child's progress into the stage log.
 const STAGE_LOG_EVERY: Duration = Duration::from_secs(30);
@@ -215,6 +240,31 @@ pub fn run_with_exe(
     model: Option<&str>,
     control: &Control,
 ) -> Result<String, String> {
+    run_with_limits(
+        exe,
+        task,
+        max_turns,
+        timeout_secs,
+        SUBAGENT_STALL_SECS,
+        provider,
+        model,
+        control,
+    )
+}
+
+/// [`run_with_exe`] with the stall window injected, so tests can exercise it in
+/// seconds instead of minutes. Production always passes [`SUBAGENT_STALL_SECS`].
+#[allow(clippy::too_many_arguments)]
+fn run_with_limits(
+    exe: &Path,
+    task: &str,
+    max_turns: u64,
+    timeout_secs: u64,
+    stall_secs: u64,
+    provider: Option<&str>,
+    model: Option<&str>,
+    control: &Control,
+) -> Result<String, String> {
     // Fail before launching anything if already cancelled.
     control.check()?;
     let activity = Activity::default();
@@ -253,6 +303,17 @@ pub fn run_with_exe(
         if Instant::now() >= deadline {
             kill_and_reap(&mut child);
             return Err(format!("subagent timed out after {timeout_secs}s"));
+        }
+        // Stall: cancellation and the wall-clock deadline win above, so a wedged
+        // child is only declared stalled while the call is otherwise healthy.
+        // The window is measured from the last byte on *either* pipe, and the
+        // child heartbeats every `CHILD_HEARTBEAT_SECS`, so a long task that is
+        // still working never trips this.
+        let silence = activity.silence();
+        if silence > Duration::from_secs(stall_secs) {
+            kill_and_reap(&mut child);
+            stage(&format!("stalled silent={}ms", silence.as_millis()));
+            return Err(format!("subagent stalled: no activity for {stall_secs}s"));
         }
         // Periodic progress snapshot (opt-in stage log only; no behaviour change).
         if Instant::now() >= next_stage {
@@ -794,5 +855,135 @@ mod tests {
 
         let text = result.expect("a chatty child that exits normally is a success");
         assert!(text.contains("done"), "got: {text:?}");
+    }
+
+    /// Write an executable stand-in child; the name keeps concurrent tests apart.
+    #[cfg(unix)]
+    fn script_file(name: &str, body: &str) -> PathBuf {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("orch-{name}-{}.sh", std::process::id()));
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "#!/bin/sh").unwrap();
+        writeln!(file, "{body}").unwrap();
+        drop(file);
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    /// `kill -0` probe: succeeds for a live **or zombie** process, so a `false`
+    /// here means the child was actually reaped.
+    #[cfg(unix)]
+    fn is_alive(pid: i32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_silent_child_is_killed_as_stalled() {
+        // The measured failure mode: a child wedged with no output at all. It
+        // records its pid and then blocks forever without writing a byte.
+        let pidfile = std::env::temp_dir().join(format!("orch-stall-{}.pid", std::process::id()));
+        let script = script_file(
+            "stall",
+            &format!("echo $$ > {}\nexec sleep 30", pidfile.display()),
+        );
+
+        let control = Control::default();
+        let start = Instant::now();
+        // Production passes `SUBAGENT_STALL_SECS`; a 1s window keeps the test fast.
+        let err = run_with_limits(&script, "ignored", 8, 60, 1, None, None, &control).unwrap_err();
+        let elapsed = start.elapsed();
+
+        assert!(err.contains("stalled"), "got: {err}");
+        assert!(
+            !err.contains("timed out"),
+            "a stall must not be reported as a timeout: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the stall window was not honoured: {elapsed:?}"
+        );
+
+        let pid = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok())
+            .expect("the child records its pid");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!is_alive(pid), "stalled child {pid} was left behind");
+
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&pidfile);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_keeps_heartbeating_is_not_stalled() {
+        // 1s worth of silence at a time against a 2s window: exactly the shape a
+        // real subagent has (`KI_HEARTBEAT_SECS=15`), just faster. The script also
+        // refuses to run without the env var, so dropping it from `child_command`
+        // reddens this test rather than passing silently.
+        let script = script_file(
+            "beat",
+            "if [ -z \"$KI_HEARTBEAT_SECS\" ]; then\n  echo 'started without KI_HEARTBEAT_SECS' >&2\n  exit 3\nfi\nfor i in 1 2 3; do\n  echo \"[ki] heartbeat t=$i\" >&2\n  sleep 1\ndone\necho done",
+        );
+
+        let control = Control::default();
+        let result = run_with_limits(&script, "ignored", 8, 60, 2, None, None, &control);
+        let _ = std::fs::remove_file(&script);
+
+        let text = result.expect(&format!(
+            "a heartbeating child is not stalled (child must get {HEARTBEAT_SECS_ENV})"
+        ));
+        assert!(text.contains("done"), "got: {text:?}");
+    }
+
+    #[test]
+    fn the_child_heartbeat_is_comfortably_faster_than_the_stall_window() {
+        // A heartbeat at or above the window would make a busy child look stalled.
+        assert!(
+            CHILD_HEARTBEAT_SECS * 3 <= SUBAGENT_STALL_SECS,
+            "heartbeat {CHILD_HEARTBEAT_SECS}s is too close to the {SUBAGENT_STALL_SECS}s stall window"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_exits_immediately_returns_and_leaves_no_zombie() {
+        let pidfile = std::env::temp_dir().join(format!("orch-quick-{}.pid", std::process::id()));
+        let script = script_file(
+            "quick",
+            &format!("echo $$ > {}\necho done", pidfile.display()),
+        );
+
+        let control = Control::default();
+        let start = Instant::now();
+        let result = run_with_limits(&script, "ignored", 8, 60, 1, None, None, &control);
+        let elapsed = start.elapsed();
+
+        let text = result.expect("an immediately exiting child is a success");
+        assert!(text.contains("done"), "got: {text:?}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "an immediate exit must not wait for the stall window: {elapsed:?}"
+        );
+
+        let pid = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok())
+            .expect("the child records its pid");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!is_alive(pid), "child {pid} was left behind");
+
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_file(&pidfile);
     }
 }

@@ -101,6 +101,17 @@ silently use a different (or misconfigured) default.
 - **Turn budget** — `maxTurns` is passed as `KI_MAX_TURNS_PER_RUN`, which the
   harness enforces regardless of what the child model wants.
 - **Wall-clock budget** — the host kills the child after `timeoutSeconds`.
+- **Stall window** — a child that produces nothing on stdout **or** stderr for
+  180 s (`SUBAGENT_STALL_SECS`) is killed and reported as
+  `subagent stalled: no activity for 180s`. This is not a second timeout: the
+  clock is reset by every byte, and the child heartbeats every 15 s
+  (`KI_HEARTBEAT_SECS`, ki's print mode), so a long task that is still working
+  never trips it. Without the window, two real hangs sat for 17 and 29 minutes
+  because `ki -p` prints nothing until the run ends. Cancellation and
+  `timeoutSeconds` are both checked first.
+- **Debugging a delegation** — `KI_DEBUG_SUBAGENT=1` appends a timestamped stage
+  log to `<temp>/kiqi-subagent.log` (`spawn pid=…`, `stdin-written`, `wait`, a
+  byte/silence snapshot every 30 s, `reaped status=…`, `readers-joined`).
 - **Recursion guard** — the child is launched with `--exclude-tools subagent`,
   so a subagent cannot delegate again.
 - **Output bound** — child output is truncated before it re-enters the
