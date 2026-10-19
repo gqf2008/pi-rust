@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use super::component::Component;
 use crate::box_component::Box;
 use crate::markdown::Markdown;
-use crate::theme::{theme, theme_revision};
+use crate::theme::{theme, theme_revision, Color};
 
 const OSC133_ZONE_START: &str = "\x1b]133;A\x07";
 const OSC133_ZONE_END: &str = "\x1b]133;B\x07";
@@ -39,12 +39,45 @@ pub struct UserMessageComponent {
 }
 
 fn build_box(text: &str, output_pad: usize) -> Box {
-    let bg = theme().colors.surface;
+    let colors = theme().colors;
+    let bg = colors.surface;
     let content_box = Box::new(output_pad, 1);
     content_box.set_bg_fn(Some(std::sync::Arc::new(move |s: &str| bg.bg(s))));
-    let md = Markdown::new(text.to_string(), 0, 0);
-    content_box.add_child(std::sync::Arc::new(md));
+    let md: std::sync::Arc<dyn Component> =
+        std::sync::Arc::new(Markdown::new(text.to_string(), 0, 0));
+    // The bubble background is explicit, so the body must not inherit the
+    // terminal's default foreground: on a light terminal (dark default text)
+    // the dark-theme bubble rendered near-black text on #343541 and the echo
+    // was invisible.
+    content_box.add_child(std::sync::Arc::new(SurfaceText {
+        inner: md,
+        color: colors.surface_text,
+    }));
     content_box
+}
+
+/// Paints a child's lines with the theme's paired surface foreground.
+struct SurfaceText {
+    inner: std::sync::Arc<dyn Component>,
+    color: Color,
+}
+
+impl Component for SurfaceText {
+    fn render(&self, width: usize) -> Vec<String> {
+        self.inner
+            .render(width)
+            .into_iter()
+            .map(|line| self.color.fg_stable(&line))
+            .collect()
+    }
+
+    fn invalidate(&self) {
+        self.inner.invalidate();
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl UserMessageComponent {
@@ -132,6 +165,22 @@ mod tests {
         // Should contain the text (after stripping ANSI/OSC).
         let joined = strip_ansi(&lines.join("\n"));
         assert!(joined.contains("Hello"));
+    }
+
+    /// The echo must paint its own foreground: inheriting the terminal default
+    /// made it invisible on a light terminal with the dark theme.
+    #[test]
+    fn the_echo_paints_the_paired_surface_text_colour() {
+        let c = UserMessageComponent::new("Hello world");
+        let joined = c.render(40).join("\n");
+        assert!(
+            joined.contains("\x1b[38;"),
+            "body must carry an explicit foreground: {joined:?}"
+        );
+        assert!(
+            joined.contains("\x1b[48;"),
+            "the bubble background is still painted: {joined:?}"
+        );
     }
 
     #[test]

@@ -13,6 +13,18 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **The user-message echo is readable whatever the terminal palette is.** The
+  bubble paints an explicit background (`surface`) but its body inherited the
+  terminal's default foreground; on a light terminal with ki's dark theme that
+  rendered near-black text on `#343541` — the echoed input was invisible. Each
+  preset now carries a paired `surface_text` (dark: light gray, light: dark
+  gray, monochrome: white) applied with a foreground-only reset so the bubble
+  background survives nested styled spans. The same class was fixed for
+  custom messages, whose light-theme text was transcribed as a near-white
+  `237` on a near-white bubble (now `#1f2328`, matching the token's own
+  comment) and whose dark-theme text inherited the terminal default (now
+  `#d4d4d4`). `/theme light` still switches the whole UI to match a light
+  terminal.
 - **A resumed session can no longer become unsendable.** When a branch carries
   tool results whose assistant message was never persisted — the shape left by
   a crash during `ask_user` — every provider request started with `role: tool`

@@ -34,6 +34,15 @@ pub struct ThemeColors {
     pub background: Color,
     /// Primary surface color (pi `userMessageBg`).
     pub surface: Color,
+    /// Foreground paired with [`Self::surface`].
+    ///
+    /// `text` is the terminal's default colour, which is right on the terminal
+    /// background but wrong on a painted surface: a light terminal (dark
+    /// default text) rendering the dark theme's `#343541` bubble produced
+    /// near-black text on a dark background — the user-message echo was
+    /// invisible. Anything that paints `surface` must paint its text with this
+    /// token instead of inheriting the terminal default.
+    pub surface_text: Color,
     /// Border color (pi `border`).
     pub border: Color,
     /// Accent border color (pi `borderAccent`).
@@ -124,6 +133,7 @@ impl Default for ThemeColors {
             info: Color::Ansi256(81),     // cyan
             background: Color::Default,
             surface: Color::Ansi256(236), // userMessageBg (#343541) ≈ 236
+            surface_text: Color::Rgb(212, 212, 212), // light body text on the dark bubble
             border: Color::Ansi256(67),   // border blue (#5f87ff) ≈ 67
             border_accent: Color::Ansi256(45), // borderAccent cyan (#00d7ff) ≈ 45
             border_muted: Color::Ansi256(239), // borderMuted darkGray (#505050) ≈ 239
@@ -160,7 +170,9 @@ impl Default for ThemeColors {
             // customMsgBg #2d2838, customMessageLabel #9575cd, text #d4d4d4.
             custom_message_bg: Color::Rgb(45, 40, 56),
             custom_message_label: Color::Rgb(149, 117, 205),
-            custom_message_text: Color::Default,
+            // The pi token is #d4d4d4; inheriting the terminal default made the
+            // text invisible on a light terminal over this painted background.
+            custom_message_text: Color::Rgb(212, 212, 212),
 
             // Tool diffs
             tool_diff_added: Color::Ansi256(107),   // green
@@ -207,6 +219,18 @@ impl Color {
     /// Apply color to text (foreground).
     pub fn fg(&self, text: &str) -> String {
         format!("{}{}\x1b[0m", self.to_fg(), text)
+    }
+
+    /// Apply a foreground to a line that may carry nested styled spans.
+    ///
+    /// Unlike [`Self::fg`], the result does not end with SGR 0 (which would
+    /// also clear a surrounding background) and the colour is re-applied after
+    /// every nested reset, so a code span in the middle of the line cannot
+    /// blank the rest of it.
+    pub fn fg_stable(&self, text: &str) -> String {
+        let fg = self.to_fg();
+        let nested = text.replace("\x1b[0m", &format!("\x1b[0m{fg}"));
+        format!("{fg}{nested}\x1b[39m")
     }
 
     /// Apply color to text (background).
@@ -383,6 +407,7 @@ fn theme_for_preset(preset: ThemePreset) -> Theme {
             colors.info = Color::Ansi256(67); // blue
             colors.background = Color::Default;
             colors.surface = Color::Ansi256(254); // userMsgBg (#e8e8e8)
+            colors.surface_text = Color::Ansi256(238); // dark body text on the light bubble
             colors.border = Color::Ansi256(67); // blue (#547da7)
             colors.border_accent = Color::Ansi256(66); // teal
             colors.border_muted = Color::Ansi256(249); // lightGray (#b0b0b0)
@@ -411,7 +436,7 @@ fn theme_for_preset(preset: ThemePreset) -> Theme {
             // customMsgBg #ede7f6, customMessageLabel #7e57c2, text #1f2328.
             colors.custom_message_bg = Color::Rgb(237, 231, 246);
             colors.custom_message_label = Color::Rgb(126, 87, 194);
-            colors.custom_message_text = Color::Ansi256(237);
+            colors.custom_message_text = Color::Rgb(31, 35, 40); // #1f2328
             colors.tool_diff_added = Color::Ansi256(65);
             colors.tool_diff_removed = Color::Ansi256(131);
             colors.tool_diff_context = Color::Ansi256(241);
@@ -438,6 +463,7 @@ fn theme_for_preset(preset: ThemePreset) -> Theme {
             colors.warning = Color::Ansi256(15);
             colors.info = Color::Ansi256(15);
             colors.surface = Color::Ansi256(236);
+            colors.surface_text = Color::Ansi256(15);
             colors.border = Color::Ansi256(244);
             colors.border_muted = Color::Ansi256(240);
             colors.selection = Color::Ansi256(244);
@@ -528,5 +554,64 @@ mod tests {
         manager.apply_preset(ThemePreset::Dark);
         let theme = manager.get();
         assert!(matches!(theme.colors.accent, Color::Ansi256(108)));
+    }
+
+    /// `fg` ends with SGR 0, which would clear a surrounding panel background;
+    /// the surface foreground must reset only the foreground and must survive
+    /// nested resets inside the line.
+    #[test]
+    fn fg_stable_does_not_clear_a_background() {
+        let out = Color::Ansi256(252).fg_stable("a\x1b[0mb");
+        assert_eq!(out.matches("\x1b[38;5;252m").count(), 2);
+        assert!(out.ends_with("\x1b[39m"));
+        assert!(!out.ends_with("\x1b[0m"));
+    }
+
+    /// Custom messages paint their own background too; their text must pair
+    /// with it rather than inherit the terminal default.
+    #[test]
+    fn every_preset_paints_custom_message_text() {
+        for preset in [
+            ThemePreset::Dark,
+            ThemePreset::Light,
+            ThemePreset::Monochrome,
+        ] {
+            let manager = ThemeManager::new();
+            manager.apply_preset(preset);
+            let colors = manager.get().colors;
+            assert_ne!(
+                colors.custom_message_text,
+                Color::Default,
+                "{preset:?} must not inherit the terminal default on a painted background"
+            );
+            assert_ne!(
+                colors.custom_message_text, colors.custom_message_bg,
+                "{preset:?} custom-message text must contrast with its background"
+            );
+        }
+    }
+
+    /// Every preset must pair its painted surface with a foreground that is
+    /// not the terminal default (which is what made the echo invisible).
+    #[test]
+    fn every_preset_paints_surface_text() {
+        for preset in [
+            ThemePreset::Dark,
+            ThemePreset::Light,
+            ThemePreset::Monochrome,
+        ] {
+            let manager = ThemeManager::new();
+            manager.apply_preset(preset);
+            let colors = manager.get().colors;
+            assert_ne!(
+                colors.surface_text,
+                Color::Default,
+                "{preset:?} must not inherit the terminal default on a painted surface"
+            );
+            assert_ne!(
+                colors.surface_text, colors.surface,
+                "{preset:?} surface text must contrast with its surface"
+            );
+        }
     }
 }
