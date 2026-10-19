@@ -144,6 +144,12 @@ pub fn agents_dir() -> Option<PathBuf> {
     // builds — non-hermetic (results depend on the machine) and slow enough to
     // shift the timing of tests that share process-wide state. Tests that want the
     // shared directory set `KI_AGENTS_DIR` explicitly.
+    //
+    // Scope limit, stated so nobody relies on more: `cfg(test)` is per *crate*, so
+    // this covers `src/` unit tests only. An integration test under `tests/` links
+    // the library built **without** `cfg(test)` and would still see the real
+    // `~/.agents` — it must set `KI_AGENTS_DIR` (or `KI_CODING_AGENT_DIR`) itself.
+    // There are no such tests today.
     #[cfg(test)]
     {
         return None;
