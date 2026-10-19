@@ -11,6 +11,18 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **The declared minimum Rust version is now 1.96** (`rust-version` in
+  `[workspace.package]`), up from a 1.78 that the workspace could no longer build
+  against. `wasmtime 49` (via `kiqi-plugin-host`) pulls
+  `cranelift-assembler-x64 0.136.2`, which itself requires 1.96.0; cargo refuses to
+  resolve the workspace below that. Measured, not assumed: 1.94 fails with
+  "not supported by the following packages", while 1.96 and 1.98 both build the
+  whole workspace. CI now has an `msrv` job that reads the declared value and builds
+  against exactly that toolchain, so the number cannot drift from reality unnoticed
+  again — which is what had happened here.
+
 ### Fixed
 
 - **Esc can interrupt a wasm `dispatch` wave.** The wasm ABI gains an additive
