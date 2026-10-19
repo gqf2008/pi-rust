@@ -157,7 +157,7 @@ ANTHROPIC_AUTH_TOKEN=token
 --continue, -c          继续最近会话
 --resume, -r            选择历史会话
 --session <id|path>     指定会话
---session-dir <dir>     指定会话目录
+--session-dir <dir>     指定会话目录（相对路径按进程 cwd 解析；这与 KI_CODING_AGENT_DIR 要求绝对路径不同）
 --name, -n <name>       设置会话显示名称
 --tools <list>          只允许指定工具
 --exclude-tools <list>  禁用指定工具
