@@ -98,7 +98,7 @@ impl SignalWakeState {
         config: F,
     ) -> WakeDecision
     where
-        F: Fn(&str) -> Option<SignalsConfig>,
+        F: Fn(&str, &str) -> Option<SignalsConfig>,
     {
         if self.session_muted {
             return WakeDecision::Skip("muted for this session");
@@ -112,7 +112,7 @@ impl SignalWakeState {
             if !seen.insert(notice.server.as_str()) {
                 continue;
             }
-            let Some(policy) = config(&notice.server) else {
+            let Some(policy) = config(&notice.server, &notice.uri) else {
                 continue;
             };
             if policy.wake != WakeMode::Auto {
@@ -231,12 +231,12 @@ mod tests {
         }
     }
 
-    fn configs(map: &[(&str, SignalsConfig)]) -> impl Fn(&str) -> Option<SignalsConfig> {
+    fn configs(map: &[(&str, SignalsConfig)]) -> impl Fn(&str, &str) -> Option<SignalsConfig> {
         let map: HashMap<String, SignalsConfig> = map
             .iter()
             .map(|(name, cfg)| (name.to_string(), cfg.clone()))
             .collect();
-        move |server: &str| map.get(server).cloned()
+        move |server: &str, _uri: &str| map.get(server).cloned()
     }
 
     #[test]
@@ -256,6 +256,23 @@ mod tests {
             state.decide(&b, now, configs(&[("docs", policy(WakeMode::Auto))])),
             WakeDecision::Wake(vec!["docs".to_string()])
         );
+    }
+
+    #[test]
+    fn a_model_only_uri_is_not_wake_eligible() {
+        let mut state = SignalWakeState::new();
+        let cfg = |server: &str, uri: &str| {
+            (server == "docs" && uri == "file:///configured").then(|| policy(WakeMode::Auto))
+        };
+        let now = Instant::now();
+        assert_eq!(
+            state.decide(&batch(&[("docs", "file:///model-only")]), now, cfg),
+            WakeDecision::Skip("no auto server is within its budget")
+        );
+        assert!(matches!(
+            state.decide(&batch(&[("docs", "file:///configured")]), now, cfg),
+            WakeDecision::Wake(_)
+        ));
     }
 
     #[test]

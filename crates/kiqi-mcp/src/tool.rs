@@ -17,17 +17,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use kiqi_agent::types::{
-    AgentToolResult, TextContentOrImage, ToolExecutionMode, ToolResultPartial,
-};
+use kiqi_agent::types::{AgentToolResult, TextContentOrImage, ToolResultPartial};
 use kiqi_agent::{AgentError, AgentTool};
 use kiqi_ai::types::{ImageContent, ImageContentType, Schema, Tool};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::manager::{
-    call_tool, read_resource, CallError, DiscoveredTool, ServerHandle, MAX_RESOURCE_TEXT,
-    READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR, WATCH_RESOURCE_SUFFIX,
+    call_tool, read_resource, CallError, DiscoveredTool, ServerHandle, SubscriptionOrigin,
+    MAX_RESOURCE_TEXT, READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR,
 };
 
 /// An `AgentTool` backed by one tool on one MCP server.
@@ -219,12 +217,9 @@ pub(crate) struct McpResourceToolAdapter {
 
 impl McpResourceToolAdapter {
     /// `description` carries the server's resource + template list (refreshed
-    /// on `resources/list_changed` by the boundary re-merge).
-    pub(crate) fn new(handle: Arc<ServerHandle>, description: String) -> Self {
-        let name = format!(
-            "{}{TOOL_NAME_SEPARATOR}{READ_RESOURCE_SUFFIX}",
-            handle.server_name()
-        );
+    /// on `resources/list_changed` by the boundary re-merge). `name` is the
+    /// manager-validated qualified tool name.
+    pub(crate) fn new(handle: Arc<ServerHandle>, name: String, description: String) -> Self {
         Self {
             schema: Tool {
                 name,
@@ -295,11 +290,8 @@ pub(crate) struct McpResourceWatchToolAdapter {
 }
 
 impl McpResourceWatchToolAdapter {
-    pub(crate) fn new(handle: Arc<ServerHandle>) -> Self {
-        let name = format!(
-            "{}{TOOL_NAME_SEPARATOR}{WATCH_RESOURCE_SUFFIX}",
-            handle.server_name()
-        );
+    /// `name` is the manager-validated qualified tool name.
+    pub(crate) fn new(handle: Arc<ServerHandle>, name: String) -> Self {
         let read_name = format!(
             "{}{TOOL_NAME_SEPARATOR}{READ_RESOURCE_SUFFIX}",
             handle.server_name()
@@ -342,12 +334,6 @@ impl AgentTool for McpResourceWatchToolAdapter {
         &self.schema.name
     }
 
-    fn execution_mode(&self) -> ToolExecutionMode {
-        // Subscription state is a read-modify-write on the shared map; keep
-        // start/stop calls from interleaving.
-        ToolExecutionMode::Sequential
-    }
-
     async fn execute(
         &self,
         _tool_call_id: &str,
@@ -365,16 +351,28 @@ impl AgentTool for McpResourceWatchToolAdapter {
             .trim();
         match action {
             "list" => {
-                let uris = self.handle.subscription_uris();
-                let text = if uris.is_empty() {
+                let entries = self.handle.subscriptions();
+                let mut text = if entries.is_empty() {
                     "No resource subscriptions.".to_string()
                 } else {
-                    let mut text = format!("Watching {} resource(s):\n", uris.len());
-                    for uri in uris {
-                        text.push_str(&format!("- {uri}\n"));
-                    }
-                    text
+                    format!("Watching {} resource(s):\n", entries.len())
                 };
+                for (uri, origin) in entries {
+                    let origin = match origin {
+                        SubscriptionOrigin::Config => "config",
+                        SubscriptionOrigin::Model => "model",
+                    };
+                    text.push_str(&format!("- {uri} [{origin}]\n"));
+                    if text.len() > MAX_RESOURCE_TEXT {
+                        let mut end = MAX_RESOURCE_TEXT;
+                        while end > 0 && !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        text.truncate(end);
+                        text.push_str("\n[truncated]");
+                        break;
+                    }
+                }
                 Ok(AgentToolResult::text(text))
             }
             "start" | "stop" => {
@@ -390,16 +388,22 @@ impl AgentTool for McpResourceWatchToolAdapter {
                         ))
                     })?;
                 if action == "start" {
-                    self.handle.subscribe_uri(uri).await.map_err(|error| {
-                        AgentError::Tool(format!("{}: {error}", self.schema.name))
-                    })?;
+                    self.handle
+                        .subscribe_uri(uri, SubscriptionOrigin::Model, Some(&signal))
+                        .await
+                        .map_err(|error| {
+                            AgentError::Tool(format!("{}: {error}", self.schema.name))
+                        })?;
                     Ok(AgentToolResult::text(format!(
-                        "Watching {uri}. Updates will arrive as MCP signals; read the content with the server's read_resource tool."
+                        "Watching {uri}. Updates will be recorded as MCP signals; automatic wake applies only to configured subscriptions. Read the content with the server's read_resource tool."
                     )))
                 } else {
-                    self.handle.unsubscribe_uri(uri).await.map_err(|error| {
-                        AgentError::Tool(format!("{}: {error}", self.schema.name))
-                    })?;
+                    self.handle
+                        .unsubscribe_uri(uri, SubscriptionOrigin::Model, Some(&signal))
+                        .await
+                        .map_err(|error| {
+                            AgentError::Tool(format!("{}: {error}", self.schema.name))
+                        })?;
                     Ok(AgentToolResult::text(format!("Stopped watching {uri}.")))
                 }
             }

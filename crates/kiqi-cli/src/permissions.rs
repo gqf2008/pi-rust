@@ -315,6 +315,9 @@ fn target_candidates(tool: &str, args: &Value) -> Vec<String> {
         }
         return targets;
     }
+    if let Some(targets) = mcp_resource_candidates(&lower, args) {
+        return targets;
+    }
     let keys: &[&str] = match lower.as_str() {
         "bash" | "powershell" => &["command"],
         "read" | "write" | "edit" => &["path"],
@@ -333,13 +336,102 @@ fn target_candidates(tool: &str, args: &Value) -> Vec<String> {
     }
 }
 
-/// Evaluate every value the call may act on. A call is denied when any
-/// candidate matches a deny rule, or fails an allow list for its tool.
-pub fn decide_call(rules: &Rules, tool: &str, args: &Value) -> Decision {
-    for target in target_candidates(tool, args) {
-        if let Decision::Deny { reason } = decide(rules, tool, &target) {
-            return Decision::Deny { reason };
+/// `{server}__read_resource` / `{server}__watch_resource` act on a `uri` and,
+/// for the watch verb, an `action`. Without these candidates a URI-scoped deny
+/// rule silently fails open (the generic value/command/path keys find nothing)
+/// and a URI-scoped allow rule rejects every call.
+///
+/// Candidates are the action, the uri, and the combined `action uri`, so a
+/// policy can scope by action (`docs__watch_resource(start)`), by resource
+/// (`docs__watch_resource(mem://public)`), or by both. `read` has no action
+/// argument; its implicit action is `read`.
+fn mcp_resource_candidates(lower: &str, args: &Value) -> Option<Vec<String>> {
+    let watch = lower.ends_with(&format!("__{}", kiqi_mcp::WATCH_RESOURCE_SUFFIX));
+    let read = lower.ends_with(&format!("__{}", kiqi_mcp::READ_RESOURCE_SUFFIX));
+    if !watch && !read {
+        return None;
+    }
+    let action = if read {
+        Some("read")
+    } else {
+        args.get("action").and_then(Value::as_str)
+    }
+    .filter(|action| !action.is_empty());
+    let uri = args
+        .get("uri")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|uri| !uri.is_empty());
+    let mut targets = Vec::new();
+    if let Some(action) = action {
+        targets.push(action.to_string());
+    }
+    if let Some(uri) = uri {
+        targets.push(uri.to_string());
+        if let Some(action) = action {
+            targets.push(format!("{action} {uri}"));
         }
+    }
+    if targets.is_empty() {
+        targets.push(String::new());
+    }
+    Some(targets)
+}
+
+/// Evaluate every value the call may act on.
+///
+/// For ordinary tools this is the strict form: every candidate must satisfy the
+/// allow list, and any candidate matching a deny rule denies. The resource
+/// verbs are the exception: their candidates (action, uri, `action uri`) are
+/// alternative representations of the same call, so an allow rule matching ANY
+/// candidate suffices (`docs__watch_resource(start)` scopes a start without
+/// naming the uri). Deny rules still win if ANY candidate matches.
+pub fn decide_call(rules: &Rules, tool: &str, args: &Value) -> Decision {
+    let candidates = target_candidates(tool, args);
+    let lower = tool.to_ascii_lowercase();
+    let resource_tool = lower.ends_with(&format!("__{}", kiqi_mcp::WATCH_RESOURCE_SUFFIX))
+        || lower.ends_with(&format!("__{}", kiqi_mcp::READ_RESOURCE_SUFFIX));
+    if !resource_tool {
+        for target in candidates {
+            if let Decision::Deny { reason } = decide(rules, tool, &target) {
+                return Decision::Deny { reason };
+            }
+        }
+        return Decision::Allow;
+    }
+    for target in &candidates {
+        if let Some(rule) = rules
+            .deny
+            .iter()
+            .find(|rule| rule_matches(rule, tool, target))
+        {
+            return Decision::Deny {
+                reason: format!(
+                    "permission denied: tool `{tool}` matches deny rule `{rule}`{}",
+                    target_note(target)
+                ),
+            };
+        }
+    }
+    let has_allow_for_tool = rules.allow.iter().any(|rule| {
+        let (rule_tool, _) = split_rule(rule);
+        rule_tool == "*" || rule_tool.eq_ignore_ascii_case(tool)
+    });
+    if has_allow_for_tool
+        && !candidates.iter().any(|target| {
+            rules
+                .allow
+                .iter()
+                .any(|rule| rule_matches(rule, tool, target))
+        })
+    {
+        let target = candidates.first().map(String::as_str).unwrap_or("");
+        return Decision::Deny {
+            reason: format!(
+                "permission denied: tool `{tool}` is not matched by an allow rule{}",
+                target_note(target)
+            ),
+        };
     }
     Decision::Allow
 }
@@ -638,6 +730,92 @@ mod tests {
             kiqi_agent::types::TextContentOrImage::Text(text) => text.text.clone(),
             _ => panic!("permissions returned an image"),
         }
+    }
+
+    #[test]
+    fn generic_allow_lists_still_require_every_candidate() {
+        // The any-candidate allow rule is scoped to the resource verbs; an
+        // unknown tool must not let a harmless `value` shadow a dangerous
+        // `command`.
+        let rules = parse_rules(json!({"allow": ["custom(git *)"]})).unwrap();
+        let decision = decide_call(
+            &rules,
+            "custom",
+            &json!({"command": "rm -rf /", "value": "git status"}),
+        );
+        assert!(matches!(decision, Decision::Deny { .. }));
+    }
+
+    #[test]
+    fn watch_resource_uri_and_action_are_rule_targets() {
+        let rules = parse_rules(json!({
+            "permissions": { "deny": ["docs__watch_resource(mem://secret)"] }
+        }))
+        .unwrap();
+        assert!(matches!(
+            decide_call(
+                &rules,
+                "docs__watch_resource",
+                &json!({ "action": "start", "uri": "mem://secret" })
+            ),
+            Decision::Deny { .. }
+        ));
+        assert_eq!(
+            decide_call(
+                &rules,
+                "docs__watch_resource",
+                &json!({ "action": "start", "uri": "mem://public" })
+            ),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn watch_resource_can_allow_start_but_deny_stop() {
+        let rules = parse_rules(json!({
+            "permissions": { "allow": ["docs__watch_resource(start)"] }
+        }))
+        .unwrap();
+        assert_eq!(
+            decide_call(
+                &rules,
+                "docs__watch_resource",
+                &json!({ "action": "start", "uri": "mem://x" })
+            ),
+            Decision::Allow
+        );
+        assert!(matches!(
+            decide_call(
+                &rules,
+                "docs__watch_resource",
+                &json!({ "action": "stop", "uri": "mem://x" })
+            ),
+            Decision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn read_resource_uri_is_a_rule_target() {
+        let rules = parse_rules(json!({
+            "permissions": { "deny": ["docs__read_resource(file:///secret)"] }
+        }))
+        .unwrap();
+        assert!(matches!(
+            decide_call(
+                &rules,
+                "docs__read_resource",
+                &json!({ "uri": "file:///secret" })
+            ),
+            Decision::Deny { .. }
+        ));
+        assert_eq!(
+            decide_call(
+                &rules,
+                "docs__read_resource",
+                &json!({ "uri": "file:///public" })
+            ),
+            Decision::Allow
+        );
     }
 
     #[test]

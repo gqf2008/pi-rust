@@ -169,6 +169,12 @@ pub struct ServerConfig {
     /// told, so it defaults to [`WakeMode::Auto`]; no subscription means
     /// [`WakeMode::Off`] (today's behavior).
     pub signals: SignalsConfig,
+    /// Whether the model may create session-scoped resource watches through
+    /// `{server}__watch_resource`. Default true for user-configured servers;
+    /// ACP client-supplied servers set it false (there is no ACP subscription
+    /// verb, and the editor's server list is not a signal-source opt-in).
+    /// `modelWatch: false` turns it off for a settings server.
+    pub model_watch: bool,
 }
 
 /// The raw entry as it appears in `mcpServers.<name>`. Every field is optional
@@ -199,6 +205,8 @@ struct RawServer {
     auto_read: Option<Vec<String>>,
     #[serde(default)]
     signals: Option<RawSignals>,
+    #[serde(default)]
+    model_watch: Option<bool>,
 }
 
 /// `signals` block. Unknown keys are ignored like the rest of the entry; the
@@ -372,6 +380,7 @@ fn parse_one(
         subscribe,
         auto_read,
         signals,
+        model_watch: raw.model_watch.unwrap_or(true),
     })
 }
 
@@ -658,6 +667,18 @@ mod tests {
     }
 
     #[test]
+    fn model_watch_defaults_true_and_can_be_disabled() {
+        let (servers, issues) = parse(json!({
+            "docs": { "command": "srv" },
+            "locked": { "command": "srv", "modelWatch": false }
+        }));
+        assert!(issues.is_empty(), "issues: {issues:?}");
+        let by_name = |n: &str| servers.iter().find(|s| s.name == n).unwrap();
+        assert!(by_name("docs").model_watch);
+        assert!(!by_name("locked").model_watch);
+    }
+
+    #[test]
     fn subscription_defaults_wake_to_auto() {
         let (servers, issues) = parse(json!({
             "docs": { "command": "srv", "subscribe": ["file:///a.md"] }
@@ -850,6 +871,7 @@ mod tests {
             subscribe: Vec::new(),
             auto_read: Vec::new(),
             signals: SignalsConfig::default(),
+            model_watch: true,
         }
     }
 

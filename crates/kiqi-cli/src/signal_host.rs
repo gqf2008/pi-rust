@@ -129,7 +129,7 @@ impl SignalHost {
         config: F,
     ) -> WakeDecision
     where
-        F: Fn(&str) -> Option<SignalsConfig>,
+        F: Fn(&str, &str) -> Option<SignalsConfig>,
     {
         self.wake.lock().unwrap().decide(batch, now, config)
     }

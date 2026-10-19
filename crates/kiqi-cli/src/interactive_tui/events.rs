@@ -228,12 +228,13 @@ pub(super) async fn handle_agent_event(
             if !batch.is_empty() {
                 crate::session::append_notice_batch(harness, &batch).await;
                 let any_auto = batch.notices.iter().any(|notice| {
-                    mcp.signal_config(&notice.server)
+                    mcp.signal_config_for(&notice.server, &notice.uri)
                         .is_some_and(|config| config.wake == kiqi_mcp::WakeMode::Auto)
                 });
-                let decision = wake_state.decide(&batch, std::time::Instant::now(), |server| {
-                    mcp.signal_config(server)
-                });
+                let decision =
+                    wake_state.decide(&batch, std::time::Instant::now(), |server, uri| {
+                        mcp.signal_config_for(server, uri)
+                    });
                 match decision {
                     crate::signal_wake::WakeDecision::Wake(servers) => {
                         // The inbox is the durable disposition surface: the

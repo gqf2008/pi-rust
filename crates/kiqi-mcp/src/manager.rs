@@ -20,8 +20,10 @@
 //!
 //! ## Resources and subscriptions (batch 2)
 //!
-//! A server that advertises resources contributes one read tool,
-//! `{server}__read_resource`; reads happen **on demand** — the product
+//! A server that advertises resources contributes a read tool,
+//! `{server}__read_resource` (and, when it also advertises
+//! `resources.subscribe`, a `{server}__watch_resource` verb); reads happen
+//! **on demand** — the product
 //! semantic for `notifications/resources/updated` is a light notice (server +
 //! uri) into a shared [`McpNoticeMailbox`], never an automatic read of the
 //! content. The one opt-in exception is a uri listed in the server's
@@ -188,13 +190,31 @@ pub(crate) struct DiscoveredTool {
 /// is kept so a later read-dedup needs no type change.
 type SubscriptionToken = Arc<AtomicU64>;
 
+/// Who created a subscription. Config watches are the user's durable opt-in;
+/// model watches are session-scoped and must not be wake-eligible unless the
+/// same uri is also configured, nor removable by the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubscriptionOrigin {
+    Config,
+    Model,
+}
+
+#[derive(Clone)]
+struct SubscriptionEntry {
+    token: SubscriptionToken,
+    origin: SubscriptionOrigin,
+}
+/// Cap on model-created watches. Config subscriptions are bounded by the user's
+/// own settings; this is the loop/prompt-injection bound for the runtime verb.
+pub const MAX_MODEL_SUBSCRIPTIONS: usize = 32;
+
 /// State that OUTLIVES one connection: the subscription map and the
 /// `list_changed` stale flags. A reconnect builds a fresh handler around the
 /// same `Arc`s — that is how subscriptions survive a `peer()` re-init (the
 /// adapter's entry owned them, not the session).
 #[derive(Default)]
 struct ServerShared {
-    subscriptions: Mutex<BTreeMap<String, SubscriptionToken>>,
+    subscriptions: Mutex<BTreeMap<String, SubscriptionEntry>>,
     stale: StaleFlags,
     /// Set by the HTTP client when the server's session id changed: rmcp
     /// transparently re-initialized after a 404, and the new server session
@@ -488,6 +508,23 @@ impl ServerHandle {
         &self.config.name
     }
 
+    /// The qualified name of one of this server's synthetic resource tools
+    /// (`{server}__{suffix}`), or `None` (with a diagnostic) when it would
+    /// exceed the provider's name budget. The validated name is handed to the
+    /// adapter so the gate and the registered name cannot drift apart.
+    fn synthetic_tool_name(&self, suffix: &str) -> Option<String> {
+        let name = format!("{}{TOOL_NAME_SEPARATOR}{suffix}", self.server_name());
+        if name.len() > MAX_TOOL_NAME_LEN {
+            eprintln!(
+                "[ki mcp] server {}: skipping resource tool {name:?}: exceeds {MAX_TOOL_NAME_LEN} chars",
+                self.server_name()
+            );
+            None
+        } else {
+            Some(name)
+        }
+    }
+
     /// A snapshot of the tools discovered from this server (re-listed when
     /// `tools/list_changed` marked the set stale and a boundary refreshed it).
     fn tools(&self) -> Vec<DiscoveredTool> {
@@ -512,6 +549,36 @@ impl ServerHandle {
 
     fn supports_subscribe(&self) -> bool {
         self.supports_subscribe.load(Ordering::Acquire)
+    }
+
+    /// Whether the model may create runtime watches on this server.
+    fn model_watch(&self) -> bool {
+        self.config.model_watch
+    }
+
+    /// Re-derive the cached resource capabilities from a (re)connected peer.
+    /// Both the read tool (`resources`) and the watch tool
+    /// (`resources.subscribe`) are chosen from these two flags, so a capability
+    /// flip across a reconnect or rmcp's transparent HTTP re-init must mark the
+    /// boundary stale for a tool re-merge.
+    fn refresh_resource_caps(&self, peer: &Peer<RoleClient>) {
+        let caps = peer
+            .peer_info()
+            .and_then(|info| info.capabilities.resources.clone());
+        let advertises = caps.is_some();
+        let subscribes = caps
+            .as_ref()
+            .and_then(|caps| caps.subscribe)
+            .unwrap_or(false);
+        let advertises_changed = self
+            .advertises_resources
+            .swap(advertises, Ordering::Release)
+            != advertises;
+        let subscribes_changed =
+            self.supports_subscribe.swap(subscribes, Ordering::Release) != subscribes;
+        if advertises_changed || subscribes_changed {
+            self.shared.stale.resources.store(true, Ordering::Release);
+        }
     }
 
     /// A live peer for a call, re-initializing the connection if the previous
@@ -564,6 +631,7 @@ impl ServerHandle {
                 // skipping the caller's uri would leave it unsubscribed on the
                 // new session.
                 if session_rotated {
+                    self.refresh_resource_caps(client.peer());
                     if let Err(error) = restore_subscriptions(
                         client.peer(),
                         &self.config.name,
@@ -612,19 +680,9 @@ impl ServerHandle {
             return Err("manager is shutting down".to_string());
         }
         let peer = fresh.peer().clone();
-        // A reconnect that flips the resources capability updates the read
-        // tool's presence at the next boundary (a list_changed may never come).
-        let advertises = fresh
-            .peer()
-            .peer_info()
-            .is_some_and(|info| info.capabilities.resources.is_some());
-        if self
-            .advertises_resources
-            .swap(advertises, Ordering::Release)
-            != advertises
-        {
-            self.shared.stale.resources.store(true, Ordering::Release);
-        }
+        // A reconnect that flips a resource capability updates the read/watch
+        // tools' presence at the next boundary (a list_changed may never come).
+        self.refresh_resource_caps(&peer);
         restore_subscriptions(
             &peer,
             &self.config.name,
@@ -645,7 +703,7 @@ impl ServerHandle {
     /// Stale content under the old lifetime can never deliver. Always lock the
     /// subscription map before the mailbox — the update path uses the same
     /// order, so nothing can slip in after the purge.
-    fn rotate_lifetime(&self, uri: &str) -> SubscriptionToken {
+    fn rotate_lifetime(&self, uri: &str, origin: SubscriptionOrigin) -> SubscriptionToken {
         let token = Arc::new(AtomicU64::new(0));
         // Hold the map guard across the purge: the update path checks the
         // token and pushes under this same lock, so a notice accepted by the
@@ -653,7 +711,13 @@ impl ServerHandle {
         // `add_subscription` purges under the subscriptions lock for exactly
         // this reason).
         let mut map = self.shared.subscriptions.lock().unwrap();
-        map.insert(uri.to_string(), token.clone());
+        map.insert(
+            uri.to_string(),
+            SubscriptionEntry {
+                token: token.clone(),
+                origin,
+            },
+        );
         self.mailbox.purge(&self.config.name, uri);
         token
     }
@@ -666,7 +730,7 @@ impl ServerHandle {
             let mut map = self.shared.subscriptions.lock().unwrap();
             let matches = match (map.get(uri), expected) {
                 (_, None) => true,
-                (Some(current), Some(expected)) => Arc::ptr_eq(current, expected),
+                (Some(current), Some(expected)) => Arc::ptr_eq(&current.token, expected),
                 (None, Some(_)) => false,
             };
             if !matches {
@@ -685,47 +749,83 @@ impl ServerHandle {
         self.mailbox.purge_server(&self.config.name);
     }
 
-    /// The uris this session currently watches, sorted. Includes both
-    /// config-driven and model-driven subscriptions.
-    pub(crate) fn subscription_uris(&self) -> Vec<String> {
+    /// The uris this session currently watches plus their origin, sorted.
+    /// Includes both config-driven and model-driven subscriptions.
+    pub(crate) fn subscriptions(&self) -> Vec<(String, SubscriptionOrigin)> {
         self.shared
             .subscriptions
             .lock()
             .unwrap()
-            .keys()
-            .cloned()
+            .iter()
+            .map(|(uri, entry)| (uri.clone(), entry.origin))
             .collect()
     }
 
     /// Host-level `resources/subscribe`. Driven by the `subscribe` config at
     /// startup and by the `{server}__watch_resource` tool at runtime. Ported
     /// semantics:
-    /// * already-subscribed on a live transport sends **no** second RPC, so a
-    ///   duplicate-rejecting server never sees one;
-    /// * the token ALWAYS rotates + the uri's queue purges, even on that no-op
-    ///   path — a fresh delivery lifetime, so stale content can never deliver;
+    /// * already-subscribed on a live transport sends **no** second RPC and
+    ///   leaves the existing lifetime + queued notices untouched — a defensive
+    ///   re-start must not drop a pending update;
+    /// * a fresh connection rotates the lifetime and purges stale notices;
     /// * the mark is installed BEFORE the RPC under the connection lock, so an
     ///   update pushed during the handshake is accepted;
     /// * a server rejection rolls the token back with an expected-token guard
     ///   and propagates the error.
-    pub(crate) async fn subscribe_uri(&self, uri: &str) -> Result<(), String> {
+    ///
+    /// A [`SubscriptionOrigin::Model`] subscription is capped at
+    /// [`MAX_MODEL_SUBSCRIPTIONS`]; config subscriptions are bounded by the
+    /// user's own settings.
+    pub(crate) async fn subscribe_uri(
+        &self,
+        uri: &str,
+        origin: SubscriptionOrigin,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<(), String> {
         if self.stopped.load(Ordering::Acquire) {
             return Err("manager is shutting down".to_string());
         }
         let mut guard = self.client.lock().await;
         let (peer, fresh) = self.ensure_live(&mut guard, Some(uri)).await?;
         let already = !fresh && self.shared.subscriptions.lock().unwrap().contains_key(uri);
-        // Registered before the RPC so early notifications are accepted, while
-        // the connection lock keeps subscribe/unsubscribe ordered.
-        let token = self.rotate_lifetime(uri);
         if already {
             return Ok(());
         }
+        if origin == SubscriptionOrigin::Model {
+            let model_count = self
+                .shared
+                .subscriptions
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|entry| entry.origin == SubscriptionOrigin::Model)
+                .count();
+            if model_count >= MAX_MODEL_SUBSCRIPTIONS {
+                return Err(format!(
+                    "refusing to watch another resource: the model subscription limit ({MAX_MODEL_SUBSCRIPTIONS}) is reached"
+                ));
+            }
+        }
+        // Registered before the RPC so early notifications are accepted, while
+        // the connection lock keeps subscribe/unsubscribe ordered.
+        let token = self.rotate_lifetime(uri, origin);
         let request = tokio::time::timeout(
             self.config.timeout,
             peer.subscribe(SubscribeRequestParams::new(uri.to_string())),
-        )
-        .await;
+        );
+        let request = match cancel {
+            Some(cancel) => tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    // Drop the local mark so a server that did install the
+                    // subscription anyway is ignored until the next reconnect.
+                    self.remove_lifetime(uri, Some(&token));
+                    return Err("resources/subscribe cancelled".to_string());
+                }
+                outcome = request => outcome,
+            },
+            None => request.await,
+        };
         match request {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => {
@@ -748,22 +848,47 @@ impl ServerHandle {
     /// unsubscribed); a REJECTED unsubscribe retires the transport, because the
     /// remote registration may outlive our state — the next call reconnects,
     /// restores the OTHER subscriptions once each, and this uri is freely
-    /// re-subscribable. If the connection could not even be established, only
-    /// the lifetime we observed is removed (expected-token guard).
-    pub(crate) async fn unsubscribe_uri(&self, uri: &str) -> Result<(), String> {
+    /// re-subscribable.
+    ///
+    /// A never-watched uri is a no-op (no RPC), so a typo cannot retire the
+    /// connection. A model requester may not remove a config-owned watch.
+    pub(crate) async fn unsubscribe_uri(
+        &self,
+        uri: &str,
+        requester: SubscriptionOrigin,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<(), String> {
         if self.stopped.load(Ordering::Acquire) {
             return Err("manager is shutting down".to_string());
         }
         let previous = self.shared.subscriptions.lock().unwrap().get(uri).cloned();
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+        if requester == SubscriptionOrigin::Model && previous.origin == SubscriptionOrigin::Config {
+            return Err(
+                "refusing to stop a configured subscription; edit the server's `subscribe` list instead"
+                    .to_string(),
+            );
+        }
         let mut guard = self.client.lock().await;
         let established = match self.ensure_live(&mut guard, Some(uri)).await {
             Ok((peer, _)) => {
                 self.remove_lifetime(uri, None);
-                let result = tokio::time::timeout(
+                let request = tokio::time::timeout(
                     self.config.timeout,
                     peer.unsubscribe(UnsubscribeRequestParams::new(uri.to_string())),
-                )
-                .await;
+                );
+                let result = match cancel {
+                    Some(cancel) => tokio::select! {
+                        biased;
+                        // Local delivery already stopped; the remote registration
+                        // is cleaned up on the next reconnect if it survives.
+                        _ = cancel.cancelled() => return Ok(()),
+                        result = request => result,
+                    },
+                    None => request.await,
+                };
                 match result {
                     Ok(Ok(())) => {}
                     Ok(Err(_)) | Err(_) => {
@@ -781,9 +906,10 @@ impl ServerHandle {
             Err(_) => false,
         };
         if !established {
-            if let Some(previous) = previous {
-                self.remove_lifetime(uri, Some(&previous));
-            }
+            // `ensure_live` may have rotated the token mid-restore before
+            // failing; the stop still wins, and no concurrent subscribe could
+            // have succeeded on a connection that was not established.
+            self.remove_lifetime(uri, None);
         }
         Ok(())
     }
@@ -916,12 +1042,13 @@ impl ServerHandle {
 /// Sorted uris, exactly one `resources/subscribe` per uri — except
 /// `skip_uri`, the uri an in-flight subscribe/unsubscribe call is handling
 /// itself. Interrupted (connection broke/stalled): subscriptions are KEPT and
-/// the error says the next call will retry. Server actively rejects: the whole
-/// set is cleared — our state and the server's can only diverge further.
+/// the error says the next call will retry. Server actively rejects ONE uri:
+/// only that uri is dropped (and its queued notices purged); the rest are
+/// restored, so one bad model watch can never wipe the user's durable set.
 async fn restore_subscriptions(
     peer: &Peer<RoleClient>,
     server: &str,
-    subscriptions: &Mutex<BTreeMap<String, SubscriptionToken>>,
+    subscriptions: &Mutex<BTreeMap<String, SubscriptionEntry>>,
     mailbox: &McpNoticeMailbox,
     skip_uri: Option<&str>,
     budget: Duration,
@@ -929,13 +1056,13 @@ async fn restore_subscriptions(
     let uris = {
         let mut map = subscriptions.lock().unwrap();
         let mut uris = Vec::new();
-        for (uri, token) in map.iter_mut() {
+        for (uri, entry) in map.iter_mut() {
             // An explicit subscribe/unsubscribe handles this uri once the
             // connection is ready; do not issue a duplicate RPC.
             if skip_uri == Some(uri.as_str()) {
                 continue;
             }
-            *token = Arc::new(AtomicU64::new(0));
+            entry.token = Arc::new(AtomicU64::new(0));
             uris.push(uri.clone());
         }
         drop(map);
@@ -943,20 +1070,23 @@ async fn restore_subscriptions(
         uris.sort();
         uris
     };
+    // One budget for the whole restore, not per uri: K subscriptions must not
+    // be able to hold the connection lock for K timeouts.
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut rejected = Vec::new();
     for uri in uris {
-        let outcome = tokio::time::timeout(
-            budget,
+        let outcome = tokio::time::timeout_at(
+            deadline,
             peer.subscribe(SubscribeRequestParams::new(uri.clone())),
         )
         .await;
         match outcome {
             Ok(Ok(())) => {}
             Ok(Err(ServiceError::McpError(error))) => {
-                subscriptions.lock().unwrap().clear();
-                mailbox.purge_server(server);
-                return Err(format!(
-                    "resources/subscribe {uri} was rejected ({error}); subscriptions cleared, subscribe again"
-                ));
+                // Drop just this uri; the rest of the set is still valid.
+                subscriptions.lock().unwrap().remove(&uri);
+                mailbox.purge(server, &uri);
+                rejected.push(format!("{uri} ({error})"));
             }
             Ok(Err(error)) => {
                 return Err(format!(
@@ -965,11 +1095,18 @@ async fn restore_subscriptions(
             }
             Err(_) => {
                 return Err(format!(
-                    "resource subscription restoration interrupted at {uri} (timed out after {}s); the next call will retry",
+                    "resource subscription restoration interrupted at {uri} (timed out after {}s total); the next call will retry",
                     budget.as_secs()
                 ));
             }
         }
+    }
+    if !rejected.is_empty() {
+        eprintln!(
+            "[ki mcp] server {server}: dropped {} subscription(s) rejected during restore: {}",
+            rejected.len(),
+            rejected.join(", ")
+        );
     }
     Ok(())
 }
@@ -1083,7 +1220,10 @@ impl McpManager {
                     // Config-driven auto-subscribe, after the handshake. One
                     // failed uri is loud but never poisons the server.
                     for uri in &handle.config.subscribe {
-                        if let Err(error) = handle.subscribe_uri(uri).await {
+                        if let Err(error) = handle
+                            .subscribe_uri(uri, SubscriptionOrigin::Config, None)
+                            .await
+                        {
                             issues.push(format!(
                                 "mcp server {}: subscribing {uri}: {error} — subscription skipped",
                                 config.name
@@ -1118,38 +1258,36 @@ impl McpManager {
         let mut adapters: Vec<Arc<dyn AgentTool>> = Vec::new();
         for server in &self.servers {
             for tool in server.tools() {
+                // `read_resource` / `watch_resource` are reserved synthetic
+                // verbs. A server tool with the same bare name would otherwise
+                // win the CLI's first-wins collision gate and hide the
+                // documented resource verbs.
+                let reserved = (server.advertises_resources() && tool.bare == READ_RESOURCE_SUFFIX)
+                    || (server.supports_subscribe() && tool.bare == WATCH_RESOURCE_SUFFIX);
+                if reserved {
+                    eprintln!(
+                        "[ki mcp] server {}: server tool {:?} collides with a synthetic resource tool; skipped",
+                        server.server_name(),
+                        tool.qualified
+                    );
+                    continue;
+                }
                 adapters.push(Arc::new(McpToolAdapter::new(Arc::clone(server), &tool)));
             }
             if server.advertises_resources() {
-                let qualified = format!(
-                    "{}{TOOL_NAME_SEPARATOR}{READ_RESOURCE_SUFFIX}",
-                    server.server_name()
-                );
-                if qualified.len() > MAX_TOOL_NAME_LEN {
-                    eprintln!(
-                        "[ki mcp] server {}: skipping read tool {qualified:?}: exceeds {MAX_TOOL_NAME_LEN} chars",
-                        server.server_name()
-                    );
-                } else {
+                if let Some(name) = server.synthetic_tool_name(READ_RESOURCE_SUFFIX) {
                     adapters.push(Arc::new(McpResourceToolAdapter::new(
                         Arc::clone(server),
+                        name,
                         server.resource_description(),
                     )));
                 }
-                if server.supports_subscribe() {
-                    let watch_name = format!(
-                        "{}{TOOL_NAME_SEPARATOR}{WATCH_RESOURCE_SUFFIX}",
-                        server.server_name()
-                    );
-                    if watch_name.len() > MAX_TOOL_NAME_LEN {
-                        eprintln!(
-                            "[ki mcp] server {}: skipping watch tool {watch_name:?}: exceeds {MAX_TOOL_NAME_LEN} chars",
-                            server.server_name()
-                        );
-                    } else {
-                        adapters.push(Arc::new(McpResourceWatchToolAdapter::new(Arc::clone(
-                            server,
-                        ))));
+                if server.supports_subscribe() && server.model_watch() {
+                    if let Some(name) = server.synthetic_tool_name(WATCH_RESOURCE_SUFFIX) {
+                        adapters.push(Arc::new(McpResourceWatchToolAdapter::new(
+                            Arc::clone(server),
+                            name,
+                        )));
                     }
                 }
             }
@@ -1185,10 +1323,21 @@ impl McpManager {
     /// A name that never passed the build-time policy can never be resurrected
     /// by a refresh.
     pub fn tool_allowed(&self, name: &str) -> bool {
-        match &*self.allowed_tools.lock().unwrap() {
-            Some(set) => set.contains(name),
-            None => true,
+        let guard = self.allowed_tools.lock().unwrap();
+        let Some(set) = guard.as_ref() else {
+            return true;
+        };
+        if set.contains(name) {
+            return true;
         }
+        // A watch tool can appear after a reconnect capability flip, after the
+        // build-time allow set was recorded. Its read sibling did exist then;
+        // if that sibling passed the policy, let the watch verb follow it.
+        if let Some(prefix) = name.strip_suffix(WATCH_RESOURCE_SUFFIX) {
+            let read_name = format!("{prefix}{READ_RESOURCE_SUFFIX}");
+            return set.contains(&read_name);
+        }
+        false
     }
 
     /// Whether a native tool name's first `__` segment names one of this
@@ -1297,14 +1446,40 @@ impl McpManager {
             .map(|handle| handle.config.signals.clone())
     }
 
-    /// Subscribe one server's resource (host/config-driven; no model verb).
+    /// Wake policy for one `(server, uri)`. Only a uri in the server's config
+    /// `subscribe` list is wake-eligible: a model-started watch is record-only,
+    /// so it cannot manufacture a wake source or consume the user's budget.
+    pub fn signal_config_for(
+        &self,
+        server: &str,
+        uri: &str,
+    ) -> Option<crate::config::SignalsConfig> {
+        let handle = self
+            .servers
+            .iter()
+            .find(|handle| handle.server_name() == server)?;
+        if !handle
+            .config
+            .subscribe
+            .iter()
+            .any(|configured| configured == uri)
+        {
+            return None;
+        }
+        Some(handle.config.signals.clone())
+    }
+
+    /// Subscribe one server's resource (config startup or the model's watch
+    /// tool).
     pub async fn subscribe(&self, server: &str, uri: &str) -> Result<(), String> {
         let handle = self
             .servers
             .iter()
             .find(|handle| handle.server_name() == server)
             .ok_or_else(|| format!("mcp server {server} is not running"))?;
-        handle.subscribe_uri(uri).await
+        handle
+            .subscribe_uri(uri, SubscriptionOrigin::Config, None)
+            .await
     }
 
     /// Unsubscribe one server's resource. Always reports unsubscribed, even
@@ -1316,7 +1491,9 @@ impl McpManager {
             .iter()
             .find(|handle| handle.server_name() == server)
             .ok_or_else(|| format!("mcp server {server} is not running"))?;
-        handle.unsubscribe_uri(uri).await
+        handle
+            .unsubscribe_uri(uri, SubscriptionOrigin::Config, None)
+            .await
     }
 
     /// Re-list tools / resources for servers marked stale by `list_changed`.

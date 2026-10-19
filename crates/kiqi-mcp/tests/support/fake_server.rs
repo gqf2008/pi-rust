@@ -74,6 +74,7 @@ fn main() {
     let repeat_cursor = flag("--repeat-cursor");
     let record_path: Option<String> = opt("--record");
     let resources_mode = flag("--resources");
+    let supports_subscribe = !flag("--no-resource-subscribe");
     let subscribe_notify = flag("--subscribe-notify");
     let reject_duplicate_subscribe = flag("--reject-duplicate-subscribe");
     let reject_unsubscribe = flag("--reject-unsubscribe");
@@ -109,7 +110,7 @@ fn main() {
                 if crash_on_init {
                     std::process::exit(1);
                 }
-                reply(id, initialize_result(resources_mode));
+                reply(id, initialize_result(resources_mode, supports_subscribe));
             }
             "notifications/initialized" => {} // a notification: never answered
             "tools/list" => {
@@ -249,10 +250,10 @@ fn record(path: &Option<String>, message: &Value) {
     }
 }
 
-fn initialize_result(resources_mode: bool) -> Value {
+fn initialize_result(resources_mode: bool, supports_subscribe: bool) -> Value {
     let mut capabilities = json!({ "tools": {} });
     if resources_mode {
-        capabilities["resources"] = json!({ "subscribe": true });
+        capabilities["resources"] = json!({ "subscribe": supports_subscribe });
     }
     json!({
         "protocolVersion": "2025-06-18",

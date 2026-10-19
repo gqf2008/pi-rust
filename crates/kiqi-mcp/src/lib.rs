@@ -11,9 +11,10 @@
 //! * [`manager`] — connect (stdio child or HTTP/Streamable session), handshake,
 //!   enumerate tools and resources, run the resource-subscription lifecycle,
 //!   and reap the process tree / delete the HTTP session on shutdown;
-//! * [`tool`] — the `AgentTool` adapters (one per discovered tool, plus one
-//!   `{server}__read_resource` per server advertising resources) and MCP
-//!   content → ki content mapping;
+//! * [`tool`] — the `AgentTool` adapters (one per discovered tool, plus a
+//!   `{server}__read_resource` per server advertising resources and a
+//!   `{server}__watch_resource` when it also advertises
+//!   `resources.subscribe`) and MCP content → ki content mapping;
 //! * [`notice`] — the bounded, coalescing mailbox behind the light-notice
 //!   product semantic: a `notifications/resources/updated` delivers a
 //!   (server, uri) notice, never an automatic content read. `autoRead` uris are
@@ -32,7 +33,10 @@ pub use config::{
     parse_signals_defaults, HttpTransport, ServerConfig, SignalsConfig, SignalsDefaults,
     StdioTransport, Transport, WakeMode,
 };
-pub use manager::{McpManager, READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR, WATCH_RESOURCE_SUFFIX};
+pub use manager::{
+    McpManager, MAX_MODEL_SUBSCRIPTIONS, READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR,
+    WATCH_RESOURCE_SUFFIX,
+};
 pub use notice::{
     notice_entry_text, notice_message, McpNotice, McpNoticeBatch, McpNoticeMailbox,
     NOTICE_CUSTOM_TYPE,

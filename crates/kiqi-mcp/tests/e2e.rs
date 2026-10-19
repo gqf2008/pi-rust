@@ -665,6 +665,11 @@ async fn signal_policy_defaults_to_auto_for_a_subscribed_server() {
         .expect("a connected server has a policy");
     assert_eq!(policy.wake, kiqi_mcp::WakeMode::Auto);
     assert!(manager.signal_config("unknown").is_none());
+    // Only the configured uri is wake-eligible; a model-added uri is not.
+    assert!(manager.signal_config_for("docs", "mem://alpha").is_some());
+    assert!(manager
+        .signal_config_for("docs", "mem://model-only")
+        .is_none());
     manager.shutdown().await;
 }
 
@@ -674,10 +679,15 @@ async fn signal_policy_defaults_to_auto_for_a_subscribed_server() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_model_can_start_and_stop_watching_a_resource() {
     let tmp = tempfile::tempdir().unwrap();
+    let record = tmp.path().join("record.log");
     let (manager, issues) = McpManager::start(
         &[stdio_server_with(
             "docs",
-            vec!["--resources".to_string()],
+            vec![
+                "--resources".to_string(),
+                "--record".to_string(),
+                record.to_string_lossy().into_owned(),
+            ],
             10,
             true,
             &[],
@@ -701,8 +711,20 @@ async fn the_model_can_start_and_stop_watching_a_resource() {
         .await
         .unwrap();
     assert!(text_of(&started).contains("Watching mem://alpha"));
+    // The model verb must reach the wire, not just the local map.
+    assert_eq!(
+        count_recorded(&record, "resources/subscribe", "mem://alpha"),
+        1,
+        "start must send exactly one resources/subscribe"
+    );
     let listed = call(watch, json!({ "action": "list" })).await.unwrap();
     assert!(text_of(&listed).contains("mem://alpha"));
+    assert!(text_of(&listed).contains("[model]"));
+    // A model-only watch is record-only: it is not wake-eligible.
+    assert!(
+        manager.signal_config_for("docs", "mem://alpha").is_none(),
+        "a model-started watch must not become a wake source"
+    );
 
     call(poke, json!({ "uri": "mem://alpha" })).await.unwrap();
     let batch = wait_for(5, "the alpha notice", || {
@@ -725,11 +747,139 @@ async fn the_model_can_start_and_stop_watching_a_resource() {
         .await
         .unwrap();
     assert!(text_of(&stopped).contains("Stopped watching"));
+    assert_eq!(
+        count_recorded(&record, "resources/unsubscribe", "mem://alpha"),
+        1,
+        "stop must send exactly one resources/unsubscribe"
+    );
     call(poke, json!({ "uri": "mem://alpha" })).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         manager.take_notices().is_empty(),
         "a stopped watch must not deliver"
+    );
+
+    // Stopping a uri that was never watched is a local no-op: a typo must not
+    // put an unsubscribe on the wire (a rejection would retire the transport).
+    let never = call(watch, json!({ "action": "stop", "uri": "mem://never" }))
+        .await
+        .unwrap();
+    assert!(text_of(&never).contains("Stopped watching"));
+    assert_eq!(
+        count_recorded(&record, "resources/unsubscribe", "mem://never"),
+        0,
+        "a never-watched stop must not reach the wire"
+    );
+    manager.shutdown().await;
+}
+
+/// The watch verb is capability-gated: a server that lists resources but does
+/// not advertise `resources.subscribe` gets only the read tool.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_watch_tool_requires_the_subscribe_capability() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (manager, issues) = McpManager::start(
+        &[stdio_server_with(
+            "docs",
+            vec![
+                "--resources".to_string(),
+                "--no-resource-subscribe".to_string(),
+            ],
+            10,
+            true,
+            &[],
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    let names: Vec<String> = manager
+        .tool_adapters()
+        .iter()
+        .map(|adapter| adapter.schema().name.clone())
+        .collect();
+    assert!(
+        names.contains(&"docs__read_resource".to_string()),
+        "{names:?}"
+    );
+    assert!(
+        !names.contains(&"docs__watch_resource".to_string()),
+        "watch tool must be gated on resources.subscribe: {names:?}"
+    );
+    manager.shutdown().await;
+}
+
+/// A model `stop` must not disable the user's configured watch, and `list`
+/// must make the provenance visible.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_stop_cannot_remove_a_configured_watch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (manager, issues) = McpManager::start(
+        &[stdio_server_with(
+            "docs",
+            vec!["--resources".to_string()],
+            10,
+            true,
+            &["mem://alpha"],
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    let adapters = manager.tool_adapters();
+    let watch = find(&adapters, "docs__watch_resource");
+    let listed = call(watch, json!({ "action": "list" })).await.unwrap();
+    assert!(
+        text_of(&listed).contains("[config]"),
+        "got {:?}",
+        text_of(&listed)
+    );
+    let error = call(watch, json!({ "action": "stop", "uri": "mem://alpha" }))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("configured subscription"),
+        "got {error}"
+    );
+    // It is still watched after the refused stop.
+    let listed = call(watch, json!({ "action": "list" })).await.unwrap();
+    assert!(text_of(&listed).contains("mem://alpha"));
+    manager.shutdown().await;
+}
+
+/// The runtime verb is bounded, so a model (or prompt injection) cannot grow
+/// the subscription map without limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn model_watches_are_capped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (manager, issues) = McpManager::start(
+        &[stdio_server_with(
+            "docs",
+            vec!["--resources".to_string()],
+            10,
+            true,
+            &[],
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    let adapters = manager.tool_adapters();
+    let watch = find(&adapters, "docs__watch_resource");
+    for i in 0..kiqi_mcp::MAX_MODEL_SUBSCRIPTIONS {
+        call(
+            watch,
+            json!({ "action": "start", "uri": format!("mem://{i}") }),
+        )
+        .await
+        .unwrap();
+    }
+    let error = call(watch, json!({ "action": "start", "uri": "mem://overflow" }))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("subscription limit"),
+        "got {error}"
     );
     manager.shutdown().await;
 }
@@ -840,12 +990,11 @@ async fn notifications_coalesce_and_count_suppressed_updates() {
     manager.shutdown().await;
 }
 
-/// Rotation purge: a notice queued under the CURRENT lifetime is destroyed by
-/// the very re-subscribe that rotates it. (Removing the purge from
-/// `ServerHandle::rotate_lifetime` fails this test — the purge is the only
-/// observable effect of the rotation on ki's side.)
+/// A defensive re-subscribe of an already-live uri is a no-op: no second RPC,
+/// and the queued notice survives (rotating/purging here would drop an update
+/// the model has not seen yet).
 #[tokio::test(flavor = "multi_thread")]
-async fn resubscribe_purges_the_queued_stale_notice() {
+async fn resubscribe_keeps_the_queued_notice() {
     let tmp = tempfile::tempdir().unwrap();
     let (manager, issues) = McpManager::start(
         &[stdio_server_with(
@@ -878,21 +1027,23 @@ async fn resubscribe_purges_the_queued_stale_notice() {
         (manager.pending_notice_count() >= 1).then_some(())
     });
     // Re-subscribe the SAME uri: already-subscribed, so no second RPC goes
-    // out — but the delivery lifetime rotates and the uri's queue purges.
+    // out and the queued notice survives. A defensive re-start must not drop
+    // an update the model has not seen yet.
     manager
         .subscribe("docs", "mem://alpha")
         .await
         .expect("re-subscribe succeeds");
     let batch = manager.take_notices();
-    assert!(
-        batch.is_empty(),
-        "the pre-rotation notice must be purged, not delivered: {batch:?}"
-    );
     assert_eq!(
-        manager.pending_notice_count(),
-        0,
-        "the mailbox must be empty after the rotation purge"
+        batch.notices,
+        vec![kiqi_mcp::McpNotice {
+            server: "docs".into(),
+            uri: "mem://alpha".into(),
+            content: None,
+        }],
+        "a no-op re-subscribe must keep the pending notice"
     );
+    assert_eq!(manager.pending_notice_count(), 0);
 
     manager.shutdown().await;
 }
