@@ -57,10 +57,14 @@ sha() {
   awk '{print $1}' "$file" | tr 'A-F' 'a-f'
 }
 
-LINUX_X64="kiqi-$TAG-x86_64-unknown-linux-gnu.tar.gz"
-LINUX_ARM="kiqi-$TAG-aarch64-unknown-linux-gnu.tar.gz"
-MAC_ARM="kiqi-$TAG-aarch64-apple-darwin.tar.gz"
-WIN_X64="kiqi-$TAG-x86_64-pc-windows-msvc.zip"
+# Asset names come from `release-binaries.yml`: `name="ki-v${version}-${target}"`,
+# i.e. the `ki` command name and the version *without* its `v` prefix. These used to
+# read `kiqi-$TAG-…` (old binary name + the prefixed tag), which matches no uploaded
+# asset — every digest lookup would fall back to the sidecar and fail.
+LINUX_X64="ki-v$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+LINUX_ARM="ki-v$VERSION-aarch64-unknown-linux-gnu.tar.gz"
+MAC_ARM="ki-v$VERSION-aarch64-apple-darwin.tar.gz"
+WIN_X64="ki-v$VERSION-x86_64-pc-windows-msvc.zip"
 
 SHA_LINUX_X64=$(sha "$LINUX_X64")
 SHA_LINUX_ARM=$(sha "$LINUX_ARM")

@@ -42,6 +42,25 @@ grep -q 'needed+=("kiqi-' "$RELEASE" && {
     status=1
 }
 
+# --- 1b. refresh-channels.sh builds the same asset names --------------------
+# Same drift class as release.sh: it constructs the names itself, so a rename has to
+# reach this file too.
+REFRESH="$ROOT/scripts/refresh-channels.sh"
+if [ -f "$REFRESH" ]; then
+    # Match code only: the explanatory comment above those lines quotes the old
+    # names, and a whole-file grep would be satisfied by that prose — the same
+    # "checker that cannot fail" trap this repo has hit before.
+    grep -v '^[[:space:]]*#' "$REFRESH" | grep -q 'kiqi-\$TAG-' && {
+        echo "FAIL: refresh-channels.sh still builds 'kiqi-\$TAG-…' asset names" >&2
+        echo "      the workflow uploads 'ki-v<version>-<target>'" >&2
+        status=1
+    }
+    grep -q 'ki-v\$VERSION-' "$REFRESH" || {
+        echo "FAIL: refresh-channels.sh does not build 'ki-v\$VERSION-…' asset names" >&2
+        status=1
+    }
+fi
+
 # --- 2. Pushing goes to `fork`, never `origin` ------------------------------
 grep -q '要推送就推 `fork`' "$AGENTS" || {
     echo "note: AGENTS.md no longer states the push rule; review this test" >&2
