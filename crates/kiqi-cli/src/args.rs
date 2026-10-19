@@ -638,7 +638,9 @@ pub fn print_help() {
   --tui-mode <mode>              TUI buffer: regular or fullscreen (macOS default: regular)
   --list-models [search]         List available models (with optional fuzzy search)
   --offline                      Disable startup network operations (same as KI_OFFLINE=1)
-  --export <file>                Export a JSONL session to HTML and exit
+  --export <session.jsonl>       Export a session to HTML and exit. `<session.jsonl>` is
+                                 the INPUT; the first positional argument is the output
+                                 path (default: kiqi-session-<stem>.html in the cwd)
   --approve, -a                  Force-enable current-project resources
   --no-approve, -na              Disable current-project resources
   --print, -p                    Non-interactive: process prompt(s) and exit
