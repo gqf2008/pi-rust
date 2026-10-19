@@ -148,7 +148,8 @@ UI：
 |---|---|
 | `crates/kiqi-agent/src/agent_loop.rs` | `stream_assistant_response` 返回 `StreamedTurn::{Message, SoftInterrupted}`；每次请求用 `config.signal.child_token()` 作为 `opts.signal`，并 `install`/`clear`（`clear` 在折叠与分类之间，每个过了 `install` 的路径恰好 clear 一次） |
 | 同上 | 软中断判定需**四条同时成立**：`stop_reason == Aborted`、`stream_token.is_cancelled()`、`!config.signal.is_cancelled()`、`take_soft()` |
-| 同上 | 命中时：`added_partial` 则 `context.messages.pop()`；不 push 进 `new_messages`（持久化只认它，`agent_harness.rs` 的 `persist_new_messages`）；**仍然 emit `MessageEnd`** |
+| 同上 | 命中时：`added_partial` 则 `context.messages.pop()`，并 emit `MessageEnd` 收尾 TUI 的流式块；无 `Start`（连接期就被取消，provider 直接回 `Error { reason: Aborted }`）则既不 pop 也不 emit——没有块可收尾 |
+| 同上 | `settle_partial` **只在非软路径**调用（分类之后）。它在无 `Start` 时会 push 最终消息，若在折叠里就执行，软分支（只 pop `Start` 推的那条）来不及撤回，被中断的半条 assistant 会留在 `context.messages`，下一次请求就看得见 |
 | 同上 | 有排队消息 → `drain_steering` 后 `continue`（注入并重新请求）；无排队 → `break` 出内层循环，交给既有 follow-up 检查，最终 `LoopOutcome::Completed` |
 
 阶段 2 有两处**偏离方案原文**的判断（后续不要回退）：
@@ -163,6 +164,15 @@ UI：
    “emit `MessageEnd` + 从 `new_messages` 移除”。**已知副作用**：TUI 当场能看到被中断
    的那一段（靠 `MessageEnd` 收尾流式块），但重新加载会话后它不在了——因为会话文件
    里确实没有它。
+3. **`settle_partial` 延后到分类之后。** 阶段 2 初版在折叠函数返回前就落句，于是
+   “连接期被取消、没有 `Start`”的形状（`added_partial == false`）会把 Aborted 的
+   assistant 先 push 进上下文；软分支只 pop 有 `Start` 的那种，于是“Esc 打断的那条
+   回复”泄漏进下一次请求。现在折叠只发 `Start`/`MessageUpdate`，落句由
+   `stream_assistant_response` 在非软路径完成；软路径的两种形状分别是
+   “pop + `MessageEnd`”与“什么都不做”。回归用例：
+   `a_stream_soft_interrupt_without_a_start_leaves_no_assistant_behind`
+   （断言第二次请求的上下文是 `["user","user"]`，且 assistant 的
+   `MessageStart`/`MessageEnd` 成对）。
 
 ## 6. 开放问题
 

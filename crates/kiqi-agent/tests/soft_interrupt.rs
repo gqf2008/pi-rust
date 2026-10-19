@@ -646,6 +646,165 @@ async fn a_stream_soft_interrupt_continues_with_queued_steering() {
     );
 }
 
+/// The no-`Start` shape of the same rule: a provider cancelled while connecting
+/// answers `Error { reason: Aborted }` without ever opening the message (that is
+/// the path `kiqi-ai`'s anthropic mapper takes for an aborted connect). So
+/// `added_partial` stays false, and a `settle_partial` run *before* the
+/// classification would push the aborted assistant into `context.messages` at a
+/// point where the soft branch — which only pops what `Start` pushed — can no
+/// longer remove it.
+///
+/// The latch is armed with nothing installed (`NothingToInterrupt`), which is how
+/// a press between two actions reaches the next request already cancelled. Both
+/// halves of the bug show up here: the next request sees `["user", "assistant"]`
+/// instead of `["user", "user"]`, and the aborted attempt announces a
+/// `MessageEnd` for a block no `MessageStart` ever opened.
+#[tokio::test]
+async fn a_stream_soft_interrupt_without_a_start_leaves_no_assistant_behind() {
+    let interrupt = Arc::new(InterruptControl::new());
+    let requests = Arc::new(AtomicUsize::new(0));
+    let seen: Arc<std::sync::Mutex<Vec<Vec<&'static str>>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let stream_fn = {
+        let requests = Arc::clone(&requests);
+        let seen = Arc::clone(&seen);
+        kiqi_agent::stream_fn(move |_model, ctx, _opts| {
+            seen.lock()
+                .expect("seen lock")
+                .push(ctx.messages.iter().map(role_tag).collect());
+            let index = requests.fetch_add(1, Ordering::SeqCst);
+            let (mut prod, stream) = kiqi_ai::event_stream::create_assistant_message_event_stream();
+            tokio::spawn(async move {
+                if index == 0 {
+                    // Cancelled during connect: no `Start`, straight to `Error`.
+                    prod.push(AssistantMessageEvent::Error {
+                        reason: ErrorReason::Aborted,
+                        error: common::assistant_text("never started", StopReason::Aborted),
+                    });
+                    return;
+                }
+                let done = common::assistant_text("after-interrupt", StopReason::Stop);
+                prod.push(AssistantMessageEvent::Start {
+                    partial: Arc::new(done.clone()),
+                });
+                prod.push(AssistantMessageEvent::Done {
+                    reason: DoneReason::Stop,
+                    message: done,
+                });
+            });
+            stream
+        })
+    };
+
+    // What `AgentHarness::interrupt()` does when no action is installed: arm the
+    // latch, so `install` hands the next request an already-cancelled token.
+    interrupt.soft_interrupt();
+
+    // Deliver one steering message, and only after the aborted request: drain #0
+    // is the loop's initial one, before any request is made.
+    let drains = Arc::new(AtomicUsize::new(0));
+    let steering: kiqi_agent::GetSteeringMessages = {
+        let drains = Arc::clone(&drains);
+        Arc::new(move || {
+            let drains = Arc::clone(&drains);
+            Box::pin(async move {
+                if drains.fetch_add(1, Ordering::SeqCst) == 1 {
+                    vec![common::user_message("keep going")]
+                } else {
+                    Vec::new()
+                }
+            })
+        })
+    };
+
+    let mut config = common::base_config();
+    config.interrupt = Arc::clone(&interrupt);
+    let handle = kiqi_agent::AbortHandle::new();
+    config.signal = handle.token();
+    config.get_steering_messages = Some(steering);
+
+    let context = AgentContext {
+        system_prompt: String::new(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (collector, events_buf) = kiqi_agent::CollectorEmitter::new();
+    let emit: Arc<dyn kiqi_agent::AgentEmitter> = Arc::new(collector);
+
+    let new_messages = kiqi_agent::run_agent_loop(
+        vec![common::user_message("hello")],
+        context,
+        config,
+        emit,
+        stream_fn,
+    )
+    .await
+    .expect("the run survives the soft interrupt");
+
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        2,
+        "the steering message caused a re-ask"
+    );
+
+    // The regression: the second request must not see the aborted attempt.
+    assert_eq!(
+        seen.lock().expect("seen lock").clone(),
+        vec![vec!["user"], vec!["user", "user"]],
+        "LEAK: the no-`Start` aborted assistant stayed in the LLM context"
+    );
+
+    // The transcript is prompt + injected steering + the next answer; the
+    // interrupted attempt is in neither `new_messages` nor the run signal.
+    assert_eq!(
+        new_messages.len(),
+        3,
+        "prompt + steering + answer: {new_messages:?}"
+    );
+    assert_eq!(text_of(&new_messages[1]), "keep going");
+    assert_eq!(text_of(&new_messages[2]), "after-interrupt");
+    assert!(
+        !handle.token().is_cancelled(),
+        "a soft interrupt must not cancel the run signal"
+    );
+    assert!(
+        !interrupt.has_current(),
+        "the second request released its slot too"
+    );
+
+    // No live block existed for the aborted attempt, so nothing may announce
+    // one: every assistant `MessageStart` is closed by a `MessageEnd`, and the
+    // no-`Start` attempt emits neither.
+    let events = events_buf.lock().expect("events lock").clone();
+    let assistant_starts = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::MessageStart {
+                    message: AgentMessage::Assistant(_)
+                }
+            )
+        })
+        .count();
+    let assistant_ends = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::MessageEnd {
+                    message: AgentMessage::Assistant(_)
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        assistant_starts, assistant_ends,
+        "assistant MessageStart/MessageEnd must pair: {events:?}"
+    );
+}
+
 /// The distinction that makes the above safe: cancelling the *run* signal is a
 /// hard abort and must keep today's semantics — the `Aborted` assistant message
 /// is a real message, it is persisted, and the run ends.

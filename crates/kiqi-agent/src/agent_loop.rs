@@ -285,7 +285,8 @@ async fn run_loop(
                     StreamedTurn::SoftInterrupted => {
                         // A soft interrupt killed the request, not the run. The
                         // interrupted attempt is not a turn: it is neither in
-                        // `current_context` (the stream path popped it) nor here,
+                        // `current_context` (the stream path pops what `Start`
+                        // pushed and never settles a no-`Start` attempt) nor here,
                         // and `new_messages` is the only thing the harness
                         // persists.
                         pending_messages = drain_steering(config).await;
@@ -560,25 +561,39 @@ async fn stream_assistant_response(
         && !config.signal.is_cancelled()
         && config.interrupt.take_soft()
     {
+        // A request with no `Start` has no live block: a provider cancelled
+        // during connect answers `Error { reason: Aborted }` without ever
+        // starting the message (`kiqi-ai`'s mapper takes the same path), so
+        // nothing was shown, nothing is popped and nothing is announced —
+        // announcing `MessageEnd` there would leave the TUI with a half-open
+        // block. That shape is also why `settle_partial` may not run inside the
+        // fold, before this classification.
         if added_partial {
             // Drop the slot `Start` pushed. This is the only message this request
             // added to the context, and it is not part of the conversation: the
             // next provider request must not see an aborted assistant turn.
             context.messages.pop();
+            // Still emit `MessageEnd`: the TUI finalizes the live streaming block
+            // on it (`interactive_tui/events.rs`, `finalize_assistant_blocks`),
+            // and without it the block would look like it is still streaming. The
+            // UI sees this message — the LLM context and the session file do not.
+            emit_event(
+                emit,
+                AgentEvent::MessageEnd {
+                    message: AgentMessage::Assistant(Box::new(final_message)),
+                },
+            )
+            .await;
         }
-        // Still emit `MessageEnd`: the TUI finalizes the live streaming block on
-        // it (`interactive_tui/events.rs`, `finalize_assistant_blocks`), and
-        // without it the block would look like it is still streaming. The UI
-        // sees this message — the LLM context and the session file do not.
-        emit_event(
-            emit,
-            AgentEvent::MessageEnd {
-                message: AgentMessage::Assistant(Box::new(final_message)),
-            },
-        )
-        .await;
         return Ok(StreamedTurn::SoftInterrupted);
     }
+
+    // Only a turn that counts may reach the context. `settle_partial` pushes a
+    // finalized assistant when the provider sent no `Start`, so running it
+    // before the classification would leave an aborted assistant in
+    // `context.messages` on the no-`Start` soft path — the next request would
+    // see the turn the user just interrupted.
+    settle_partial(&final_message, added_partial, context, emit).await;
 
     emit_event(
         emit,
@@ -593,9 +608,11 @@ async fn stream_assistant_response(
 /// Fold the provider's event stream into `context`, returning the finalized
 /// assistant message and whether this request pushed a partial for it.
 ///
-/// Emits `MessageStart` / `MessageUpdate` but **not** `MessageEnd`: the caller
-/// owns that one, because in the soft-interrupt case it is emitted for a message
-/// that deliberately never reaches the transcript.
+/// Emits `MessageStart` / `MessageUpdate` but neither `MessageEnd` nor the
+/// settled message: the caller owns both. It must not settle before the
+/// soft-vs-hard classification runs — a no-`Start` aborted request would land in
+/// `context.messages` and the soft branch could not undo it (see
+/// [`settle_partial`]).
 async fn fold_assistant_stream(
     mut response: AssistantMessageEventStream,
     context: &mut AgentContext,
@@ -624,7 +641,7 @@ async fn fold_assistant_stream(
                     // No `context.messages` update here: nothing reads it between
                     // deltas (`transform_context`/`convert_to_llm` ran before this
                     // loop), and `Start` already pushed the slot while the
-                    // terminal arm replaces it with the finalized message. Keeping
+                    // caller replaces it with the finalized message. Keeping
                     // the old `*last = am.clone()` copied the whole growing message
                     // once per delta for no observable effect.
                     emit_event(
@@ -646,7 +663,6 @@ async fn fold_assistant_stream(
                         "assistant-message event stream ended without a terminal event".into(),
                     )
                 })?;
-                settle_partial(&final_message, added_partial, context, emit).await;
                 return Ok((final_message, added_partial));
             }
         }
@@ -657,13 +673,20 @@ async fn fold_assistant_stream(
     let final_message = response.result().await.map_err(|_| {
         AgentError::Provider("assistant-message event stream ended without a terminal event".into())
     })?;
-    settle_partial(&final_message, added_partial, context, emit).await;
     Ok((final_message, added_partial))
 }
 
 /// Put the finalized message where the partial was: replace the slot `Start`
 /// pushed, or — when the provider sent no `Start` at all — push it now and
 /// announce it, so the `MessageStart`/`MessageEnd` pairing still holds.
+///
+/// Deliberately **not** called from [`fold_assistant_stream`], and only on the
+/// paths that mean "this message is part of the conversation". A provider
+/// cancelled while connecting reports `Error { reason: Aborted }` with no
+/// `Start`; settling that before the soft-vs-hard classification would push an
+/// aborted assistant into `context.messages` that the soft branch (which only
+/// pops what `Start` pushed) could not remove, leaking the interrupted turn into
+/// the next provider request.
 async fn settle_partial(
     final_message: &AssistantMessage,
     added_partial: bool,
