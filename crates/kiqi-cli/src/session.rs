@@ -142,6 +142,30 @@ pub fn default_system_prompt_for_tools(
   your head you will re-derive it from scratch every turn."
     };
 
+    // Guidance that names a tool must not appear when that tool is absent: a run with
+    // `--no-tools` was still told "the bash tool runs Bash …" and "track work with the
+    // todo tool", which is the same lie as advertising the tools themselves.
+    let has = |name: &str| match tools {
+        None => true,
+        Some(names) => names.iter().any(|n| n == name),
+    };
+    let bash_rule = if has("bash") {
+        "- The bash tool runs Bash, even on Windows. Use ls, find, rg, and POSIX pipelines;\n  \
+         do not pass PowerShell cmdlets such as Get-ChildItem, Select-Object, or Select-String.\n  \
+         If a powershell tool is available, use it for PowerShell commands.\n"
+            .to_string()
+    } else {
+        String::new()
+    };
+    let todo_rule = if has("todo") {
+        "- Track multi-step work with the todo tool instead of re-listing the plan in prose: \n  \
+         add the steps once, then mark them done as you go. Re-stating the same plan without \n  \
+         acting on it is a bug, not progress.\n"
+            .to_string()
+    } else {
+        String::new()
+    };
+
     // Advertise exactly what the session has. `None` keeps the historical list (a
     // caller that does not know yet); `Some(empty)` says so plainly, because an empty
     // "Available tools:" heading reads as a formatting bug.
@@ -186,13 +210,9 @@ Guidelines:
 - Be concise in your responses
 - Show file paths clearly when working with files
 - Prefer the smallest change that solves the problem
-- The bash tool runs Bash, even on Windows. Use ls, find, rg, and POSIX pipelines;
-  do not pass PowerShell cmdlets such as Get-ChildItem, Select-Object, or Select-String.
-  If a powershell tool is available, use it for PowerShell commands.
+{bash_rule}
 {working_state_rule}
-- Track multi-step work with the todo tool instead of re-listing the plan in prose: add the
-  steps once, then mark them done as you go. Re-stating the same plan without acting on it is
-  a bug, not progress.
+{todo_rule}
 - Read only what you need. If a file or search result was already shown earlier in this
   conversation, use it instead of fetching it again.
 - When unsure about ki commands, extensions, Pi package compatibility, or .ki configuration, consult the project documentation before guessing
@@ -3422,6 +3442,39 @@ mod tests {
                     );
                 }
             });
+    }
+
+    /// Guidance that names a tool must disappear when that tool does.
+    ///
+    /// The tool list was made truthful in 4a3aad2, but the prose below it kept saying
+    /// "the bash tool runs Bash …" and "track work with the todo tool" regardless — so
+    /// `--no-tools` produced a prompt that named no tools in the list and then advised
+    /// using two of them. Same class of lie, one layer down.
+    #[test]
+    fn guidance_about_a_tool_is_dropped_when_that_tool_is_not_available() {
+        let none = default_system_prompt_for_tools(".", false, Some(&[]));
+        assert!(
+            !none.contains("The bash tool runs"),
+            "the bash rule must go with bash: {none}"
+        );
+        assert!(
+            !none.contains("with the todo tool"),
+            "the todo rule must go with todo: {none}"
+        );
+
+        // Only bash: the todo rule survives, untouched.
+        let only_bash = vec!["bash".to_string()];
+        let with_bash = default_system_prompt_for_tools(".", false, Some(&only_bash));
+        assert!(with_bash.contains("The bash tool runs"), "{with_bash}");
+        assert!(
+            !with_bash.contains("with the todo tool"),
+            "todo is absent here: {with_bash}"
+        );
+
+        // Unknown tool set keeps both, matching the historical prompt.
+        let unknown = default_system_prompt_for_tools(".", false, None);
+        assert!(unknown.contains("The bash tool runs"), "{unknown}");
+        assert!(unknown.contains("with the todo tool"), "{unknown}");
     }
 
     #[test]
