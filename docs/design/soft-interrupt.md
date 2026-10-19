@@ -1,6 +1,6 @@
 # 方案：软中断（Esc 只停当前动作，不终止整轮）
 
-> 状态：**阶段 1 已落地（2026-10-19，`4902ab7`）**；阶段 2/3 待做。目标：把 Esc 从“终止整个 run”改为
+> 状态：**阶段 1、2 已落地（2026-10-19，`4902ab7` / 本卡）**；阶段 3 待做。目标：把 Esc 从“终止整个 run”改为
 > “取消当前工具调用/模型流，保留 run 与 steering 队列”，由 LLM 在看到插入消息后
 > 决定停止、收尾还是继续。
 > 关联：`signal-driven-agent.md` §5（MUI 输入）、`plugin-abi.md` §6.36
@@ -118,8 +118,8 @@ UI：
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 1 | 工具软中断：`InterruptControl` + `AgentLane::interrupt` + 单/双 Esc | **已落地** `f7013cb` + `4902ab7` |
-| 2 | 流软中断：provider token、Aborted 分支丢弃半条消息并继续 | 待做 |
-| 3 | UI 提示、审计日志、`InterruptResult` 细化 | 部分（提示已做） |
+| 2 | 流软中断：provider token、丢弃半条消息、有排队则续流 | **已落地** 本卡（见 §5.2） |
+| 3 | 审计日志、`InterruptResult` 细化 | 待做（提示已做） |
 
 阶段 1 先解决最痛的长工具（bash/dispatch）；阶段 2 覆盖“模型正在生成时按 Esc”。
 
@@ -142,10 +142,34 @@ UI：
    will be stopped.”，不能说“没有东西可中断”。阶段 2 把流也 install 之后，这个窗口会
    收窄到“两个动作之间”，但语义不变。
 
+### 5.2 阶段 2 落地记录
+
+| 位置 | 实现 |
+|---|---|
+| `crates/kiqi-agent/src/agent_loop.rs` | `stream_assistant_response` 返回 `StreamedTurn::{Message, SoftInterrupted}`；每次请求用 `config.signal.child_token()` 作为 `opts.signal`，并 `install`/`clear`（`clear` 在折叠与分类之间，每个过了 `install` 的路径恰好 clear 一次） |
+| 同上 | 软中断判定需**四条同时成立**：`stop_reason == Aborted`、`stream_token.is_cancelled()`、`!config.signal.is_cancelled()`、`take_soft()` |
+| 同上 | 命中时：`added_partial` 则 `context.messages.pop()`；不 push 进 `new_messages`（持久化只认它，`agent_harness.rs` 的 `persist_new_messages`）；**仍然 emit `MessageEnd`** |
+| 同上 | 有排队消息 → `drain_steering` 后 `continue`（注入并重新请求）；无排队 → `break` 出内层循环，交给既有 follow-up 检查，最终 `LoopOutcome::Completed` |
+
+阶段 2 有两处**偏离方案原文**的判断（后续不要回退）：
+
+1. **无排队消息时不重发请求，而是结束本 turn。** 方案 §3.3/§6.1 写的是“继续，让 LLM
+   决定”；这对工具调用成立（模型能看到被取消的 tool result），对流不成立——流被中断时
+   没有任何 tool result 可看，立刻重发只会让模型把同一段话重说一遍，用户会以为 Esc
+   没生效。结束本 turn 仍然是 `Completed`（不是 `Aborted`），run signal 未取消（I1）、
+   也不设静音（I5）。
+2. **不新增 `AgentEvent` 变体。** `AgentEvent` 是插件契约的一部分（`kiqi-extensions` 的
+   `EventTag` + `plugin-abi.md`），为一条丢弃消息新增变体得不偿失。改用
+   “emit `MessageEnd` + 从 `new_messages` 移除”。**已知副作用**：TUI 当场能看到被中断
+   的那一段（靠 `MessageEnd` 收尾流式块），但重新加载会话后它不在了——因为会话文件
+   里确实没有它。
+
 ## 6. 开放问题
 
 1. 软中断后**没有**排队消息时：run 继续让 LLM 自行决定，还是直接结束本轮？
-   本方案选择“继续”，因为 LLM 应看到被取消的工具结果再决定。
+   已定（阶段 2）：**工具调用**继续（LLM 应看到被取消的 tool result 再决定）；
+   **模型流**结束本 turn（没有 tool result 可看，重发只会重说一遍）。两者都是
+   `Completed` 而非 `Aborted`，run signal 不取消。
 2. 单 Esc 在“流式生成”和“工具执行”中语义一致（软中断）；双 Esc 始终硬中断。
 3. 双 Esc 与现有 `double_escape_action`（默认 tree）的窗口冲突：Working 中双 Esc
    优先硬中断；Idle 中保持 tree。

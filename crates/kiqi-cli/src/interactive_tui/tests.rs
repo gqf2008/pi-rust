@@ -2600,7 +2600,15 @@ fn soft_interrupt_notes_describe_what_the_press_reached() {
     // Working and the queue stays queued), so the wording matters: it must not
     // read like an abort, and the nothing-in-flight case must not promise that
     // nothing will happen.
-    assert!(SOFT_INTERRUPT_NOTE.contains("continues"));
+    //
+    // Phase 2 made the note cover provider requests as well as tool calls, so it
+    // says "step" rather than "tool" — `contains("tool")` would now be wrong.
+    assert!(SOFT_INTERRUPT_NOTE.contains("step"));
+    assert!(!SOFT_INTERRUPT_NOTE.contains("tool"));
+    // With queued input the loop asks again; without it the turn ends. Both
+    // outcomes keep the run alive, so the note must not say the queue "continues"
+    // unconditionally nor sound like a stop of the whole run.
+    assert!(SOFT_INTERRUPT_NOTE.contains("queued input"));
     assert!(!SOFT_INTERRUPT_NOTE.to_ascii_lowercase().contains("abort"));
     // The latch is armed in this arm (`InterruptResult::NothingToInterrupt`), so
     // the note has to say the next step is affected. "Nothing to interrupt"

@@ -35,6 +35,7 @@ use kiqi_ai::types::{
     ToolResultMessage, ToolResultRole,
 };
 use kiqi_ai::validate_tool_arguments;
+use kiqi_ai::AssistantMessageEventStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -274,12 +275,36 @@ async fn run_loop(
             // whose tools still have to run.
             let message = match pending_assistant.take() {
                 Some(message) => message,
-                None => {
-                    let message =
-                        stream_assistant_response(current_context, config, emit, stream_fn).await?;
-                    new_messages.push(AgentMessage::Assistant(Box::new(message.clone())));
-                    message
-                }
+                None => match stream_assistant_response(current_context, config, emit, stream_fn)
+                    .await?
+                {
+                    StreamedTurn::Message(message) => {
+                        new_messages.push(AgentMessage::Assistant(message.clone()));
+                        *message
+                    }
+                    StreamedTurn::SoftInterrupted => {
+                        // A soft interrupt killed the request, not the run. The
+                        // interrupted attempt is not a turn: it is neither in
+                        // `current_context` (the stream path popped it) nor here,
+                        // and `new_messages` is the only thing the harness
+                        // persists.
+                        pending_messages = drain_steering(config).await;
+                        if pending_messages.is_empty() {
+                            // Nothing queued while streaming: stop this turn
+                            // without touching `config.signal`, so the next user
+                            // prompt continues the conversation instead of
+                            // hitting a cancelled run. Falls out to the existing
+                            // follow-up check below; with no follow-ups pending
+                            // the outer loop breaks and the run reports
+                            // `Completed`.
+                            break;
+                        }
+                        // Someone typed while we were streaming: loop around so
+                        // the injection block above runs and the provider is
+                        // asked again with that steering message in context.
+                        continue;
+                    }
+                },
             };
 
             if matches!(message.stop_reason, StopReason::Error | StopReason::Aborted) {
@@ -435,15 +460,47 @@ async fn run_loop(
 // streamAssistantResponse
 // ----------------------------------------------------------------------------
 
+/// What one stream request produced, from the loop's point of view.
+///
+/// The distinction exists because a *soft* interrupt kills the request without
+/// killing the turn: the provider answers with an `Aborted` assistant message,
+/// but that message is not something the model finished saying, so it must not
+/// enter the transcript. The two arms are therefore not "success" vs "failure"
+/// — both are `Ok`:
+///
+/// - [`Message`](Self::Message): a conversational assistant message. The caller
+///   appends it to `new_messages` (the only vec the harness persists) and keeps
+///   the turn going normally.
+/// - [`SoftInterrupted`](Self::SoftInterrupted): the request died because its
+///   per-request token was cancelled by [`InterruptControl::soft_interrupt`]
+///   while the run signal stayed live. Nothing was appended to the LLM context
+///   (the partial pushed by `Start` is popped again) and nothing may be appended
+///   to `new_messages`: the transcript, the session file and the next request
+///   all have to look as if the attempt never happened. The caller decides
+///   whether to continue (queued steering) or stop the turn.
+///
+/// [`InterruptControl::soft_interrupt`]: crate::interrupt::InterruptControl::soft_interrupt
+enum StreamedTurn {
+    Message(Box<AssistantMessage>),
+    SoftInterrupted,
+}
+
 /// Stream one assistant response, folding protocol events into the partial
 /// message and emitting agent `Message*` events. Mirrors TS
 /// `streamAssistantResponse`.
+///
+/// Two differences from the TS original, both about cancellation:
+/// 1. the provider is handed a *child* of the run signal, installed as the
+///    soft-interrupt target for the duration of the request, so a soft
+///    interrupt can kill this one request without cancelling the run;
+/// 2. the outcome is a [`StreamedTurn`], because a soft-interrupted request ends
+///    with an `Aborted` message that must be dropped rather than returned.
 async fn stream_assistant_response(
     context: &mut AgentContext,
     config: &AgentLoopConfig,
     emit: &Arc<dyn AgentEmitter>,
     stream_fn: &StreamFn,
-) -> Result<AssistantMessage, AgentError> {
+) -> Result<StreamedTurn, AgentError> {
     // Apply optional transform_context (AgentMessage[] → AgentMessage[]).
     let messages = if let Some(transform) = &config.transform_context {
         transform(context.messages.clone(), config.signal.clone()).await
@@ -473,9 +530,77 @@ async fn stream_assistant_response(
         config.api_key.clone()
     };
 
-    let opts = config.to_stream_options(resolved_api_key);
-    let mut response = stream_fn(&config.model, &llm_context, &opts);
+    // A child of the run signal: cancelling it aborts this one request only.
+    // It is registered as the soft-interrupt target for exactly as long as the
+    // request lives, mirroring `run_one_tool_call`; a *latched* soft interrupt
+    // (pressed while nothing was in flight) cancels it right here.
+    let stream_token = config.signal.child_token();
+    let install_id = config.interrupt.install(stream_token.clone());
 
+    // `to_stream_options` forwards the run signal and other callers still rely
+    // on that, so the per-request token is overridden here instead of inside it.
+    let mut opts = config.to_stream_options(resolved_api_key);
+    opts.signal = stream_token.clone();
+
+    let response = stream_fn(&config.model, &llm_context, &opts);
+
+    // The fold can bail out early (a `result()` failure), and so can the
+    // classification below, so the slot is released *between* the two: every
+    // path that gets past `install` runs `clear` exactly once.
+    let folded = fold_assistant_stream(response, context, emit).await;
+    config.interrupt.clear(install_id);
+    let (final_message, added_partial) = folded?;
+
+    // Soft interrupt vs hard abort. All four must hold: the provider reported
+    // `Aborted`, *our* token is the thing that was cancelled, the run signal is
+    // still live (otherwise this is a real abort and must stay one), and the
+    // interrupter said it was soft (one-shot latch).
+    if matches!(final_message.stop_reason, StopReason::Aborted)
+        && stream_token.is_cancelled()
+        && !config.signal.is_cancelled()
+        && config.interrupt.take_soft()
+    {
+        if added_partial {
+            // Drop the slot `Start` pushed. This is the only message this request
+            // added to the context, and it is not part of the conversation: the
+            // next provider request must not see an aborted assistant turn.
+            context.messages.pop();
+        }
+        // Still emit `MessageEnd`: the TUI finalizes the live streaming block on
+        // it (`interactive_tui/events.rs`, `finalize_assistant_blocks`), and
+        // without it the block would look like it is still streaming. The UI
+        // sees this message — the LLM context and the session file do not.
+        emit_event(
+            emit,
+            AgentEvent::MessageEnd {
+                message: AgentMessage::Assistant(Box::new(final_message)),
+            },
+        )
+        .await;
+        return Ok(StreamedTurn::SoftInterrupted);
+    }
+
+    emit_event(
+        emit,
+        AgentEvent::MessageEnd {
+            message: AgentMessage::Assistant(Box::new(final_message.clone())),
+        },
+    )
+    .await;
+    Ok(StreamedTurn::Message(Box::new(final_message)))
+}
+
+/// Fold the provider's event stream into `context`, returning the finalized
+/// assistant message and whether this request pushed a partial for it.
+///
+/// Emits `MessageStart` / `MessageUpdate` but **not** `MessageEnd`: the caller
+/// owns that one, because in the soft-interrupt case it is emitted for a message
+/// that deliberately never reaches the transcript.
+async fn fold_assistant_stream(
+    mut response: AssistantMessageEventStream,
+    context: &mut AgentContext,
+    emit: &Arc<dyn AgentEmitter>,
+) -> Result<(AssistantMessage, bool), AgentError> {
     let mut added_partial = false;
 
     while let Some(event) = response.next().await {
@@ -521,23 +646,8 @@ async fn stream_assistant_response(
                         "assistant-message event stream ended without a terminal event".into(),
                     )
                 })?;
-                let am = AgentMessage::Assistant(Box::new(final_message.clone()));
-                if added_partial {
-                    if let Some(last) = context.messages.last_mut() {
-                        *last = am.clone();
-                    }
-                } else {
-                    context.messages.push(am.clone());
-                    emit_event(
-                        emit,
-                        AgentEvent::MessageStart {
-                            message: am.clone(),
-                        },
-                    )
-                    .await;
-                }
-                emit_event(emit, AgentEvent::MessageEnd { message: am }).await;
-                return Ok(final_message);
+                settle_partial(&final_message, added_partial, context, emit).await;
+                return Ok((final_message, added_partial));
             }
         }
     }
@@ -547,23 +657,28 @@ async fn stream_assistant_response(
     let final_message = response.result().await.map_err(|_| {
         AgentError::Provider("assistant-message event stream ended without a terminal event".into())
     })?;
+    settle_partial(&final_message, added_partial, context, emit).await;
+    Ok((final_message, added_partial))
+}
+
+/// Put the finalized message where the partial was: replace the slot `Start`
+/// pushed, or — when the provider sent no `Start` at all — push it now and
+/// announce it, so the `MessageStart`/`MessageEnd` pairing still holds.
+async fn settle_partial(
+    final_message: &AssistantMessage,
+    added_partial: bool,
+    context: &mut AgentContext,
+    emit: &Arc<dyn AgentEmitter>,
+) {
     let am = AgentMessage::Assistant(Box::new(final_message.clone()));
     if added_partial {
         if let Some(last) = context.messages.last_mut() {
-            *last = am.clone();
+            *last = am;
         }
     } else {
         context.messages.push(am.clone());
-        emit_event(
-            emit,
-            AgentEvent::MessageStart {
-                message: am.clone(),
-            },
-        )
-        .await;
+        emit_event(emit, AgentEvent::MessageStart { message: am }).await;
     }
-    emit_event(emit, AgentEvent::MessageEnd { message: am }).await;
-    Ok(final_message)
 }
 
 // ----------------------------------------------------------------------------

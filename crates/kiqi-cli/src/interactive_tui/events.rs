@@ -155,12 +155,17 @@ pub(super) fn abort_run_restoring_queue(
 /// `soft-interrupt.md` §3.5. Kept as constants so the wording is asserted by a
 /// test instead of drifting between the two `InterruptResult` arms.
 ///
+/// The note must hold for *both* things a soft interrupt can stop (phase 1: one
+/// tool call; phase 2: one provider request), and for both continuations: with
+/// queued input the loop injects it and asks again, without it the turn ends and
+/// the run survives. So: "step", not "tool", and "still runs", not "continues".
+///
 /// The `NothingToInterrupt` note must not claim that nothing happened: the soft
 /// flag is latched in that arm, so the *next* action the run installs starts
 /// cancelled (`InterruptResult::NothingToInterrupt` documents this). A note that
 /// said "nothing to interrupt" would be lying to the user one edit later.
 pub(super) const SOFT_INTERRUPT_NOTE: &str =
-    "Interrupted the current tool; queued input continues.";
+    "Interrupted the current step; queued input will run next.";
 pub(super) const NOTHING_TO_INTERRUPT_NOTE: &str =
     "Nothing in flight right now; the next step will be stopped.";
 pub(super) const NO_ACTIVE_RUN_TO_INTERRUPT_NOTE: &str = "No run to interrupt.";
