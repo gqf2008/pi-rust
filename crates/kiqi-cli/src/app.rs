@@ -916,17 +916,37 @@ fn build_initial_message(
 /// auth-guidance / model-resolver error formatting (condensed to stderr lines).
 pub(crate) fn print_resolve_error(e: &ResolveError) {
     match e {
-        ResolveError::NoApiKey { hint } => {
-            eprintln!("error: {e}");
-            eprintln!();
-            eprintln!("Provide credentials via one of: {hint}.");
-        }
-        ResolveError::Config(_) => {
+        ResolveError::NoApiKey { hint: _ } => {
+            // `e` already carries the full list ("No API key. Set one of: …"); the
+            // second line used to repeat it word for word with a different opening,
+            // so the reader got the same seven options twice and no extra information.
             eprintln!("error: {e}");
             eprintln!();
             eprintln!(
-                "Check ~/.ki/auth.json / ~/.ki/models.json (set KI_CODING_AGENT_DIR to relocate)."
+                "`ki auth login` stores a key; `ki --list-models` shows what each provider needs."
             );
+        }
+        ResolveError::Config(inner) => {
+            eprintln!("error: {e}");
+            eprintln!();
+            // Name the file the error actually came from. This arm used to say
+            // "check ~/.ki/auth.json / ~/.ki/models.json" for *every* config error,
+            // but `Config` carries any `ConfigError` — including a `settings.json`
+            // that failed to parse — so the old hint sent people to two files that
+            // were fine and never mentioned the broken one.
+            match inner {
+                crate::config::ConfigError::Read { path, .. }
+                | crate::config::ConfigError::Write { path, .. }
+                | crate::config::ConfigError::Json { path, .. } => {
+                    eprintln!("Fix {}.", path.display());
+                }
+                crate::config::ConfigError::NoHomeDir { .. }
+                | crate::config::ConfigError::RelativeOverride { .. } => {
+                    eprintln!(
+                        "Set KI_CODING_AGENT_DIR to an absolute path to relocate the config directory."
+                    );
+                }
+            }
         }
         _ => eprintln!("error: {e}"),
     }
