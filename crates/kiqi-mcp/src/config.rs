@@ -154,10 +154,10 @@ pub struct ServerConfig {
     pub transport: Transport,
     pub enabled: bool,
     pub timeout: Duration,
-    /// Resource uris ki subscribes to right after the handshake. There is no
-    /// model verb for subscribing (batch-2 stance): subscriptions are
-    /// host/config-driven, and the restore-on-reconnect machinery keeps them
-    /// alive for the session.
+    /// Resource uris ki subscribes to right after the handshake. Durable,
+    /// config-driven watches; the `{server}__watch_resource` tool can add
+    /// session-scoped watches at runtime. The restore-on-reconnect machinery
+    /// keeps configured watches alive for the session.
     pub subscribe: Vec<String>,
     /// Resource uris whose updates are read eagerly at the boundary instead of
     /// delivering the light (server, uri) notice. Opt-in per server: the

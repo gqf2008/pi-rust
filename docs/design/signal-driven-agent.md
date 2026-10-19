@@ -133,6 +133,9 @@ chain_id        若由某次 run 的副作用产生，记录产生它的 run
 `dismiss` 始终可用；`goal`/`todo`/`plan-mode` 仍是可选的编排工具。
 `signals list` 也会返回每条信号的 id、来源、uri、状态与备注。
 
+订阅动作由 `{server}__watch_resource`（`start`/`stop`/`list`）承担，和
+`{server}__read_resource` 一起构成「发现 → 订阅 → 收通知 → 按需读取」的闭环。
+
 插件工具的具体面：
 `goal`（`plugins/kiqi-goal/src/lib.rs:1026`，start/update/pause/resume/complete/limit/show/list，
 目标跨轮注入）、`todo`（`plugins/kiqi-todo/src/lib.rs:340`，会话任务表）、
@@ -144,10 +147,11 @@ chain_id        若由某次 run 的副作用产生，记录产生它的 run
 1. **动作空间 = 当前会话已注册的工具集。** 默认构建不编译任何一方插件
    （`AGENTS.md`「两条插件通道」），所以 `goal`/`todo`/`plan-mode`/`ask_user`
    可能都不存在。语义是「能用什么就用什么」，不是硬依赖；缺省降级见上表。
-2. **智能体不能改订阅本身。** `resources/subscribe` 是宿主/配置驱动，没有模型动词
-   （`crates/kiqi-mcp/src/manager.rs:675,1247-1266`）。想退订或改订阅，只能请求用户
-   修改配置。会话级静音已实现（用户 `/signals off`，智能体 `signals mute`），
-   但这是唤醒策略，不是订阅变更。
+2. **订阅有模型动词，但配置仍是持久形态。** 配置里的 `subscribe` 在启动时订阅；
+   智能体可用 `{server}__watch_resource` 在会话内 `start` / `stop` / `list`
+   （仅当 server 声明 `resources.subscribe`）。模型启动的 watch 随会话存活、
+   在重连时恢复，但不写回配置；要跨会话持久就写配置。会话级静音仍是唤醒策略，
+   不是订阅变更。
 3. **「延时」仍是「下一个边界/下一轮」**，不承诺墙钟时间。真正的定时唤醒需要
    阶段 3 的定时器事件源。
 4. **所有行动仍走权限门。** 智能体不能给自己授权；自动唤醒不改变 L3。
@@ -415,4 +419,29 @@ cargo test -p kiqi-cli --lib --locked signal
 ```bash
 cargo test -p kiqi-mcp --lib --locked config::tests
 cargo test -p kiqi-cli --lib --locked signal
+```
+
+## 16. 运行时订阅（2026-10-19）
+
+`{server}__watch_resource` 补上了「订阅」的模型动词：
+
+| 动作 | 语义 |
+|---|---|
+| `start` | `resources/subscribe`；后续更新走既有 notice → 唤醒 → inbox 管道 |
+| `stop` | `resources/unsubscribe`；本地投递立即停止，排队中的该 uri 通知被清除 |
+| `list` | 当前订阅的 uri（配置驱动 + 模型驱动） |
+
+约束：
+
+- 只有 server 声明 `resources.subscribe: true` 时才注册该工具；否则不出现，
+  避免保证失败的协议调用。
+- 走与配置订阅完全相同的 manager 路径：mark-before-RPC、重连恢复、失败回滚。
+- 模型启动的 watch 属于会话：重连会恢复，但不写回 `settings.json`；跨会话持久
+  仍然写配置。
+- 读取内容仍走 `{server}__read_resource`；订阅本身不自动读全文。
+
+验证：
+
+```bash
+cargo test -p kiqi-mcp --test e2e --locked the_model_can_start_and_stop_watching_a_resource
 ```

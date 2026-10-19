@@ -32,7 +32,7 @@ pub use config::{
     parse_signals_defaults, HttpTransport, ServerConfig, SignalsConfig, SignalsDefaults,
     StdioTransport, Transport, WakeMode,
 };
-pub use manager::{McpManager, READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR};
+pub use manager::{McpManager, READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR, WATCH_RESOURCE_SUFFIX};
 pub use notice::{
     notice_entry_text, notice_message, McpNotice, McpNoticeBatch, McpNoticeMailbox,
     NOTICE_CUSTOM_TYPE,

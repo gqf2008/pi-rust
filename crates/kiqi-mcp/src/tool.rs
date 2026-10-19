@@ -17,7 +17,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use kiqi_agent::types::{AgentToolResult, TextContentOrImage, ToolResultPartial};
+use kiqi_agent::types::{
+    AgentToolResult, TextContentOrImage, ToolExecutionMode, ToolResultPartial,
+};
 use kiqi_agent::{AgentError, AgentTool};
 use kiqi_ai::types::{ImageContent, ImageContentType, Schema, Tool};
 use serde_json::Value;
@@ -25,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::manager::{
     call_tool, read_resource, CallError, DiscoveredTool, ServerHandle, MAX_RESOURCE_TEXT,
-    READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR,
+    READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR, WATCH_RESOURCE_SUFFIX,
 };
 
 /// An `AgentTool` backed by one tool on one MCP server.
@@ -279,6 +281,133 @@ impl AgentTool for McpResourceToolAdapter {
             }
         };
         map_resource_result(&self.schema.name, &value)
+    }
+}
+
+/// An `AgentTool` managing this server's resource subscriptions. Together with
+/// `{server}__read_resource` it closes the loop: discover resources from the
+/// read tool's description, `start` watching one, receive signals, then read on
+/// demand. A model-started watch lives for this session only; durable watches
+/// belong in the server's `subscribe` config.
+pub(crate) struct McpResourceWatchToolAdapter {
+    handle: Arc<ServerHandle>,
+    schema: Tool,
+}
+
+impl McpResourceWatchToolAdapter {
+    pub(crate) fn new(handle: Arc<ServerHandle>) -> Self {
+        let name = format!(
+            "{}{TOOL_NAME_SEPARATOR}{WATCH_RESOURCE_SUFFIX}",
+            handle.server_name()
+        );
+        let read_name = format!(
+            "{}{TOOL_NAME_SEPARATOR}{READ_RESOURCE_SUFFIX}",
+            handle.server_name()
+        );
+        Self {
+            schema: Tool {
+                name,
+                description: format!(
+                    "Watch resources on this server. `start` subscribes to a uri so updates arrive as MCP signals; `stop` unsubscribes; `list` shows current subscriptions. Read content with `{read_name}`. A watch started here lasts for this session only; durable watches belong in the server's `subscribe` config."
+                ),
+                parameters: Schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["start", "stop", "list"],
+                            "description": "start = subscribe, stop = unsubscribe, list = show current subscriptions"
+                        },
+                        "uri": {
+                            "type": "string",
+                            "description": "Resource uri (required for start and stop)"
+                        }
+                    },
+                    "required": ["action"]
+                })),
+                constrained_sampling: None,
+            },
+            handle,
+        }
+    }
+}
+
+#[async_trait]
+impl AgentTool for McpResourceWatchToolAdapter {
+    fn schema(&self) -> &Tool {
+        &self.schema
+    }
+
+    fn label(&self) -> &str {
+        &self.schema.name
+    }
+
+    fn execution_mode(&self) -> ToolExecutionMode {
+        // Subscription state is a read-modify-write on the shared map; keep
+        // start/stop calls from interleaving.
+        ToolExecutionMode::Sequential
+    }
+
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        params: Value,
+        signal: CancellationToken,
+        _on_update: Arc<dyn Fn(ToolResultPartial) + Send + Sync>,
+    ) -> Result<AgentToolResult, AgentError> {
+        if signal.is_cancelled() {
+            return Err(AgentError::Abort);
+        }
+        let action = params
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        match action {
+            "list" => {
+                let uris = self.handle.subscription_uris();
+                let text = if uris.is_empty() {
+                    "No resource subscriptions.".to_string()
+                } else {
+                    let mut text = format!("Watching {} resource(s):\n", uris.len());
+                    for uri in uris {
+                        text.push_str(&format!("- {uri}\n"));
+                    }
+                    text
+                };
+                Ok(AgentToolResult::text(text))
+            }
+            "start" | "stop" => {
+                let uri = params
+                    .get("uri")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|uri| !uri.is_empty())
+                    .ok_or_else(|| {
+                        AgentError::Tool(format!(
+                            "{}: `uri` is required for `{action}`",
+                            self.schema.name
+                        ))
+                    })?;
+                if action == "start" {
+                    self.handle.subscribe_uri(uri).await.map_err(|error| {
+                        AgentError::Tool(format!("{}: {error}", self.schema.name))
+                    })?;
+                    Ok(AgentToolResult::text(format!(
+                        "Watching {uri}. Updates will arrive as MCP signals; read the content with the server's read_resource tool."
+                    )))
+                } else {
+                    self.handle.unsubscribe_uri(uri).await.map_err(|error| {
+                        AgentError::Tool(format!("{}: {error}", self.schema.name))
+                    })?;
+                    Ok(AgentToolResult::text(format!("Stopped watching {uri}.")))
+                }
+            }
+            other => Err(AgentError::Validation(format!(
+                "{} expects action start|stop|list (got {other:?})",
+                self.schema.name
+            ))),
+        }
     }
 }
 

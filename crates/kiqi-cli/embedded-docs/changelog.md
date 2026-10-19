@@ -65,6 +65,12 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   the ported plugins came from) and `@juicesharp/rpiv-todo`.
 
 ### Added
+- **The model can watch MCP resources at runtime**: `{server}__watch_resource`
+  (`start`/`stop`/`list`) subscribes through the same manager path as the
+  config `subscribe` list, and is only exposed when the server advertises
+  `resources.subscribe`. Updates then arrive as regular MCP signals and content
+  is read on demand; a model-started watch survives reconnects within the
+  session but is not written back to settings.
 - **MCP resource updates can wake the session (`signals`, interactive TUI)**:
   an explicit `subscribe` list is the user's opt-in to be told, so its
   `signals.wake` defaults to `auto`. The host records the notice and, within a

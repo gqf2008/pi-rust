@@ -66,7 +66,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::config::{HttpTransport, ServerConfig, StdioTransport, Transport};
 use crate::notice::McpNoticeMailbox;
-use crate::tool::{McpResourceToolAdapter, McpToolAdapter};
+use crate::tool::{McpResourceToolAdapter, McpResourceWatchToolAdapter, McpToolAdapter};
 
 /// The client service type: a [`KiClientHandler`] whose `get_info` carries ki's
 /// identity + the protocol version ki asks for.
@@ -130,6 +130,9 @@ pub const TOOL_NAME_SEPARATOR: &str = "__";
 
 /// The read tool's suffix: `{server}__read_resource`.
 pub const READ_RESOURCE_SUFFIX: &str = "read_resource";
+
+/// The subscription tool's suffix: `{server}__watch_resource`.
+pub const WATCH_RESOURCE_SUFFIX: &str = "watch_resource";
 
 /// The largest single resource payload (a read result's text, or the read
 /// tool's description) ki will hand to the model. The retired adapter's
@@ -410,6 +413,10 @@ pub(crate) struct ServerHandle {
     /// refreshed when `resources/list_changed` marks it stale.
     resource_description: Mutex<String>,
     advertises_resources: AtomicBool,
+    /// The server's `resources.subscribe` capability. The watch tool is only
+    /// exposed when this is true; otherwise a `resources/subscribe` would be a
+    /// guaranteed protocol error.
+    supports_subscribe: AtomicBool,
     shared: Arc<ServerShared>,
     mailbox: Arc<McpNoticeMailbox>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
@@ -440,24 +447,25 @@ impl ServerHandle {
         let shared = Arc::new(ServerShared::default());
         // The connect budget covers the whole handshake + listing, so a server
         // that accepts a connection then stalls cannot hold up the session build.
-        let (client, pgid, tools, advertises_resources, description) = tokio::time::timeout(
-            config.timeout,
-            connect_and_list(
-                &config,
-                cwd,
-                &stderr_tail,
-                Arc::clone(&shared),
-                Arc::clone(&mailbox),
-                http_idle_timeout_ms,
-            ),
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "timed out after {}s during initialize/tools-list",
-                config.timeout.as_secs()
+        let (client, pgid, tools, advertises_resources, supports_subscribe, description) =
+            tokio::time::timeout(
+                config.timeout,
+                connect_and_list(
+                    &config,
+                    cwd,
+                    &stderr_tail,
+                    Arc::clone(&shared),
+                    Arc::clone(&mailbox),
+                    http_idle_timeout_ms,
+                ),
             )
-        })??;
+            .await
+            .map_err(|_| {
+                format!(
+                    "timed out after {}s during initialize/tools-list",
+                    config.timeout.as_secs()
+                )
+            })??;
         Ok(Self {
             config,
             cwd: cwd.to_path_buf(),
@@ -465,6 +473,7 @@ impl ServerHandle {
             tools: Mutex::new(tools),
             resource_description: Mutex::new(description),
             advertises_resources: AtomicBool::new(advertises_resources),
+            supports_subscribe: AtomicBool::new(supports_subscribe),
             shared,
             mailbox,
             stderr_tail,
@@ -499,6 +508,10 @@ impl ServerHandle {
 
     fn advertises_resources(&self) -> bool {
         self.advertises_resources.load(Ordering::Acquire)
+    }
+
+    fn supports_subscribe(&self) -> bool {
+        self.supports_subscribe.load(Ordering::Acquire)
     }
 
     /// A live peer for a call, re-initializing the connection if the previous
@@ -672,8 +685,21 @@ impl ServerHandle {
         self.mailbox.purge_server(&self.config.name);
     }
 
-    /// Host-level `resources/subscribe` (no model verb — the host and the
-    /// config drive it). Ported semantics:
+    /// The uris this session currently watches, sorted. Includes both
+    /// config-driven and model-driven subscriptions.
+    pub(crate) fn subscription_uris(&self) -> Vec<String> {
+        self.shared
+            .subscriptions
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Host-level `resources/subscribe`. Driven by the `subscribe` config at
+    /// startup and by the `{server}__watch_resource` tool at runtime. Ported
+    /// semantics:
     /// * already-subscribed on a live transport sends **no** second RPC, so a
     ///   duplicate-rejecting server never sees one;
     /// * the token ALWAYS rotates + the uri's queue purges, even on that no-op
@@ -1085,7 +1111,9 @@ impl McpManager {
 
     /// One native tool adapter per discovered tool, across every live server —
     /// plus one `{server}__read_resource` read tool per server advertising
-    /// resources. A tools-only server adds zero tools beyond its tools.
+    /// resources, and one `{server}__watch_resource` subscription tool when the
+    /// server also advertises `resources.subscribe`. A tools-only server adds
+    /// zero tools beyond its tools.
     pub fn tool_adapters(&self) -> Vec<Arc<dyn AgentTool>> {
         let mut adapters: Vec<Arc<dyn AgentTool>> = Vec::new();
         for server in &self.servers {
@@ -1107,6 +1135,22 @@ impl McpManager {
                         Arc::clone(server),
                         server.resource_description(),
                     )));
+                }
+                if server.supports_subscribe() {
+                    let watch_name = format!(
+                        "{}{TOOL_NAME_SEPARATOR}{WATCH_RESOURCE_SUFFIX}",
+                        server.server_name()
+                    );
+                    if watch_name.len() > MAX_TOOL_NAME_LEN {
+                        eprintln!(
+                            "[ki mcp] server {}: skipping watch tool {watch_name:?}: exceeds {MAX_TOOL_NAME_LEN} chars",
+                            server.server_name()
+                        );
+                    } else {
+                        adapters.push(Arc::new(McpResourceWatchToolAdapter::new(Arc::clone(
+                            server,
+                        ))));
+                    }
                 }
             }
         }
@@ -1306,7 +1350,7 @@ async fn connect_and_list(
     shared: Arc<ServerShared>,
     mailbox: Arc<McpNoticeMailbox>,
     http_idle_timeout_ms: Option<i64>,
-) -> Result<(Client, Option<u32>, Vec<DiscoveredTool>, bool, String), String> {
+) -> Result<(Client, Option<u32>, Vec<DiscoveredTool>, bool, bool, String), String> {
     let server = config.name.as_str();
     let (client, pgid) = spawn_client(
         server,
@@ -1319,10 +1363,15 @@ async fn connect_and_list(
         config.timeout,
     )
     .await?;
-    let advertises_resources = client
+    let resource_caps = client
         .peer()
         .peer_info()
-        .is_some_and(|info| info.capabilities.resources.is_some());
+        .and_then(|info| info.capabilities.resources.clone());
+    let advertises_resources = resource_caps.is_some();
+    let supports_subscribe = resource_caps
+        .as_ref()
+        .and_then(|caps| caps.subscribe)
+        .unwrap_or(false);
     let peer = client.peer();
     match list_all_tools(server, &peer).await {
         Ok(tools) => {
@@ -1340,7 +1389,14 @@ async fn connect_and_list(
             } else {
                 String::new()
             };
-            Ok((client, pgid, tools, advertises_resources, description))
+            Ok((
+                client,
+                pgid,
+                tools,
+                advertises_resources,
+                supports_subscribe,
+                description,
+            ))
         }
         Err(error) => {
             // The handshake succeeded but discovery did not; don't leak the child.

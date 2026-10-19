@@ -492,10 +492,10 @@ async fn read_tool_is_emitted_only_for_servers_advertising_resources() {
     assert!(issues.is_empty(), "start issues: {issues:?}");
 
     let adapters = manager.tool_adapters();
-    // Six tools + poke + one read tool per resource server.
+    // Six tools + poke + the read and watch resource tools.
     assert_eq!(
         adapters.len(),
-        8,
+        9,
         "got {:?}",
         adapters
             .iter()
@@ -665,6 +665,72 @@ async fn signal_policy_defaults_to_auto_for_a_subscribed_server() {
         .expect("a connected server has a policy");
     assert_eq!(policy.wake, kiqi_mcp::WakeMode::Auto);
     assert!(manager.signal_config("unknown").is_none());
+    manager.shutdown().await;
+}
+
+/// The model-facing half of the subscription loop: start a watch, receive the
+/// update as a notice, then stop the watch and confirm the same update is no
+/// longer delivered.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_model_can_start_and_stop_watching_a_resource() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (manager, issues) = McpManager::start(
+        &[stdio_server_with(
+            "docs",
+            vec!["--resources".to_string()],
+            10,
+            true,
+            &[],
+        )],
+        tmp.path(),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    let adapters = manager.tool_adapters();
+    let watch = find(&adapters, "docs__watch_resource");
+    let poke = find(&adapters, "docs__poke");
+
+    let listed = call(watch, json!({ "action": "list" })).await.unwrap();
+    assert!(
+        text_of(&listed).contains("No resource subscriptions"),
+        "got {:?}",
+        text_of(&listed)
+    );
+
+    let started = call(watch, json!({ "action": "start", "uri": "mem://alpha" }))
+        .await
+        .unwrap();
+    assert!(text_of(&started).contains("Watching mem://alpha"));
+    let listed = call(watch, json!({ "action": "list" })).await.unwrap();
+    assert!(text_of(&listed).contains("mem://alpha"));
+
+    call(poke, json!({ "uri": "mem://alpha" })).await.unwrap();
+    let batch = wait_for(5, "the alpha notice", || {
+        let batch = manager.take_notices();
+        batch
+            .notices
+            .iter()
+            .any(|notice| notice.uri == "mem://alpha")
+            .then_some(batch)
+    });
+    assert!(
+        batch
+            .notices
+            .iter()
+            .any(|notice| notice.server == "docs" && notice.uri == "mem://alpha"),
+        "model-started watch delivered no notice: {batch:?}"
+    );
+
+    let stopped = call(watch, json!({ "action": "stop", "uri": "mem://alpha" }))
+        .await
+        .unwrap();
+    assert!(text_of(&stopped).contains("Stopped watching"));
+    call(poke, json!({ "uri": "mem://alpha" })).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        manager.take_notices().is_empty(),
+        "a stopped watch must not deliver"
+    );
     manager.shutdown().await;
 }
 
