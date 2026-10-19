@@ -77,9 +77,53 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "signals",
 ];
 
+/// The historical "Available tools:" block, used when the caller cannot name the
+/// session's tools (tests, `/debug`, and any future caller that builds the prompt
+/// before the tool set is known).
+const DEFAULT_TOOLS_BLOCK: &str = "Available tools:
+- read  — Read file contents
+- bash  — Execute Bash commands using Bash/POSIX syntax, including on Windows
+- edit  — Find/replace edits to existing files
+- write — Create or overwrite files
+- docs  — Look up ki usage, extension, package, and compatibility documentation";
+
+/// One-line description for a tool in the prompt's list.
+///
+/// Only the built-ins are described here; extension and MCP tools appear by name
+/// alone, because ki does not own their wording and a wrong description is worse
+/// than none.
+fn tool_description(name: &str) -> &'static str {
+    match name {
+        "read" => "  — Read file contents",
+        "bash" => "  — Execute Bash commands using Bash/POSIX syntax, including on Windows",
+        "edit" => "  — Find/replace edits to existing files",
+        "write" => "  — Create or overwrite files",
+        "docs" => "  — Look up ki usage, extension, package, and compatibility documentation",
+        _ => "",
+    }
+}
+
 /// The default coding system prompt. A condensed port of the TS
 /// `packages/coding-agent/src/core/system-prompt.ts` base prompt.
 pub fn default_system_prompt(cwd: &str, prior_reasoning_replayed: bool) -> String {
+    default_system_prompt_for_tools(cwd, prior_reasoning_replayed, None)
+}
+
+/// [`default_system_prompt`] with the session's actual tool set.
+///
+/// The prompt advertises the built-in tools in prose ("Available tools: read …, bash
+/// …"). That list was hard-coded, so `--no-tools` / `--no-builtin-tools` removed the
+/// tools while the prompt kept promising them — the model then calls a tool it does
+/// not have, which surfaces as a raw `Tool … not found` and wasted turns.
+///
+/// `tools` is `None` when the caller does not know yet (the prompt is also built in
+/// tests and for `/debug`), which keeps the historical list; `Some(&[])` renders an
+/// explicit "no tools are available" line instead of a list.
+pub fn default_system_prompt_for_tools(
+    cwd: &str,
+    prior_reasoning_replayed: bool,
+    tools: Option<&[String]>,
+) -> String {
     // The working-state rule must match what actually comes back on the next
     // request. With `compat.requiresThinkingAsText` (or the native thinking
     // channels of anthropic/responses) the model *does* see its own reasoning
@@ -98,16 +142,31 @@ pub fn default_system_prompt(cwd: &str, prior_reasoning_replayed: bool) -> Strin
   your head you will re-derive it from scratch every turn."
     };
 
+    // Advertise exactly what the session has. `None` keeps the historical list (a
+    // caller that does not know yet); `Some(empty)` says so plainly, because an empty
+    // "Available tools:" heading reads as a formatting bug.
+    let tools_list = match tools {
+        None => DEFAULT_TOOLS_BLOCK.to_string(),
+        Some(names) if names.is_empty() => {
+            "No tools are available in this session: every tool call will fail. \
+             Reply with what you would do instead of calling one."
+                .to_string()
+        }
+        Some(names) => {
+            let mut block = String::from("Available tools:");
+            for name in names {
+                let desc = tool_description(name);
+                block.push_str(&format!("\n- {name}{desc}"));
+            }
+            block
+        }
+    };
+
     format!(
         "You are an expert coding assistant operating inside kiqi, a coding agent harness. \
 You help users by reading files, executing commands, editing code, and writing new files.
 
-Available tools:
-- read  — Read file contents
-- bash  — Execute Bash commands using Bash/POSIX syntax, including on Windows
-- edit  — Find/replace edits to existing files
-- write — Create or overwrite files
-- docs  — Look up ki usage, extension, package, and compatibility documentation
+{tools_list}
 
 Guidelines:
 - Reply in the SAME language the user is writing in. Detect the language of the user's
@@ -456,14 +515,29 @@ pub async fn build_with_selection(
     // working-state rule is worded (see `default_system_prompt`).
     let prior_reasoning_replayed = kiqi_ai::model::prior_reasoning_is_replayed(&resolved.model);
     let mut context_paths = Vec::new();
+    // The prompt must advertise the tools this session actually has: with
+    // `--no-tools` / `--no-builtin-tools` the list below would otherwise promise
+    // tools the model cannot call.
+    let tool_names: Vec<String> = tools.iter().map(|t| t.tool.schema().name.clone()).collect();
     let base_prompt = match args.system_prompt.as_deref() {
         Some(explicit) => explicit.to_string(),
         None if project_trusted => match discover_system_prompt_file(cwd) {
-            Some(path) => read_prompt_source(&path, &mut context_paths)
-                .unwrap_or_else(|| default_system_prompt(&cwd_str, prior_reasoning_replayed)),
-            None => default_system_prompt(&cwd_str, prior_reasoning_replayed),
+            Some(path) => read_prompt_source(&path, &mut context_paths).unwrap_or_else(|| {
+                default_system_prompt_for_tools(
+                    &cwd_str,
+                    prior_reasoning_replayed,
+                    Some(&tool_names),
+                )
+            }),
+            None => default_system_prompt_for_tools(
+                &cwd_str,
+                prior_reasoning_replayed,
+                Some(&tool_names),
+            ),
         },
-        None => default_system_prompt(&cwd_str, prior_reasoning_replayed),
+        None => {
+            default_system_prompt_for_tools(&cwd_str, prior_reasoning_replayed, Some(&tool_names))
+        }
     };
 
     // ---- Append-text sources (precedence: --append-system-prompt > APPEND_SYSTEM.md) ----
@@ -3230,6 +3304,48 @@ mod tests {
     ///
     /// Runs in a subprocess because it needs its own `KI_CODING_AGENT_DIR` and
     /// `KI_AGENTS_DIR`, and the crate's env-mutating tests share one lock.
+    /// The prompt must advertise the tools the session actually has.
+    ///
+    /// The "Available tools:" block used to be a hard-coded string, so
+    /// `--no-builtin-tools` removed `read`/`bash`/`edit`/`write`/`docs` while the
+    /// prompt kept promising them — the model then calls a tool it does not have and
+    /// spends turns on `Tool … not found`. Measured on the real binary before the fix:
+    /// with `--no-builtin-tools` the dump still listed all five.
+    ///
+    /// `None` keeps the historical block for callers that do not know the tool set;
+    /// `Some(&[])` must say so plainly rather than print an empty heading.
+    #[test]
+    fn the_prompt_lists_the_tools_the_session_actually_has() {
+        let absent = default_system_prompt_for_tools(".", false, Some(&[]));
+        assert!(
+            absent.contains("No tools are available"),
+            "an empty tool set must say so: {absent}"
+        );
+        assert!(
+            !absent.contains("- bash"),
+            "and must not list a tool that is gone: {absent}"
+        );
+
+        let some = vec!["todo".to_string(), "bash".to_string()];
+        let listed = default_system_prompt_for_tools(".", false, Some(&some));
+        assert!(listed.contains("- todo"), "{listed}");
+        assert!(
+            listed.contains("- bash  — Execute Bash"),
+            "a known tool keeps its description: {listed}"
+        );
+        assert!(
+            !listed.contains("- read"),
+            "a tool that is not in the set must not be advertised: {listed}"
+        );
+
+        // `None` = unknown, so the historical block stays (tests and `/debug`).
+        let unknown = default_system_prompt_for_tools(".", false, None);
+        assert!(
+            unknown.contains("- read  — Read file contents"),
+            "{unknown}"
+        );
+    }
+
     #[test]
     fn the_composed_prompt_carries_shared_agents_instructions_before_the_ki_ones() {
         const CHILD: &str = "KI_SHARED_AGENTS_PROMPT_REGRESSION_CHILD";
