@@ -315,6 +315,14 @@ KI_CODING_AGENT_DIR=/work/kiqi-agent ki
 
 会话默认保存到 agent 配置目录下的 sessions；`--no-session` 可使用临时会话。
 
+共享目录 `~/.agents` 用 `KI_AGENTS_DIR` 指定（须绝对路径，相对路径被忽略）：
+
+```bash
+KI_AGENTS_DIR=/work/shared-agents ki
+```
+
+注意：设了 `KI_CODING_AGENT_DIR` 后就不再回退读真实的 `~/.agents`——重定位配置目录意味着「用这套布局、不用用户那套」。想让重定位的运行也用共享目录，显式设 `KI_AGENTS_DIR`。
+
 ## 6. Rust 插件
 
 Rust 原生插件是 `cdylib`，只依赖 `kiqi-plugin-sdk`，由 `kiqi-extensions` 动态加载：
