@@ -758,6 +758,7 @@ const KNOWN_LONG_FLAGS: &[&str] = &[
     "--append-system-prompt",
     "--approve",
     "--base-url",
+    "--connect",
     "--continue",
     "--debug-system-prompt",
     "--exclude-tools",
@@ -780,16 +781,21 @@ const KNOWN_LONG_FLAGS: &[&str] = &[
     "--no-session",
     "--no-skills",
     "--no-themes",
+    "--no-tools",
+    "--offline",
     "--package-only",
     "--print",
     "--project-only",
     "--provider",
     "--resume",
+    "--server",
     "--session",
     "--session-dir",
     "--system-prompt",
     "--theme",
     "--thinking",
+    "--timeout",
+    "--token",
     "--tools",
     "--tui-mode",
     "--verbose",
@@ -884,6 +890,50 @@ mod tests {
     /// `--modle sonnet` used to be swallowed as an extension flag, so the run used
     /// the default model and exited 0 — the worst shape of wrong. The parser cannot
     /// reject it (passthrough is a documented contract), but it can say so.
+    /// Every flag `--help` lists must be in `KNOWN_LONG_FLAGS`, or a typo of it gets
+    /// no hint at all.
+    ///
+    /// That gap was real: `--token`, `--timeout`, `--connect`, `--no-tools`,
+    /// `--offline` and `--server` were documented but absent from the list, so
+    /// `--tokn` was accepted silently as an extension flag. The assertion reads the
+    /// source via `include_str!` because the help text is an inline `println!` — the
+    /// flags are a two-space-indented block there, which is exactly the list a user
+    /// sees.
+    ///
+    /// The reverse direction is not an error: `KNOWN_LONG_FLAGS` may name accepted
+    /// flags that `--help` does not list yet (`--theme`, `--fork`, `--models`,
+    /// `--extension`, `--project-only`, `--no-themes` today), and those suggestions
+    /// are still valid because the parser accepts them.
+    #[test]
+    fn every_documented_flag_is_in_the_known_list() {
+        const SRC: &str = include_str!("args.rs");
+        let mut documented: Vec<&str> = SRC
+            .lines()
+            .filter_map(|line| line.strip_prefix("  "))
+            .filter_map(|rest| rest.split_whitespace().next())
+            // `--approve, -a` puts the alias in the same token; take the flag itself.
+            .map(|tok| tok.trim_end_matches(','))
+            .filter(|tok| tok.starts_with("--") && tok.len() > 2)
+            .collect();
+        documented.sort_unstable();
+        documented.dedup();
+
+        assert!(
+            documented.len() > 30,
+            "the help block was not found (only {} flags parsed) — did the format change?",
+            documented.len()
+        );
+        let missing: Vec<&str> = documented
+            .into_iter()
+            .filter(|flag| !KNOWN_LONG_FLAGS.contains(flag))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these flags are in --help but not in KNOWN_LONG_FLAGS, so a typo of them \
+             gets no hint: {missing:?}"
+        );
+    }
+
     #[test]
     fn a_misspelled_known_flag_is_reported_but_extension_flags_are_not() {
         let misspelled = parse_args(&s(&["--modle", "sonnet", "-p", "hi"]));
