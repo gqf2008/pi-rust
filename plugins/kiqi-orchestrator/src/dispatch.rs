@@ -92,8 +92,8 @@ pub fn dispatch(
     // ---- Wait, if asked. ----
     match wait {
         Wait::None => {}
-        Wait::Fixed(max) => wait_for_drain(Some(max)),
-        Wait::Drain => wait_for_drain(None),
+        Wait::Fixed(max) => wait_for_drain(Some(max), control)?,
+        Wait::Drain => wait_for_drain(None, control)?,
     }
 
     // ---- Collect. ----
@@ -242,18 +242,21 @@ fn spawn_node_worker(id: String, node: Node, control: Control, progress_tx: Prog
     });
 }
 
-fn wait_for_drain(max: Option<Duration>) {
+fn wait_for_drain(max: Option<Duration>, control: &Control) -> Result<(), String> {
     let start = Instant::now();
     loop {
+        // A human interruption (Esc) must stop a long wait promptly; the
+        // worker nodes are cancelled through the same control.
+        control.check()?;
         if running()
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .is_empty()
         {
-            return;
+            return Ok(());
         }
         if max.is_some_and(|max| start.elapsed() >= max) {
-            return;
+            return Ok(());
         }
         std::thread::sleep(WAIT_POLL);
     }
@@ -360,7 +363,17 @@ mod tests {
         let _serialize = RUNNING_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Must not block when the running set is empty.
         let start = Instant::now();
-        wait_for_drain(None);
+        wait_for_drain(None, &Control::default()).expect("not cancelled");
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn wait_returns_promptly_when_cancelled() {
+        let _serialize = RUNNING_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let control = Control::default();
+        control.cancel();
+        let start = Instant::now();
+        assert_eq!(wait_for_drain(None, &control), Err("cancelled".into()));
         assert!(start.elapsed() < Duration::from_secs(1));
     }
 
