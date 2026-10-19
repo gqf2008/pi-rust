@@ -62,6 +62,9 @@ jobs:
             exit 1
           fi
 
+      - name: Verify the documented gate matches this workflow
+        run: sh scripts/check-feature-parity.sh
+
       - name: Run workspace tests
         run: cargo test --workspace --locked
 

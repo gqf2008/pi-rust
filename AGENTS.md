@@ -56,6 +56,8 @@ cargo test  --workspace --locked
 cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-lens,plugin-kiqi-webfetch,plugin-kiqi-websearch,plugin-kiqi-subagents,plugin-kiqi-goal,plugin-kiqi-plan-mode,plugin-kiqi-ask-user,plugin-kiqi-langfuse,plugin-kiqi-permissions,plugin-kiqi-codegraph,plugin-kiqi-orchestrator
 # 文档快照（改了 CHANGELOG.md / README.md 等必须重跑，CI 会比对）
 sh scripts/sync-embedded-docs.sh
+# 上面那份 feature 清单与 CI 的一致性（CI 也会跑；改任何一侧都要过这条）
+sh scripts/check-feature-parity.sh
 ```
 
 注意：goal 测试已用子进程 + tempdir 隔离，跑 `cargo test -p kiqi-cli` 不再改写源码树
