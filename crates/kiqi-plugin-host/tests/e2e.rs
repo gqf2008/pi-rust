@@ -1009,8 +1009,9 @@ fn observe_events_skip_a_guest_that_is_waiting_on_the_ui() {
     assert!(outcome.is_error, "the cancelled ask is an error result");
 }
 
-/// Gate §6.3.4: a `timeout` closes the dialog and fails the ask rather than
-/// waiting forever.
+/// Gate §6.3.4 + decision-fallback §4.1: a `timeout` closes the dialog and
+/// returns a structured `unanswered` result — not an error, and never a
+/// fabricated answer.
 #[test]
 fn ask_user_honours_timeout() {
     let wasm = ask_user_wasm();
@@ -1038,9 +1039,23 @@ fn ask_user_honours_timeout() {
             &sink,
         )
         .expect("ask");
-    assert!(outcome.is_error);
     assert!(
-        text_of(&outcome).contains("timed out"),
+        !outcome.is_error,
+        "a timeout is a result, not a failure: {outcome:?}"
+    );
+    assert_eq!(outcome.details["status"], serde_json::json!("unanswered"));
+    assert_eq!(outcome.details["reason"], serde_json::json!("timeout"));
+    assert_eq!(outcome.details["fallback"], serde_json::json!("keep"));
+    assert_eq!(
+        outcome.details["question"],
+        serde_json::json!("Which port?")
+    );
+    assert!(
+        outcome.details.get("answer").is_none(),
+        "a timeout must not fake an answer: {outcome:?}"
+    );
+    assert!(
+        text_of(&outcome).contains("unanswered"),
         "got {}",
         text_of(&outcome)
     );

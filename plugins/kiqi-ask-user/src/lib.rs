@@ -401,6 +401,162 @@ fn cancel_ui_dialog(host: &dyn AskHost, request_id: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// Timeout outcome
+// ---------------------------------------------------------------------------
+
+/// Bytes of the question kept in the structured `unanswered` payload.
+const UNANSWERED_QUESTION_BYTES: usize = 200;
+
+/// Bytes of the question kept in one audit line.
+const AUDIT_QUESTION_BYTES: usize = 80;
+
+/// First `limit` bytes of `text`, cut on a char boundary so slicing never panics
+/// on multi-byte input (a Chinese question is 3 bytes per char).
+fn truncate_on_char_boundary(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+/// The answer to assume when nobody replied in time. Deliberately the most
+/// conservative outcome: keep everything as it is. There is no per-question
+/// `fallback` field in the schema yet (adding one changes both sides and
+/// `additionalProperties:false`), so this is the host's default for now.
+fn conservative_fallback(_question: &AskQuestion) -> &'static str {
+    "keep"
+}
+
+/// Successful result for a question nobody answered in time.
+///
+/// A timeout is a *result*, not a tool failure: the drive finishes and the run
+/// continues with [`conservative_fallback`]. The payload deliberately has no
+/// `answer` key — a timeout is not consent, and the model must not be able to
+/// read one into it.
+fn unanswered_result(question: &AskQuestion, reason: &str) -> Value {
+    let fallback = conservative_fallback(question);
+    json!({
+        "content": [{"type": "text", "text": format!(
+            "ask_user is unanswered ({reason}): nobody replied to:\n{}\n\
+             Nothing was answered or approved. Assuming `{fallback}` (keep everything as it is); \
+             this is not user consent.",
+            question.question
+        )}],
+        "details": {
+            "status": "unanswered",
+            "reason": reason,
+            "fallback": fallback,
+            "question": truncate_on_char_boundary(&question.question, UNANSWERED_QUESTION_BYTES),
+        },
+    })
+}
+
+/// Env-gated audit for timeout decisions.
+///
+/// `KI_DEBUG_DECISION=1` appends to `<temp>/kiqi-decision.log`; any other
+/// non-empty value is used as the path. Same shape as the orchestrator's
+/// `KI_DEBUG_SUBAGENT` stage log: resolved once, appended, every IO error
+/// swallowed and nothing ever panics — a diagnostic that can break a run is
+/// worse than no diagnostic. Unset means one `OnceLock` lookup per decision.
+mod decision_trace {
+    use std::io::Write;
+    use std::sync::OnceLock;
+
+    /// Env var that turns the audit on.
+    const ENV: &str = "KI_DEBUG_DECISION";
+
+    /// Resolved destination, or `None` when the audit is off.
+    fn target() -> Option<&'static std::path::PathBuf> {
+        static TARGET: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+        TARGET
+            .get_or_init(|| {
+                let value = std::env::var(ENV).ok()?;
+                let value = value.trim();
+                if value.is_empty() || value == "0" {
+                    return None;
+                }
+                if value == "1" || value.eq_ignore_ascii_case("true") {
+                    Some(std::env::temp_dir().join("kiqi-decision.log"))
+                } else {
+                    Some(std::path::PathBuf::from(value))
+                }
+            })
+            .as_ref()
+    }
+
+    /// One audit line, kept separate from the writer so the format is testable
+    /// without touching the filesystem or the environment.
+    pub(super) fn timeout_line(
+        timestamp: &str,
+        request_id: &str,
+        fallback: &str,
+        question: &str,
+    ) -> String {
+        format!(
+            "{timestamp} [ki decision] ask_user timeout requestId={request_id} \
+             fallback={fallback} question={question}"
+        )
+    }
+
+    /// Nobody answered `request_id` in time; `fallback` is what runs instead.
+    pub(super) fn ask_user_timeout(request_id: &str, fallback: &str, question: &str) {
+        let Some(path) = target() else {
+            return;
+        };
+        let line = timeout_line(&timestamp(), request_id, fallback, question);
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
+    /// UTC timestamp, `2026-09-24T12:00:01.234Z` (same format as
+    /// `interrupt_trace` in `kiqi-agent`).
+    fn timestamp() -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let millis = now.as_millis();
+        let secs = (millis / 1000) as i64;
+        let sub = millis % 1000;
+        let (year, month, day, hour, min, sec) = civil_from_unix(secs);
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{sub:03}Z")
+    }
+
+    /// Days-from-civil inverse (Howard Hinnant's algorithm) — avoids a date
+    /// crate dependency for a diagnostic timestamp.
+    fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
+        let days = secs.div_euclid(86_400);
+        let secs_of_day = secs.rem_euclid(86_400);
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+        (
+            y,
+            m as u32,
+            d as u32,
+            (secs_of_day / 3600) as u32,
+            (secs_of_day % 3600 / 60) as u32,
+            (secs_of_day % 60) as u32,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tool drive
 // ---------------------------------------------------------------------------
 
@@ -556,7 +712,7 @@ fn open_next(drive: &mut Drive, host: &dyn AskHost) -> Result<Option<Value>, Str
 }
 
 /// Poll the currently open question. `Ok(Some(done))` when the whole plan is
-/// answered; `Ok(None)` while still waiting.
+/// answered **or nobody answered in time**; `Ok(None)` while still waiting.
 pub(crate) fn poll_open_question(
     drive: &mut Drive,
     host: &dyn AskHost,
@@ -566,9 +722,19 @@ pub(crate) fn poll_open_question(
     };
     if Instant::now() >= pending.deadline {
         let request_id = pending.request_id.clone();
+        let question = pending.question.clone();
         cancel_ui_dialog(host, &request_id);
         drive.pending = None;
-        return Err("ask timed out".into());
+        let fallback = conservative_fallback(&question);
+        decision_trace::ask_user_timeout(
+            &request_id,
+            fallback,
+            &truncate_on_char_boundary(&question.question, AUDIT_QUESTION_BYTES),
+        );
+        // Complete the drive instead of failing it: the caller turns
+        // `Ok(Some(..))` into `StepResult::done`, so the model sees a
+        // structured `unanswered` and carries on with the fallback.
+        return Ok(Some(unanswered_result(&question, "timeout")));
     }
     let request_id = pending.request_id.clone();
     let response = invoke_ui_dialog(host, &json!({"op": "poll", "requestId": request_id}))?;
@@ -891,6 +1057,100 @@ mod tests {
     #[test]
     fn effective_timeout_keeps_the_boundary_value() {
         assert_eq!(effective_timeout_secs(Some(60)), 60);
+    }
+
+    #[test]
+    fn deadline_lands_in_the_future_for_a_pending_question() {
+        struct PendingHost;
+        impl AskHost for PendingHost {
+            fn dialog(&self, _args: &Value) -> Result<Value, String> {
+                Ok(json!({ "status": "pending" }))
+            }
+        }
+
+        let mut drive =
+            Drive::new(json!({ "question": "Delete build/?", "options": ["Yes", "No"] }));
+        let opened = start_drive(&mut drive, &PendingHost).unwrap();
+        assert!(opened.is_null());
+        let pending = drive.pending.as_ref().expect("question is open");
+        assert!(pending.deadline > Instant::now());
+    }
+
+    /// Host stub that never answers, so only the deadline can end the drive.
+    struct SilentHost;
+
+    impl AskHost for SilentHost {
+        fn dialog(&self, _args: &Value) -> Result<Value, String> {
+            Ok(json!({ "status": "pending" }))
+        }
+    }
+
+    fn drive_with_deadline_in_the_past() -> Drive {
+        let mut drive =
+            Drive::new(json!({ "question": "Delete build/?", "options": ["Yes", "No"] }));
+        let opened = start_drive(&mut drive, &SilentHost).unwrap();
+        assert!(opened.is_null());
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        drive.pending.as_mut().expect("question is open").deadline = past;
+        drive
+    }
+
+    #[test]
+    fn timeout_completes_the_drive_instead_of_failing_it() {
+        let mut drive = drive_with_deadline_in_the_past();
+        let done = poll_open_question(&mut drive, &SilentHost)
+            .expect("a timeout is a result, not an error")
+            .expect("a timeout finishes the plan");
+        let text = done.to_string();
+        assert!(text.contains("\"status\":\"unanswered\""), "{text}");
+        assert!(text.contains("\"reason\":\"timeout\""), "{text}");
+        assert!(text.contains("\"fallback\":\"keep\""), "{text}");
+        assert!(
+            !text.contains("\"answer\""),
+            "must not fake an answer: {text}"
+        );
+        assert!(drive.pending.is_none());
+    }
+
+    #[test]
+    fn conservative_fallback_keeps_everything() {
+        let AskPlan::Questions { questions } = plan(json!({ "question": "Delete build/?" })) else {
+            panic!("expected questions");
+        };
+        assert_eq!(conservative_fallback(&questions[0]), "keep");
+    }
+
+    #[test]
+    fn timeout_truncates_a_long_question_on_a_char_boundary() {
+        let question = AskQuestion {
+            id: "q".into(),
+            question: "删".repeat(100), // 300 bytes, 3 bytes per char
+            header: None,
+            context: None,
+            options: Vec::new(),
+            allow_multiple: false,
+            allow_freeform: true,
+            allow_comment: false,
+            suggest: None,
+            display_mode: None,
+            timeout: None,
+        };
+        let result = unanswered_result(&question, "timeout");
+        let kept = result["details"]["question"].as_str().unwrap();
+        assert!(kept.len() <= UNANSWERED_QUESTION_BYTES);
+        assert_eq!(kept.len() % 3, 0, "cut mid-char: {kept:?}");
+        assert!(question.question.starts_with(kept));
+    }
+
+    #[test]
+    fn audit_line_names_the_timeout_and_the_fallback() {
+        let line = decision_trace::timeout_line("2026-10-19T00:00:00.000Z", "ask-1", "keep", "Go?");
+        assert_eq!(
+            line,
+            "2026-10-19T00:00:00.000Z [ki decision] ask_user timeout requestId=ask-1 fallback=keep question=Go?"
+        );
     }
 
     #[test]

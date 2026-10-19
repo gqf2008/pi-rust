@@ -5,6 +5,22 @@
 //! start/poll/cancel state machine driven by the host. Here `call_tool` blocks,
 //! so the dialog is a straight open → poll → answer loop, with cancellation and
 //! `timeout` handled inline.
+//!
+//! Both channels wait at most `effective_timeout_secs(question.timeout)` — the
+//! model's own `timeout`, capped at [`DEFAULT_ANSWER_TIMEOUT_SECS`] — and both
+//! answer a timeout with the same structured `unanswered` result plus the
+//! conservative `keep` fallback. Only cancellation is still an error.
+//!
+//! ## Why there is no `KI_DEBUG_DECISION` audit here
+//!
+//! The compile-time plugin can append a timeout line to
+//! `<temp>/kiqi-decision.log` behind an env gate. A guest cannot: `world plugin`
+//! (`plugins/kiqi-plugin.wit`) imports no `wasi:cli/environment`, so the guest
+//! has no environment to gate on, and its `fs` capability is jailed to the
+//! plugin's own data directory, so it cannot open a host temp path either.
+//! Emitting through the always-granted `log` import instead would be an
+//! unconditional log line rather than a gated audit, so the audit channel stays
+//! host-side only; the guest's evidence is the `unanswered` details it returns.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -313,9 +329,67 @@ fn answer_values(answer: &Value) -> Vec<String> {
     Vec::new()
 }
 
-/// Open one question and wait for its answer. `Err` on cancel or timeout, which
-/// the caller turns into a model-visible failure.
-fn ask_one(question: &AskQuestion) -> Result<AskAnswer, String> {
+/// Outcome of one question.
+///
+/// `Unanswered` is the TTL firing: nobody replied in time. It is a result, not
+/// a failure — the caller turns it into a structured `unanswered` tool result
+/// so the model keeps going with the conservative fallback.
+enum AskOne {
+    Answered(AskAnswer),
+    Unanswered,
+}
+
+/// Bytes of the question kept in the structured `unanswered` payload.
+const UNANSWERED_QUESTION_BYTES: usize = 200;
+
+/// First `limit` bytes of `text`, cut on a char boundary so slicing never panics
+/// on multi-byte input (a Chinese question is 3 bytes per char).
+fn truncate_on_char_boundary(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+/// The answer to assume when nobody replied in time. Deliberately the most
+/// conservative outcome: keep everything as it is. There is no per-question
+/// `fallback` field in the schema yet (adding one changes both sides and
+/// `additionalProperties:false`), so this is the host's default for now.
+fn conservative_fallback(_question: &AskQuestion) -> &'static str {
+    "keep"
+}
+
+/// Successful result for a question nobody answered in time.
+///
+/// Deliberately carries no `answer` key: a timeout is not consent, and the model
+/// must not be able to read one into it.
+fn unanswered_result(question: &AskQuestion) -> types::ToolResult {
+    let fallback = conservative_fallback(question);
+    types::ToolResult {
+        blocks: vec![types::ContentBlock::Text(format!(
+            "ask_user is unanswered (timeout): nobody replied to:\n{}\n\
+             Nothing was answered or approved. Assuming `{fallback}` (keep everything as it is); \
+             this is not user consent.",
+            question.question
+        ))],
+        is_error: false,
+        details: json!({
+            "status": "unanswered",
+            "reason": "timeout",
+            "fallback": fallback,
+            "question": truncate_on_char_boundary(&question.question, UNANSWERED_QUESTION_BYTES),
+        })
+        .to_string(),
+    }
+}
+
+/// Open one question and wait for its answer. `Err` on cancel (unchanged); a
+/// timeout comes back as [`AskOne::Unanswered`], not an error.
+fn ask_one(question: &AskQuestion) -> Result<AskOne, String> {
     let request_id = next_request_id();
     let open = json!({
         "op": "open",
@@ -331,7 +405,7 @@ fn ask_one(question: &AskQuestion) -> Result<AskAnswer, String> {
         if Instant::now() >= deadline {
             let cancel = json!({ "op": "cancel", "requestId": request_id }).to_string();
             let _ = ui::dialog(&cancel);
-            return Err("ask timed out".to_string());
+            return Ok(AskOne::Unanswered);
         }
         let poll = json!({ "op": "poll", "requestId": request_id }).to_string();
         let response = ui::dialog(&poll).map_err(capability_reason)?;
@@ -354,7 +428,7 @@ fn ask_one(question: &AskQuestion) -> Result<AskAnswer, String> {
                             .unwrap_or(false),
                     )
                 };
-                return Ok(AskAnswer {
+                return Ok(AskOne::Answered(AskAnswer {
                     id: question.id.clone(),
                     question: question.question.clone(),
                     values,
@@ -363,7 +437,7 @@ fn ask_one(question: &AskQuestion) -> Result<AskAnswer, String> {
                         .and_then(Value::as_str)
                         .map(str::to_string),
                     confirmed,
-                });
+                }));
             }
             "cancelled" => return Err("ask cancelled".to_string()),
             _ => std::thread::sleep(POLL_INTERVAL),
@@ -480,7 +554,10 @@ impl Guest for AskUserPlugin {
         let mut answers = Vec::new();
         for question in &questions {
             match ask_one(question) {
-                Ok(answer) => answers.push(answer),
+                Ok(AskOne::Answered(answer)) => answers.push(answer),
+                // Nobody replied in time: finish the whole call as `unanswered`
+                // rather than asking the remaining questions into the void.
+                Ok(AskOne::Unanswered) => return Ok(unanswered_result(question)),
                 Err(reason) => {
                     return Ok(types::ToolResult {
                         blocks: vec![types::ContentBlock::Text(reason)],
