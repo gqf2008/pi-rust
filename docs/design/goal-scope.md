@@ -114,6 +114,51 @@
    实现「两道门都放行才放行」，并保留一条断言：`scope` 永不使某调用从 Deny 变 Allow。
 4. 测试：scope 收紧生效；scope 无法放宽 deny；无 scope 时行为与现在完全一致。
 
+### 4.1 成本评估（2026-10-20 实核，不是估计）
+
+A 比预想的便宜：它不需要任何规则合并算法，只是对**已有的纯函数做一次合取**。
+
+```rust
+// 形状，不是最终代码
+fn decide_with_scope(perms: &Rules, scope: &Rules, tool: &str, target: &str) -> Decision {
+    match decide(perms, tool, target) {
+        // 权限拒绝先返回：deny 永远优先，scope 无法翻案
+        Decision::Deny { reason } => Decision::Deny { reason },
+        // 权限放行后，scope 还有一次否决权
+        Decision::Allow => decide(scope, tool, target),
+    }
+}
+```
+
+支撑这三行的事实：
+
+| 事实 | 判据 |
+|---|---|
+| `decide` 是纯函数，只依赖 `&Rules` 与 `tool`/`target` | `crates/kiqi-cli/src/permissions.rs:245` |
+| 空规则集**放行一切**（因此空 `scope` ＝ 不额外收紧，与今日行为逐字相同） | `permissions.rs` 的测试 `default_allows_without_allow_list`（约 :820-826），断言 `Rules::default()` 对 `rm -rf /` 也返 `Allow` |
+| deny 优先已由函数自身保证，无需在合取层重做 | `decide` 先查 deny 再查 allow 名单（`permissions.rs:245-275`） |
+
+**「只能收紧」是可证的，不是靠测试抽样**：返回 `Allow` 当且仅当两个 `decide` 都返
+`Allow`，所以 `scope` 只能把 `Allow` 变成 `Deny`，永远不能反向。
+
+这条不是纸面推理——2026-10-20 用一个一次性探针在 `permissions.rs` 的测试模块里实测过
+（探针已还原，未入库），四条断言全绿：
+
+1. **空 scope 与今日行为逐字相同**：对 `bash git status`、`bash git push origin main`、
+   `read /etc/passwd` 三种，`decide_with_scope(perms, Rules::default(), …)` 与
+   `decide(perms, …)` 完全相等。
+2. **放行的 scope 翻不了 deny**：`scope = {"allow": ["*(*)"]}` 时，
+   `bash git push origin main` 仍被 `permissions` 的 deny 拦下。
+3. **scope 点名工具时确实收紧**：`scope = {"allow": ["Bash(git status)"]}` 下
+   `bash git status` 放行、`bash git log` 被拒。
+4. **scope 也翻不了 permissions 的 allow 名单**：`scope` 放行一切时，
+   `bash rm -rf /` 仍被 `permissions` 的 allow-list 拒绝。
+
+若采纳 A，这四条就是实现的验收断言（写进 `permissions.rs` 的 `mod tests`）。
+
+真正的工作量不在这个函数，而在 §4 的第 1、2 步（goal 两侧 schema + 宿主解析新增
+可选字段）。与方案 B 相比，A 尤其不碰 `BeforeToolCall` 的同步契约。
+
 ## 5. 待你决定
 
 1. 选 **A**（建议）、**B**（高价值高风险）还是 **C**（零风险但无人值守不推进）？
