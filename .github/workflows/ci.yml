@@ -120,3 +120,35 @@ jobs:
 
       - name: Check the workspace compiles on Windows
         run: cargo check --workspace --all-targets
+
+  # Every other job runs whatever `@stable` currently is (1.99 at the time of
+  # writing), so `rust-version` in `[workspace.package]` was never exercised: it sat
+  # at 1.78 while `wasmtime 49` → cranelift already required 1.96. This job reads the
+  # declared value and builds the workspace with exactly that toolchain, so the
+  # number cannot drift from reality again.
+  msrv:
+    name: MSRV (declared rust-version)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Read the declared MSRV
+        id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ -z "$version" ]; then
+            echo "::error::could not read rust-version from [workspace.package] in Cargo.toml"
+            exit 1
+          fi
+          echo "declared=$version" >> "$GITHUB_OUTPUT"
+          echo "Building with the declared MSRV: $version"
+
+      - name: Install the declared MSRV
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.declared }}
+
+      - name: Check the workspace against the declared MSRV
+        run: cargo check --workspace --locked
