@@ -1143,6 +1143,31 @@ fn test_chat_container_has_welcome_content() {
     );
 }
 
+/// The empty-skills hint must name every directory the loader reads. Naming only
+/// `.ki` paths sends people to create a skill where ki will not look — the hint is
+/// the only guidance a user gets at that moment, so it has to match
+/// `resource_dirs::skill_dirs`.
+#[test]
+fn the_empty_skills_hint_names_every_directory_the_loader_reads() {
+    use kiqi_harness::types::AgentHarnessResources;
+    let shared = Arc::new(Mutex::new(AgentHarnessResources::default()));
+    let panel = Arc::new(Container::new());
+    show_context_panel(&panel, &shared.lock().unwrap());
+    let output = strip_ansi(&panel.render(160).join("\n"));
+
+    for dir in [
+        ".ki/skills/",
+        ".agents/skills/",
+        "~/.ki/agent/skills/",
+        "~/.agents/skills/",
+    ] {
+        assert!(
+            output.contains(dir),
+            "the hint must mention `{dir}`: {output}"
+        );
+    }
+}
+
 #[test]
 fn reload_updates_context_header_and_context_panel_without_stale_paths() {
     use kiqi_harness::types::AgentHarnessResources;

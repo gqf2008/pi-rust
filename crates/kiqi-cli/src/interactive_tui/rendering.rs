@@ -495,7 +495,14 @@ pub(super) fn show_context_panel(
 
     if skills.is_empty() {
         lines
-            .push("  Skills: (none discovered — create .ki/skills/ or ~/.ki/agent/skills/)".into());
+            // Name every directory the loader actually reads, or the hint sends
+            // people to create skills somewhere ki will not look. `.agents` is the
+            // shared convention and is read for skills (see `resource_dirs`).
+            .push(
+                "  Skills: (none discovered — create .ki/skills/, .agents/skills/, \
+                 ~/.ki/agent/skills/ or ~/.agents/skills/)"
+                    .into(),
+            );
     } else {
         lines.push(format!("  Skills ({}):", skills.len()));
         for s in skills {
