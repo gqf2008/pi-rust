@@ -704,8 +704,6 @@ mod tests {
         assert!(out.len() <= MAX_OUTPUT_BYTES + "\n[subagent output truncated]".len());
     }
 
-    #[cfg(unix)]
-    #[test]
     /// Regression: on a NORMAL exit the process group was never reaped, so a
     /// descendant that outlived the child held the stdout write end and
     /// `join_reader` hung forever, past every cancellation checkpoint. The

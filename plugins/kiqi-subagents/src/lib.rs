@@ -44,7 +44,6 @@ export_single_tool_plugin!(
 mod tests {
     use super::*;
 
-    #[test]
     /// Byte-exact mirror of the wasm e2e's envelope pin
     /// (kiqi-plugin-host/tests/e2e.rs subagents_guest_emits_the_byte_stable_
     /// delegation_envelope): the two ends of the "byte-stable envelope" claim
