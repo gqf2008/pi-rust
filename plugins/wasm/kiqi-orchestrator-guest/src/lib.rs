@@ -762,13 +762,13 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     if status != 0 {
         return Err(format!("subagent exited with {status}:\n{}", text.trim()));
     }
-    // A zero exit with nothing on stdout is not a result this tool can use. The
-    // compile-time channel (`plugins/kiqi-orchestrator/src/spawn.rs`) rejects the
-    // same shape for the same reason: `ki -p` prints its answer once, at the end
-    // of the run, so an empty stdout means the child never produced a final
-    // message — most often because the run hit its turn ceiling, which still
-    // ends the run `Completed` with exit 0. Reporting that as `done` would make
-    // truncated work vanish from the board. Keep both channels in step.
+    // A zero exit with nothing on stdout is not a result this tool can use. A
+    // truncated run now exits non-zero (a budget stop maps to exit 1), so this is
+    // a backstop for a child that succeeds yet prints nothing at all: `ki -p`
+    // prints its answer once, at the end of the run, so empty stdout means no
+    // final message was ever produced. The compile-time channel
+    // (`plugins/kiqi-orchestrator/src/spawn.rs`) rejects the same shape — keep
+    // both channels in step.
     if text.trim().is_empty() {
         return Err(format!(
             "subagent exited successfully but produced no output; the run may have \

@@ -371,17 +371,14 @@ fn run_with_limits(
     // A zero exit with nothing on stdout is not a success this tool can use.
     //
     // `ki -p` writes its answer once, at the end of the run, so an empty stdout
-    // means the child never produced a final message. The common cause is the
-    // run-level turn ceiling (`KI_MAX_TURNS_PER_RUN`, which `child_command` sets
-    // from the node's `maxTurns`): a truncated run still ends `Completed` and
-    // still exits 0 (`kiqi-harness`'s `derive_outcome` treats a budget stop as a
-    // normal exit), so without this check a node that ran out of turns mid-task
-    // would be reported to the orchestrator as `done` with an empty result and
-    // the work would silently vanish.
+    // means the child never produced a final message. A run stopped by the turn
+    // ceiling (`KI_MAX_TURNS_PER_RUN`, which `child_command` sets from the node's
+    // `maxTurns`) now exits non-zero and is caught above, so this arm is a
+    // backstop for a child that succeeds yet still prints nothing.
     //
-    // Returning `Err` instead makes the truncation visible: the node shows up as
-    // failed, with the child's stderr (where `ki` would report anything it could
-    // say about the run) as the diagnostic.
+    // Returning `Err` keeps such a node visible as a failure instead of marking
+    // it `done` with an empty result, with the child's stderr (where `ki` says
+    // anything it can about the run) as the diagnostic.
     if text.trim().is_empty() {
         let detail = if stderr_text.trim().is_empty() {
             "(no stdout, no stderr)".to_string()
