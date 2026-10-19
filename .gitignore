@@ -20,7 +20,13 @@ target/*
 # Static frontend deployment bundle
 .deploy/
 .codegraph
+# Runtime state of any ki project (`.ki/goals.json`, sessions, ...). `.ki/*` only
+# covered this checkout as the worktree root, so a test running with the cwd set
+# to `crates/kiqi-cli` could still write into the tree; `**/.ki/*` covers every
+# depth. It sits before the skill negations on purpose: a pattern placed later
+# would match `.ki/skills` itself and silently kill the `!` re-includes below.
 .ki/*
+**/.ki/*
 !.ki/skills/
 .ki/skills/*
 !.ki/skills/kiqi-extension-authoring/

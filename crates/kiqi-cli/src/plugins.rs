@@ -1832,43 +1832,11 @@ mod tests {
             "data": {"kind": "note"}
         })));
 
-        #[cfg(feature = "plugin-kiqi-goal")]
-        {
-            // kiqi-goal is the other kind of plugin: its host access sits on the TOOL
-            // path (starting a goal injects the notice), so this proves a plugin
-            // really reaches the host through InjectApi rather than only being
-            // loadable. The assertion is on the host side - what it was handed.
-            let goal_host = PluginHost::new("kiqi-goal", kiqi_goal::kiqi::factory());
-            let started = goal_host
-                .call_tool(
-                    "goal",
-                    &serde_json::json!({"action": "start", "title": "wire goal"}),
-                    &caps,
-                    &NoProgress,
-                )
-                .expect("goal start runs");
-            assert!(!started.is_error, "goal start succeeded: {started:?}");
-            let injected = fake
-                .seen
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(action, _)| action == "append_entry")
-                .filter_map(|(_, args)| args.get("message").cloned())
-                .any(|message| {
-                    message
-                        .get("data")
-                        .and_then(|d| d.get("customType"))
-                        .and_then(|c| c.as_str())
-                        .map(|c| c.contains("goal"))
-                        .unwrap_or(false)
-                });
-            assert!(
-                injected,
-                "starting a goal injected its notice through InjectApi; saw {:?}",
-                fake.seen.lock().unwrap()
-            );
-        }
+        // kiqi-goal makes its host call on the TOOL path (starting a goal injects
+        // the notice) and it persists that goal through `current_dir()`, so it
+        // cannot run here: the process cwd is this crate's source tree. See
+        // `goal_tool_writes_state_into_the_project_cwd`, which exercises the very
+        // same path with the cwd pinned to a tempdir.
 
         #[cfg(feature = "plugin-kiqi-ask-user")]
         {
@@ -1963,6 +1931,125 @@ mod tests {
             };
             assert!(text.contains("from the branch"), "got {text}");
         }
+    }
+
+    /// kiqi-goal's host access sits on the TOOL path (starting a goal injects the
+    /// notice), so calling it proves a plugin really reaches the host through
+    /// InjectApi rather than only being loadable. The assertion is on the host
+    /// side - what it was handed.
+    ///
+    /// It also persists the goal through `current_dir()`
+    /// (`plugins/kiqi-goal/src/lib.rs:134-138`), and under `cargo test` the cwd is
+    /// `crates/kiqi-cli` - the source tree, whose `.ki/goals.json` used to be
+    /// tracked and got dirtied by this very test. So the goal path runs in a
+    /// child process pinned to a tempdir: the parent only spawns it, and the
+    /// child asserts both halves (state written to its cwd, source tree clean).
+    #[cfg(feature = "plugin-kiqi-goal")]
+    #[test]
+    fn goal_tool_writes_state_into_the_project_cwd() {
+        const CHILD_ENV: &str = "KI_TEST_GOAL_CWD_CHILD";
+        const TEST_NAME: &str = "plugins::tests::goal_tool_writes_state_into_the_project_cwd";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let project = std::env::current_dir().unwrap();
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let fake = std::sync::Arc::new(FakeHost::default());
+            let caps_host = ActionCaps::new(fake.clone(), runtime.handle().clone());
+            let silent = Silent;
+            // `inject` is granted deliberately: kiqi-goal cannot advance without
+            // it, so this is the capability gate doing its job.
+            let caps = HostCaps {
+                session: Some(&caps_host),
+                control: Some(&caps_host),
+                inject: Some(&caps_host),
+                ui: None,
+                log: &silent,
+                cancel: None,
+            };
+
+            let goal_host = PluginHost::new("kiqi-goal", kiqi_goal::kiqi::factory());
+            let started = goal_host
+                .call_tool(
+                    "goal",
+                    &serde_json::json!({"action": "start", "title": "wire goal"}),
+                    &caps,
+                    &NoProgress,
+                )
+                .expect("goal start runs");
+            assert!(!started.is_error, "goal start succeeded: {started:?}");
+            let injected = fake
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(action, _)| action == "append_entry")
+                .filter_map(|(_, args)| args.get("message").cloned())
+                .any(|message| {
+                    message
+                        .get("data")
+                        .and_then(|d| d.get("customType"))
+                        .and_then(|c| c.as_str())
+                        .map(|c| c.contains("goal"))
+                        .unwrap_or(false)
+                });
+            assert!(
+                injected,
+                "starting a goal injected its notice through InjectApi; saw {:?}",
+                fake.seen.lock().unwrap()
+            );
+
+            // The state path follows `current_dir()`, so it belongs to the child.
+            let written = project.join(".ki").join("goals.json");
+            assert!(
+                written.is_file(),
+                "the goal tool wrote its state to {} (project dir {} holds {:?})",
+                written.display(),
+                project.display(),
+                std::fs::read_dir(&project)
+                    .map(|entries| entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.file_name())
+                        .collect::<Vec<_>>())
+                    .unwrap_or_default()
+            );
+            // Regression lock: the tracked source-tree copy must not come back.
+            let source_tree = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(".ki")
+                .join("goals.json");
+            assert!(
+                !source_tree.exists(),
+                "the goal test wrote into the source tree at {} - it must stay \
+                 outside the checkout",
+                source_tree.display()
+            );
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(TEST_NAME)
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .env(crate::config::CONFIG_DIR_ENV, &agent_dir)
+            .current_dir(&project)
+            .status()
+            .unwrap();
+
+        assert!(status.success(), "child test process failed: {status}");
+        assert!(
+            project.join(".ki").join("goals.json").is_file(),
+            "the child wrote the goal state into its own project dir"
+        );
     }
 
     /// The host-side wiring: an event dispatched through `kiqi-extensions`'
