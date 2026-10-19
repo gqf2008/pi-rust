@@ -674,6 +674,12 @@ fn emit_startup_warnings(parsed: &Args) {
             eprintln!("warning: {warn}");
         }
     }
+    // Misspelled known flags are reported even without `--verbose`: the run still
+    // proceeds (the flag is handed to extensions), so this warning is the only sign
+    // that the user did not get what they asked for.
+    for warn in &parsed.mistyped_flags {
+        eprintln!("warning: {warn}");
+    }
     if parsed.no_themes && parsed.theme.is_some() {
         eprintln!("warning: --no-themes overrides --theme; using the built-in default theme");
     }

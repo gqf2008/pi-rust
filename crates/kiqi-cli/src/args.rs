@@ -221,6 +221,13 @@ pub struct Args {
     /// JSON booleans (a bare flag) or strings (a flag with a value), matching
     /// Pi's `unknownFlags` contract so an extension can claim its own options.
     pub unknown_flags: BTreeMap<String, serde_json::Value>,
+    /// Misspelled known flags, reported unconditionally at startup.
+    ///
+    /// Kept apart from [`ignored`](Self::ignored), which is only printed under
+    /// `--verbose`: a typo silently changes what the run does (`--modle sonnet` used
+    /// the default model), so its warning must not depend on a flag the user has no
+    /// reason to pass.
+    pub mistyped_flags: Vec<String>,
     /// Warnings about recognized-but-ignored flags (v1 scope cuts). Surfaced
     /// to the user on startup when `--verbose`.
     pub ignored: Vec<String>,
@@ -521,6 +528,16 @@ pub fn parse_args(args: &[String]) -> Args {
                 } else {
                     serde_json::Value::Bool(true)
                 };
+                // A misspelled known flag is kept for extensions, exactly like a
+                // genuine extension flag — so `--modle sonnet` used to run with the
+                // *default* model and exit 0, silently doing something other than
+                // what was asked. We cannot reject it (that would break the
+                // passthrough contract), but a near-miss can be called out.
+                if let Some(known) = closest_known_flag(name) {
+                    result.mistyped_flags.push(format!(
+                        "{name} is not a ki option; did you mean {known}? (kept for extensions to claim)"
+                    ));
+                }
                 result.unknown_flags.insert(name[2..].to_string(), value);
             }
             // Unknown short flag → hard error (mirrors TS).
@@ -722,6 +739,118 @@ pub fn print_version() {
     println!("{} {}", crate::APP_NAME, crate::VERSION);
 }
 
+/// Long flags the parser handles itself.
+///
+/// Kept as data (not derived from the match arms, which a `match` cannot be
+/// enumerated from) purely so a typo can be reported. A name missing here only
+/// costs a missed hint; it can never change parsing.
+const KNOWN_LONG_FLAGS: &[&str] = &[
+    "--api-key",
+    "--append-system-prompt",
+    "--approve",
+    "--base-url",
+    "--continue",
+    "--debug-system-prompt",
+    "--exclude-tools",
+    "--export",
+    "--extension",
+    "--extensions-dir",
+    "--fork",
+    "--help",
+    "--list-models",
+    "--local-only",
+    "--mode",
+    "--model",
+    "--models",
+    "--name",
+    "--no-approve",
+    "--no-builtin-tools",
+    "--no-context-files",
+    "--no-extensions",
+    "--no-prompt-templates",
+    "--no-session",
+    "--no-skills",
+    "--no-themes",
+    "--package-only",
+    "--print",
+    "--project-only",
+    "--provider",
+    "--resume",
+    "--session",
+    "--session-dir",
+    "--system-prompt",
+    "--theme",
+    "--thinking",
+    "--tools",
+    "--tui-mode",
+    "--verbose",
+    "--version",
+];
+
+/// A known long flag one edit away from `unknown`, if any.
+///
+/// One edit only: that catches `--modle`, `--modes`, `--sessoin` and friends
+/// without guessing at genuinely different words (an extension flag like
+/// `--walgit-token` must not be "corrected" into something else).
+fn closest_known_flag(unknown: &str) -> Option<&'static str> {
+    // Several known flags can be one typo away and the first match is not the best
+    // one: `--modle` is one transposition from `--model` and one insertion away from
+    // `--mode`, and returning `--mode` (listed earlier) would send the user to a flag
+    // that sets the run *mode*. Prefer an equal-length candidate (a transposition or
+    // substitution keeps the length) and, failing that, the longest one — the more
+    // specific flag is the likelier intent.
+    KNOWN_LONG_FLAGS
+        .iter()
+        .copied()
+        .filter(|known| one_edit_apart(known, unknown))
+        .max_by_key(|known| (known.len() == unknown.len(), known.len()))
+}
+
+/// Whether `a` and `b` differ by one typo: one insertion, deletion, substitution, or
+/// an adjacent transposition.
+///
+/// Transpositions are included because they are the most common typo of all, and
+/// `--modle` is two substitutions under a strict edit distance — the exact case that
+/// started this.
+fn one_edit_apart(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+    if a.len() == b.len() {
+        let differing: Vec<usize> = a
+            .iter()
+            .zip(&b)
+            .enumerate()
+            .filter(|(_, (x, y))| x != y)
+            .map(|(i, _)| i)
+            .collect();
+        return match differing.as_slice() {
+            [_] => true,
+            // Adjacent and swapped: a transposition.
+            [i, j] => *j == i + 1 && a[*i] == b[*j] && a[*j] == b[*i],
+            _ => false,
+        };
+    }
+    let (longer, shorter) = if a.len() > b.len() {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    let mut skipped = false;
+    let mut j = 0;
+    for ch in longer {
+        if j < shorter.len() && *ch == shorter[j] {
+            j += 1;
+        } else if skipped {
+            return false;
+        } else {
+            skipped = true;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -739,6 +868,47 @@ mod tests {
 
     fn s(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()
+    }
+
+    /// A misspelled known flag must be reported; an extension's own flag must not.
+    ///
+    /// `--modle sonnet` used to be swallowed as an extension flag, so the run used
+    /// the default model and exited 0 — the worst shape of wrong. The parser cannot
+    /// reject it (passthrough is a documented contract), but it can say so.
+    #[test]
+    fn a_misspelled_known_flag_is_reported_but_extension_flags_are_not() {
+        let misspelled = parse_args(&s(&["--modle", "sonnet", "-p", "hi"]));
+        assert!(
+            misspelled
+                .mistyped_flags
+                .iter()
+                .any(|note| note.contains("--modle") && note.contains("--model")),
+            "a one-typo of a known flag must be called out: {:?}",
+            misspelled.mistyped_flags
+        );
+        // Still handed to extensions, unchanged.
+        assert!(misspelled.unknown_flags.contains_key("modle"));
+
+        for unrelated in ["--walgit-token", "--my-extension-flag", "--server"] {
+            let parsed = parse_args(&s(&[unrelated, "x", "-p", "hi"]));
+            assert!(
+                parsed.mistyped_flags.is_empty(),
+                "{unrelated} is not a typo and must not be corrected: {:?}",
+                parsed.mistyped_flags
+            );
+            assert!(parsed.unknown_flags.contains_key(&unrelated[2..]));
+        }
+    }
+
+    #[test]
+    fn one_typo_apart_covers_substitutions_insertions_and_transpositions() {
+        assert!(one_edit_apart("--model", "--modle"), "transposition");
+        assert!(one_edit_apart("--model", "--modes"), "substitution");
+        assert!(one_edit_apart("--model", "--mode"), "deletion");
+        assert!(one_edit_apart("--model", "--models"), "insertion");
+        assert!(!one_edit_apart("--model", "--walgit-token"));
+        assert!(!one_edit_apart("--model", "--server"));
+        assert!(!one_edit_apart("--model", "--model-x"));
     }
 
     #[test]
