@@ -139,7 +139,11 @@ pub(super) fn abort_run_restoring_queue(
     editor: Arc<Editor>,
     state: Arc<TuiState>,
     tui: Arc<TuiAltScreen>,
+    wake_state: Arc<Mutex<crate::signal_wake::SignalWakeState>>,
 ) {
+    // Pressing Esc must not be followed by the agent getting up again on its
+    // own: mute signal-triggered wakes until the user submits something.
+    wake_state.lock().unwrap().record_abort();
     tokio::spawn(async move {
         let _ = restore_queued_messages_to_editor(lane.clone(), editor, state, tui.clone()).await;
         let _ = lane.abort().await;
@@ -155,11 +159,24 @@ pub(super) async fn drain_agent_events(
     lane: Arc<dyn AgentLane>,
     harness: AgentHarness,
     mcp: Arc<kiqi_mcp::McpManager>,
+    tx: mpsc::UnboundedSender<TuiMessage>,
+    wake_state: Arc<Mutex<crate::signal_wake::SignalWakeState>>,
 ) {
     loop {
         match rx.recv().await {
             Ok(event) => {
-                handle_agent_event(event, &tui, &state, &chat, &lane, &harness, &mcp).await
+                handle_agent_event(
+                    event,
+                    &tui,
+                    &state,
+                    &chat,
+                    &lane,
+                    &harness,
+                    &mcp,
+                    &tx,
+                    &wake_state,
+                )
+                .await
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {
                 // We dropped some intermediate deltas; the next MessageUpdate/
@@ -181,6 +198,8 @@ pub(super) async fn handle_agent_event(
     lane: &Arc<dyn AgentLane>,
     harness: &AgentHarness,
     mcp: &Arc<kiqi_mcp::McpManager>,
+    tx: &mpsc::UnboundedSender<TuiMessage>,
+    wake_state: &Arc<Mutex<crate::signal_wake::SignalWakeState>>,
 ) {
     match event {
         AgentEvent::AgentStart => {
@@ -203,8 +222,55 @@ pub(super) async fn handle_agent_event(
                 }
             }
             // Same boundary, same reason: MCP resource-update notices gathered
-            // during the run append now, never mid-run.
-            crate::session::drain_mcp_boundary(harness, mcp).await;
+            // during the run append now, never mid-run. The record goes in
+            // FIRST (I1); the wake decision only adds a short trigger after it.
+            let batch = crate::session::take_mcp_boundary(harness, mcp).await;
+            if !batch.is_empty() {
+                crate::session::append_notice_batch(harness, &batch).await;
+                let any_auto = batch.notices.iter().any(|notice| {
+                    mcp.signal_config(&notice.server)
+                        .is_some_and(|config| config.wake == kiqi_mcp::WakeMode::Auto)
+                });
+                let decision = wake_state.lock().unwrap().decide(
+                    &batch,
+                    std::time::Instant::now(),
+                    |server| mcp.signal_config(server),
+                );
+                match decision {
+                    crate::signal_wake::WakeDecision::Wake(servers) => {
+                        eprintln!(
+                            "[ki mcp] signal wake: servers={servers:?} notices={} suppressed={}",
+                            batch.notices.len(),
+                            batch.suppressed
+                        );
+                        // The main loop drives the run through the same
+                        // streaming path as a user prompt. A closed channel
+                        // means the TUI is shutting down; the notice is
+                        // already recorded, so nothing is lost.
+                        if tx
+                            .send(TuiMessage::SignalWake(crate::signal_wake::wake_message(
+                                &batch,
+                            )))
+                            .is_err()
+                        {
+                            eprintln!(
+                                "warning: mcp: signal wake dropped: the TUI channel is closed"
+                            );
+                        }
+                    }
+                    crate::signal_wake::WakeDecision::Skip(reason) if any_auto => {
+                        // Only `auto` servers produce a skip line: with the
+                        // default `off`, every notification would otherwise
+                        // log, which is noise.
+                        let servers: Vec<&str> =
+                            batch.notices.iter().map(|n| n.server.as_str()).collect();
+                        eprintln!(
+                            "[ki mcp] signal recorded without wake: {reason} (servers={servers:?})"
+                        );
+                    }
+                    crate::signal_wake::WakeDecision::Skip(_) => {}
+                }
+            }
             // The run drained the queue; refresh so consumed entries drop out
             // of the pending-messages display.
             refresh_pending_messages(state, lane).await;

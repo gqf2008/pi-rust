@@ -2141,6 +2141,41 @@ pub(crate) fn merge_mcp_tools(
     mcp.record_injected_tools(allowed);
 }
 
+/// Drain MCP resource-update notices and refresh the MCP tool slice, WITHOUT
+/// recording anything. The caller decides how the batch reaches the transcript:
+/// [`drain_mcp_boundary`] records it and stops there (the non-interactive
+/// modes); the interactive TUI records it and may additionally emit a wake
+/// trigger (`signal_wake`).
+///
+/// `autoRead` is applied here: configured uris are read now and their text
+/// rides the batch; every other notice stays a pointer.
+pub(crate) async fn take_mcp_boundary(
+    harness: &AgentHarness,
+    mcp: &kiqi_mcp::McpManager,
+) -> kiqi_mcp::McpNoticeBatch {
+    let batch = mcp.take_notices_with_auto_read().await;
+    // A `tools/list_changed` / `resources/list_changed` refreshes the cached
+    // lists; a changed set is swapped into the harness with a narrow slice
+    // replace (not a full `set_tools` from scratch) so everything non-MCP —
+    // and each tool's active/inactive state — is preserved untouched.
+    if mcp.refresh_if_stale().await {
+        replace_mcp_tools(harness, mcp).await;
+    }
+    batch
+}
+
+/// Record one drained batch as the single batched custom entry (the goal-guest
+/// injection precedent). It becomes a user message on the next context build.
+pub(crate) async fn append_notice_batch(harness: &AgentHarness, batch: &kiqi_mcp::McpNoticeBatch) {
+    if batch.is_empty() {
+        return;
+    }
+    let message = kiqi_mcp::notice_message(batch);
+    if let Err(error) = harness.session().append_message(message).await {
+        eprintln!("warning: mcp: could not record resource notice: {error}");
+    }
+}
+
 /// Deliver MCP resource-update notices at a session boundary and refresh the
 /// MCP tool slice when a server sent `list_changed`.
 ///
@@ -2158,22 +2193,8 @@ pub(crate) async fn drain_mcp_boundary(
     harness: &AgentHarness,
     mcp: &kiqi_mcp::McpManager,
 ) -> Vec<kiqi_mcp::McpNotice> {
-    // The autoRead opt-in is applied here: configured uris are read now and
-    // their text rides the batched entry; every other notice stays a pointer.
-    let batch = mcp.take_notices_with_auto_read().await;
-    if !batch.is_empty() {
-        let message = kiqi_mcp::notice_message(&batch);
-        if let Err(error) = harness.session().append_message(message).await {
-            eprintln!("warning: mcp: could not record resource notice: {error}");
-        }
-    }
-    // A `tools/list_changed` / `resources/list_changed` refreshes the cached
-    // lists; a changed set is swapped into the harness with a narrow slice
-    // replace (not a full `set_tools` from scratch) so everything non-MCP —
-    // and each tool's active/inactive state — is preserved untouched.
-    if mcp.refresh_if_stale().await {
-        replace_mcp_tools(harness, mcp).await;
-    }
+    let batch = take_mcp_boundary(harness, mcp).await;
+    append_notice_batch(harness, &batch).await;
     batch.notices
 }
 

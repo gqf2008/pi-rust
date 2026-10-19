@@ -249,6 +249,9 @@ struct CommandContext {
     tui: Arc<TuiAltScreen>,
     tx: mpsc::UnboundedSender<TuiMessage>,
     state: Arc<TuiState>,
+    /// Arousal budget for MCP signals. The submit path resets the chain even
+    /// when the message is queued as steering (the main loop never sees it).
+    signal_wake: Arc<Mutex<crate::signal_wake::SignalWakeState>>,
     editor: Arc<Editor>,
     editor_container: Arc<Container>,
     lane: Arc<dyn AgentLane>,
@@ -708,6 +711,10 @@ enum TuiMessage {
     /// order relative to agent runs (upstream's `recordBashResult` /
     /// `_pendingBashMessages`).
     UserBashFinished(UserBashReport),
+    /// An MCP resource signal passed the host's arousal budget and should start
+    /// a run. The batch's detailed notice entry is already in the transcript;
+    /// this is the short external-signal trigger built by `signal_wake`.
+    SignalWake(String),
 }
 
 /// Terminal result of a user-initiated `!command` shell run.
@@ -962,6 +969,11 @@ pub async fn interactive_tui(
 
     // Channel between the key/callback threads and the main async loop.
     let (tx, mut rx) = mpsc::unbounded_channel::<TuiMessage>();
+    // Per-session arousal budget for MCP resource signals (design:
+    // `signal-driven-agent.md`). Shared by the submit path (user input resets
+    // the chain), the event drain (AgentEnd decides whether to wake), and the
+    // interrupt path (Esc mutes the chain until the next user input).
+    let signal_wake = Arc::new(Mutex::new(crate::signal_wake::SignalWakeState::new()));
 
     // Apply the saved theme before constructing transcript components. Some
     // components keep styled text, so doing this after the welcome banner left
@@ -1379,6 +1391,7 @@ pub async fn interactive_tui(
         tui: tui.clone(),
         tx: tx.clone(),
         state: state.clone(),
+        signal_wake: signal_wake.clone(),
         editor: editor.clone(),
         editor_container: editor_container.clone(),
         lane: lane.clone(),
@@ -1397,6 +1410,12 @@ pub async fn interactive_tui(
         if text.is_empty() && ctx_for_cb.state.pending_images.lock().unwrap().is_empty() {
             return;
         }
+
+        // Any real submission is the user showing up: clear an interrupt mute
+        // and the consecutive chain counters before routing it. Done here (not
+        // only in the main loop) because a message queued as steering while a
+        // run is active never reaches the main loop as a `UserInput`.
+        ctx_for_cb.signal_wake.lock().unwrap().record_user_input();
 
         if text.starts_with('/') && dispatch_slash(text, &ctx_for_cb, &registry_for_cb) {
             return;
@@ -1527,6 +1546,8 @@ pub async fn interactive_tui(
         let lane_drain = lane.clone();
         let harness_drain = harness.clone();
         let mcp_drain = Arc::clone(&reload_context.mcp);
+        let tx_drain = tx.clone();
+        let wake_drain = signal_wake.clone();
         Some(tokio::spawn(async move {
             drain_agent_events(
                 rx,
@@ -1536,6 +1557,8 @@ pub async fn interactive_tui(
                 lane_drain,
                 harness_drain,
                 mcp_drain,
+                tx_drain,
+                wake_drain,
             )
             .await;
         }))
@@ -2137,6 +2160,7 @@ pub async fn interactive_tui(
                         editor_for_key.clone(),
                         state_for_key.clone(),
                         tui_for_key.clone(),
+                        ctx_for_key.signal_wake.clone(),
                     );
                     continue;
                 }
@@ -2758,6 +2782,42 @@ pub async fn interactive_tui(
                     &state,
                     drain_handle.is_some(),
                     prompt_images,
+                )
+                .await;
+            }
+            Some(TuiMessage::SignalWake(prompt)) => {
+                // User priority (design §5.3): a staged steering/follow-up
+                // message means the user is already driving the next turn.
+                // The notice entry is on disk either way, so skipping the
+                // synthetic run loses nothing — the next prompt sees it.
+                let user_waiting = lane
+                    .queued_messages()
+                    .await
+                    .map(|queued| !queued.steering.is_empty() || !queued.follow_up.is_empty())
+                    .unwrap_or(false);
+                if user_waiting {
+                    add_note_message(
+                        &chat_container,
+                        "MCP signal recorded; skipped auto-wake because user messages are queued.",
+                    );
+                    tui.request_render(false);
+                    continue;
+                }
+                if !state.try_start_working() {
+                    continue;
+                }
+                // The harness emits no user `message_start` for a directly-sent
+                // prompt, so the trigger bubble is rendered here (same reason as
+                // the initial `-p` prompts).
+                add_user_message(&chat_container, &prompt);
+                run_prompt_streaming(
+                    &lane,
+                    &prompt,
+                    false,
+                    &tui,
+                    &state,
+                    drain_handle.is_some(),
+                    Vec::new(),
                 )
                 .await;
             }
