@@ -73,6 +73,54 @@ impl Default for SignalsConfig {
     }
 }
 
+/// Top-level `signals` defaults (global settings, optionally overridden by a
+/// trusted project). Every field is optional: an absent field falls through to
+/// the per-server value / the `subscribe`-derived default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignalsDefaults {
+    pub wake: Option<WakeMode>,
+    pub min_interval: Option<Duration>,
+    pub max_runs_per_hour: Option<u32>,
+    pub max_consecutive_runs: Option<u32>,
+}
+
+/// Field-wise merge: the project block wins over the global one.
+pub fn merge_signals_defaults(
+    global: SignalsDefaults,
+    project: SignalsDefaults,
+) -> SignalsDefaults {
+    SignalsDefaults {
+        wake: project.wake.or(global.wake),
+        min_interval: project.min_interval.or(global.min_interval),
+        max_runs_per_hour: project.max_runs_per_hour.or(global.max_runs_per_hour),
+        max_consecutive_runs: project.max_consecutive_runs.or(global.max_consecutive_runs),
+    }
+}
+
+/// Parse the top-level `signals` block. Invalid fields are reported and
+/// ignored; one bad field must not drop the whole block (and must not take the
+/// MCP servers down with it).
+pub fn parse_signals_defaults(raw: Option<&serde_json::Value>) -> (SignalsDefaults, Vec<String>) {
+    let mut out = SignalsDefaults::default();
+    let mut issues = Vec::new();
+    let Some(value) = raw else {
+        return (out, issues);
+    };
+    if !value.is_object() {
+        issues.push("`signals` must be a JSON object".to_string());
+        return (out, issues);
+    }
+    let raw: RawSignals = match serde_json::from_value(value.clone()) {
+        Ok(raw) => raw,
+        Err(error) => {
+            issues.push(format!("`signals`: invalid definition: {error}"));
+            return (out, issues);
+        }
+    };
+    apply_signals_fields(raw, &mut out, &mut issues);
+    (out, issues)
+}
+
 /// Where a configured server's transport goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transport {
@@ -206,6 +254,15 @@ pub fn validate_http_url(url: &str) -> Result<(), String> {
 /// issue per rejected entry. The caller is expected to print every issue to
 /// stderr (loud, never silent) — nothing is dropped without a reason.
 pub fn parse_servers(raw: Option<&serde_json::Value>) -> (Vec<ServerConfig>, Vec<String>) {
+    parse_servers_with_defaults(raw, &SignalsDefaults::default())
+}
+
+/// Same as [`parse_servers`], with top-level `signals` defaults applied to
+/// every entry (per-server fields still win).
+pub fn parse_servers_with_defaults(
+    raw: Option<&serde_json::Value>,
+    defaults: &SignalsDefaults,
+) -> (Vec<ServerConfig>, Vec<String>) {
     let mut out = Vec::new();
     let mut issues = Vec::new();
     let Some(value) = raw else {
@@ -216,7 +273,7 @@ pub fn parse_servers(raw: Option<&serde_json::Value>) -> (Vec<ServerConfig>, Vec
         return (out, issues);
     };
     for (name, entry) in map {
-        match parse_one(name, entry) {
+        match parse_one(name, entry, defaults) {
             Ok(config) => out.push(config),
             Err(reason) => issues.push(format!("mcpServers.{name}: {reason}")),
         }
@@ -224,7 +281,11 @@ pub fn parse_servers(raw: Option<&serde_json::Value>) -> (Vec<ServerConfig>, Vec
     (out, issues)
 }
 
-fn parse_one(name: &str, entry: &serde_json::Value) -> Result<ServerConfig, String> {
+fn parse_one(
+    name: &str,
+    entry: &serde_json::Value,
+    defaults: &SignalsDefaults,
+) -> Result<ServerConfig, String> {
     if !valid_server_name(name) {
         return Err(format!(
             "invalid server name (allowed: [A-Za-z0-9_-], non-empty, no {:?})",
@@ -301,7 +362,7 @@ fn parse_one(name: &str, entry: &serde_json::Value) -> Result<ServerConfig, Stri
 
     // Wake policy: subscribing is the explicit "tell me" opt-in, so a
     // subscription defaults to `auto`; an explicit `signals.wake` overrides.
-    let signals = parse_signals(raw.signals, !subscribe.is_empty())?;
+    let signals = parse_signals(raw.signals, !subscribe.is_empty(), defaults)?;
 
     Ok(ServerConfig {
         name: name.to_string(),
@@ -314,7 +375,11 @@ fn parse_one(name: &str, entry: &serde_json::Value) -> Result<ServerConfig, Stri
     })
 }
 
-fn parse_signals(raw: Option<RawSignals>, subscribed: bool) -> Result<SignalsConfig, String> {
+fn parse_signals(
+    raw: Option<RawSignals>,
+    subscribed: bool,
+    defaults: &SignalsDefaults,
+) -> Result<SignalsConfig, String> {
     let mut config = SignalsConfig {
         wake: if subscribed {
             WakeMode::Auto
@@ -323,34 +388,72 @@ fn parse_signals(raw: Option<RawSignals>, subscribed: bool) -> Result<SignalsCon
         },
         ..SignalsConfig::default()
     };
+    // Precedence: built-in/`subscribe` default < top-level defaults <
+    // per-server explicit fields.
+    if let Some(wake) = defaults.wake {
+        config.wake = wake;
+    }
+    if let Some(interval) = defaults.min_interval {
+        config.min_interval = interval;
+    }
+    if let Some(runs) = defaults.max_runs_per_hour {
+        config.max_runs_per_hour = runs;
+    }
+    if let Some(runs) = defaults.max_consecutive_runs {
+        config.max_consecutive_runs = runs;
+    }
     let Some(raw) = raw else {
         return Ok(config);
     };
-    if let Some(wake) = raw.wake {
-        let normalized = wake.trim().to_ascii_lowercase();
-        config.wake = match normalized.as_str() {
-            "off" => WakeMode::Off,
-            "notify" => WakeMode::Notify,
-            "auto" => WakeMode::Auto,
-            other => {
-                return Err(format!(
-                    "`signals.wake` must be one of off/notify/auto (got {other:?})"
-                ))
-            }
-        };
+    let mut issues = Vec::new();
+    let mut explicit = SignalsDefaults::default();
+    apply_signals_fields(raw, &mut explicit, &mut issues);
+    if let Some(issue) = issues.into_iter().next() {
+        return Err(issue);
     }
-    if let Some(seconds) = raw.min_interval_seconds {
-        config.min_interval =
-            Duration::from_secs(seconds.clamp(MIN_SIGNAL_INTERVAL_SECS, MAX_SIGNAL_INTERVAL_SECS));
+    if let Some(wake) = explicit.wake {
+        config.wake = wake;
     }
-    if let Some(runs) = raw.max_runs_per_hour {
-        config.max_runs_per_hour = runs.clamp(MIN_SIGNAL_RUNS_PER_HOUR, MAX_SIGNAL_RUNS_PER_HOUR);
+    if let Some(interval) = explicit.min_interval {
+        config.min_interval = interval;
     }
-    if let Some(runs) = raw.max_consecutive_runs {
-        config.max_consecutive_runs =
-            runs.clamp(MIN_SIGNAL_CONSECUTIVE_RUNS, MAX_SIGNAL_CONSECUTIVE_RUNS);
+    if let Some(runs) = explicit.max_runs_per_hour {
+        config.max_runs_per_hour = runs;
+    }
+    if let Some(runs) = explicit.max_consecutive_runs {
+        config.max_consecutive_runs = runs;
     }
     Ok(config)
+}
+
+/// Apply the fields present in a `signals` object to `out`. Shared by the
+/// top-level defaults (issues are collected) and the per-server block (an
+/// invalid wake rejects that server entry).
+fn apply_signals_fields(raw: RawSignals, out: &mut SignalsDefaults, issues: &mut Vec<String>) {
+    if let Some(wake) = raw.wake {
+        let normalized = wake.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "off" => out.wake = Some(WakeMode::Off),
+            "notify" => out.wake = Some(WakeMode::Notify),
+            "auto" => out.wake = Some(WakeMode::Auto),
+            other => issues.push(format!(
+                "`signals.wake` must be one of off/notify/auto (got {other:?})"
+            )),
+        }
+    }
+    if let Some(seconds) = raw.min_interval_seconds {
+        out.min_interval = Some(Duration::from_secs(
+            seconds.clamp(MIN_SIGNAL_INTERVAL_SECS, MAX_SIGNAL_INTERVAL_SECS),
+        ));
+    }
+    if let Some(runs) = raw.max_runs_per_hour {
+        out.max_runs_per_hour =
+            Some(runs.clamp(MIN_SIGNAL_RUNS_PER_HOUR, MAX_SIGNAL_RUNS_PER_HOUR));
+    }
+    if let Some(runs) = raw.max_consecutive_runs {
+        out.max_consecutive_runs =
+            Some(runs.clamp(MIN_SIGNAL_CONSECUTIVE_RUNS, MAX_SIGNAL_CONSECUTIVE_RUNS));
+    }
 }
 
 /// Merge the global block with the project block. **Project wins**: a project
@@ -659,6 +762,78 @@ mod tests {
             by_name("high").signals.max_consecutive_runs,
             MAX_SIGNAL_CONSECUTIVE_RUNS
         );
+    }
+
+    #[test]
+    fn global_defaults_override_the_subscribe_default() {
+        let (defaults, issues) = parse_signals_defaults(Some(&json!({ "wake": "off" })));
+        assert!(issues.is_empty(), "issues: {issues:?}");
+        let (servers, issues) = parse_servers_with_defaults(
+            Some(&json!({
+                "docs": { "command": "srv", "subscribe": ["file:///a.md"] }
+            })),
+            &defaults,
+        );
+        assert!(issues.is_empty(), "issues: {issues:?}");
+        assert_eq!(servers[0].signals.wake, WakeMode::Off);
+    }
+
+    #[test]
+    fn per_server_fields_beat_global_defaults() {
+        let (defaults, issues) = parse_signals_defaults(Some(&json!({
+            "wake": "off",
+            "minIntervalSeconds": 5,
+            "maxRunsPerHour": 1,
+            "maxConsecutiveRuns": 1
+        })));
+        assert!(issues.is_empty(), "issues: {issues:?}");
+        let (servers, issues) = parse_servers_with_defaults(
+            Some(&json!({
+                "docs": {
+                    "command": "srv",
+                    "subscribe": ["file:///a.md"],
+                    "signals": { "wake": "auto", "minIntervalSeconds": 90 }
+                }
+            })),
+            &defaults,
+        );
+        assert!(issues.is_empty(), "issues: {issues:?}");
+        let signals = &servers[0].signals;
+        assert_eq!(signals.wake, WakeMode::Auto);
+        assert_eq!(signals.min_interval, Duration::from_secs(90));
+        // Untouched fields still come from the global block.
+        assert_eq!(signals.max_runs_per_hour, 1);
+        assert_eq!(signals.max_consecutive_runs, 1);
+    }
+
+    #[test]
+    fn project_defaults_merge_field_wise() {
+        let (global, _) = parse_signals_defaults(Some(&json!({
+            "wake": "off",
+            "minIntervalSeconds": 10,
+            "maxRunsPerHour": 3
+        })));
+        let (project, _) = parse_signals_defaults(Some(&json!({
+            "wake": "auto",
+            "maxConsecutiveRuns": 1
+        })));
+        let merged = merge_signals_defaults(global, project);
+        assert_eq!(merged.wake, Some(WakeMode::Auto));
+        assert_eq!(merged.min_interval, Some(Duration::from_secs(10)));
+        assert_eq!(merged.max_runs_per_hour, Some(3));
+        assert_eq!(merged.max_consecutive_runs, Some(1));
+    }
+
+    #[test]
+    fn invalid_global_wake_is_reported_and_ignored() {
+        let (defaults, issues) = parse_signals_defaults(Some(&json!({
+            "wake": "sometimes",
+            "minIntervalSeconds": 12
+        })));
+        assert_eq!(defaults.wake, None);
+        assert_eq!(defaults.min_interval, Some(Duration::from_secs(12)));
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("off/notify/auto"), "issues: {issues:?}");
     }
 
     fn stdio(name: &str) -> ServerConfig {
