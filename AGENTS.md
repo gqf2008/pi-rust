@@ -50,7 +50,10 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
 cargo test  --workspace --locked
 # 可选 feature（有 wasm 版的插件都不在默认构建里）必须单独跑，否则它们会腐烂：
-cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-lens,plugin-kiqi-webfetch,plugin-kiqi-websearch,plugin-kiqi-subagents,plugin-kiqi-goal,plugin-kiqi-plan-mode,plugin-kiqi-ask-user,plugin-kiqi-langfuse,plugin-kiqi-permissions
+# 这份清单必须与 .github/workflows/ci.yml 的 "opt-in plugin features" 步骤逐项一致——
+# 少列一个，本地门禁就比 CI 松，而 CI 那边仍是红的（2026-10-20 就漏了
+# plugin-kiqi-codegraph 与 plugin-kiqi-orchestrator 两项，已补齐）。
+cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-lens,plugin-kiqi-webfetch,plugin-kiqi-websearch,plugin-kiqi-subagents,plugin-kiqi-goal,plugin-kiqi-plan-mode,plugin-kiqi-ask-user,plugin-kiqi-langfuse,plugin-kiqi-permissions,plugin-kiqi-codegraph,plugin-kiqi-orchestrator
 # 文档快照（改了 CHANGELOG.md / README.md 等必须重跑，CI 会比对）
 sh scripts/sync-embedded-docs.sh
 ```
