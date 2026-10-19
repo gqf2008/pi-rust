@@ -17,118 +17,217 @@ pub fn visible_width(s: &str) -> usize {
     UnicodeWidthStr::width(stripped.as_str())
 }
 
+/// Byte length of the escape sequence at the start of `s`, or 0 when `s` does
+/// not start with `ESC`.
+///
+/// This is the single scanner shared by [`strip_ansi`] and
+/// [`slice_by_column`]: both have to agree on where an escape sequence ends,
+/// otherwise stripping and slicing drift apart and columns get miscounted.
+fn escape_len(s: &str) -> usize {
+    let mut chars = s.char_indices();
+    match chars.next() {
+        // `ESC` is a single byte, so the next atom starts at offset 1 at worst.
+        Some((_, '\x1b')) => {}
+        _ => return 0,
+    }
+
+    match chars.next() {
+        // CSI: skip until the final byte (0x40-0x7E).
+        Some((_, '[')) => {
+            let mut end = 2;
+            for (index, c) in chars {
+                end = index + c.len_utf8();
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    break;
+                }
+            }
+            end
+        }
+        // OSC / APC / DCS / PM: skip until BEL (0x07) or ST (ESC \).
+        // `CURSOR_MARKER` (`ESC _ pi:c BEL`) is an APC sequence, so it is
+        // consumed whole here and never contributes any visible width.
+        Some((_, ']' | '_' | 'P' | '^')) => {
+            let mut end = 2;
+            let mut chars = chars.peekable();
+            while let Some((index, c)) = chars.next() {
+                end = index + c.len_utf8();
+                if c == '\x07' {
+                    break;
+                }
+                if c == '\x1b' {
+                    if matches!(chars.peek(), Some((_, '\\'))) {
+                        let (index, c) = chars.next().expect("peeked char");
+                        end = index + c.len_utf8();
+                        break;
+                    }
+                }
+            }
+            end
+        }
+        // Character set designation: `ESC ( X` / `ESC ) X`.
+        Some((_, '(' | ')')) => match chars.next() {
+            Some((index, c)) => index + c.len_utf8(),
+            None => 2,
+        },
+        // Other escape sequences: skip the following character.
+        Some((index, c)) => index + c.len_utf8(),
+        // Lone trailing `ESC`.
+        None => 1,
+    }
+}
+
 /// Strip ANSI escape sequences from a string.
 pub fn strip_ansi(s: &str) -> String {
-    // Simple ANSI stripping - removes escape sequences
     let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
+    let mut offset = 0;
 
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // Cursor markers are private escape sequences, not ANSI CSI/OSC
-            // sequences. Treat the complete marker as zero-width; otherwise
-            // the old logic skipped only `\\x1b_` and counted `pi:c` as text,
-            // making the hardware cursor jump several columns when moving.
-            let mut marker_tail = chars.clone();
-            let marker = ['_', 'p', 'i', ':', 'c', '\x07'];
-            let is_cursor_marker = marker
-                .iter()
-                .all(|expected| marker_tail.next() == Some(*expected));
-            if is_cursor_marker {
-                chars = marker_tail;
-                continue;
-            }
-
-            // Start of escape sequence
-            match chars.peek() {
-                Some('[') => {
-                    chars.next(); // consume '['
-                                  // CSI sequence: skip until final byte (0x40-0x7E)
-                    while let Some(&c) = chars.peek() {
-                        chars.next();
-                        if (c as u8) >= 0x40 && (c as u8) <= 0x7E {
-                            break;
-                        }
-                    }
-                }
-                Some(']' | '_' | 'P' | '^') => {
-                    chars.next(); // consume ']'
-                                  // OSC sequence: skip until BEL (0x07) or ST (ESC \)
-                    while let Some(&c) = chars.peek() {
-                        chars.next();
-                        if c == '\x07' {
-                            break;
-                        }
-                        if c == '\x1b' {
-                            if let Some('\\') = chars.peek() {
-                                chars.next();
-                                break;
-                            }
-                        }
-                    }
-                }
-                Some('(' | ')') => {
-                    chars.next(); // consume '(' or ')'
-                                  // Character set designation: skip one more char
-                    chars.next();
-                }
-                Some(_) => {
-                    // Other escape sequences: skip next char
-                    chars.next();
-                }
-                None => break,
-            }
+    while offset < s.len() {
+        let tail = &s[offset..];
+        if tail.starts_with('\x1b') {
+            // Escape sequences are zero-width, so they are dropped whole. That
+            // includes `CURSOR_MARKER`: its APC payload must not be counted as
+            // text, or the hardware cursor jumps several columns.
+            offset += escape_len(tail);
         } else {
-            result.push(c);
+            let end = tail.find('\x1b').unwrap_or(tail.len());
+            result.push_str(&tail[..end]);
+            offset += end;
         }
     }
 
     result
 }
 
+/// One zero-width escape sequence or one visible grapheme of a line.
+struct Atom<'a> {
+    text: &'a str,
+    width: usize,
+    /// Escape sequences are zero-width *and* droppable; a zero-width grapheme
+    /// cluster (e.g. a lone combining mark) is still text.
+    escape: bool,
+}
+
+/// Split a line into escape sequences (width 0) and grapheme clusters (their
+/// terminal width).
+fn atoms(line: &str) -> Vec<Atom<'_>> {
+    let mut atoms = Vec::new();
+    let mut offset = 0;
+
+    while offset < line.len() {
+        let tail = &line[offset..];
+        if tail.starts_with('\x1b') {
+            let end = escape_len(tail);
+            atoms.push(Atom {
+                text: &tail[..end],
+                width: 0,
+                escape: true,
+            });
+            offset += end;
+        } else {
+            let end = tail.find('\x1b').unwrap_or(tail.len());
+            for text in tail[..end].graphemes(true) {
+                atoms.push(Atom {
+                    text,
+                    width: UnicodeWidthStr::width(text),
+                    escape: false,
+                });
+            }
+            offset += end;
+        }
+    }
+
+    atoms
+}
+
+/// Fold one escape sequence into the accumulated SGR context.
+///
+/// Non-SGR escapes (OSC hyperlinks, APC markers, ...) carry no style state and
+/// are ignored; `ESC[0m` / `ESC[m` are the resets that clear the context.
+fn accumulate_sgr(context: &mut String, escape: &str) {
+    if !(escape.starts_with("\x1b[") && escape.ends_with('m')) {
+        return;
+    }
+    if matches!(escape, "\x1b[0m" | "\x1b[m") {
+        context.clear();
+    }
+    context.push_str(escape);
+}
+
 /// Slice a string by visible column positions.
 ///
-/// Returns a substring that starts at `start_col` and has at most `width` visible columns.
-/// Preserves ANSI escape sequences appropriately.
+/// Returns the part of `s` that starts at `start_col` and spans at most `width`
+/// visible columns. Escape sequences are treated as zero-width atoms: they never
+/// count towards a column and never get cut in half.
+///
+/// With `preserve_styles` the slice is coloured: it opens with the SGR state
+/// accumulated before `start_col` (reset by `ESC[0m` / `ESC[m`), keeps the
+/// zero-width escapes that fall inside the range (cursor markers, hyperlinks),
+/// and closes with `ESC[0m` when a style is still active so nothing leaks into
+/// the rest of the row. Without it every escape sequence is dropped, i.e. the
+/// caller gets the plain-text slice.
+///
+/// Wide graphemes are never split in half: a grapheme straddling an edge is
+/// replaced by spaces for the columns that overlap. `width == 0` returns an
+/// empty string and an out-of-range `start_col` returns an empty string rather
+/// than panicking.
 pub fn slice_by_column(s: &str, start_col: usize, width: usize, preserve_styles: bool) -> String {
     if width == 0 {
         return String::new();
     }
 
-    let stripped = strip_ansi(s);
-    let segments: Vec<&str> = stripped.graphemes(true).collect();
+    let end = start_col.saturating_add(width);
+    let atoms = atoms(s);
+    let mut column = 0;
+    let mut started = false;
+    let mut result = String::new();
+    // SGR state before the first emitted grapheme, and the state of what has
+    // actually been emitted (the trailing reset is decided by the latter).
+    let mut context = String::new();
+    let mut style = String::new();
 
-    // Find the character indices for the column range
-    let mut current_col = 0;
-    let mut start_idx = None;
-    let mut end_idx = segments.len();
-    let mut col_count = 0;
-
-    for (i, seg) in segments.iter().enumerate() {
-        let seg_width = UnicodeWidthStr::width(*seg);
-        if current_col >= start_col && start_idx.is_none() {
-            start_idx = Some(i);
+    for atom in &atoms {
+        if atom.escape {
+            if !preserve_styles {
+                continue;
+            }
+            if started {
+                accumulate_sgr(&mut style, atom.text);
+                result.push_str(atom.text);
+            } else {
+                accumulate_sgr(&mut context, atom.text);
+            }
+            continue;
         }
-        if start_idx.is_some() {
-            col_count += seg_width;
-            if col_count >= width {
-                end_idx = i + 1;
-                break;
+
+        if column >= end {
+            break;
+        }
+        let next = column + atom.width;
+        if next > start_col {
+            if !started {
+                started = true;
+                if preserve_styles {
+                    result.push_str(&context);
+                    style.push_str(&context);
+                }
+            }
+            if column >= start_col && next <= end {
+                result.push_str(atom.text);
+            } else {
+                // Straddles the start or the end of the range: pad instead of
+                // emitting half a grapheme.
+                let overlap = next.min(end).saturating_sub(column.max(start_col));
+                result.push_str(&" ".repeat(overlap));
             }
         }
-        current_col += seg_width;
+        column = next;
     }
 
-    let start_idx = start_idx.unwrap_or(segments.len());
-    let result: String = segments[start_idx..end_idx].iter().copied().collect();
-
-    if preserve_styles && result != stripped {
-        // TODO: Preserve ANSI styles from the original string
-        // This is a simplified version
-        result
-    } else {
-        result
+    if preserve_styles && !style.is_empty() {
+        result.push_str("\x1b[0m");
     }
+
+    result
 }
 
 /// Normalize terminal output by resetting styles at line ends.
@@ -215,5 +314,36 @@ mod tests {
         // let link = hyperlink("https://example.com", "Example");
         // assert!(link.contains("https://example.com"));
         // assert!(link.contains("Example"));
+    }
+
+    #[test]
+    fn slice_by_column_preserves_sgr_when_asked() {
+        let result = slice_by_column("\x1b[31mabcdef\x1b[0m", 1, 3, true);
+        assert_eq!(strip_ansi(&result), "bcd");
+        assert!(result.starts_with("\x1b[31m"), "result: {result:?}");
+        assert!(result.ends_with("\x1b[0m"), "result: {result:?}");
+        assert_eq!(visible_width(&result), 3);
+    }
+
+    #[test]
+    fn slice_by_column_drops_styles_when_not_asked() {
+        let result = slice_by_column("\x1b[31mabcdef\x1b[0m", 1, 3, false);
+        assert_eq!(result, "bcd");
+    }
+
+    #[test]
+    fn slice_by_column_keeps_the_cursor_marker() {
+        let line = format!("\x1b[32mab{CURSOR_MARKER}cd\x1b[0m");
+        let result = slice_by_column(&line, 1, 2, true);
+        assert!(result.contains(CURSOR_MARKER), "result: {result:?}");
+        assert!(result.contains("\x1b[32m"), "result: {result:?}");
+        assert_eq!(strip_ansi(&result), "bc");
+        assert_eq!(visible_width(&result), 2);
+    }
+
+    #[test]
+    fn slice_by_column_wide_graphemes_are_not_split() {
+        let result = slice_by_column("中文", 1, 1, true);
+        assert_eq!(visible_width(&result), 1);
     }
 }
