@@ -82,6 +82,12 @@ jobs:
       - name: Test install.sh platform detection
         run: sh scripts/tests/install-sh.sh
 
+      # `release.sh` orchestrates the release workflow, so it has to agree with it:
+      # the asset names it polls for and the remote it pushes to. Both had drifted
+      # (polled `kiqi-v…` for 30 minutes; pushed to `origin` = bigfish1913).
+      - name: Test release.sh against the release workflow
+        run: sh scripts/tests/release-sh.sh
+
       - name: Run workspace tests
         run: cargo test --workspace --locked
 

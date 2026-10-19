@@ -1,0 +1,66 @@
+#!/bin/sh
+# Keep `release.sh` consistent with the workflow it orchestrates.
+#
+# Two classes of drift, both silent and both found in this script:
+#
+#   1. **Push target.** `phase_push` ran `git push origin HEAD`. In this clone
+#      `origin` is `bigfish1913/pi-rust`, which AGENTS.md forbids pushing to
+#      ("要推送就推 `fork`"). A release would have published to the wrong repo.
+#   2. **Asset names.** `phase_wait` polled for `kiqi-v<ver>-<target>`, but
+#      `release-binaries.yml` uploads `ki-v<ver>-<target>` (`name="ki-v${version}-
+#      ${target}"`). The poll would never see its files and would die after
+#      120 × 15 s — 30 minutes of waiting for something that cannot appear.
+#
+# Both are checked statically: the workflow is the source of truth for the asset
+# name, and AGENTS.md for the remote. Nothing here runs a release.
+set -eu
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+RELEASE="$ROOT/scripts/release.sh"
+WORKFLOW="$ROOT/.github/workflows/release-binaries.yml"
+AGENTS="$ROOT/AGENTS.md"
+
+for f in "$RELEASE" "$WORKFLOW" "$AGENTS"; do
+    [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
+done
+
+status=0
+
+# --- 1. The workflow's asset name is `ki-v<version>-<target>` ----------------
+# Assert the workflow still says so, then that release.sh expects the same prefix.
+grep -q 'name="ki-v\${version}-\${target}"' "$WORKFLOW" || {
+    echo "FAIL: release-binaries.yml no longer names assets 'ki-v<version>-<target>';" >&2
+    echo "      update this test and scripts/release.sh together" >&2
+    status=1
+}
+grep -q 'needed+=("ki-v\$release_version-' "$RELEASE" || {
+    echo "FAIL: scripts/release.sh does not poll for 'ki-v<version>-…' assets" >&2
+    status=1
+}
+grep -q 'needed+=("kiqi-' "$RELEASE" && {
+    echo "FAIL: scripts/release.sh still polls the retired 'kiqi-v…' asset names" >&2
+    status=1
+}
+
+# --- 2. Pushing goes to `fork`, never `origin` ------------------------------
+grep -q '要推送就推 `fork`' "$AGENTS" || {
+    echo "note: AGENTS.md no longer states the push rule; review this test" >&2
+}
+grep -n 'git push origin' "$RELEASE" && {
+    echo "FAIL: scripts/release.sh pushes to 'origin', which is bigfish1913/pi-rust" >&2
+    echo "      (AGENTS.md: push to 'fork')" >&2
+    status=1
+}
+grep -q 'git push "\$PUSH_REMOTE" HEAD' "$RELEASE" || {
+    echo "FAIL: scripts/release.sh does not push the branch to \$PUSH_REMOTE" >&2
+    status=1
+}
+grep -q 'PUSH_REMOTE="\${KI_RELEASE_REMOTE:-fork}"' "$RELEASE" || {
+    echo "FAIL: \$PUSH_REMOTE must default to 'fork'" >&2
+    status=1
+}
+
+if [ "$status" -eq 0 ]; then
+    echo "release.sh: asset names match the workflow, push target is 'fork'"
+fi
+exit "$status"

@@ -68,6 +68,8 @@ cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-le
 sh scripts/check-offline-lock.sh
 # `install.sh` 是 `curl | sh` 的入口，离线可测（`--dry-run --version` 不联网）
 sh scripts/tests/install-sh.sh
+# `release.sh` 必须与它编排的工作流一致（asset 名、push 的远端）
+sh scripts/tests/release-sh.sh
 # 文档快照（改了 CHANGELOG.md / README.md 等必须重跑，CI 会比对）
 sh scripts/sync-embedded-docs.sh
 # CI 还会把每个插件单独编成 cdylib（compile-time feature 关闭时的入口），

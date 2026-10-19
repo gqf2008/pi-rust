@@ -25,6 +25,12 @@
 set -euo pipefail
 
 REPO="bigfish1913/pi-rust"
+
+# Git remote that receives the release commit and tag. `origin` in this clone is
+# bigfish1913/pi-rust, which AGENTS.md forbids pushing to; `fork` is
+# gqf2008/pi-rust. Override with `KI_RELEASE_REMOTE` when a clone names it
+# differently.
+PUSH_REMOTE="${KI_RELEASE_REMOTE:-fork}"
 # `<target>:<archive extension>` — must mirror the `archive:` column of the
 # release-binaries matrix. Each target publishes exactly ONE archive (plus its
 # `.sha256` sidecar), so requiring both formats here waits forever.
@@ -180,8 +186,10 @@ phase_tag() {
 
 phase_push() {
   note "push branch + tag"
-  step git push origin HEAD
-  step git push origin "$release_tag"
+  # `fork` is gqf2008/pi-rust; `origin` is bigfish1913/pi-rust, which AGENTS.md
+  # forbids pushing to ("要推送就推 `fork`"). This used to push to `origin`.
+  step git push "$PUSH_REMOTE" HEAD
+  step git push "$PUSH_REMOTE" "$release_tag"
 }
 
 phase_wait() {
@@ -191,7 +199,10 @@ phase_wait() {
   for entry in "${ASSET_TARGETS[@]}"; do
     target="${entry%%:*}"
     ext="${entry##*:}"
-    needed+=("kiqi-$release_tag-$target.$ext" "kiqi-$release_tag-$target.$ext.sha256")
+    # `release-binaries.yml` names the archive `ki-v<version>-<target>.<ext>` (the
+    # `ki` command name); this used to wait for `kiqi-v…`, which no job ever
+    # uploads — the poll below would then never finish.
+    needed+=("ki-v$release_version-$target.$ext" "ki-v$release_version-$target.$ext.sha256")
   done
   if [[ "$DRY_RUN" == "1" ]]; then
     echo "  \$ poll: gh release view $release_tag --json assets until all archives + .sha256 exist"
