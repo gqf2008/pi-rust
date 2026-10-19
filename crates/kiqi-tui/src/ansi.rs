@@ -139,18 +139,113 @@ fn atoms(line: &str) -> Vec<Atom<'_>> {
     atoms
 }
 
-/// Fold one escape sequence into the accumulated SGR context.
+/// Whether `escape` is an SGR sequence (the only escapes carrying style).
+fn is_sgr(escape: &str) -> bool {
+    escape.starts_with("\x1b[") && escape.ends_with('m')
+}
+
+/// The parameter list of an SGR escape, or `None` for any other escape.
+fn sgr_params(escape: &str) -> Option<&str> {
+    if !is_sgr(escape) {
+        return None;
+    }
+    Some(&escape[2..escape.len() - 1])
+}
+
+/// Whether these SGR parameters start by resetting everything (`ESC[m`,
+/// `ESC[0m`, `ESC[0;31m`).
+fn sgr_resets(params: &str) -> bool {
+    matches!(params.split(';').next(), Some("" | "0"))
+}
+
+/// The payload of an OSC-8 hyperlink escape (`params;uri`), or `None` when the
+/// escape is something else.
+fn osc8_payload(escape: &str) -> Option<&str> {
+    let rest = escape.strip_prefix("\x1b]8;")?;
+    Some(
+        rest.strip_suffix('\x07')
+            .or_else(|| rest.strip_suffix("\x1b\\"))
+            .unwrap_or(rest),
+    )
+}
+
+/// The escape that closes an OSC-8 hyperlink.
+const OSC8_CLOSE: &str = "\x1b]8;;\x07";
+
+/// Fold one escape sequence into the slice's style state.
 ///
-/// Non-SGR escapes (OSC hyperlinks, APC markers, ...) carry no style state and
-/// are ignored; `ESC[0m` / `ESC[m` are the resets that clear the context.
-fn accumulate_sgr(context: &mut String, escape: &str) {
-    if !(escape.starts_with("\x1b[") && escape.ends_with('m')) {
+/// SGR sequences set or clear `active`; OSC-8 hyperlinks set or clear `link` (the
+/// open sequence the slice has to replay, or the close it has to emit). Every
+/// other escape — APC markers, character-set designations — carries no state.
+fn fold_style(active: &mut bool, link: &mut String, escape: &str) {
+    if let Some(payload) = osc8_payload(escape) {
+        match payload.split_once(';') {
+            // `ESC]8;;BEL` closes the link; a non-empty URI opens one.
+            Some((_, uri)) if uri.is_empty() => link.clear(),
+            _ => {
+                link.clear();
+                link.push_str(escape);
+            }
+        }
         return;
     }
-    if matches!(escape, "\x1b[0m" | "\x1b[m") {
-        context.clear();
+    let Some(params) = sgr_params(escape) else {
+        return;
+    };
+    // A leading `0` (or no parameter at all) resets, so only the parameters
+    // after it decide whether a style stays on. This is what keeps the trailing
+    // reset from being duplicated after an explicit `ESC[0m`.
+    *active = if sgr_resets(params) {
+        let mut rest = params.split(';');
+        rest.next();
+        rest.any(|part| part != "0")
+    } else {
+        true
+    };
+}
+
+/// Tracks the style/hyperlink state of a slice as it is built.
+#[derive(Default)]
+struct SliceStyle {
+    /// SGR bytes seen before the first emitted grapheme, replayed at the start.
+    prefix: String,
+    /// Whether a style is currently on (decides the trailing reset).
+    active: bool,
+    /// OSC-8 open sequence currently in effect, if any.
+    link: String,
+}
+
+impl SliceStyle {
+    fn fold(&mut self, escape: &str) {
+        fold_style(&mut self.active, &mut self.link, escape);
+        let Some(params) = sgr_params(escape) else {
+            return;
+        };
+        // Canonicalise the replay: a reset drops everything accumulated before
+        // it, so slicing a line that carries repeated resets produces the same
+        // bytes as slicing one that does not (the old `accumulate_sgr` did the
+        // same, and rendering asserts on those bytes).
+        if sgr_resets(params) {
+            self.prefix.clear();
+        }
+        self.prefix.push_str(escape);
     }
-    context.push_str(escape);
+
+    /// Emit what the slice has to open with, then keep folding in place.
+    fn open(&self, result: &mut String) {
+        result.push_str(&self.prefix);
+        result.push_str(&self.link);
+    }
+
+    /// Close whatever the slice left open so it cannot leak into the row.
+    fn close(&self, result: &mut String) {
+        if self.active {
+            result.push_str("\x1b[0m");
+        }
+        if !self.link.is_empty() {
+            result.push_str(OSC8_CLOSE);
+        }
+    }
 }
 
 /// Slice a string by visible column positions.
@@ -160,16 +255,20 @@ fn accumulate_sgr(context: &mut String, escape: &str) {
 /// count towards a column and never get cut in half.
 ///
 /// With `preserve_styles` the slice is coloured: it opens with the SGR state
-/// accumulated before `start_col` (reset by `ESC[0m` / `ESC[m`), keeps the
-/// zero-width escapes that fall inside the range (cursor markers, hyperlinks),
-/// and closes with `ESC[0m` when a style is still active so nothing leaks into
-/// the rest of the row. Without it every escape sequence is dropped, i.e. the
-/// caller gets the plain-text slice.
+/// (and any open OSC-8 hyperlink) accumulated before `start_col` — reset by
+/// `ESC[0m` / `ESC[m` — keeps the zero-width escapes that fall inside the range
+/// (cursor markers, hyperlinks) and closes with `ESC[0m` / `ESC]8;;BEL` when a
+/// style or link is still on, so nothing leaks into the rest of the row. Escapes
+/// that *begin* after the range are dropped rather than emitted: a hyperlink
+/// opened there would otherwise swallow the rows that follow. Without
+/// `preserve_styles` every escape sequence is dropped and the caller gets plain
+/// text.
 ///
 /// Wide graphemes are never split in half: a grapheme straddling an edge is
-/// replaced by spaces for the columns that overlap. `width == 0` returns an
-/// empty string and an out-of-range `start_col` returns an empty string rather
-/// than panicking.
+/// replaced by spaces for the columns that overlap (so the result is exactly
+/// `width` columns wide whenever the source is long enough). `width == 0`
+/// returns an empty string and an out-of-range `start_col` returns an empty
+/// string rather than panicking.
 pub fn slice_by_column(s: &str, start_col: usize, width: usize, preserve_styles: bool) -> String {
     if width == 0 {
         return String::new();
@@ -180,21 +279,21 @@ pub fn slice_by_column(s: &str, start_col: usize, width: usize, preserve_styles:
     let mut column = 0;
     let mut started = false;
     let mut result = String::new();
-    // SGR state before the first emitted grapheme, and the state of what has
-    // actually been emitted (the trailing reset is decided by the latter).
-    let mut context = String::new();
-    let mut style = String::new();
+    let mut style = SliceStyle::default();
 
     for atom in &atoms {
         if atom.escape {
             if !preserve_styles {
                 continue;
             }
+            // Nothing past the window may be emitted, not even a zero-width
+            // escape: the row has already been filled.
+            if column >= end {
+                break;
+            }
+            style.fold(atom.text);
             if started {
-                accumulate_sgr(&mut style, atom.text);
                 result.push_str(atom.text);
-            } else {
-                accumulate_sgr(&mut context, atom.text);
             }
             continue;
         }
@@ -207,8 +306,7 @@ pub fn slice_by_column(s: &str, start_col: usize, width: usize, preserve_styles:
             if !started {
                 started = true;
                 if preserve_styles {
-                    result.push_str(&context);
-                    style.push_str(&context);
+                    style.open(&mut result);
                 }
             }
             if column >= start_col && next <= end {
@@ -223,8 +321,8 @@ pub fn slice_by_column(s: &str, start_col: usize, width: usize, preserve_styles:
         column = next;
     }
 
-    if preserve_styles && !style.is_empty() {
-        result.push_str("\x1b[0m");
+    if preserve_styles {
+        style.close(&mut result);
     }
 
     result
@@ -345,5 +443,53 @@ mod tests {
     fn slice_by_column_wide_graphemes_are_not_split() {
         let result = slice_by_column("中文", 1, 1, true);
         assert_eq!(visible_width(&result), 1);
+    }
+
+    #[test]
+    fn slice_by_column_does_not_repeat_the_reset() {
+        // The slice is fully inside a styled span that is already closed: the
+        // trailing reset must not be added a second time, and a style reset
+        // inside the window must not leave the slice "still styled".
+        let result = slice_by_column("\x1b[31mab\x1b[0mcdef", 0, 4, true);
+        assert_eq!(result, "\x1b[31mab\x1b[0mcd");
+        assert_eq!(strip_ansi(&result), "abcd");
+        assert_eq!(visible_width(&result), 4);
+    }
+
+    #[test]
+    fn slice_by_column_drops_escapes_that_start_after_the_range() {
+        // A hyperlink opened past the window used to be emitted anyway, which
+        // made the rest of the row part of the link (`ESC[0m` does not close
+        // OSC-8). Nothing past `end` may be emitted.
+        let line = "abc\x1b]8;;http://example.com\x07def";
+        let result = slice_by_column(line, 0, 3, true);
+        assert_eq!(result, "abc");
+    }
+
+    #[test]
+    fn slice_by_column_closes_an_osc8_link_it_cut() {
+        // The link opens inside the window and its close falls outside: the
+        // slice must close it itself (hstack calls this without the
+        // `SEGMENT_RESET` fallback that layout uses).
+        let line = "ab\x1b]8;;http://example.com\x07cd\x1b]8;;\x07ef";
+        let result = slice_by_column(line, 0, 3, true);
+        assert_eq!(strip_ansi(&result), "abc");
+        assert!(result.ends_with(OSC8_CLOSE), "result: {result:?}");
+        assert_eq!(result, "ab\x1b]8;;http://example.com\x07c\x1b]8;;\x07");
+    }
+
+    #[test]
+    fn slice_by_column_keeps_a_link_opened_before_the_range() {
+        let line = "\x1b]8;;http://example.com\x07abcd\x1b]8;;\x07";
+        let result = slice_by_column(line, 1, 2, true);
+        assert_eq!(strip_ansi(&result), "bc");
+        assert_eq!(result, "\x1b]8;;http://example.com\x07bc\x1b]8;;\x07");
+    }
+
+    #[test]
+    fn slice_by_column_drops_a_link_closed_before_the_range() {
+        let line = "\x1b]8;;http://example.com\x07a\x1b]8;;\x07bcd";
+        let result = slice_by_column(line, 1, 2, true);
+        assert_eq!(result, "bc");
     }
 }
