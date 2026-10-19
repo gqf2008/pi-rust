@@ -2511,6 +2511,101 @@ fn double_escape_trigger_has_half_second_window() {
 }
 
 #[test]
+fn single_escape_soft_interrupts_double_escape_hard_aborts() {
+    // `soft-interrupt.md` §3.5: one Esc only stops the action in flight (the
+    // run, its queue and its signal/goal chains survive); a second Esc inside
+    // the 500ms window still takes the whole run down. Drive the verdict the
+    // key loop uses, carrying the window from press to press exactly as the
+    // loop does.
+    let first = std::time::Instant::now();
+    let verdict = esc_action(RunStatus::Working, None, first);
+    assert_eq!(verdict.action, EscAction::SoftInterrupt);
+    assert_eq!(
+        verdict.last_escape_time,
+        Some(first),
+        "the first press must arm the double-press window"
+    );
+
+    // Second press 100ms later: inside the window → hard abort, and the window
+    // is consumed so a third press starts a fresh soft interrupt.
+    let second = first + std::time::Duration::from_millis(100);
+    let verdict = esc_action(RunStatus::Working, verdict.last_escape_time, second);
+    assert_eq!(verdict.action, EscAction::HardAbort);
+    assert_eq!(verdict.last_escape_time, None, "the window is consumed");
+    let third = second + std::time::Duration::from_millis(100);
+    assert_eq!(
+        esc_action(RunStatus::Working, verdict.last_escape_time, third).action,
+        EscAction::SoftInterrupt
+    );
+}
+
+#[test]
+fn escape_outside_the_window_soft_interrupts_again_instead_of_aborting() {
+    // A slow second press is a *new* single press, not an abort: 501ms is
+    // outside the window, so it must soft-interrupt and re-arm.
+    let first = std::time::Instant::now();
+    let slow = first + std::time::Duration::from_millis(501);
+    let verdict = esc_action(RunStatus::Working, Some(first), slow);
+    assert_eq!(verdict.action, EscAction::SoftInterrupt);
+    assert_eq!(verdict.last_escape_time, Some(slow));
+}
+
+#[test]
+fn escape_outside_working_passes_through_to_the_idle_double_escape_action() {
+    // Only Working is Esc's interrupt; Idle keeps its tree/fork double-escape
+    // and Aborting keeps ignoring it. Neither may touch the stored window from
+    // here — the Idle branch below the interrupt case owns that (§3.5 step 4).
+    let now = std::time::Instant::now();
+    for status in [RunStatus::Idle, RunStatus::Aborting] {
+        let verdict = esc_action(status, Some(now), now);
+        assert_eq!(verdict.action, EscAction::PassThrough, "status {status:?}");
+        assert_eq!(verdict.last_escape_time, Some(now), "status {status:?}");
+    }
+}
+
+#[test]
+fn a_double_press_window_never_leaks_across_a_run_status_change() {
+    // A Working Esc arms the window for the hard abort; if the run ends before
+    // the second press, that stale window must not make the *next* Idle Esc
+    // fire tree/fork as an instant double press (and a lone Idle press must not
+    // hard-abort a run that just started).
+    let now = std::time::Instant::now();
+    let soft = esc_action(RunStatus::Working, None, now);
+    assert_eq!(soft.action, EscAction::SoftInterrupt);
+
+    // Same status keeps the window (the legitimate double press).
+    assert_eq!(
+        sync_escape_window(
+            RunStatus::Working,
+            RunStatus::Working,
+            soft.last_escape_time
+        ),
+        (RunStatus::Working, soft.last_escape_time)
+    );
+    // Working → Idle drops it, so the Idle press below sees a clean window.
+    let (seen, window) =
+        sync_escape_window(RunStatus::Working, RunStatus::Idle, soft.last_escape_time);
+    assert_eq!(seen, RunStatus::Idle);
+    assert_eq!(window, None);
+    // Idle → Working drops it too (a lone Idle press must not abort).
+    assert_eq!(
+        sync_escape_window(RunStatus::Idle, RunStatus::Working, Some(now)).1,
+        None
+    );
+}
+
+#[test]
+fn soft_interrupt_notes_describe_what_the_press_reached() {
+    // The dim note is the only feedback a soft interrupt gives (the status stays
+    // Working and the queue stays queued), so the wording matters: it must not
+    // read like an abort, and the nothing-to-interrupt case must say so.
+    assert!(SOFT_INTERRUPT_NOTE.contains("continues"));
+    assert!(!SOFT_INTERRUPT_NOTE.to_ascii_lowercase().contains("abort"));
+    assert!(NOTHING_TO_INTERRUPT_NOTE.contains("Nothing to interrupt"));
+    assert!(NO_ACTIVE_RUN_TO_INTERRUPT_NOTE.contains("No run"));
+}
+
+#[test]
 fn ctrl_c_clears_first_and_only_exits_inside_the_window() {
     // upstream's `handleCtrlC`: a lone press clears the editor and never
     // quits by itself; only a second press within 500ms exits. It must not

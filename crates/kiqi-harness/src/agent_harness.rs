@@ -43,7 +43,8 @@ use kiqi_agent::message::AgentMessage;
 use kiqi_agent::{
     run_agent_loop, run_agent_loop_from_assistant, AfterToolCall, AfterToolResults, AgentContext,
     AgentEmitter, AgentEvent, AgentLoopConfig, AgentTool, BeforeToolCall, BeforeToolCallContext,
-    ConvertToLlm, QueueMode, ShouldStopAfterTurnContext, StreamFn, TransformContext,
+    ConvertToLlm, InterruptControl, QueueMode, ShouldStopAfterTurnContext, StreamFn,
+    TransformContext,
 };
 use kiqi_ai::types::{
     AssistantMessage, Content, DeferredHandle, StopReason, ThinkingLevel, Usage, UserContent,
@@ -189,6 +190,26 @@ pub struct AbortResult {
     pub run_id: String,
     pub steer: Vec<AgentMessage>,
     pub follow_up: Vec<AgentMessage>,
+}
+
+/// Result of [`AgentLane::interrupt`]. The soft-interrupt counterpart of
+/// [`AbortResult`]: it reports what the interrupt reached, never a run outcome
+/// (the run keeps going, or never started).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptResult {
+    /// A tool call (or stream request) was in flight and its token was
+    /// cancelled. The run continues with the conversation after that action
+    /// unwinds — it was *not* aborted.
+    Soft,
+    /// Nothing to interrupt: no operation is active on this lane (or the active
+    /// one belongs to another lane). Best-effort, so this is `Ok`, not an error
+    /// like [`AgentLane::abort`]'s idle case.
+    NoActiveRun,
+    /// The operation is active but has no cancellable action installed right
+    /// now (between actions, or a compaction, which installs none). The soft
+    /// flag is still latched, so the *next* action the run installs starts
+    /// cancelled — a press that lands during a stream is not dropped.
+    NothingToInterrupt,
 }
 
 /// Result of `record_usage`. Mirrors TS `RecordUsageResult` (`Result<void, Closed>`).
@@ -356,6 +377,13 @@ pub trait AgentLane: Send + Sync {
 
     async fn abort(&self) -> HarnessResult<AbortResult>;
 
+    /// 软中断：只取消当前工具/流，run 继续。与 `abort()`（终止整轮）相对。
+    ///
+    /// Best-effort by contract: with nothing active this returns
+    /// [`InterruptResult::NoActiveRun`] instead of an error, so a UI key binding
+    /// can press it unconditionally (and twice) without reporting a failure.
+    async fn interrupt(&self) -> HarnessResult<InterruptResult>;
+
     async fn steer(&self, message: AgentMessage) -> HarnessResult<QueueResult>;
     async fn follow_up(&self, message: AgentMessage) -> HarnessResult<QueueResult>;
     async fn next_run(&self, message: AgentMessage) -> HarnessResult<QueueResult>;
@@ -461,6 +489,12 @@ struct ActiveRun {
     signal: CancellationToken,
     idle: Arc<tokio::sync::Notify>,
     kind: OperationKind,
+    /// Soft-interrupt handle for *this* operation. The same `Arc` is handed to
+    /// the agent loop (via `AgentLoopConfig::interrupt`), so
+    /// [`AgentLane::interrupt`] cancels exactly the action that loop installed.
+    /// Fresh per run: a latch left over from one run must not pre-cancel the
+    /// first tool of the next one.
+    interrupt: Arc<InterruptControl>,
 }
 
 /// A queued user message keeps its public entry id until the agent loop drains
@@ -1765,13 +1799,18 @@ impl AgentHarness {
     // -- private helpers ----------------------------------------------------
 
     /// Reject if closed or if a lane already has an active operation. On
-    /// success, installs the `ActiveRun` guard and returns `(run_id, signal,
-    /// idle_notify)`.
+    /// success, installs the `ActiveRun` guard and returns
+    /// `(run_id, signal, idle_notify, interrupt)`.
     fn acquire_run(
         &self,
         kind: OperationKind,
         window: u64,
-    ) -> HarnessResult<(String, CancellationToken, Arc<tokio::sync::Notify>)> {
+    ) -> HarnessResult<(
+        String,
+        CancellationToken,
+        Arc<tokio::sync::Notify>,
+        Arc<InterruptControl>,
+    )> {
         let mut inner = self.inner.lock().unwrap();
         if inner.closed {
             return Err(HarnessError::closed());
@@ -1807,14 +1846,20 @@ impl AgentHarness {
             signal.cancel();
         }
         let idle = Arc::new(tokio::sync::Notify::new());
+        // One soft-interrupt handle per operation. Created here (not on the
+        // harness) so the handle the loop installs into and the handle
+        // `interrupt()` reaches are the same `Arc`, and so a latch cannot
+        // outlive the run it belongs to.
+        let interrupt = Arc::new(InterruptControl::new());
         inner.active_run = Some(ActiveRun {
             run_id: run_id.clone(),
             lane: self.lane.clone(),
             signal: signal.clone(),
             idle: Arc::clone(&idle),
             kind,
+            interrupt: Arc::clone(&interrupt),
         });
-        Ok((run_id, signal, idle))
+        Ok((run_id, signal, idle, interrupt))
     }
 
     /// Release the active-run guard and notify idle waiters.
@@ -3116,7 +3161,8 @@ impl AgentHarness {
         from_assistant: bool,
         window: StartingGuard<'_>,
     ) -> HarnessResult<RunResult> {
-        let (run_id, signal, _idle) = self.acquire_run(OperationKind::Run, window.id())?;
+        let (run_id, signal, _idle, interrupt) =
+            self.acquire_run(OperationKind::Run, window.id())?;
 
         // `nextRun` messages are consumed when a new run starts, before the
         // caller's prompt. This matches pi's ordering and keeps them durable
@@ -3561,6 +3607,7 @@ impl AgentHarness {
                 cache_retention: snap.stream_options.cache_retention.unwrap_or_default(),
                 session_id: None,
                 signal: signal.clone(),
+                interrupt: Arc::clone(&interrupt),
             };
 
         // Emitter: use the caller's override if one was supplied (e.g. the TUI
@@ -3848,7 +3895,8 @@ impl AgentHarness {
         // Owns a pre-registration window too: an abort landing between the
         // `/compact` call and its registration must latch, not be refused.
         let window = StartingGuard::new(self);
-        let (run_id, signal, _idle) = self.acquire_run(OperationKind::Compaction, window.id())?;
+        let (run_id, signal, _idle, _interrupt) =
+            self.acquire_run(OperationKind::Compaction, window.id())?;
         let _run_lease = ActiveRunLease { harness: self };
         let recovery_tools = self.get_tools().await?;
         let recovery_hook = self.inner.lock().unwrap().before_tool_call.clone();
@@ -4239,6 +4287,38 @@ impl AgentLane for AgentHarness {
             run_id,
             steer,
             follow_up,
+        })
+    }
+
+    /// Soft interrupt: cancel the action in flight (one tool call for now, later
+    /// also one stream request) and let the run continue; `abort()` is the
+    /// opposite (end the whole run).
+    ///
+    /// Deliberately best-effort — unlike [`Self::abort`], an idle press is
+    /// `Ok(NoActiveRun)` rather than an error, so a TUI key binding can fire it
+    /// unconditionally (and twice) without showing a failure.
+    async fn interrupt(&self) -> HarnessResult<InterruptResult> {
+        // Take the handle out of the harness lock, then release it: the checks
+        // below take `InterruptControl`'s *own* mutex, and no lock of ours is
+        // held across the awaits this `async fn` is allowed to grow.
+        let interrupt = {
+            let inner = self.inner.lock().unwrap();
+            match &inner.active_run {
+                Some(active) if active.lane == self.lane => Arc::clone(&active.interrupt),
+                // Idle — or the active operation belongs to another lane.
+                _ => return Ok(InterruptResult::NoActiveRun),
+            }
+        };
+        // An op with no installed action is between actions (or is a
+        // compaction, which installs none). `soft_interrupt()` latches the flag
+        // either way, so a press that lands during a stream cancels the action
+        // the loop installs next instead of being dropped.
+        let installed = interrupt.has_current();
+        interrupt.soft_interrupt();
+        Ok(if installed {
+            InterruptResult::Soft
+        } else {
+            InterruptResult::NothingToInterrupt
         })
     }
 
@@ -4708,6 +4788,10 @@ impl AgentLane for LaneHandle {
 
     async fn abort(&self) -> HarnessResult<AbortResult> {
         self.runner().abort().await
+    }
+
+    async fn interrupt(&self) -> HarnessResult<InterruptResult> {
+        self.runner().interrupt().await
     }
 
     async fn steer(&self, message: AgentMessage) -> HarnessResult<QueueResult> {
@@ -5376,7 +5460,9 @@ mod starting_window_tests {
     use crate::session::types::SessionMetadata;
     use kiqi_ai::{Api, Model};
 
-    fn opts() -> AgentHarnessOptions {
+    /// Shared with `soft_interrupt_tests` (sibling module): both need a
+    /// harness with no entries, no models and no tools.
+    pub(super) fn opts() -> AgentHarnessOptions {
         AgentHarnessOptions {
             model: Model::new("m", "m", Api::Faux, "faux", "http://x"),
             thinking_level: Default::default(),
@@ -5443,7 +5529,7 @@ mod starting_window_tests {
 
         // The prompt registers: the latch is consumed into a pre-cancelled
         // token, so the run starts pre-aborted and promptly resolves Aborted.
-        let (_, signal, _) = harness
+        let (_, signal, _, _) = harness
             .acquire_run(OperationKind::Run, guard.id())
             .expect("run acquires");
         assert!(
@@ -5475,7 +5561,7 @@ mod starting_window_tests {
         // ...and latch nothing: the next run starts with a live token. An idle
         // cancel must never kill the NEXT turn.
         let window = StartingGuard::new(&harness);
-        let (_, signal, _) = harness
+        let (_, signal, _, _) = harness
             .acquire_run(OperationKind::Run, window.id())
             .unwrap();
         assert!(!signal.is_cancelled());
@@ -5507,7 +5593,7 @@ mod starting_window_tests {
 
         // The LATER prompt runs with a live token (the no-latch-kill invariant).
         let window = StartingGuard::new(&harness);
-        let (_, signal, _) = harness
+        let (_, signal, _, _) = harness
             .acquire_run(OperationKind::Run, window.id())
             .unwrap();
         assert!(!signal.is_cancelled());
@@ -5559,7 +5645,7 @@ mod starting_window_tests {
         // A second call arms its own window (overwriting the single slot) and
         // registers first: its run must start with a LIVE token...
         let other_window = StartingGuard::new(&harness);
-        let (_, other_signal, _) = harness
+        let (_, other_signal, _, _) = harness
             .acquire_run(OperationKind::Run, other_window.id())
             .unwrap();
         assert!(
@@ -5581,12 +5667,132 @@ mod starting_window_tests {
         );
 
         // Only main's own registration consumes (and clears) main's latch.
-        let (_, signal, _) = harness
+        let (_, signal, _, _) = harness
             .acquire_run(OperationKind::Run, main_window.id())
             .unwrap();
         assert!(signal.is_cancelled(), "main's own latch pre-cancels main");
         assert!(harness.inner.lock().unwrap().pending_abort.is_none());
         harness.release_run();
         drop(main_window);
+    }
+}
+
+/// Soft interrupt (`AgentLane::interrupt`). White-box on purpose: the
+/// [`InterruptControl`] the loop installs its per-action tokens into lives in
+/// the private `ActiveRun`, so "an action is in flight right now" cannot be
+/// staged from outside the crate — `tests/harness_run_e2e.rs` covers that path
+/// through a real run + real tool instead. These pin the three-state contract
+/// and the invariant that a soft interrupt never kills the run.
+#[cfg(test)]
+mod soft_interrupt_tests {
+    use super::starting_window_tests::opts;
+    use super::*;
+
+    #[tokio::test]
+    async fn idle_interrupt_reports_no_active_run_instead_of_erroring() {
+        let harness = AgentHarness::create(opts()).await.unwrap();
+
+        // `abort()` errors here (and latches against a starting window);
+        // `interrupt()` is best-effort: a UI key binding must be able to press
+        // it while idle without surfacing a failure.
+        assert_eq!(
+            AgentLane::interrupt(&harness)
+                .await
+                .expect("an idle soft interrupt is not an error"),
+            InterruptResult::NoActiveRun
+        );
+        assert!(
+            harness.inner.lock().unwrap().pending_abort.is_none(),
+            "a soft interrupt must not latch an abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupt_from_another_lane_reports_no_active_run() {
+        let harness = AgentHarness::create(opts()).await.unwrap();
+        harness.session().create_lane("side", None).await.unwrap();
+
+        let window = StartingGuard::new(&harness);
+        let (_, signal, _, _) = harness
+            .acquire_run(OperationKind::Run, window.id())
+            .expect("main acquires");
+
+        // The handle's `runner()` carries the side lane, so the foreign lane
+        // cannot reach main's in-flight run.
+        let side = harness.lane("side");
+        assert_eq!(
+            AgentLane::interrupt(side.as_ref())
+                .await
+                .expect("best effort"),
+            InterruptResult::NoActiveRun
+        );
+        assert!(!signal.is_cancelled(), "main's run is untouched");
+        harness.release_run();
+    }
+
+    #[tokio::test]
+    async fn active_run_with_no_installed_action_reports_nothing_to_interrupt() {
+        let harness = AgentHarness::create(opts()).await.unwrap();
+        let window = StartingGuard::new(&harness);
+        let (_, signal, _, interrupt) = harness
+            .acquire_run(OperationKind::Run, window.id())
+            .expect("run acquires");
+        assert!(!interrupt.has_current(), "nothing is executing yet");
+
+        assert_eq!(
+            AgentLane::interrupt(&harness).await.expect("best effort"),
+            InterruptResult::NothingToInterrupt
+        );
+        assert!(
+            !signal.is_cancelled(),
+            "a soft interrupt must never cancel the run signal"
+        );
+
+        // The press is not dropped: the flag is latched, so the action the loop
+        // installs next starts out cancelled (the "pressed during a stream"
+        // case).
+        let next = CancellationToken::new();
+        let id = interrupt.install(next.clone());
+        assert!(
+            next.is_cancelled(),
+            "a latched soft interrupt pre-cancels the next action"
+        );
+        interrupt.clear(id);
+
+        harness.release_run();
+    }
+
+    #[tokio::test]
+    async fn interrupt_cancels_the_installed_action_and_leaves_the_run_alive() {
+        let harness = AgentHarness::create(opts()).await.unwrap();
+        let window = StartingGuard::new(&harness);
+        let (_, signal, _, interrupt) = harness
+            .acquire_run(OperationKind::Run, window.id())
+            .expect("run acquires");
+
+        // Stand in for the loop's `install`: the token handed to a tool call.
+        let action = signal.child_token();
+        let id = interrupt.install(action.clone());
+
+        assert_eq!(
+            AgentLane::interrupt(&harness).await.expect("best effort"),
+            InterruptResult::Soft
+        );
+        assert!(action.is_cancelled(), "the in-flight action is cancelled");
+        assert!(
+            !signal.is_cancelled(),
+            "the run survives — that is what makes the interrupt soft"
+        );
+        assert!(
+            interrupt.take_soft(),
+            "the loop can tell the action died to a soft interrupt"
+        );
+        interrupt.clear(id);
+
+        // `abort()` is unchanged: it cancels the RUN token (not a child).
+        AgentLane::abort(&harness).await.expect("abort still works");
+        assert!(signal.is_cancelled(), "abort kills the run");
+
+        harness.release_run();
     }
 }

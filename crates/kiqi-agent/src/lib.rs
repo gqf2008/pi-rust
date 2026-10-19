@@ -18,6 +18,7 @@ pub(crate) mod clock;
 pub mod error;
 pub mod events;
 pub mod hooks;
+pub mod interrupt;
 pub mod message;
 pub mod queue;
 pub mod stream_fn;
@@ -37,6 +38,7 @@ pub use hooks::{
     GetFollowUpMessages, GetSteeringMessages, PrepareNextTurn, ShouldStopAfterTurn,
     TransformContext,
 };
+pub use interrupt::{InstallId, InterruptControl};
 pub use message::{AgentMessage, AgentMessageRole, CustomMessage};
 pub use queue::PendingMessageQueue;
 pub use stream_fn::{stream_fn, StreamFn};

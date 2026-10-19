@@ -218,6 +218,7 @@ pub fn loop_config_with_converter(
         cache_retention: kiqi_ai::provider::CacheRetention::default(),
         session_id: None,
         signal: tokio_util::sync::CancellationToken::new(),
+        interrupt: std::sync::Arc::new(kiqi_agent::InterruptControl::new()),
     }
 }
 

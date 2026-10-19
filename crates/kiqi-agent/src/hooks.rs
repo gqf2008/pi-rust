@@ -10,6 +10,7 @@
 //! without lifetime gymnastics. Every hook mirrors the TS contract: must not
 //! throw — return a safe fallback instead.
 
+use crate::interrupt::InterruptControl;
 use crate::message::AgentMessage;
 use crate::types::{
     AfterToolCallContext, AfterToolCallResult, AgentLoopTurnUpdate, BeforeToolCallContext,
@@ -127,6 +128,12 @@ pub struct AgentLoopConfig {
     pub session_id: Option<String>,
     /// Cancellation token for the whole run. The loop clones a child per tool.
     pub signal: CancellationToken,
+
+    /// Soft-interrupt control. Shared with whoever triggers the interrupt so
+    /// cancelling a single action (tool call / stream request) never touches
+    /// `signal`. The loop installs a per-action child token here around
+    /// execution and clears it afterwards; see [`InterruptControl`].
+    pub interrupt: Arc<InterruptControl>,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {
@@ -155,6 +162,7 @@ impl std::fmt::Debug for AgentLoopConfig {
             )
             .field("before_tool_call", &self.before_tool_call.is_some())
             .field("after_tool_call", &self.after_tool_call.is_some())
+            .field("interrupt", &self.interrupt.has_current())
             .finish()
     }
 }

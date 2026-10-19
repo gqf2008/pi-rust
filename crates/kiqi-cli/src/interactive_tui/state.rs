@@ -7,7 +7,7 @@ use super::*;
 // ===========================================================================
 
 /// The live status of the agent run, fed to the footer + status slot.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RunStatus {
     Idle,
     Working,
@@ -495,6 +495,85 @@ pub(super) fn ctrl_c_action(
         CtrlCAction::Exit
     } else {
         CtrlCAction::Clear
+    }
+}
+
+/// What one Esc press does while a run is Working (`soft-interrupt.md` §3.5).
+///
+/// One window drives both meanings, like upstream's `onEscape`: the *first*
+/// press only stops the action in flight, a *second* press inside 500ms takes
+/// the whole run down. Splitting it into a pure verdict is what makes the
+/// single-vs-double dispatch testable without driving the key loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EscAction {
+    /// Working, no live double-press window: cancel the action in flight (one
+    /// tool call, one stream request). The run keeps going and keeps its
+    /// steering queue — this goes through `InterruptControl`, not the run
+    /// signal, so it cannot end the turn.
+    SoftInterrupt,
+    /// Working, second press inside the window: end the whole run and hand the
+    /// staged messages back to the editor (the pre-existing behavior).
+    HardAbort,
+    /// Not Working: the `!command` cancel and the Idle double-escape action own
+    /// this press. A window armed by a previous Working press is untouched.
+    PassThrough,
+}
+
+/// An [`EscAction`] plus the double-press window the press leaves behind, so
+/// the caller cannot arm the window on one arm and forget to clear it on the
+/// other.
+pub(super) struct EscVerdict {
+    pub(super) action: EscAction,
+    pub(super) last_escape_time: Option<std::time::Instant>,
+}
+
+/// Decide what this Esc press means. Pure: the key loop owns the clock and the
+/// stored window, this owns the rule.
+pub(super) fn esc_action(
+    status: RunStatus,
+    last_escape_time: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> EscVerdict {
+    if status != RunStatus::Working {
+        return EscVerdict {
+            action: EscAction::PassThrough,
+            last_escape_time,
+        };
+    }
+    if double_escape_trigger(last_escape_time, now) {
+        // The second press consumed the window, so a third press starts over as
+        // a soft interrupt instead of aborting again.
+        EscVerdict {
+            action: EscAction::HardAbort,
+            last_escape_time: None,
+        }
+    } else {
+        EscVerdict {
+            action: EscAction::SoftInterrupt,
+            last_escape_time: Some(now),
+        }
+    }
+}
+
+/// Keep the double-press window and the status it was armed under in sync.
+///
+/// The window is only meaningful inside one status: a Working Esc arms it for
+/// the hard abort, an Idle Esc for tree/fork. If the run ended (or a new run
+/// started) in between, the armed press belongs to the old status — keeping it
+/// would let a *lone* press be read as a double press across the boundary (a
+/// stale Working press instantly triggering tree/fork in Idle, or a lone Idle
+/// press hard-aborting a run that just started).
+///
+/// Returns the status to remember next time and the window to keep.
+pub(super) fn sync_escape_window(
+    last_seen_status: RunStatus,
+    status_now: RunStatus,
+    last_escape_time: Option<std::time::Instant>,
+) -> (RunStatus, Option<std::time::Instant>) {
+    if status_now == last_seen_status {
+        (last_seen_status, last_escape_time)
+    } else {
+        (status_now, None)
     }
 }
 

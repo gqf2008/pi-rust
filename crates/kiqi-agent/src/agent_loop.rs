@@ -1060,10 +1060,26 @@ async fn execute_prepared_tool_call(
     };
 
     let child_token = config.signal.child_token();
-    match tool
-        .execute(&tool_call.id, args.clone(), child_token, on_update)
-        .await
-    {
+    // Register this action as the soft-interrupt target. A latched soft
+    // interrupt (e.g. pressed while the loop was busy with a stream) cancels
+    // `child_token` right here, so the tool starts out cancelled.
+    let install_id = config.interrupt.install(child_token.clone());
+    let outcome = tool
+        .execute(&tool_call.id, args.clone(), child_token.clone(), on_update)
+        .await;
+    // Release the slot for both the Ok and Err paths: the action is over either
+    // way, and a late `clear` is a no-op if a parallel action displaced us.
+    config.interrupt.clear(install_id);
+    // Drain the soft flag together with the action it killed. Leaving it
+    // latched would make `install` pre-cancel every remaining tool call of the
+    // run (and would make `interrupt()` keep reporting `Soft` when nothing is
+    // in flight). Only drain it when *this* action is the one that died: a hard
+    // abort cancels the run signal, not the soft flag, so `take_soft` stays
+    // false there and the caller still sees `Aborted`.
+    if child_token.is_cancelled() {
+        config.interrupt.take_soft();
+    }
+    match outcome {
         Ok(result) => {
             accepting_updates.store(false, Ordering::SeqCst);
             ExecutedToolCallOutcome {

@@ -17,6 +17,7 @@
 use crate::agent_loop::{run_agent_loop, run_agent_loop_continue};
 use crate::events::{AgentEmitter, AgentEvent, BroadcastEmitter};
 use crate::hooks::{default_convert_to_llm_fn, AgentLoopConfig, ConvertToLlm};
+use crate::interrupt::InterruptControl;
 use crate::message::AgentMessage;
 use crate::queue::PendingMessageQueue;
 use crate::stream_fn::{get_default_stream_fn, StreamFn};
@@ -169,6 +170,9 @@ struct Inner {
     tool_execution: ToolExecutionMode,
     event_tx: broadcast::Sender<AgentEvent>,
     active_run: Mutex<Option<ActiveRun>>,
+    /// Shared with every `AgentLoopConfig` this agent builds, so an outside
+    /// caller can soft-interrupt one action without owning the run signal.
+    interrupt: Arc<InterruptControl>,
 }
 
 /// Builder for [`Agent`] with a fluent API. Mirrors the TS `new Agent(opts)`.
@@ -300,6 +304,7 @@ impl AgentBuilder {
             tool_execution: self.opts.tool_execution.unwrap_or_default(),
             event_tx,
             active_run: Mutex::new(None),
+            interrupt: Arc::new(InterruptControl::new()),
         };
 
         Ok(Agent {
@@ -360,6 +365,20 @@ impl Agent {
         if let Some(run) = self.inner.active_run.lock().expect("run lock").as_ref() {
             run.abort.cancel();
         }
+    }
+
+    /// The soft-interrupt handle for this agent. Cloned from the same
+    /// [`InterruptControl`] the loop installs its per-action tokens into, so
+    /// handing it to a UI layer lets that layer cancel one tool call / stream
+    /// request while the run keeps going.
+    pub fn interrupt(&self) -> Arc<InterruptControl> {
+        Arc::clone(&self.inner.interrupt)
+    }
+
+    /// Convenience for [`InterruptControl::soft_interrupt`] on the agent's own
+    /// handle: cancel the in-flight action, keep the run alive.
+    pub fn soft_interrupt(&self) {
+        self.inner.interrupt.soft_interrupt();
     }
 
     /// Resolve when the current run finishes (or immediately if idle).
@@ -538,6 +557,7 @@ impl Agent {
             cache_retention: kiqi_ai::provider::CacheRetention::default(),
             session_id: self.inner.session_id.clone(),
             signal,
+            interrupt: Arc::clone(&self.inner.interrupt),
         }
     }
 

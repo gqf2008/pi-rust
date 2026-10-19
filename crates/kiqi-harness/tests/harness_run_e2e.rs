@@ -4280,3 +4280,193 @@ async fn idle_abort_is_refused_and_never_kills_the_next_turn() {
         other => panic!("expected Completed, got {other:?}"),
     }
 }
+
+// ===========================================================================
+// Soft interrupt (AgentLane::interrupt): cancel the action, keep the run.
+// ===========================================================================
+
+/// A tool that blocks inside `execute` until its *own* per-action token is
+/// cancelled, then returns normally. That is the shape a soft interrupt must
+/// handle: the run is genuinely mid-tool (not between turns), so the token the
+/// loop installed in `InterruptControl` is the only thing a key press can reach.
+struct InterruptibleTool {
+    schema: kiqi_ai::types::Tool,
+    /// Fires once `execute` has been entered, so the test never races the
+    /// interrupt against the tool start. `oneshot` (not `Notify`) because a
+    /// permit would otherwise be lost if the test has not awaited yet.
+    started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Whether the token handed to `execute` was cancelled — i.e. whether the
+    /// interrupt reached the tool rather than just returning `Soft`.
+    saw_cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl InterruptibleTool {
+    fn new(
+        saw_cancel: Arc<std::sync::atomic::AtomicBool>,
+    ) -> (Self, tokio::sync::oneshot::Receiver<()>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (
+            Self {
+                schema: kiqi_ai::types::Tool {
+                    name: "slow_tool".to_string(),
+                    description: "blocks until its action token is cancelled".to_string(),
+                    parameters: kiqi_ai::types::Schema::new(
+                        serde_json::json!({ "type": "object", "properties": {} }),
+                    ),
+                    constrained_sampling: None,
+                },
+                started: Mutex::new(Some(tx)),
+                saw_cancel,
+            },
+            rx,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl kiqi_agent::AgentTool for InterruptibleTool {
+    fn schema(&self) -> &kiqi_ai::types::Tool {
+        &self.schema
+    }
+    fn label(&self) -> &str {
+        "slow_tool"
+    }
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        _params: serde_json::Value,
+        signal: tokio_util::sync::CancellationToken,
+        _on_update: Arc<dyn Fn(kiqi_agent::ToolResultPartial) + Send + Sync>,
+    ) -> Result<kiqi_agent::AgentToolResult, kiqi_agent::AgentError> {
+        if let Some(tx) = self.started.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        // Only the loop's per-action child token cancels here; a run `abort()`
+        // would cancel the parent and thus this child too.
+        signal.cancelled().await;
+        self.saw_cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(kiqi_agent::AgentToolResult::text("tool stopped early"))
+    }
+}
+
+/// Build a harness whose only callable tool blocks until soft-interrupted.
+async fn harness_with_interruptible_tool(
+    script: FauxScript,
+    saw_cancel: Arc<std::sync::atomic::AtomicBool>,
+) -> (
+    Arc<AgentHarness>,
+    Arc<FauxProvider>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    let provider = FauxProvider::new(script);
+    let model = provider.default_model().clone();
+    let (tool, started) = InterruptibleTool::new(saw_cancel);
+    let tools: Vec<HarnessTool> = vec![HarnessTool::new(Arc::new(tool))];
+    let active: Vec<String> = tools.iter().map(|t| t.tool.schema().name.clone()).collect();
+
+    let metadata = SessionMetadata {
+        id: "soft-interrupt".into(),
+        created_at: 0,
+        parent_session_id: None,
+    };
+    let storage = Arc::new(InMemorySessionStorage::new(
+        metadata,
+        Arc::new(SystemClock),
+        Arc::new(DefaultIdGenerator::new()),
+    ));
+    let session = Session::new(storage, None);
+    let options = AgentHarnessOptions {
+        model,
+        thinking_level: Default::default(),
+        active_tool_names: active,
+        tools,
+        system_prompt: None,
+        resources: Default::default(),
+        stream_options: Default::default(),
+        retry: RetryPolicy::default(),
+        compaction: Default::default(),
+        steering_mode: Default::default(),
+        follow_up_mode: Default::default(),
+        tool_execution: Default::default(),
+        drive: Default::default(),
+        session,
+        models: vec![provider.clone() as Arc<dyn Provider>],
+        to_provider_messages: None,
+        entry_projectors: Default::default(),
+        agent_emitter: None,
+        before_tool_call: None,
+        after_tool_call: None,
+        transform_context: None,
+        entry_transforms: Vec::new(),
+        provider_hooks: None,
+        allow_existing_session: false,
+    };
+    let harness = Arc::new(AgentHarness::create(options).await.expect("create harness"));
+    (harness, provider, started)
+}
+
+/// Esc while a tool call is running must cancel *that tool* and let the run
+/// finish its next turn — the observable difference between `interrupt()` and
+/// `abort()`: the run resolves `Completed`, not `Aborted`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn soft_interrupt_stops_the_running_tool_and_the_run_completes() {
+    // turn 1 — the model calls the blocking tool
+    // turn 2 — (after the tool unwinds) the model answers and stops
+    let script = FauxScript::new()
+        .with_tool_call("slow_tool", serde_json::json!({}))
+        .with_text("Finished after the tool was interrupted.");
+    let saw_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (harness, provider, started) =
+        harness_with_interruptible_tool(script, saw_cancel.clone()).await;
+
+    let run_harness = Arc::clone(&harness);
+    let run = tokio::spawn(async move {
+        AgentLane::prompt_text(run_harness.as_ref(), "run the slow tool", vec![]).await
+    });
+
+    // Wait until the tool is actually inside `execute` (and therefore installed
+    // as the interrupt target) before pressing.
+    started.await.expect("the tool must have started");
+
+    let interrupted = AgentLane::interrupt(harness.as_ref())
+        .await
+        .expect("a soft interrupt is best-effort, never an error");
+    assert_eq!(
+        interrupted,
+        kiqi_harness::agent_harness::InterruptResult::Soft,
+        "a tool was in flight, so the interrupt had something to cancel"
+    );
+
+    let result = run
+        .await
+        .expect("the run task must not panic")
+        .expect("the run must resolve, not fail");
+    assert!(
+        matches!(result.outcome, HarnessRunOutcome::Completed { .. }),
+        "a soft interrupt must let the run finish; got {:?}",
+        result.outcome
+    );
+    assert!(
+        saw_cancel.load(std::sync::atomic::Ordering::SeqCst),
+        "the tool's own token must be the thing that was cancelled"
+    );
+    assert_eq!(
+        provider
+            .state()
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2,
+        "the run must have taken its next turn after the tool unwound"
+    );
+
+    // A press after the run resolved is a no-op, not an error: the run released
+    // its `ActiveRun`, so there is no operation (and no latched interrupt) left.
+    assert_eq!(
+        AgentLane::interrupt(harness.as_ref())
+            .await
+            .expect("best effort"),
+        kiqi_harness::agent_harness::InterruptResult::NoActiveRun,
+        "the run is over: the harness holds no active operation any more"
+    );
+}

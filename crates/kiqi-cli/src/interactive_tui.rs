@@ -68,7 +68,7 @@ use tokio_util::sync::CancellationToken;
 
 use kiqi_agent::{AgentEvent, AgentMessage};
 use kiqi_ai::types::{AssistantMessage, Content, UserMessage};
-use kiqi_harness::agent_harness::{AgentHarness, AgentLane, HarnessRunOutcome};
+use kiqi_harness::agent_harness::{AgentHarness, AgentLane, HarnessRunOutcome, InterruptResult};
 use kiqi_harness::session::types::{Entry, EntryOrder, EntryQuery};
 use kiqi_tui::scroll_view::{OverscrollMode, ScrollbarMode};
 #[cfg(test)]
@@ -1746,6 +1746,14 @@ pub async fn interactive_tui(
 
     let key_handle = tokio::task::spawn_blocking(move || {
         let mut last_escape_time = None;
+        // The run status `last_escape_time` was armed under. The 500ms
+        // double-press window is only meaningful *inside* one status — Working
+        // arms it for the hard abort, Idle for tree/fork — so a status change
+        // (the run ended, or a new one started) must drop the armed window.
+        // Otherwise a lone Working Esc could still be inside the window when
+        // the run ends and the very next Idle Esc would fire tree/fork as if it
+        // were the second press (and vice versa).
+        let mut last_seen_status = RunStatus::Idle;
         // upstream's `handleCtrlC` "press twice to exit" window: the instant of
         // the last lone Ctrl+C. Shares the 500ms with Esc's double-escape.
         let mut last_sigint_time: Option<std::time::Instant> = None;
@@ -1933,6 +1941,16 @@ pub async fn interactive_tui(
             // actually arrived before any routing decision, so a client that
             // sends LF for Enter is visible as `Char('j') mods=CONTROL`.
             crate::key_trace::key(&key, "");
+            // Sample the status once per key event (the cheap mutex the Esc
+            // branch takes anyway) and drop a double-press window that was
+            // armed under a status the run has since left. Sampled before the
+            // routing below, so the press that *observes* the change already
+            // sees a clean window.
+            {
+                let status_now = *state_for_key.status.lock().unwrap();
+                (last_seen_status, last_escape_time) =
+                    sync_escape_window(last_seen_status, status_now, last_escape_time);
+            }
             // A key press during a voice-draft auto-send countdown cancels the
             // countdown — the user wants to edit, not send. The key still falls
             // through to the editor, so it doubles as their first correction.
@@ -2174,39 +2192,62 @@ pub async fn interactive_tui(
                 continue;
             }
 
-            // 2b. Esc: interrupt an active run (mirrors Ctrl+C abort). When a
-            //     selector is open Esc already cancelled it above; when idle,
-            //     Esc falls through to the editor (no-op-ish). Only fire while
-            //     Working so an idle Esc doesn't abort a non-existent run.
+            // 2b. Esc: a *single* press soft-interrupts the action in flight, a
+            //     *second* press inside 500ms hard-aborts the run (mirrors
+            //     Ctrl+C abort). When a selector is open Esc already cancelled it
+            //     above; when idle, Esc falls through to the editor and the
+            //     double-escape action below. Only fire while Working so an idle
+            //     Esc doesn't interrupt a non-existent run.
             if keybinding_matches(
                 &keybindings_for_key,
                 &key,
                 kiqi_tui::keybindings::keys::INTERRUPT,
             ) {
                 let status = *state_for_key.status.lock().unwrap();
-                if status == RunStatus::Working {
-                    state_for_key.set_status(RunStatus::Aborting);
-                    ask_user_for_key.cancel_all();
-                    if !run_extension_cancel(&state_for_key)
-                        && state_for_key.extension_dialog_open()
-                    {
-                        close_extension_editor(
-                            &state_for_key,
-                            &ctx_for_key.editor_container,
-                            &editor_for_key,
-                            &tui_for_key,
+                // One window, two meanings: the first Working press only stops
+                // the current tool/stream, the second ends the run.
+                let verdict = esc_action(status, last_escape_time, std::time::Instant::now());
+                last_escape_time = verdict.last_escape_time;
+                match verdict.action {
+                    EscAction::HardAbort => {
+                        state_for_key.set_status(RunStatus::Aborting);
+                        ask_user_for_key.cancel_all();
+                        if !run_extension_cancel(&state_for_key)
+                            && state_for_key.extension_dialog_open()
+                        {
+                            close_extension_editor(
+                                &state_for_key,
+                                &ctx_for_key.editor_container,
+                                &editor_for_key,
+                                &tui_for_key,
+                            );
+                        }
+                        // upstream's `onEscape` restores the queue before it
+                        // aborts, so an interrupt hands the staged messages back.
+                        abort_run_restoring_queue(
+                            lane_for_key.clone(),
+                            editor_for_key.clone(),
+                            state_for_key.clone(),
+                            tui_for_key.clone(),
+                            ctx_for_key.signal_wake.clone(),
                         );
+                        continue;
                     }
-                    // upstream's `onEscape` restores the queue before it
-                    // aborts, so an interrupt hands the staged messages back.
-                    abort_run_restoring_queue(
-                        lane_for_key.clone(),
-                        editor_for_key.clone(),
-                        state_for_key.clone(),
-                        tui_for_key.clone(),
-                        ctx_for_key.signal_wake.clone(),
-                    );
-                    continue;
+                    EscAction::SoftInterrupt => {
+                        // Cancel the tool/stream token only: the run signal is
+                        // untouched, the status stays Working, and the steering
+                        // queue stays queued for the loop to drain (I1/I3/I5).
+                        // `interrupt()` is async and this is a blocking crossterm
+                        // reader, so the helper spawns — same shape as
+                        // `abort_run_restoring_queue`.
+                        soft_interrupt_run(
+                            lane_for_key.clone(),
+                            state_for_key.clone(),
+                            tui_for_key.clone(),
+                        );
+                        continue;
+                    }
+                    EscAction::PassThrough => {}
                 }
                 // A running `!command` takes Esc next (upstream's `onEscape`
                 // precedence: streaming → bash → bash-mode editor →

@@ -151,6 +151,49 @@ pub(super) fn abort_run_restoring_queue(
     });
 }
 
+/// The dim transcript note a soft interrupt leaves behind, per
+/// `soft-interrupt.md` §3.5. Kept as constants so the wording is asserted by a
+/// test instead of drifting between the two `InterruptResult` arms.
+pub(super) const SOFT_INTERRUPT_NOTE: &str =
+    "Interrupted the current tool; queued input continues.";
+pub(super) const NOTHING_TO_INTERRUPT_NOTE: &str =
+    "Nothing to interrupt yet (still waiting on the provider).";
+pub(super) const NO_ACTIVE_RUN_TO_INTERRUPT_NOTE: &str = "No run to interrupt.";
+
+/// `app.interrupt` when Esc is a *single* press: cancel the action in flight and
+/// let the run continue. Deliberately does none of the hard-abort side effects —
+/// no `Aborting` status, no `record_abort()` (the signal/goal chains stay live,
+/// I5), and no queue restoration (the messages stay queued, I3: the loop drains
+/// them at its next safe point). `lane.interrupt()` is async and the key loop is
+/// a blocking crossterm reader, so this runs on a spawned task like
+/// [`abort_run_restoring_queue`].
+pub(super) fn soft_interrupt_run(
+    lane: Arc<dyn AgentLane>,
+    state: Arc<TuiState>,
+    tui: Arc<TuiAltScreen>,
+) {
+    tokio::spawn(async move {
+        let note = match lane.interrupt().await {
+            Ok(InterruptResult::Soft) => SOFT_INTERRUPT_NOTE,
+            Ok(InterruptResult::NothingToInterrupt) => NOTHING_TO_INTERRUPT_NOTE,
+            Ok(InterruptResult::NoActiveRun) => NO_ACTIVE_RUN_TO_INTERRUPT_NOTE,
+            Err(error) => {
+                add_error_message(
+                    &state.chat_container,
+                    &format!("Could not interrupt the run: {error}"),
+                );
+                tui.request_render(false);
+                return;
+            }
+        };
+        // A dim note in the transcript, the same mechanism `handle_dequeue` and
+        // `add_error_message` use: it lands above the dock and never steals a
+        // layout slot, so a status line is never overwritten mid-render.
+        add_note_message(&state.chat_container, note);
+        tui.request_render(false);
+    });
+}
+
 /// Drain MCP notices at a boundary and, when the policy allows, emit the wake
 /// trigger. Shared by `AgentEnd` and the idle pump so both paths use exactly
 /// one policy and one ordering (record first, then decide).
