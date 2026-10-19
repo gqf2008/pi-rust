@@ -4474,3 +4474,150 @@ async fn soft_interrupt_stops_the_running_tool_and_the_run_completes() {
         "the run is over: the harness holds no active operation any more"
     );
 }
+
+/// The skills listing has to reach the provider, and it must carry metadata only.
+///
+/// `compose_prompt` appends `<available_skills>` per run rather than storing it in
+/// the harness's `system_prompt`, so `get_system_prompt()` cannot see it — the only
+/// honest check is what the provider actually receives. Without this test the
+/// listing could silently stop being appended (a wiring break), or start inlining
+/// whole `SKILL.md` bodies (turning every request into a context dump), and every
+/// existing test would stay green.
+///
+/// The body marker is deliberately distinctive: a substring search over the prompt
+/// is the assertion, so any future refactor that starts embedding content fails
+/// loudly instead of quietly costing tokens.
+// The harness drives provider calls through `block_in_place`, which only works on
+// a multi-threaded runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_skills_listing_reaches_the_provider_without_the_skill_body() {
+    use kiqi_ai::types::Context as AiContext;
+    use kiqi_ai::{AssistantMessageEventStream, Model, SimpleStreamOptions};
+
+    struct RecordingProvider {
+        inner: Arc<FauxProvider>,
+        seen: Arc<Mutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for RecordingProvider {
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+        fn models(&self) -> &[Model] {
+            self.inner.models()
+        }
+        async fn stream_simple(
+            &self,
+            model: &Model,
+            ctx: &AiContext,
+            opts: &SimpleStreamOptions,
+        ) -> AssistantMessageEventStream {
+            self.seen.lock().unwrap().push(ctx.system_prompt.clone());
+            self.inner.stream_simple(model, ctx, opts).await
+        }
+    }
+
+    let mut script = FauxScript::default();
+    script.set_responses(vec![FauxStep::text("Done.")]);
+    let faux = FauxProvider::new(script);
+    let model = faux.default_model().clone();
+    let seen: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(RecordingProvider {
+        inner: Arc::clone(&faux),
+        seen: Arc::clone(&seen),
+    });
+
+    let env = Arc::new(InMemoryExecutionEnv::new());
+    let env_dyn: Arc<dyn kiqi_tools::ExecutionEnv> = env.clone();
+    let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
+    let _registry = Arc::new(MutationQueueRegistry::new());
+    let ctx = ExecutionToolContext::new(env_dyn, Some(mut_env));
+    let tools: Vec<HarnessTool> = vec![create_read_tool(&ctx, None), create_write_tool(&ctx)]
+        .into_iter()
+        .map(HarnessTool::new)
+        .collect();
+    let active: Vec<String> = tools.iter().map(|t| t.tool.schema().name.clone()).collect();
+    assert!(
+        active.iter().any(|n| n == "read"),
+        "the read gate needs `read`"
+    );
+
+    let metadata = SessionMetadata {
+        id: "b-skills-listing".into(),
+        created_at: 0,
+        parent_session_id: None,
+    };
+    let storage = Arc::new(InMemorySessionStorage::new(
+        metadata,
+        Arc::new(SystemClock),
+        Arc::new(DefaultIdGenerator::new()),
+    ));
+    let session = Session::new(storage, None);
+
+    let skill = kiqi_harness::types::Skill {
+        name: "demo".to_string(),
+        description: "A demo skill the model may route to".to_string(),
+        content: "BODY_MARKER do not inline me".to_string(),
+        file_path: "/home/u/.agents/skills/demo/SKILL.md".to_string(),
+        disable_model_invocation: None,
+    };
+    let options = AgentHarnessOptions {
+        model,
+        thinking_level: Default::default(),
+        active_tool_names: active,
+        tools,
+        system_prompt: Some("BASE SYSTEM PROMPT".to_string()),
+        resources: kiqi_harness::types::AgentHarnessResources {
+            skills: Some(vec![skill]),
+            ..Default::default()
+        },
+        stream_options: Default::default(),
+        retry: RetryPolicy::default(),
+        compaction: Default::default(),
+        steering_mode: Default::default(),
+        follow_up_mode: Default::default(),
+        tool_execution: Default::default(),
+        drive: Default::default(),
+        session,
+        models: vec![provider as Arc<dyn Provider>],
+        to_provider_messages: None,
+        entry_projectors: Default::default(),
+        agent_emitter: None,
+        before_tool_call: None,
+        after_tool_call: None,
+        transform_context: None,
+        entry_transforms: Vec::new(),
+        provider_hooks: None,
+        allow_existing_session: false,
+    };
+    let harness = AgentHarness::create(options).await.expect("create harness");
+    harness
+        .prompt_text("hello", vec![])
+        .await
+        .expect("prompt completes");
+
+    let seen = seen.lock().unwrap().clone();
+    let prompt = seen
+        .first()
+        .and_then(|p| p.as_deref())
+        .expect("the request must carry a system prompt");
+
+    assert!(
+        prompt.contains("<available_skills>"),
+        "the harness must append the listing per run: {prompt}"
+    );
+    assert!(prompt.contains("<name>demo</name>"), "{prompt}");
+    assert!(
+        prompt.contains("A demo skill the model may route to"),
+        "the description is what routing depends on: {prompt}"
+    );
+    assert!(
+        prompt.contains("/home/u/.agents/skills/demo/SKILL.md"),
+        "the location must be there so the model can read it on demand: {prompt}"
+    );
+    assert!(
+        !prompt.contains("BODY_MARKER"),
+        "progressive loading: the SKILL.md body must not be inlined: {prompt}"
+    );
+}

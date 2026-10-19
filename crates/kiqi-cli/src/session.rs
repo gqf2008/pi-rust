@@ -3216,6 +3216,94 @@ mod tests {
     use super::*;
     use crate::args::Args;
 
+    /// End-to-end: `~/.agents/AGENTS.md` must reach the prompt that the CLI hands
+    /// the harness, ahead of the ki-specific agent-dir file. No other test covers
+    /// that chain — the loader is unit-tested and the binary is checked by hand,
+    /// but a wiring break between loading and composition would leave both green.
+    ///
+    /// Scope note: this asserts on `get_system_prompt()`, which is the base prompt
+    /// the CLI composes (base → append → context). The `<available_skills>` section
+    /// is appended per *run* by the harness (`compose_prompt`), so it is not
+    /// visible here — it is pinned in `kiqi-harness`'s
+    /// `the_skills_listing_reaches_the_provider_without_the_skill_body`.
+    ///
+    /// Runs in a subprocess because it needs its own `KI_CODING_AGENT_DIR` and
+    /// `KI_AGENTS_DIR`, and the crate's env-mutating tests share one lock.
+    #[test]
+    fn the_composed_prompt_carries_shared_agents_instructions_before_the_ki_ones() {
+        const CHILD: &str = "KI_SHARED_AGENTS_PROMPT_REGRESSION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "session::tests::the_composed_prompt_carries_shared_agents_instructions_before_the_ki_ones",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env(crate::config::CONFIG_DIR_ENV, dir.path().join("agent"))
+                .env(crate::config::AGENTS_DIR_ENV, dir.path().join("shared"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let agent = crate::config::agent_dir().unwrap();
+                let shared = crate::config::agents_dir().expect("KI_AGENTS_DIR is set");
+                let cwd = agent.join("project");
+                std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::create_dir_all(&shared).unwrap();
+                std::fs::write(shared.join("AGENTS.md"), "SHARED_GLOBAL_INSTRUCTIONS").unwrap();
+                std::fs::write(agent.join("AGENTS.md"), "KI_GLOBAL_INSTRUCTIONS").unwrap();
+
+                let resolved = crate::provider::resolve(
+                    Some("anthropic"),
+                    Some(crate::provider::DEFAULT_MODEL_ID),
+                    None,
+                    Some("test-key"),
+                    None,
+                )
+                .unwrap();
+                let args = Args {
+                    no_session: true,
+                    no_extensions: true,
+                    no_prompt_templates: true,
+                    trust_override: Some(true),
+                    ..Default::default()
+                };
+                // `true`: a trusted project is what makes the context chain load at
+                // all (`session.rs` short-circuits the whole block otherwise).
+                let (harness, _events, _context) =
+                    build(&resolved, &args, &cwd, true).await.unwrap();
+                let prompt = harness.get_system_prompt().await.unwrap().unwrap();
+
+                assert!(
+                    prompt.contains("SHARED_GLOBAL_INSTRUCTIONS"),
+                    "`~/.agents/AGENTS.md` must reach the prompt: {prompt}"
+                );
+                assert!(
+                    prompt.contains("KI_GLOBAL_INSTRUCTIONS"),
+                    "the agent-dir AGENTS.md must still reach the prompt: {prompt}"
+                );
+                let shared_at = prompt.find("SHARED_GLOBAL_INSTRUCTIONS").unwrap();
+                let ki_at = prompt.find("KI_GLOBAL_INSTRUCTIONS").unwrap();
+                assert!(
+                    shared_at < ki_at,
+                    "the shared (most general) instructions must come first"
+                );
+            });
+    }
+
     #[test]
     fn loaded_context_paths_track_precedence_and_reload() {
         const CHILD: &str = "KI_CONTEXT_PATHS_REGRESSION_CHILD";
