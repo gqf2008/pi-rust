@@ -16,7 +16,7 @@
 | ACP 协议面本就期待宿主管 MCP | `session/new` 携带 `mcpServers`（schema `v1/agent.rs:2659`）；ki 现为**响亮拒绝**（`acp/mod.rs:266-276, 374-383`） |
 | 宿主内建的所有机制已就位 | 内建工具 trait（`kiqi-agent/src/agent_tool.rs:29`）、装配 seam（`session.rs:371-378` 之间）、会话级长活资源先例（ReloadContext/ACP LiveSession） |
 | 生态有官方 SDK | `rmcp`（modelcontextprotocol/rust-sdk，Apache-2.0）；ABB 已在本组织内用 1.8.0 跑通 stdio 全链路（`abb/crates/abb-agent/src/mcp.rs`，1253 行） |
-| MSRV 不是障碍（实核） | ki 声明 `rust-version = "1.78"` 已陈旧——已在依赖中的 `agent-client-protocol 3.3.0` 自身要求 `1.88.0`；实际工具链 1.99.0 |
+| MSRV 不是障碍（实核） | 当时 ki 声明的 `rust-version = "1.78"` 已陈旧——依赖里的 `agent-client-protocol 3.3.0` 自身要求 `1.88.0`，实际工具链 1.99.0。**2026-10-20 更新**：声明已改为实测的 `1.96`（`wasmtime 49` → cranelift 要求 1.96.0），并加了 CI `msrv` job 直接验证，见 `CHANGELOG.md` 的 `[Unreleased]`。本条结论不变：MSRV 不构成引入 `rmcp` 的障碍 |
 
 ## 2. 目标 / 非目标
 
