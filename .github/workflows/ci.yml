@@ -88,6 +88,12 @@ jobs:
       - name: Test release.sh against the release workflow
         run: sh scripts/tests/release-sh.sh
 
+      # Every crate is `publish = false` and README says so, yet it used to carry
+      # crates.io badges, a `cargo install kiqi-cli` quick-start, crates.io crate
+      # links and a "docs.rs page" claim — all of which fail for a user who follows them.
+      - name: Test the README's install instructions against the manifests
+        run: sh scripts/tests/docs-install-path.sh
+
       - name: Run workspace tests
         run: cargo test --workspace --locked
 

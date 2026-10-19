@@ -1,8 +1,5 @@
 # ki — a Rust-native coding-agent runtime
 
-[![crates.io](https://img.shields.io/crates/v/kiqi-cli.svg)](https://crates.io/crates/kiqi-cli)
-[![downloads](https://img.shields.io/crates/d/kiqi-cli.svg)](https://crates.io/crates/kiqi-cli)
-[![docs.rs](https://docs.rs/kiqi-cli/badge.svg)](https://docs.rs/kiqi-cli)
 [![license](https://img.shields.io/crates/l/kiqi-cli.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue.svg)](#install)
 [![CI](https://github.com/bigfish1913/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/bigfish1913/pi-rust/actions/workflows/ci.yml)
@@ -28,7 +25,7 @@ Website: <https://ki.laofu.online/> · Docs: <https://ki.laofu.online/docs.html>
 
 | You want | Depend on | Start at |
 | -------- | --------- | -------- |
-| A working terminal coding agent | nothing | `cargo install kiqi-cli` |
+| A working terminal coding agent | nothing | `scripts/install.sh` (see below) |
 | Your own agent inside your process | `kiqi-agent` (+ `kiqi-ai`, `kiqi-tools`) | [`examples/minimal`](examples/minimal) |
 | A tool/provider that extends every session | `kiqi-plugin-sdk` | [`examples/plugin-stub`](examples/plugin-stub) |
 
@@ -48,12 +45,16 @@ curl -fsSL https://raw.githubusercontent.com/bigfish1913/pi-rust/main/scripts/in
 Verifies the published SHA-256 checksum and installs to `/usr/local/bin` or
 `~/.local/bin`. Preview first with `--dry-run`.
 
-**From crates.io** (requires Rust 1.96+):
+**From source** (requires Rust 1.96+):
 
 ```bash
-cargo install kiqi-cli
+git clone https://github.com/gqf2008/pi-rust && cd pi-rust
+cargo install --path crates/kiqi-cli --force
 ki --version
 ```
+
+The crates are not published to crates.io, so `cargo install kiqi-cli` does not work —
+it would fetch a different (or no) package.
 
 **Package managers:**
 
@@ -65,7 +66,7 @@ scoop install ki                                     # Windows
 
 The Homebrew formula currently supports Apple silicon on macOS. Intel Macs can
 use the prebuilt installer for releases with an `x86_64-apple-darwin` asset, or
-`cargo install kiqi-cli`. A winget manifest is [open for
+`scripts/install.sh` (see below). A winget manifest is [open for
 review](https://github.com/microsoft/winget-pkgs/pull/444745).
 
 **From source:**
@@ -168,18 +169,19 @@ gets the TUI, the harness and the plugin loader at once.
 
 | Crate | What it is |
 | ----- | ---------- |
-| [`kiqi-telemetry`](https://crates.io/crates/kiqi-telemetry) | Span/event contracts with a no-op default — instrumentation is opt-in, and pulls in no tracing or OpenTelemetry backend |
-| [`kiqi-ai`](https://crates.io/crates/kiqi-ai) | Provider-agnostic message, streaming and tool-schema types; Anthropic + OpenAI-compatible + `faux` providers |
-| [`kiqi-agent`](https://crates.io/crates/kiqi-agent) | The agent loop: `AgentTool`, events, hooks, queues, cancellation |
-| [`kiqi-tools`](https://crates.io/crates/kiqi-tools) | `read`/`write`/`edit`/`bash` (+ `grep`, `find`, `ls`, `powershell`) and the `ExecutionEnv` seam |
-| [`kiqi-harness`](https://crates.io/crates/kiqi-harness) | Session tree, JSONL persistence, compaction, crash recovery, the run loop |
-| [`kiqi-tui`](https://crates.io/crates/kiqi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
-| [`kiqi-cli`](https://crates.io/crates/kiqi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, plugin loading |
-| [`kiqi-plugin-sdk`](https://crates.io/crates/kiqi-plugin-sdk) | The stable `#[repr(C)]` ABI contract for plugins. No `kiqi-*` deps; only `serde_json`, behind a default `json` feature that can be turned off |
-| [`kiqi-extensions`](https://crates.io/crates/kiqi-extensions) | Host-side plugin loader and the async-across-ABI tool bridge |
+| [`kiqi-telemetry`](./crates/kiqi-telemetry) | Span/event contracts with a no-op default — instrumentation is opt-in, and pulls in no tracing or OpenTelemetry backend |
+| [`kiqi-ai`](./crates/kiqi-ai) | Provider-agnostic message, streaming and tool-schema types; Anthropic + OpenAI-compatible + `faux` providers |
+| [`kiqi-agent`](./crates/kiqi-agent) | The agent loop: `AgentTool`, events, hooks, queues, cancellation |
+| [`kiqi-tools`](./crates/kiqi-tools) | `read`/`write`/`edit`/`bash` (+ `grep`, `find`, `ls`, `powershell`) and the `ExecutionEnv` seam |
+| [`kiqi-harness`](./crates/kiqi-harness) | Session tree, JSONL persistence, compaction, crash recovery, the run loop |
+| [`kiqi-tui`](./crates/kiqi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
+| [`kiqi-cli`](./crates/kiqi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, plugin loading |
+| [`kiqi-plugin-sdk`](./crates/kiqi-plugin-sdk) | The stable `#[repr(C)]` ABI contract for plugins. No `kiqi-*` deps; only `serde_json`, behind a default `json` feature that can be turned off |
+| [`kiqi-extensions`](./crates/kiqi-extensions) | Host-side plugin loader and the async-across-ABI tool bridge |
 
-Every crate has its own README and docs.rs page. The `crates/kiqi-*`
-directories and the published crate names use the same `kiqi-` prefix.
+Every crate has its own README. The crates are **not** published to crates.io
+(`publish = false` in each manifest), so links above point at the in-repo
+directories; `docs.rs` has no pages for them.
 
 ## Why ki
 

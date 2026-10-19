@@ -70,6 +70,8 @@ sh scripts/check-offline-lock.sh
 sh scripts/tests/install-sh.sh
 # `release.sh` 必须与它编排的工作流一致（asset 名、push 的远端）
 sh scripts/tests/release-sh.sh
+# README 的安装指令必须与清单一致（全仓 crate 都是 publish = false）
+sh scripts/tests/docs-install-path.sh
 # 文档快照（改了 CHANGELOG.md / README.md 等必须重跑，CI 会比对）
 sh scripts/sync-embedded-docs.sh
 # CI 还会把每个插件单独编成 cdylib（compile-time feature 关闭时的入口），
