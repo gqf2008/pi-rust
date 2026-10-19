@@ -47,9 +47,16 @@ Global and project settings merge by name — a project entry overrides a global
 one of the same name, and a project's servers are only honored when the project
 is trusted.
 
-* `subscribe` — uris subscribed right after the handshake (there is no model
-  verb for subscribing). Subscriptions are restored one-by-one after a
-  reconnect.
+* `subscribe` — durable uris subscribed right after the handshake. The model
+  can also start/stop session-scoped watches at runtime through
+  `{server}__watch_resource` (exposed when the server advertises
+  `resources.subscribe`). Subscriptions are restored one-by-one after a
+  reconnect; one rejected uri drops only that uri.
+* `modelWatch` — default `true`; set `false` to hide the runtime watch verb for
+  this server. ACP client-supplied servers always disable it. Model watches are
+  capped at 32 and are record-only unless the same uri is in `subscribe`, so
+  they cannot consume the configured wake budget; a model `stop` cannot remove
+  a configured watch.
 * `autoRead` — an opt-in list of uris whose updates are read at the session
   boundary and appended to the batched notice entry (bounded at 20k with the
   usual truncation marker). Every other uri keeps the light notice: server +
@@ -57,8 +64,10 @@ is trusted.
 
 ## Resources
 
-A server advertising resources contributes one read tool,
-`{server}__read_resource`. `notifications/resources/updated` (stdio or the
+A server advertising resources contributes a read tool,
+`{server}__read_resource`; when it also advertises `resources.subscribe`, it
+contributes `{server}__watch_resource` (`start`/`stop`/`list`) as well.
+`notifications/resources/updated` (stdio or the
 HTTP standalone SSE stream) delivers a coalescing, bounded notice; the model
 reads the content on demand unless the uri is listed in `autoRead`.
 

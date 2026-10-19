@@ -13,6 +13,20 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **MCP runtime watches are bounded and cannot escape the user's opt-in.** The
+  watch verb is capped at 32 model subscriptions; a model-started watch is
+  record-only unless the same uri is in the server's config `subscribe` list,
+  so it cannot consume the configured wake budget; and a model `stop` cannot
+  remove a configured watch. `modelWatch: false` disables the verb per server,
+  and ACP client-supplied servers always disable it. Permission rules can now
+  target the resource `uri` and action (`docs__watch_resource(start)`), closing
+  a URI-scoped deny-rule fail-open. During reconnect restore, one rejected
+  subscription drops only that uri (the rest of the configured set survives),
+  and the whole restore shares one timeout budget instead of one per uri.
+  A no-op re-subscribe keeps queued notices, stopping a never-watched uri no
+  longer sends an RPC, subscribe/unsubscribe observe the tool's cancellation
+  token, and server tools named `read_resource`/`watch_resource` are skipped so
+  the synthetic verbs stay available.
 - **The user-message echo is readable whatever the terminal palette is.** The
   bubble paints an explicit background (`surface`) but its body inherited the
   terminal's default foreground; on a light terminal with ki's dark theme that

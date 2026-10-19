@@ -90,8 +90,8 @@ chain_id        若由某次 run 的副作用产生，记录产生它的 run
 
 ### 3.3 配置本身表达意图
 
-用户在 `mcpServers` 里写下 `subscribe`（`crates/kiqi-mcp/src/config.rs:60-64`：
-订阅是宿主/配置驱动，没有模型动词）时，这不是随手开的开关，而是一个显式动作。
+用户在 `mcpServers` 里写下 `subscribe`（`crates/kiqi-mcp/src/config.rs:157-160`：
+配置订阅仍是宿主/配置驱动；模型动词见 §16 的 `{server}__watch_resource`）时，这不是随手开的开关，而是一个显式动作。
 它表达的意图应分三层读，不能互相外推：
 
 | 配置 | 人类的对应说法 | 宿主读法 |
@@ -135,6 +135,9 @@ chain_id        若由某次 run 的副作用产生，记录产生它的 run
 
 订阅动作由 `{server}__watch_resource`（`start`/`stop`/`list`）承担，和
 `{server}__read_resource` 一起构成「发现 → 订阅 → 收通知 → 按需读取」的闭环。
+模型启动的 watch 是**record-only**：只有当同一 uri 同时出现在 server 的配置
+`subscribe` 列表里时才具备唤醒资格，因此模型不能自造唤醒源或消耗用户的唤醒预算。
+`list` 会标出 `[config]` / `[model]`；模型不能 `stop` 配置订阅。
 
 插件工具的具体面：
 `goal`（`plugins/kiqi-goal/src/lib.rs:1026`，start/update/pause/resume/complete/limit/show/list，
@@ -149,9 +152,10 @@ chain_id        若由某次 run 的副作用产生，记录产生它的 run
    可能都不存在。语义是「能用什么就用什么」，不是硬依赖；缺省降级见上表。
 2. **订阅有模型动词，但配置仍是持久形态。** 配置里的 `subscribe` 在启动时订阅；
    智能体可用 `{server}__watch_resource` 在会话内 `start` / `stop` / `list`
-   （仅当 server 声明 `resources.subscribe`）。模型启动的 watch 随会话存活、
-   在重连时恢复，但不写回配置；要跨会话持久就写配置。会话级静音仍是唤醒策略，
-   不是订阅变更。
+   （仅当 server 声明 `resources.subscribe` 且未关闭 `modelWatch`）。模型启动的
+   watch 随会话存活、在重连时恢复，但不写回配置；要跨会话持久就写配置。
+   模型 watch 上限 32 条；不能 `stop` 配置订阅；ACP 客户端提供的 server 一律禁用
+   该动词。会话级静音仍是唤醒策略，不是订阅变更。
 3. **「延时」仍是「下一个边界/下一轮」**，不承诺墙钟时间。真正的定时唤醒需要
    阶段 3 的定时器事件源。
 4. **所有行动仍走权限门。** 智能体不能给自己授权；自动唤醒不改变 L3。
@@ -194,6 +198,8 @@ chain_id        若由某次 run 的副作用产生，记录产生它的 run
 - `notify`：落 transcript + 用户侧可见提示（TUI 状态栏/ACP Notice），不启动 run。
 - `auto`：允许自动唤醒（仍受 §5.3/§5.4 约束）。
 - 未配置 `subscribe`：没有通知可收，`wake` 写什么都无效果，行为与现状一致。
+- **唤醒资格是 per-uri**：只有配置 `subscribe` 列表里的 uri 参与唤醒与预算；
+  模型运行时 watch 的 uri 只落 transcript / inbox，不会自动唤醒。
 - **顶层 `signals` 段**提供所有 server 的默认值，per-server 字段覆盖它。优先级：
   per-server 显式字段 > 项目顶层 `signals` > 全局顶层 `signals` > `subscribe` 推导。
   项目顶层段只在项目被信任时生效；字段无效只报告并忽略，不会拖垮 MCP 配置。
@@ -427,17 +433,24 @@ cargo test -p kiqi-cli --lib --locked signal
 
 | 动作 | 语义 |
 |---|---|
-| `start` | `resources/subscribe`；后续更新走既有 notice → 唤醒 → inbox 管道 |
-| `stop` | `resources/unsubscribe`；本地投递立即停止，排队中的该 uri 通知被清除 |
-| `list` | 当前订阅的 uri（配置驱动 + 模型驱动） |
+| `start` | `resources/subscribe`；后续更新走既有 notice → 唤醒 → inbox 管道（模型 watch 默认 record-only） |
+| `stop` | `resources/unsubscribe`；本地投递立即停止。从未订阅的 uri 是 no-op（不发 RPC）；模型不能停配置订阅 |
+| `list` | 当前订阅的 uri 及其来源（`[config]` / `[model]`），输出有长度上限 |
 
 约束：
 
-- 只有 server 声明 `resources.subscribe: true` 时才注册该工具；否则不出现，
-  避免保证失败的协议调用。
-- 走与配置订阅完全相同的 manager 路径：mark-before-RPC、重连恢复、失败回滚。
-- 模型启动的 watch 属于会话：重连会恢复，但不写回 `settings.json`；跨会话持久
-  仍然写配置。
+- 注册条件：server 声明 `resources.subscribe: true`，且 `modelWatch` 未关闭；
+  ACP 客户端提供的 server 一律关闭（客户端没有订阅动词，其 server 列表不是
+  信号源授权）。
+- **唤醒资格按 uri**：模型 watch 的 uri 即使收到通知也只落 transcript / inbox；
+  只有配置 `subscribe` 里的 uri 参与唤醒预算。
+- 模型 watch 上限 `MAX_MODEL_SUBSCRIPTIONS = 32`；配置订阅由用户配置约束。
+- 走与配置订阅完全相同的 manager 路径：mark-before-RPC、重连恢复、失败回滚；
+  重复 `start` 是 no-op 且**不清空**排队通知；subscribe/unsubscribe 感知取消令牌。
+- 重连恢复时单个 uri 被 server 拒绝只删除该 uri，其余配置订阅继续恢复；整批
+  共享一个超时预算，不再是每个 uri 各一份。
+- 权限规则可匹配 `uri` 与 `action`（如 `docs__watch_resource(start)`）。
+- 服务器自带的 `read_resource` / `watch_resource` 工具会被跳过，保留合成动词。
 - 读取内容仍走 `{server}__read_resource`；订阅本身不自动读全文。
 
 验证：
