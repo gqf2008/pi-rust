@@ -145,6 +145,15 @@ pub fn default_system_prompt_for_tools(
     // Advertise exactly what the session has. `None` keeps the historical list (a
     // caller that does not know yet); `Some(empty)` says so plainly, because an empty
     // "Available tools:" heading reads as a formatting bug.
+    //
+    // The resulting block is bigger than the old hard-coded one — measured 2014 B
+    // versus ~330 B on a session with the plugin and MCP tools installed — and that is
+    // the point: the fixed text named five built-ins and silently omitted the other
+    // ~39 tools the model could actually call (plugins, codegraph, walgit MCP…).
+    // Naming them costs tokens; a model that does not know they exist costs turns.
+    // If this ever needs trimming, drop *names* per tool family (or reuse the
+    // `<available_skills>` precedent of listing only what routing needs) rather than
+    // restoring a list that is wrong.
     let tools_list = match tools {
         None => DEFAULT_TOOLS_BLOCK.to_string(),
         Some(names) if names.is_empty() => {
