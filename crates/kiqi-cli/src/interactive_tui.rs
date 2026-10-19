@@ -2759,6 +2759,12 @@ pub async fn interactive_tui(
         }
         match rx.recv().await {
             Some(TuiMessage::UserInput(prompt, prompt_images)) => {
+                // Every direct user prompt resets the signal chain. The submit
+                // handler already does this for editor submissions (including
+                // steering queued while a run is active, which never reaches
+                // this arm); voice auto-send and the idle Alt+Enter path send
+                // `UserInput` directly, so cover them here too.
+                signal_wake.lock().unwrap().record_user_input();
                 // Clear the editor so the next prompt starts fresh (the submit
                 // handler runs on the blocking key thread and can't mutate the
                 // editor state safely there; clearing here, on the async loop,
