@@ -3,7 +3,7 @@
 > 状态：**阶段 1、2、3 已全部落地（2026-10-19，`4902ab7` / `3fa2aa7` / `cf7e9c5`+`7e9377f`）**。目标：把 Esc 从“终止整个 run”改为
 > “取消当前工具调用/模型流，保留 run 与 steering 队列”，由 LLM 在看到插入消息后
 > 决定停止、收尾还是继续。
-> 关联：`signal-driven-agent.md` §5（MUI 输入）、`plugin-abi.md` §6.36
+> 关联：`signal-driven-agent.md` §5（MUI 输入）、`plugin-abi.md` §6.38
 > （wasm `proc.cancel-requested`）、`ki-mcp-builtin.md`。
 
 ## 1. 现状（实核）

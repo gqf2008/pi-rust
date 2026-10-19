@@ -815,6 +815,31 @@ e2e 三条：八工具面与 schema 形状、**探测决策**（有/无索引两
 是 sync 还是 init」来断言——这条断言在实现里抓到了一个真 bug：探测路径我把 `cwd` 已是 root
 这件事算重了）、以及有真 `codegraph` 时的 live 会话（没有就明示跳过）。
 
+### 6.34 `kiqi-orchestrator` 迁 wasm：阻塞波 + `proc.close-stdin`（ABI 0.7.1，纯加法）
+
+> 补记（2026-10-20）：这一节当初**没有落笔**，而 AGENTS.md 与
+> `plugin-abi-handover.md` 从 `393624c` 起就一直在引用 §6.34。四份文档指向一个不存在的
+> 小节。内容据 `c41421d` 补齐，不是事后重写的历史。
+
+业主的裁决是：迁 wasm，接受语义缩减，而不是继续把它编进默认构建。
+`plugins/wasm/kiqi-orchestrator-guest` 自带一份三个工具与指引的副本（lens/goal 的先例：
+逻辑小到可以复制）。
+
+| 工具 | 迁后的形态 | 代价 |
+|---|---|---|
+| `plan` | 图、校验、update 语法与渲染沿用编译期逻辑；状态驻留 guest 内存，跨调用保留，`sessionId` 变化时清空 | 无 |
+| `dispatch` | 一波在调用内跑完：ready 节点在 `proc` 上并行（宿主按授权 `max-open` 限制），guest 多路复用 stdout 并按节点 `timeoutSeconds` 杀子进程 | **放弃后台波与中途重塑**；`waitSeconds: 0` 被拒（子进程不能活过调用），`waitSeconds: N` 到时杀掉并失败剩余节点。波与波之间仍可重塑 |
+| `subagent` | task 走 stdin、EOF、收集 | 子进程是 PATH 上的 `ki`（wasm 里没有 `current_exe()`）；`program` 覆盖是给隔离测试的缝，它收不到 ki 专属 flag，且仍受 allow-list 约束 |
+| `expectFile` / `verify` | 走 `exec`（`test -f` / `sh -c`） | 用它们的节点需要把这两个命令放进 exec allow-list |
+| 指引注入 | 仍是**同一个门**：只有 `.ki/goals.json` 里有 active goal 时才追加（读该文件需要 `fs` 授权） | `KI_ORCHESTRATOR_GUIDE` env 覆盖没有了——guest 读不到环境变量，只能由文件决定。`sessionId` 变化会清空 `plan` 状态，与编译期版一致 |
+
+契约侧只加了一条：**`proc.close-stdin`**（0.7.1，纯加法）。task 走 stdin，EOF 才是「prompt
+写完了」的信号——这正是编译期版一直用的「写完就 drop stdin」协议。
+
+构建面：`kiqi-orchestrator` 离开默认构建（默认只剩 `kiqi-permissions`，信任倒置的排除裁决
+不变），CI 的 opt-in 配置加上该 feature；注册表清单测试按 feature 门控 orchestrator 条目，
+两种配置下都有意义。
+
 ### 6.35 `fs` 授权带 scope（**ABI 不变**，仍 0.7.1——只动授权模型与宿主，不动 WIT）（补齐与 exec/proc 的不对称）
 
 `exec`/`proc` 都有 cwd scope（plugin-data | project），`fs` 却只有 data 监禁——goal 状态落不进
@@ -888,7 +913,7 @@ Esc 无响应。进程采样显示按键线程永久阻塞在一个 std mutex �
 （真实 ask_user guest，断言 observe 2 秒内返回 Continue），以及 kiqi-cli 的
 `observe_dispatch_does_not_wait_for_a_busy_plugin`（模式选择）。
 
-### 6.36 `proc.cancel-requested`：wasm 工具调用的取消查询（**纯加法，包版本仍 0.7.1**）
+### 6.38 `proc.cancel-requested`：wasm 工具调用的取消查询（**纯加法，包版本仍 0.7.1**）
 
 wasm 工具调用是同步的：宿主在 `Plugin::call` 里安装 `HostCaps`（含 `cancel` 探针），
 guest 却没有任何接口能看见“用户按了 Esc”。长调用（典型是 orchestrator 的
