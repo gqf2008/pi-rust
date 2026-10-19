@@ -230,6 +230,18 @@ ki --connect 127.0.0.1:9899
 `/name`、`/reload` 依赖本地 harness，在远程模式下不可用。完整协议、可用命令与
 限制见 [`remote-mode.md`](remote-mode.md)。
 
+### 3.1 退出码
+
+| 码 | 含义 |
+|---|---|
+| `0` | 正常结束 |
+| `1` | 运行时失败（模型/会话构建失败、`Error`/`Aborted`），**或 run 撞到单轮上限**（`KI_MAX_TURNS_PER_RUN`，`ki -p` 下即 `maxTurns`） |
+| `2` | 用法错误 |
+| `3` | 启动被扩展否决（`BeforeTuiStart` 返回 `EVENT_HANDLER_ABORT`） |
+
+被单轮上限截断的 run 走的是正常出口，只读 stdout 会以为任务完成（输出可能是半截的）；
+把上限记为 `1` 才能让脚本/编排分辨“做完”与“被截断”。交互模式同时追加 `runBudget` 消息说明原因。
+
 ## 4. 内置工具
 
 默认工具包含 Pi 的 `read`、`bash`、`edit`、`write`，以及 ki 自带的只读 `docs` 文档查询工具。Windows 上还会默认注册 `powershell`。`docs` 可以查询使用手册、扩展开发、Agent 项目结构、Rust 调试和架构说明；`grep`、`find`、`ls` 仍保留为库实现，但不由 CLI 默认注册。
