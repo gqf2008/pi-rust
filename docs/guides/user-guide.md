@@ -280,6 +280,34 @@ ki 使用自己的 `.ki` 目录：
 
 全局资源默认位于 `~/.ki/agent/`，包括 `settings.json`、`models.json`、`skills/`、`prompts/`、`themes/` 和 `extensions/`。同名资源发生冲突时，项目资源优先于全局资源。
 
+### 5.1 跨工具共享目录 `.agents`
+
+`.agents` 是一个跨工具约定（Claude Code、skills 生态都用它），**不是** ki 自己的配置目录。ki 会把它一起读进来，因为你可能已经在用它了：
+
+| 位置 | 内容 | 优先级 |
+|---|---|---|
+| `<项目>/.ki/skills` | 项目技能 | 最高（同名胜出） |
+| `<项目>/.agents/skills` | 项目技能（共享约定） | 次之 |
+| 配置的全局 `skillDirs` | 自定义全局技能 | 再次 |
+| `~/.ki/agent/skills` | ki 全局技能 | 再次 |
+| `~/.agents/skills` | 用户级共享技能 | 最低 |
+
+上下文文件的加载顺序同理（越通用越靠前、越具体越靠后）：
+
+```text
+~/.agents/AGENTS.md  →  ~/.ki/agent/AGENTS.md  →  <祖先目录>/AGENTS.md  →  <项目>/AGENTS.md
+```
+
+把常驻指令放在 `~/.agents/AGENTS.md`，它对所有遵循该约定的工具都生效；只针对 ki 的规则放 `~/.ki/agent/AGENTS.md`。两个文件都不存在时静默跳过，不报错。
+
+两点需要注意：
+
+- 技能采用**渐进式加载**：系统提示里只放名称、描述和文件位置，完整 `SKILL.md` 在模型判断任务匹配时才读取。所以技能再多也不会撑爆提示词。
+- `~/.agents` 只用来放 `AGENTS.md` 与 `skills/`；ki 不会从那里找 prompts、themes 或 extensions。
+- 项目 `.agents/skills` 与项目 `.ki/skills` 一样不经项目信任门（v1 约定）：只要你在项目里启动 ki，它就会被读。
+
+### 5.2 项目级资源目录
+
 项目级 `.ki/settings.json` 可以追加资源目录：
 
 ```json

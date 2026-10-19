@@ -269,6 +269,20 @@ ki 会优先使用 ki 自己的目录，同时兼容原 Pi 的 `.pi` 布局：
 
 项目 `.ki` 优先于项目 `.pi`。全局资源默认位于 `~/.ki/agent/`，包括 `settings.json`、`models.json`、`skills/`、`prompts/`、`themes/`、`extensions/` 和 `packages/`。同名资源发生冲突时，项目资源优先于全局资源，`.ki` 优先于 `.pi`。
 
+`.agents` 是一个跨工具共享约定（Claude Code、skills 生态都用它），ki 也会读取它：
+
+| 技能目录 | 说明 |
+|---|---|
+| `<项目>/.ki/skills` | 项目技能（最高优先级） |
+| `<项目>/.agents/skills` | 项目技能（共享约定） |
+| 配置的全局 `skillDirs` | 自定义全局技能 |
+| `~/.ki/agent/skills` | ki 全局技能 |
+| `~/.agents/skills` | 用户级共享技能（最低优先级） |
+
+上下文文件按「越通用越靠前」排列：`~/.agents/AGENTS.md` → `~/.ki/agent/AGENTS.md` → 祖先目录 → `<项目>/AGENTS.md`。全局、通用的常驻指令放 `~/.agents/AGENTS.md`，只针对 ki 的放 `~/.ki/agent/AGENTS.md`；文件不存在时静默跳过。
+
+技能是**渐进式加载**的：系统提示只放名称、描述和位置，完整 `SKILL.md` 在任务匹配时才读取。`~/.agents` 只提供 `AGENTS.md` 与 `skills/`，ki 不从那里找 prompts、themes 或 extensions。
+
 项目级 `.ki/settings.json` 可以追加资源目录：
 
 ```json
