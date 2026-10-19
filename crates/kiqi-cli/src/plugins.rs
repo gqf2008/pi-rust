@@ -1285,6 +1285,40 @@ mod tests {
         fn log(&self, _level: LogLevel, _message: &str) {}
     }
 
+    /// Serialises the tests that install the process-wide compiled-event sink.
+    ///
+    /// `install_compiled_event_sink` writes a global and `clear_compiled_event_sink`
+    /// sets it back to `None`. Two tests here do "install → dispatch → assert →
+    /// clear", so a neighbour's *clear* landing between our *install* and our
+    /// *dispatch* leaves the fan-out with no sink: the plugin never sees the event,
+    /// and the assertion then reports the plugin's empty state.
+    ///
+    /// That is not a guess. Interleaving it deterministically (install, clear,
+    /// dispatch) reproduces the observed failure verbatim:
+    ///
+    ///     probe: after a neighbour cleared the sink, todo list = "No todos"
+    ///
+    /// — the same `got No todos` seen when the opt-in feature run failed. The same
+    /// window exists in the other direction (a neighbour's *install* replacing ours
+    /// between our install and dispatch), which would surface as the wrong plugin's
+    /// data rather than nothing.
+    ///
+    /// Note the ordering that matters: clearing *after* a test's own dispatch does
+    /// nothing to it (the state is already restored), so a probe that clears late
+    /// will not show the race — that was my first attempt, and it "passed".
+    ///
+    /// Every test that calls `install_compiled_event_sink` must hold this for the
+    /// whole install → assert → clear sequence.
+    static SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take [`SINK_LOCK`], ignoring poisoning: a test panicking mid-dispatch says
+    /// nothing about the global, and the next test installs its own sink anyway.
+    fn lock_sink() -> std::sync::MutexGuard<'static, ()> {
+        SINK_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Build a guest fixture through the same path `ki plugin insmod --build`
     /// uses: the artifact is located from cargo's JSON output, so a
     /// machine-level `build.target-dir` cannot make the test look in the wrong
@@ -2096,6 +2130,7 @@ mod tests {
             ui: None,
             log: std::sync::Arc::new(Silent),
         };
+        let _sink = lock_sink();
         install_compiled_event_sink(owned);
 
         // A registry with no cdylib handlers still reaches the compiled plugin.
@@ -2155,6 +2190,7 @@ mod tests {
             ui: None,
             log: std::sync::Arc::new(Silent),
         };
+        let _sink = lock_sink();
         install_compiled_event_sink(owned);
 
         // A registry with no cdylib handlers still fans SessionTree out to the
