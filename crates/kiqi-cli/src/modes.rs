@@ -17,6 +17,7 @@
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use kiqi_agent::events::AgentEvent;
 use kiqi_ai::types::{AssistantMessage, Content, ImageContent, StopReason};
@@ -36,6 +37,115 @@ pub fn assistant_text(msg: &AssistantMessage) -> String {
             _ => None,
         })
         .collect()
+}
+
+/// Env var that turns on the print path's liveness heartbeat (whole seconds).
+/// The orchestrator sets it on every subagent (`CHILD_HEARTBEAT_SECS` in
+/// `kiqi-orchestrator::spawn`) so the parent's activity clock keeps moving
+/// through long tool calls.
+pub const HEARTBEAT_SECS_ENV: &str = "KI_HEARTBEAT_SECS";
+
+/// Read [`HEARTBEAT_SECS_ENV`]; a missing, zero or unparsable value means "off".
+fn heartbeat_secs_from_env() -> Option<u64> {
+    let raw = std::env::var(HEARTBEAT_SECS_ENV).ok()?;
+    match raw.trim().parse::<u64>().ok()? {
+        0 => None,
+        secs => Some(secs),
+    }
+}
+
+/// Background liveness heartbeat for print mode.
+///
+/// `ki -p` writes its final text to stdout only once the run ends, so a
+/// supervising parent cannot tell "working on a long tool call" from "hung" by
+/// watching stdout. With `KI_HEARTBEAT_SECS=<n>` set, print mode emits
+/// `[ki] heartbeat t=<elapsed>s` on **stderr** every n seconds while the prompt
+/// runs — stderr, never stdout, so the one-shot text contract is untouched, and
+/// a TUI that owns the alt-screen never sees it (this lives in the print path
+/// only).
+///
+/// The heartbeat never blocks the run: it is a detached task woken by a timer,
+/// and [`Heartbeat::stop`] joins it so nothing is written after the run ends.
+pub struct Heartbeat {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    join: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Heartbeat {
+    /// An inert handle (heartbeat disabled).
+    pub fn disabled() -> Self {
+        Self {
+            stop: None,
+            join: None,
+        }
+    }
+
+    /// Start a heartbeat if [`HEARTBEAT_SECS_ENV`] says so; writes go to stderr.
+    pub fn from_env() -> Self {
+        Self::from_env_with_sink(Box::new(std::io::stderr()))
+    }
+
+    /// [`Heartbeat::from_env`] with an explicit sink (used by the tests so a
+    /// heartbeat can be observed without touching the process's stderr).
+    fn from_env_with_sink(sink: Box<dyn Write + Send>) -> Self {
+        match heartbeat_secs_from_env() {
+            Some(secs) => Self::spawn_with_sink(secs, sink),
+            None => Self::disabled(),
+        }
+    }
+
+    /// Start a heartbeat writing one line per `secs` to `sink`.
+    fn spawn_with_sink(secs: u64, sink: Box<dyn Write + Send>) -> Self {
+        if secs == 0 {
+            return Self::disabled();
+        }
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let started = Instant::now();
+        let period = Duration::from_secs(secs);
+        let join = tokio::spawn(async move {
+            let mut sink = sink;
+            // `interval_at` + one period: the first line lands at t=secs, not t=0
+            // (a heartbeat at t=0 would just duplicate the caller's own log line).
+            let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => break,
+                    _ = ticker.tick() => {
+                        let elapsed = started.elapsed().as_secs();
+                        if writeln!(sink, "[ki] heartbeat t={elapsed}s").is_err() {
+                            break;
+                        }
+                        let _ = sink.flush();
+                    }
+                }
+            }
+        });
+        Self {
+            stop: Some(stop_tx),
+            join: Some(join),
+        }
+    }
+
+    /// Stop the heartbeat and wait for the task to finish, so no line is written
+    /// after this returns.
+    pub async fn stop(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.await;
+        }
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        // Never leave the task ticking past the run, even on an early return.
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
 }
 
 /// The exit code a run's outcome maps to. Mirrors TS print mode: error/aborted
@@ -65,6 +175,11 @@ pub async fn print(
     reload_context: &crate::session::ReloadContext,
 ) -> i32 {
     let lane: Arc<dyn AgentLane> = harness.lane("main");
+    // Liveness heartbeat (opt-in via `KI_HEARTBEAT_SECS`): print mode's stdout is
+    // silent until the run ends, so this is the only in-band progress signal a
+    // supervising orchestrator has. Started here, stopped once the run body
+    // returns — on every exit path, so nothing is written afterwards.
+    let heartbeat = Heartbeat::from_env();
     // The run body resolves to its exit code on every path (`return` inside the
     // block exits the block, not this fn), so the tail below dispatches
     // `SessionShutdown` exactly once per run.
@@ -159,6 +274,7 @@ pub async fn print(
         last_exit
     };
     let code = code.await;
+    heartbeat.stop().await;
     // `SessionShutdown`: the one-shot run is over — plugins release per-run
     // resources (the wasm langfuse guest flushes its buffered traces here).
     // Advisory veto; dispatched exactly once, on every exit path.
@@ -1749,5 +1865,123 @@ mod tests {
             1,
             "json mode must dispatch SessionShutdown exactly once"
         );
+    }
+
+    /// Sink that records everything the heartbeat writes.
+    #[derive(Clone, Default)]
+    struct CapturedStderr(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedStderr {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedStderr {
+        fn lines(&self) -> Vec<String> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    /// `KI_HEARTBEAT_SECS` is process-global, so the two env-driven tests must
+    /// not interleave. Restores the previous value on drop.
+    static HEARTBEAT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct HeartbeatEnvGuard {
+        previous: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl HeartbeatEnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let _lock = HEARTBEAT_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = std::env::var(HEARTBEAT_SECS_ENV).ok();
+            match value {
+                Some(value) => std::env::set_var(HEARTBEAT_SECS_ENV, value),
+                None => std::env::remove_var(HEARTBEAT_SECS_ENV),
+            }
+            Self { previous, _lock }
+        }
+    }
+
+    impl Drop for HeartbeatEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(HEARTBEAT_SECS_ENV, value),
+                None => std::env::remove_var(HEARTBEAT_SECS_ENV),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_writes_one_stderr_line_per_period_until_stopped() {
+        let _env = HeartbeatEnvGuard::set(Some("1"));
+        let sink = CapturedStderr::default();
+        let heartbeat = Heartbeat::from_env_with_sink(Box::new(sink.clone()));
+
+        // ~3s of "run": a 1s period must produce at least two lines.
+        tokio::time::sleep(Duration::from_millis(2_600)).await;
+        heartbeat.stop().await;
+
+        let lines = sink.lines();
+        assert!(
+            lines.len() >= 2,
+            "expected >= 2 heartbeat lines in ~2.6s at a 1s period, got {lines:?}"
+        );
+        for line in &lines {
+            assert!(
+                line.starts_with("[ki] heartbeat t=") && line.ends_with('s'),
+                "unexpected heartbeat line: {line:?}"
+            );
+        }
+
+        // `stop()` joins the task: nothing may be written afterwards.
+        let after_stop = sink.lines().len();
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+        assert_eq!(
+            sink.lines().len(),
+            after_stop,
+            "the heartbeat kept writing after stop()"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_is_silent_without_the_env_var() {
+        let _env = HeartbeatEnvGuard::set(None);
+        let sink = CapturedStderr::default();
+        let heartbeat = Heartbeat::from_env_with_sink(Box::new(sink.clone()));
+
+        // Longer than the 1s period the enabled test uses: if the env gate were
+        // lost the sink would already hold a line.
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+        heartbeat.stop().await;
+
+        assert!(
+            sink.lines().is_empty(),
+            "heartbeat must be opt-in, got {:?}",
+            sink.lines()
+        );
+    }
+
+    #[test]
+    fn heartbeat_secs_only_accepts_a_positive_integer() {
+        let _env = HeartbeatEnvGuard::set(None);
+        assert_eq!(heartbeat_secs_from_env(), None);
+        std::env::set_var(HEARTBEAT_SECS_ENV, "0");
+        assert_eq!(heartbeat_secs_from_env(), None);
+        std::env::set_var(HEARTBEAT_SECS_ENV, "nonsense");
+        assert_eq!(heartbeat_secs_from_env(), None);
+        std::env::set_var(HEARTBEAT_SECS_ENV, " 15 ");
+        assert_eq!(heartbeat_secs_from_env(), Some(15));
     }
 }

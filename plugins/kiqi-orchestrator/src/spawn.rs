@@ -11,8 +11,10 @@
 //! (`kiqi-cli::app::build_initial_message`).
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use wait_timeout::ChildExt;
@@ -33,9 +35,87 @@ pub const MAX_TURNS_ENV: &str = "KI_MAX_TURNS_PER_RUN";
 /// subagent (which does not have `plan`/`dispatch`).
 pub const SUBAGENT_ENV: &str = "KI_ORCHESTRATOR_SUBAGENT";
 
+/// Heartbeat period handed to the child (`KI_HEARTBEAT_SECS`).
+///
+/// `ki -p` prints its final text only when the run ends, so stdout carries no
+/// liveness signal at all — the child's stderr heartbeat (implemented in
+/// `kiqi-cli`'s print mode) is what keeps the parent's activity clock moving
+/// through a long tool call. Kept well below any plausible stall window.
+pub const CHILD_HEARTBEAT_SECS: u64 = 15;
+
+/// Env name the child reads to turn its heartbeat on.
+pub const HEARTBEAT_SECS_ENV: &str = "KI_HEARTBEAT_SECS";
+
+/// Env gate for the subagent stage log: `KI_DEBUG_SUBAGENT=1` appends to
+/// `<temp>/kiqi-subagent.log`, any other value is used as the path.
+pub const DEBUG_LOG_ENV: &str = "KI_DEBUG_SUBAGENT";
+
+/// How often the wait loop snapshots the child's progress into the stage log.
+const STAGE_LOG_EVERY: Duration = Duration::from_secs(30);
+
 /// How often the wait loop re-checks cancellation/timeout. Bounds how long a
 /// cancelled call can keep a child alive.
 const POLL_SLICE: Duration = Duration::from_millis(100);
+
+/// Which pipe a byte count belongs to.
+#[derive(Clone, Copy)]
+enum Stream {
+    Out,
+    Err,
+}
+
+/// Last-activity clock shared by both pipe readers and the wait loop.
+///
+/// Stdout silence alone is *not* a stall signal (`ki -p` writes nothing until
+/// the run ends), but *any* byte on either pipe is progress: the child's
+/// `KI_HEARTBEAT_SECS` heartbeat and its final text both land here. The clock is
+/// set at spawn, then refreshed per chunk read, so a silent-but-alive child and
+/// a hung one are finally distinguishable.
+#[derive(Clone, Default)]
+struct Activity {
+    last: Arc<Mutex<Option<Instant>>>,
+    out_bytes: Arc<AtomicUsize>,
+    err_bytes: Arc<AtomicUsize>,
+}
+
+impl Activity {
+    /// Start the clock: a freshly spawned child counts as active.
+    fn start(&self) {
+        if let Ok(mut last) = self.last.lock() {
+            *last = Some(Instant::now());
+        }
+    }
+
+    /// Record `bytes` arriving on `stream` — resets the silence window.
+    fn touch(&self, stream: Stream, bytes: usize) {
+        let counter = match stream {
+            Stream::Out => &self.out_bytes,
+            Stream::Err => &self.err_bytes,
+        };
+        counter.fetch_add(bytes, Ordering::Relaxed);
+        if let Ok(mut last) = self.last.lock() {
+            *last = Some(Instant::now());
+        }
+    }
+
+    /// How long the child has been silent (stdout + stderr).
+    fn silence(&self) -> Duration {
+        self.last
+            .lock()
+            .ok()
+            .and_then(|last| *last)
+            .map(|last| last.elapsed())
+            .unwrap_or_default()
+    }
+
+    /// `(stdout bytes, stderr bytes)` read so far.
+    fn bytes(&self) -> (usize, usize) {
+        (
+            self.out_bytes.load(Ordering::Relaxed),
+            self.err_bytes.load(Ordering::Relaxed),
+        )
+    }
+}
 
 /// Build the child command. Separate from `run` so it is unit-testable without
 /// spawning anything.
@@ -70,6 +150,9 @@ pub fn child_command(
         // Hard turn ceiling enforced by the harness, not the model.
         .env(MAX_TURNS_ENV, max_turns.to_string())
         .env(SUBAGENT_ENV, "1")
+        // Child-side liveness heartbeat: without it a long tool call looks
+        // exactly like a hang (print mode's stdout is silent until the end).
+        .env(HEARTBEAT_SECS_ENV, CHILD_HEARTBEAT_SECS.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -134,20 +217,34 @@ pub fn run_with_exe(
 ) -> Result<String, String> {
     // Fail before launching anything if already cancelled.
     control.check()?;
+    let activity = Activity::default();
     let mut child = child_command(exe, max_turns, provider, model)
         .spawn()
         .map_err(|err| format!("failed to start subagent `{}`: {err}", exe.display()))?;
+    activity.start();
+    stage(&format!("spawn pid={}", child.id()));
 
     // Drain stdout/stderr on their own threads so a chatty child cannot block on
-    // a full pipe while we wait for it to exit.
-    let out_reader = child.stdout.take().map(spawn_reader);
-    let err_reader = child.stderr.take().map(spawn_reader);
+    // a full pipe while we wait for it to exit. Both readers also refresh the
+    // activity clock — a byte on either pipe means the child is alive.
+    let out_reader = child
+        .stdout
+        .take()
+        .map(|stdout| spawn_reader(stdout, activity.clone(), Stream::Out));
+    let err_reader = child
+        .stderr
+        .take()
+        .map(|stderr| spawn_reader(stderr, activity.clone(), Stream::Err));
 
     write_stdin(&mut child, task);
+    stage("stdin-written");
 
     // Wait in slices so cancellation and the wall-clock deadline are both observed
     // while the child is still running.
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(timeout_secs);
+    let mut next_stage = started + STAGE_LOG_EVERY;
+    stage("wait");
     loop {
         if control.is_cancelled() {
             kill_and_reap(&mut child);
@@ -156,6 +253,16 @@ pub fn run_with_exe(
         if Instant::now() >= deadline {
             kill_and_reap(&mut child);
             return Err(format!("subagent timed out after {timeout_secs}s"));
+        }
+        // Periodic progress snapshot (opt-in stage log only; no behaviour change).
+        if Instant::now() >= next_stage {
+            let (out_bytes, err_bytes) = activity.bytes();
+            stage(&format!(
+                "wait elapsed={}s out={out_bytes}B err={err_bytes}B silent={}ms",
+                started.elapsed().as_secs(),
+                activity.silence().as_millis()
+            ));
+            next_stage = Instant::now() + STAGE_LOG_EVERY;
         }
         let slice = deadline
             .saturating_duration_since(Instant::now())
@@ -180,8 +287,14 @@ pub fn run_with_exe(
     let status = child
         .wait()
         .map_err(|err| format!("failed to reap subagent: {err}"))?;
+    stage(&format!(
+        "reaped status={} success={}",
+        status.code().unwrap_or(-1),
+        status.success()
+    ));
     let mut text = join_reader(out_reader);
     let stderr_text = join_reader(err_reader);
+    stage("readers-joined");
     if !status.success() && !stderr_text.trim().is_empty() {
         text.push_str("\n[stderr]\n");
         text.push_str(stderr_text.trim_end());
@@ -242,12 +355,95 @@ fn write_stdin(child: &mut Child, task: &str) {
     }
 }
 
-fn spawn_reader<R: Read + Send + 'static>(mut reader: R) -> std::thread::JoinHandle<String> {
+fn spawn_reader<R: Read + Send + 'static>(
+    mut reader: R,
+    activity: Activity,
+    stream: Stream,
+) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
         let mut buf = Vec::new();
-        let _ = reader.read_to_end(&mut buf);
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(bytes) => {
+                    buf.extend_from_slice(&chunk[..bytes]);
+                    // Every chunk is progress: this is what tells the wait loop
+                    // the child is working, not hung.
+                    activity.touch(stream, bytes);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                // Same tolerance `read_to_end` had: a read error ends the stream
+                // and the partial buffer still gets returned.
+                Err(_) => break,
+            }
+        }
         String::from_utf8_lossy(&buf).into_owned()
     })
+}
+
+/// Stage-log destination, resolved once from [`DEBUG_LOG_ENV`].
+fn stage_log_path() -> Option<&'static PathBuf> {
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let value = std::env::var(DEBUG_LOG_ENV).ok()?;
+        let value = value.trim();
+        if value.is_empty() || value == "0" {
+            return None;
+        }
+        if value == "1" || value.eq_ignore_ascii_case("true") {
+            Some(std::env::temp_dir().join("kiqi-subagent.log"))
+        } else {
+            Some(PathBuf::from(value))
+        }
+    })
+    .as_ref()
+}
+
+/// Append one timestamped stage line; a no-op unless [`DEBUG_LOG_ENV`] is set.
+///
+/// Diagnostics must never change a run's outcome, so every IO error (a missing
+/// temp dir, a full disk, a path pointing at a directory) is ignored and nothing
+/// panics.
+fn stage(line: &str) {
+    let Some(path) = stage_log_path() else {
+        return;
+    };
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| writeln!(file, "{} {line}", stage_timestamp()));
+}
+
+/// UTC timestamp, `2026-09-24T12:00:01.234Z` — the same format `key_trace` uses,
+/// inlined here so the plugin keeps zero extra crate dependencies.
+fn stage_timestamp() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let secs = (millis / 1000) as i64;
+    let sub = millis % 1000;
+    let days = secs.div_euclid(86_400);
+    let secs_of_day = secs.rem_euclid(86_400);
+    // Days-from-civil inverse (Howard Hinnant) — no date crate needed.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{sub:03}Z",
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60
+    )
 }
 
 fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {
@@ -272,7 +468,9 @@ mod tests {
             vec!["-p", "--no-session", "--exclude-tools", EXCLUDED_TOOLS]
         );
 
-        let envs: Vec<(String, String)> = command
+        // `Command::get_envs` iterates in an unspecified order, so sort before the
+        // exact comparison (the set, not the order, is the contract).
+        let mut envs: Vec<(String, String)> = command
             .get_envs()
             .map(|(key, value)| {
                 (
@@ -283,9 +481,14 @@ mod tests {
                 )
             })
             .collect();
+        envs.sort();
         assert_eq!(
             envs,
             vec![
+                (
+                    HEARTBEAT_SECS_ENV.to_string(),
+                    CHILD_HEARTBEAT_SECS.to_string()
+                ),
                 (MAX_TURNS_ENV.to_string(), "7".to_string()),
                 (SUBAGENT_ENV.to_string(), "1".to_string()),
             ]
@@ -485,5 +688,111 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "cancel took too long: {elapsed:?}"
         );
+    }
+
+    /// Reader that yields one chunk per `read`, sleeping before each, so the
+    /// activity clock can be observed mid-stream.
+    struct ChunkedReader {
+        chunks: std::collections::VecDeque<(Duration, Vec<u8>)>,
+    }
+
+    impl Read for ChunkedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Some((delay, chunk)) = self.chunks.pop_front() else {
+                return Ok(0);
+            };
+            std::thread::sleep(delay);
+            let n = chunk.len().min(buf.len());
+            buf[..n].copy_from_slice(&chunk[..n]);
+            if n < chunk.len() {
+                self.chunks
+                    .push_front((Duration::ZERO, chunk[n..].to_vec()));
+            }
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn spawn_reader_refreshes_the_activity_clock_on_every_chunk() {
+        let gap = Duration::from_millis(400);
+        let first = b"one\n".to_vec();
+        let second = b"two\n".to_vec();
+        let reader = ChunkedReader {
+            chunks: vec![
+                (Duration::ZERO, first.clone()),
+                (gap, second.clone()),
+                (gap, b"three\n".to_vec()),
+            ]
+            .into(),
+        };
+
+        let activity = Activity::default();
+        activity.start();
+        let handle = spawn_reader(reader, activity.clone(), Stream::Err);
+
+        // As soon as the second chunk lands the clock must have been reset. If the
+        // reader only counted bytes (or only touched the clock once at EOF), the
+        // silence window here would already be ~one full gap.
+        let second_end = first.len() + second.len();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while activity.bytes().1 < second_end && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let silence = activity.silence();
+        assert!(
+            silence < Duration::from_millis(200),
+            "the clock was not refreshed by the arriving chunk: silence={silence:?}"
+        );
+
+        let text = join_reader(Some(handle));
+        assert_eq!(text, "one\ntwo\nthree\n");
+        assert_eq!(
+            activity.bytes(),
+            (0, text.len()),
+            "stderr bytes are counted on the stderr counter only"
+        );
+    }
+
+    #[test]
+    fn activity_clock_counts_both_pipes_and_starts_at_spawn() {
+        let activity = Activity::default();
+        assert_eq!(activity.bytes(), (0, 0));
+        activity.start();
+        assert!(activity.silence() < Duration::from_secs(1));
+
+        activity.touch(Stream::Out, 5);
+        activity.touch(Stream::Err, 7);
+        assert_eq!(activity.bytes(), (5, 7));
+        assert!(activity.silence() < Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_keeps_writing_to_stderr_still_returns_its_text() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // The shape of a real subagent: periodic stderr output (the heartbeat)
+        // and the final answer on stdout at the very end.
+        let script = std::env::temp_dir().join(format!("orch-chatty-{}.sh", std::process::id()));
+        {
+            let mut file = std::fs::File::create(&script).unwrap();
+            writeln!(file, "#!/bin/sh").unwrap();
+            writeln!(file, "for i in 1 2 3 4 5; do").unwrap();
+            writeln!(file, "  echo \"[ki] heartbeat t=$i\" >&2").unwrap();
+            writeln!(file, "  sleep 0.2").unwrap();
+            writeln!(file, "done").unwrap();
+            writeln!(file, "echo done").unwrap();
+        }
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let control = Control::default();
+        let result = run_with_exe(&script, "ignored", 8, 30, None, None, &control);
+        let _ = std::fs::remove_file(&script);
+
+        let text = result.expect("a chatty child that exits normally is a success");
+        assert!(text.contains("done"), "got: {text:?}");
     }
 }
