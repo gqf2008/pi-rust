@@ -958,7 +958,17 @@ fn print_build_error(e: &BuildError) {
         BuildError::SessionNotFound { .. } => {
             eprintln!("error: {e}");
             eprintln!();
-            eprintln!("List saved sessions with the /session command in interactive mode.");
+            // `e` already says what to do about *this* invocation (drop the
+            // --continue/--resume/--session flag). The extra hint is for "which
+            // sessions exist", and it must work in the mode the user is in: `/session`
+            // is interactive-only, so `ki -p --resume …` printed advice it could not
+            // follow. `--resume` with no argument opens a picker, and `--list-models`
+            // shows catalogs — but for sessions the picker is the only listing, so
+            // name it and say where it runs.
+            eprintln!(
+                "`ki --resume` (interactive) browses saved sessions; they are stored per \
+                 project under the agent dir's sessions/<project>/ subdirectory."
+            );
         }
         _ => eprintln!("error: {e}"),
     }
