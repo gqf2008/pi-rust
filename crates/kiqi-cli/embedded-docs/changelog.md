@@ -13,6 +13,12 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **MCP notifications reach an idle session.** The notice mailbox now signals
+  a per-session MUI input adapter (`Notify`, not a poll). When idle, the TUI
+  main loop drains the mailbox and applies the wake policy; while a run is
+  active, the notice is queued as a steering message into that run. Both paths
+  end in the same run/agent logic as terminal input, so an idle session no
+  longer waits for a user prompt before seeing a signal.
 - **MCP runtime watches are bounded and cannot escape the user's opt-in.** The
   watch verb is capped at 32 model subscriptions; a model-started watch is
   record-only unless the same uri is in the server's config `subscribe` list,

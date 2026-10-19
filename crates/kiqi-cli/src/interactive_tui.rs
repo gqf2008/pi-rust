@@ -711,6 +711,10 @@ enum TuiMessage {
     /// order relative to agent runs (upstream's `recordBashResult` /
     /// `_pendingBashMessages`).
     UserBashFinished(UserBashReport),
+    /// An MCP resource notice landed in the session's mailbox. This is the
+    /// MUI input event: the same main loop that handles terminal input drains
+    /// it (idle) or leaves it for AgentEnd (run active).
+    McpInput,
     /// An MCP resource signal passed the host's arousal budget and should start
     /// a run. The batch's detailed notice entry is already in the transcript;
     /// this is the short external-signal trigger built by `signal_wake`.
@@ -1564,6 +1568,43 @@ pub async fn interactive_tui(
         }))
     } else {
         None
+    };
+
+    // ---- MUI input adapter ----
+    // MCP is another UI: a notice is an input event, handled like terminal
+    // input. Idle → the main loop drains and applies the wake policy; a run is
+    // active → queue a steering message into that run (never append mid-run).
+    let mui_handle = {
+        let tx_mui = tx.clone();
+        let mcp_mui = Arc::clone(&reload_context.mcp);
+        let lane_mui = lane.clone();
+        let state_mui = state.clone();
+        let harness_mui = harness.clone();
+        tokio::spawn(async move {
+            loop {
+                mcp_mui.wait_for_notice().await;
+                if *state_mui.status.lock().unwrap() != RunStatus::Idle {
+                    let batch = mcp_mui.take_notices_with_auto_read().await;
+                    if batch.is_empty() {
+                        continue;
+                    }
+                    let message = kiqi_mcp::notice_message(&batch);
+                    if let Err(error) = lane_mui.steer(message).await {
+                        eprintln!(
+                            "warning: mcp: could not queue the signal into the active run: {error}"
+                        );
+                        // The run may have ended between the status check and
+                        // the steer; persist rather than lose the notice.
+                        let _ = harness_mui
+                            .session()
+                            .append_message(kiqi_mcp::notice_message(&batch))
+                            .await;
+                    }
+                } else if tx_mui.send(TuiMessage::McpInput).is_err() {
+                    break;
+                }
+            }
+        })
     };
 
     // ---- B5d: plugin→TUI reload bridge ----
@@ -2791,6 +2832,14 @@ pub async fn interactive_tui(
                 )
                 .await;
             }
+            Some(TuiMessage::McpInput) => {
+                // MUI input: drain at the same kind of boundary as terminal
+                // input, but never while a run is active. If a non-run command
+                // is in flight, leave the notice for AgentEnd.
+                if *state.status.lock().unwrap() == RunStatus::Idle {
+                    handle_signal_boundary(&harness, &reload_context.mcp, &signal_wake, &tx).await;
+                }
+            }
             Some(TuiMessage::SignalWake(prompt)) => {
                 // User priority (design §5.3): a staged steering/follow-up
                 // message means the user is already driving the next turn.
@@ -3214,6 +3263,7 @@ pub async fn interactive_tui(
     if let Some(handle) = drain_handle {
         handle.abort();
     }
+    mui_handle.abort();
     // Drop the reload bridge: clearing the mailbox closes the signal channel,
     // the drain task's `recv` returns `None`, and the task exits. (Aborting is
     // redundant — the recv terminates — but cheap + makes shutdown explicit.)

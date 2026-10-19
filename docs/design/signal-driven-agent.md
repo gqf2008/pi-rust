@@ -224,10 +224,17 @@ chain_id        若由某次 run 的副作用产生，记录产生它的 run
 
 ### 5.3 并发与优先级
 
+**MCP 是另一种 UI（MUI）**：通知到达时，per-session 的 MUI 适配器通过
+`Notify` 把它变成会话输入事件，和终端输入走同一套输入/run 逻辑：
+
+- 会话空闲：主循环排干邮箱，按唤醒策略决定是否启动一次 run；
+- run 进行中：通知作为 steering 消息排入当前 run，绝不 mid-run append；
+- 终端输入与通知竞争时，用户输入优先。
+
 | 场景 | 行为 |
 |---|---|
-| lane 空闲，策略允许 | 构造唤醒消息，`prompt_message` 启动一次 run |
-| run 正在进行 | 信号继续进邮箱；边界排干后只落 transcript，不 mid-run 唤醒；AgentEnd 后按策略决定是否跟进一次 |
+| lane 空闲，策略允许 | MUI 输入 → 排干 → 构造唤醒消息，启动一次 run |
+| run 正在进行 | MUI 把通知作为 steering 消息排入当前 run；AgentEnd 仍会排干未被消费的通知 |
 | 用户已有排队中的输入 | **用户优先**：跳过本次自动唤醒，信号留给用户输入后的 context build |
 | 用户 abort | 终止当前 run，并暂停该链的自动唤醒，直到下一次用户输入（防止「按了 Esc 又自己起来」） |
 | 自动 run 连续触发 | 达到 `maxConsecutiveRuns` 即停，落日志，留待用户输入 |
@@ -368,6 +375,7 @@ inbox 行只在有待处理信号时出现；`signals list` 返回 id、来源�
 | 唤醒预算、静默窗口、中断静音 | `crates/kiqi-cli/src/signal_wake.rs`（`SignalWakeState`） |
 | 排干与记录拆分 | `crates/kiqi-cli/src/session.rs`（`take_mcp_boundary` / `append_notice_batch`） |
 | TUI AgentEnd 决策与触发 | `crates/kiqi-cli/src/interactive_tui/events.rs` |
+| **MUI 输入源**（Notify → 空闲排干 / 忙碌 steering） | `crates/kiqi-cli/src/interactive_tui.rs`（MUI adapter）+ `crates/kiqi-mcp/src/notice.rs`（`Notify`） |
 | 触发 run、用户优先、用户输入重置 | `crates/kiqi-cli/src/interactive_tui.rs`（`TuiMessage::SignalWake`） |
 | Esc 静音 | `abort_run_restoring_queue` |
 

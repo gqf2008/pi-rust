@@ -18,6 +18,8 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+use tokio::sync::Notify;
+
 /// Distinct (server, uri) notices the mailbox holds. Upstream's pending queue
 /// was bounded at 64 for the same reason: a burst must not grow the host's
 /// memory, and the oldest state is the least useful to re-read.
@@ -65,6 +67,9 @@ struct Inner {
 #[derive(Default)]
 pub struct McpNoticeMailbox {
     inner: Mutex<Inner>,
+    /// Wakes the host's MUI input adapter when a notice lands. `notify_one`
+    /// stores a permit, so a push before the waiter starts is not lost.
+    notify: Notify,
 }
 
 impl McpNoticeMailbox {
@@ -75,27 +80,37 @@ impl McpNoticeMailbox {
     /// Record one update. Coalesces by (server, uri); counts as suppressed when
     /// it replaces a pending notice or the mailbox is at cap.
     pub(crate) fn push(&self, server: &str, uri: &str) {
-        let mut inner = self.inner.lock().unwrap();
-        if inner
-            .entries
-            .iter()
-            .any(|entry| entry.server == server && entry.uri == uri)
         {
-            // A newer update for the same uri: the pending notice carries no
-            // content, so replacing it loses nothing — but the replaced event
-            // is one the model will never see individually.
-            inner.suppressed += 1;
-            return;
+            let mut inner = self.inner.lock().unwrap();
+            if inner
+                .entries
+                .iter()
+                .any(|entry| entry.server == server && entry.uri == uri)
+            {
+                // A newer update for the same uri: the pending notice carries no
+                // content, so replacing it loses nothing — but the replaced event
+                // is one the model will never see individually.
+                inner.suppressed += 1;
+            } else if inner.entries.len() >= MAX_NOTICE_ENTRIES {
+                inner.suppressed += 1;
+            } else {
+                inner.entries.push_back(McpNotice {
+                    server: server.to_string(),
+                    uri: uri.to_string(),
+                    content: None,
+                });
+            }
         }
-        if inner.entries.len() >= MAX_NOTICE_ENTRIES {
-            inner.suppressed += 1;
-            return;
-        }
-        inner.entries.push_back(McpNotice {
-            server: server.to_string(),
-            uri: uri.to_string(),
-            content: None,
-        });
+        // Even a coalesced/dropped update means "state changed since you last
+        // looked"; the waiter may have drained the previous entry already.
+        self.notify.notify_one();
+    }
+
+    /// Wait for the next [`McpNoticeMailbox::push`]. A notice pushed before the
+    /// call returns immediately (the permit is stored). The caller must still
+    /// [`take`](Self::take) the mailbox: this is an edge, not the data.
+    pub async fn notified(&self) {
+        self.notify.notified().await;
     }
 
     /// Forget every pending notice for one (server, uri) — a subscription
@@ -353,5 +368,21 @@ mod tests {
         assert!(text.contains("- docs: file:///b.md"), "got {text:?}");
         // The light notice stays a pointer: no fabricated content block.
         assert_eq!(text.matches("  line one").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn push_wakes_a_waiter_even_when_coalesced() {
+        let mailbox = McpNoticeMailbox::new();
+        mailbox.push("docs", "file:///a.md");
+        // The permit is stored before the wait starts.
+        tokio::time::timeout(std::time::Duration::from_secs(1), mailbox.notified())
+            .await
+            .expect("a stored permit must satisfy the first wait");
+        let wait = mailbox.notified();
+        // A coalesced update still means "state changed" for the MUI adapter.
+        mailbox.push("docs", "file:///a.md");
+        tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+            .await
+            .expect("a coalesced update must still wake the MUI adapter");
     }
 }

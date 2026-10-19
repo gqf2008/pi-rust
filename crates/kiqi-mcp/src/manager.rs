@@ -1437,6 +1437,13 @@ impl McpManager {
         self.mailbox.pending_count()
     }
 
+    /// Wait for the next notice pushed into this session's mailbox. This is an
+    /// edge, not the data: the caller still drains with
+    /// [`McpManager::take_notices`] / [`McpManager::take_notices_with_auto_read`].
+    pub async fn wait_for_notice(&self) {
+        self.mailbox.notified().await;
+    }
+
     /// The parsed wake policy for a connected server. `None` for an unknown or
     /// failed server — it cannot produce notices, so it has nothing to wake.
     pub fn signal_config(&self, server: &str) -> Option<crate::config::SignalsConfig> {
