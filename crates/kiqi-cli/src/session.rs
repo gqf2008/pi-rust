@@ -1688,6 +1688,21 @@ where
         }
     }
 
+    // Re-merge extension tools FIRST: the prompt below lists the tools this session
+    // has, so building the list afterwards would keep advertising the previous
+    // reload's set (and, on the first reload, the hard-coded one).
+    let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
+    let tool_ctx = kiqi_tools::ExecutionToolContext::new(env_dyn.clone(), Some(mut_env));
+    let mut tools = build_tools(&tool_ctx, &effective_args, &ctx.cwd, &ctx.signal_host);
+    merge_extension_tools(
+        &mut tools,
+        &extension_session,
+        &effective_args,
+        &ctx.tool_context,
+    );
+    let reload_tool_names: Vec<String> =
+        tools.iter().map(|t| t.tool.schema().name.clone()).collect();
+
     // ---- Re-compose the system prompt (same precedence as build) ----
     // Same working-state wording rule as `build`; a mid-session `/model` switch
     // re-composes the prompt on the next reload, which is the same staleness the
@@ -1697,11 +1712,24 @@ where
     let base_prompt = match effective_args.system_prompt.as_deref() {
         Some(explicit) => explicit.to_string(),
         None if project_trusted => match discover_system_prompt_file(&ctx.cwd) {
-            Some(path) => read_prompt_source(&path, &mut context_paths)
-                .unwrap_or_else(|| default_system_prompt(&cwd_str, prior_reasoning_replayed)),
-            None => default_system_prompt(&cwd_str, prior_reasoning_replayed),
+            Some(path) => read_prompt_source(&path, &mut context_paths).unwrap_or_else(|| {
+                default_system_prompt_for_tools(
+                    &cwd_str,
+                    prior_reasoning_replayed,
+                    Some(&reload_tool_names),
+                )
+            }),
+            None => default_system_prompt_for_tools(
+                &cwd_str,
+                prior_reasoning_replayed,
+                Some(&reload_tool_names),
+            ),
         },
-        None => default_system_prompt(&cwd_str, prior_reasoning_replayed),
+        None => default_system_prompt_for_tools(
+            &cwd_str,
+            prior_reasoning_replayed,
+            Some(&reload_tool_names),
+        ),
     };
     let mut append_texts: Vec<String> = Vec::new();
     for extra in &effective_args.append_system_prompt {
@@ -1779,18 +1807,6 @@ where
         )))
         .await;
 
-    // Re-merge extension tools (a reloaded plugin may have added/removed a
-    // tool). The built-in set is rebuilt from scratch + extension tools merged
-    // on top, mirroring `build`.
-    let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
-    let tool_ctx = kiqi_tools::ExecutionToolContext::new(env_dyn.clone(), Some(mut_env));
-    let mut tools = build_tools(&tool_ctx, &effective_args, &ctx.cwd, &ctx.signal_host);
-    merge_extension_tools(
-        &mut tools,
-        &extension_session,
-        &effective_args,
-        &ctx.tool_context,
-    );
     // The rebuilt tool adapters get the session's UI mailboxes too, so a
     // `/reload` no longer costs a compiled plugin its `ui.dialog` /
     // `set_status` / `set_editor_text`. The mailboxes live in the reload
@@ -3323,6 +3339,91 @@ mod tests {
     ///
     /// `None` keeps the historical block for callers that do not know the tool set;
     /// `Some(&[])` must say so plainly rather than print an empty heading.
+    /// `/reload` must rebuild the prompt against the tools *after* re-merging, not
+    /// against the previous set.
+    ///
+    /// The tool rebuild used to sit below the prompt composition in
+    /// `reload_extension_resources`, so every reload rendered the list from the last
+    /// reload's tools — and on the first reload, from whatever `build` had produced
+    /// before the flag-driven filtering that only reload re-applies.
+    ///
+    /// Subprocess-isolated: the crate's env-mutating tests share one lock, and this
+    /// one writes a config dir.
+    #[test]
+    fn reload_composes_the_prompt_from_the_tools_it_just_rebuilt() {
+        const CHILD: &str = "KI_RELOAD_TOOL_PROMPT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "session::tests::reload_composes_the_prompt_from_the_tools_it_just_rebuilt",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env(crate::config::CONFIG_DIR_ENV, dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let agent = crate::config::agent_dir().unwrap();
+                let cwd = agent.join("project");
+                std::fs::create_dir_all(&cwd).unwrap();
+                let resolved = crate::provider::resolve(
+                    Some("anthropic"),
+                    Some(crate::provider::DEFAULT_MODEL_ID),
+                    None,
+                    Some("test-key"),
+                    None,
+                )
+                .unwrap();
+                // A custom system prompt would bypass the default block, so leave it
+                // unset and let the default (tool-aware) prompt be used.
+                let args = Args {
+                    no_session: true,
+                    no_extensions: true,
+                    no_prompt_templates: true,
+                    no_context_files: true,
+                    trust_override: Some(true),
+                    ..Args::default()
+                };
+                let (harness, _events, context) =
+                    build(&resolved, &args, &cwd, true).await.unwrap();
+                assert!(
+                    !reload_extension_resources(&harness, &context)
+                        .await
+                        .had_errors
+                );
+
+                let prompt = harness.get_system_prompt().await.unwrap().unwrap();
+                let tools: Vec<String> = harness
+                    .get_tools()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|tool| tool.tool.schema().name.clone())
+                    .collect();
+                assert!(!tools.is_empty(), "the default session has tools");
+                for name in &tools {
+                    assert!(
+                        prompt.contains(&format!("- {name}")),
+                        "reload must advertise `{name}` in the prompt it composes: {prompt}"
+                    );
+                }
+            });
+    }
+
     #[test]
     fn the_prompt_lists_the_tools_the_session_actually_has() {
         let absent = default_system_prompt_for_tools(".", false, Some(&[]));
