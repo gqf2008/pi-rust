@@ -516,8 +516,12 @@ impl HostState {
     }
 
     /// Resolve a relative path inside the plugin's data directory without any
-    /// capability check, for callers whose own grant already gates them
-    /// (`exec`'s cwd).
+    /// capability check — the lexical half of the jail, exposed to tests so each
+    /// guard can be asserted in isolation. Production paths go through
+    /// [`fs_checked`](Self::fs_checked) or [`scoped_cwd`](Self::scoped_cwd), which
+    /// combine both halves; without this attribute the method is dead code in every
+    /// non-test build (which is what the compiler was reporting).
+    #[cfg(test)]
     fn jail(&self, rel: &str) -> Result<std::path::PathBuf, CapabilityError> {
         jail_under(&self.data_dir()?, rel, "the plugin directory")
     }
@@ -606,6 +610,11 @@ impl HostState {
     /// directory (by `exec`, or by the user) would be followed straight out of
     /// it. So the parent is canonicalized and must still sit inside the
     /// canonical root, and the final component must not itself be a link.
+    /// The symlink half of the jail for the plugin's data directory; see [`jail`]
+    /// for why this is test-only.
+    ///
+    /// [`jail`]: Self::jail
+    #[cfg(test)]
     fn symlink_checked(
         &self,
         resolved: &std::path::Path,
