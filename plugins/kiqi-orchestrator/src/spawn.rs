@@ -277,14 +277,16 @@ fn run_with_limits(
     // Drain stdout/stderr on their own threads so a chatty child cannot block on
     // a full pipe while we wait for it to exit. Both readers also refresh the
     // activity clock — a byte on either pipe means the child is alive.
+    let out_sink: OutputSink = Arc::new(Mutex::new(Vec::new()));
+    let err_sink: OutputSink = Arc::new(Mutex::new(Vec::new()));
     let out_reader = child
         .stdout
         .take()
-        .map(|stdout| spawn_reader(stdout, activity.clone(), Stream::Out));
+        .map(|stdout| spawn_reader(stdout, activity.clone(), Stream::Out, Arc::clone(&out_sink)));
     let err_reader = child
         .stderr
         .take()
-        .map(|stderr| spawn_reader(stderr, activity.clone(), Stream::Err));
+        .map(|stderr| spawn_reader(stderr, activity.clone(), Stream::Err, Arc::clone(&err_sink)));
 
     write_stdin(&mut child, task);
     stage("stdin-written");
@@ -353,8 +355,8 @@ fn run_with_limits(
         status.code().unwrap_or(-1),
         status.success()
     ));
-    let mut text = join_reader(out_reader);
-    let stderr_text = join_reader(err_reader);
+    let mut text = join_reader(out_reader, &out_sink, READER_JOIN_TIMEOUT);
+    let stderr_text = join_reader(err_reader, &err_sink, READER_JOIN_TIMEOUT);
     stage("readers-joined");
     if !status.success() && !stderr_text.trim().is_empty() {
         text.push_str("\n[stderr]\n");
@@ -438,19 +440,29 @@ fn write_stdin(child: &mut Child, task: &str) {
     }
 }
 
+/// Where a reader thread's bytes land.
+///
+/// The reader appends here instead of returning its buffer from the thread, so the
+/// caller can collect everything read so far **even if the thread is still
+/// blocked** in `read`. That is what lets `join_reader` give up waiting instead of
+/// hanging on a pipe whose write end nobody will ever close.
+type OutputSink = Arc<Mutex<Vec<u8>>>;
+
 fn spawn_reader<R: Read + Send + 'static>(
     mut reader: R,
     activity: Activity,
     stream: Stream,
-) -> std::thread::JoinHandle<String> {
+    sink: OutputSink,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let mut buf = Vec::new();
         let mut chunk = [0u8; 8192];
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(bytes) => {
-                    buf.extend_from_slice(&chunk[..bytes]);
+                    if let Ok(mut buf) = sink.lock() {
+                        buf.extend_from_slice(&chunk[..bytes]);
+                    }
                     // Every chunk is progress: this is what tells the wait loop
                     // the child is working, not hung.
                     activity.touch(stream, bytes);
@@ -461,7 +473,6 @@ fn spawn_reader<R: Read + Send + 'static>(
                 Err(_) => break,
             }
         }
-        String::from_utf8_lossy(&buf).into_owned()
     })
 }
 
@@ -529,10 +540,37 @@ fn stage_timestamp() -> String {
     )
 }
 
-fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {
-    handle
-        .map(|handle| handle.join().unwrap_or_default())
-        .unwrap_or_default()
+/// How long to wait for a reader thread to reach EOF once the child is gone.
+///
+/// A reader can block forever if some process still holds the write end of the
+/// pipe: the child's own group is killed on every exit path, but a descendant that
+/// left the process group cannot be reached that way, and waiting for it is not an
+/// option — the parent run would hang with the child already dead. This bound, not
+/// the reap, is what keeps the call returnable.
+///
+/// Old behaviour: unbounded (`handle.join()`). New: 5 s, after which whatever was
+/// read is kept and the thread is left to finish on its own.
+const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn join_reader(
+    handle: Option<std::thread::JoinHandle<()>>,
+    sink: &OutputSink,
+    timeout: Duration,
+) -> String {
+    if let Some(handle) = handle {
+        let deadline = Instant::now() + timeout;
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if handle.is_finished() {
+            let _ = handle.join();
+        }
+        // Otherwise the thread is left detached, still blocked in `read` on a pipe
+        // nobody will close. Dropping the handle is deliberate: joining it is what
+        // used to hang the whole run.
+    }
+    let bytes = sink.lock().map(|buf| buf.clone()).unwrap_or_default();
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 #[cfg(test)]
@@ -795,6 +833,82 @@ mod tests {
         }
     }
 
+    /// A reader that yields some bytes and then never reaches EOF, standing in for
+    /// a pipe whose write end is held by a process the reap could not reach (a
+    /// descendant that left the process group). `join()` on its thread never
+    /// returns, which is what used to hang the whole run with the child already
+    /// dead.
+    struct StuckReader {
+        released: std::sync::mpsc::Receiver<()>,
+        sent: bool,
+    }
+
+    impl Read for StuckReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.sent {
+                self.sent = true;
+                let bytes = b"partial output\n";
+                buf[..bytes.len()].copy_from_slice(bytes);
+                return Ok(bytes.len());
+            }
+            // No EOF until the test releases us. The 60 s cap exists so a mutant
+            // that joins without a bound fails a bounded assertion instead of
+            // hanging the suite forever.
+            let _ = self.released.recv_timeout(Duration::from_secs(60));
+            Ok(0)
+        }
+    }
+
+    /// The bound, not the reap, is what makes the call returnable: a reader stuck
+    /// on a pipe nobody closes must not be joined indefinitely.
+    #[test]
+    fn a_reader_that_never_reaches_eof_cannot_block_the_call() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let sink: OutputSink = Arc::new(Mutex::new(Vec::new()));
+        let activity = Activity::default();
+        activity.start();
+        let handle = spawn_reader(
+            StuckReader {
+                released: release_rx,
+                sent: false,
+            },
+            activity,
+            Stream::Out,
+            Arc::clone(&sink),
+        );
+
+        let start = Instant::now();
+        // A test-sized bound; production uses READER_JOIN_TIMEOUT.
+        let text = join_reader(Some(handle), &sink, Duration::from_millis(200));
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the join must be bounded, took {elapsed:?}"
+        );
+        assert_eq!(
+            text, "partial output\n",
+            "the bytes read before the stall must survive"
+        );
+        // Let the helper thread finish so the test leaves nothing running.
+        let _ = release_tx.send(());
+    }
+
+    #[test]
+    fn a_finished_reader_still_returns_all_of_its_output() {
+        let sink: OutputSink = Arc::new(Mutex::new(Vec::new()));
+        let activity = Activity::default();
+        activity.start();
+        let handle = spawn_reader(
+            std::io::Cursor::new(b"all of it\n".to_vec()),
+            activity,
+            Stream::Out,
+            Arc::clone(&sink),
+        );
+        let text = join_reader(Some(handle), &sink, READER_JOIN_TIMEOUT);
+        assert_eq!(text, "all of it\n");
+    }
+
     #[test]
     fn spawn_reader_refreshes_the_activity_clock_on_every_chunk() {
         let gap = Duration::from_millis(400);
@@ -811,7 +925,8 @@ mod tests {
 
         let activity = Activity::default();
         activity.start();
-        let handle = spawn_reader(reader, activity.clone(), Stream::Err);
+        let sink: OutputSink = Arc::new(Mutex::new(Vec::new()));
+        let handle = spawn_reader(reader, activity.clone(), Stream::Err, Arc::clone(&sink));
 
         // As soon as the second chunk lands the clock must have been reset. If the
         // reader only counted bytes (or only touched the clock once at EOF), the
@@ -827,7 +942,7 @@ mod tests {
             "the clock was not refreshed by the arriving chunk: silence={silence:?}"
         );
 
-        let text = join_reader(Some(handle));
+        let text = join_reader(Some(handle), &sink, READER_JOIN_TIMEOUT);
         assert_eq!(text, "one\ntwo\nthree\n");
         assert_eq!(
             activity.bytes(),
