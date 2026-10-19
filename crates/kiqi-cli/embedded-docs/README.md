@@ -2,9 +2,9 @@
 
 [![license](https://img.shields.io/crates/l/kiqi-cli.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue.svg)](#install)
-[![CI](https://github.com/bigfish1913/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/bigfish1913/pi-rust/actions/workflows/ci.yml)
-[![GitHub stars](https://img.shields.io/github/stars/bigfish1913/pi-rust?style=flat)](https://github.com/bigfish1913/pi-rust/stargazers)
-[![Latest release](https://img.shields.io/github/v/release/bigfish1913/pi-rust)](https://github.com/bigfish1913/pi-rust/releases/latest)
+[![CI](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml)
+[![GitHub stars](https://img.shields.io/github/stars/gqf2008/pi-rust?style=flat)](https://github.com/gqf2008/pi-rust/stargazers)
+[![Latest release](https://img.shields.io/github/v/release/gqf2008/pi-rust)](https://github.com/gqf2008/pi-rust/releases/latest)
 
 `ki` is a library-first coding-agent runtime written in Rust, plus a terminal
 agent built on top of it. Nine composable crates span provider adapters, a
@@ -39,7 +39,7 @@ project layout.
 **Prebuilt binary** (no Rust toolchain needed):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bigfish1913/pi-rust/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/gqf2008/pi-rust/main/scripts/install.sh | sh
 ```
 
 Verifies the published SHA-256 checksum and installs to `/usr/local/bin` or
@@ -56,23 +56,19 @@ ki --version
 The crates are not published to crates.io, so `cargo install kiqi-cli` does not work —
 it would fetch a different (or no) package.
 
-**Package managers:**
+**Package managers:** not available yet. The Homebrew tap and Scoop bucket this
+project would publish to currently carry a *different* tool (`rpi`, at v0.6.1) —
+there is no `ki.rb` or `ki.json` in them — so `brew install ki` / `scoop install ki`
+have nothing to install. `packaging/` holds a formula and manifests that have never
+been published; see `release-target-split` in the project's issue notes. A winget
+manifest is [open for review](https://github.com/microsoft/winget-pkgs/pull/444745).
 
-```bash
-brew tap bigfish1913/tap && brew install ki          # macOS (Apple silicon), Linux
-scoop bucket add bigfish1913 https://github.com/bigfish1913/scoop-bucket
-scoop install ki                                     # Windows
-```
-
-The Homebrew formula currently supports Apple silicon on macOS. Intel Macs can
-use the prebuilt installer for releases with an `x86_64-apple-darwin` asset, or
-`scripts/install.sh` (see below). A winget manifest is [open for
-review](https://github.com/microsoft/winget-pkgs/pull/444745).
+Use the prebuilt installer or a source build until then:
 
 **From source:**
 
 ```bash
-git clone https://github.com/bigfish1913/pi-rust.git
+git clone https://github.com/gqf2008/pi-rust.git
 cd pi-rust && cargo run -p minimal   # offline agent, no API key required
 ```
 
@@ -310,7 +306,7 @@ machine. See [`docs/remote/user-guide.md`](docs/remote/user-guide.md).
 
 | | |
 | --- | --- |
-| Current release | **[0.3.9](https://github.com/bigfish1913/pi-rust/releases)** (nine crates, published together) |
+| Current release | **[0.4.1](https://github.com/gqf2008/pi-rust/releases/tag/v0.4.1)** (all crates share one workspace version) |
 | Stability | `kiqi-ai`, `kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-plugin-sdk` are the intended stable surface |
 | MSRV | 1.96 |
 | Platforms | Linux, macOS, Windows (CI runs the suite on Linux) |

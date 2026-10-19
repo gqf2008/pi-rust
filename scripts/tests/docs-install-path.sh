@@ -69,6 +69,22 @@ for doc in "$ROOT/README.md" "$ROOT/docs/kiqi-tool/README.md"; do
     fi
 done
 
+# --- Install commands must fetch THIS repository -----------------------------
+# The other repo's `scripts/install.sh` has `REPO="bigfish1913/pi-rust"` and installs
+# an unrelated build (`rpi`, a different version line). Following a README that points
+# there gets you somebody else's tool.
+for doc in "$ROOT/README.md" "$ROOT/docs/kiqi-tool/README.md"; do
+    [ -f "$doc" ] || continue
+    rel=${doc#"$ROOT"/}
+    grep -n 'bigfish1913/pi-rust' "$doc" \
+        | grep -E 'raw\.githubusercontent\.com|releases/download|actions/workflows' \
+        | grep -v '^[0-9]*:>' >/dev/null && {
+        echo "FAIL: $rel points an install/badge URL at bigfish1913/pi-rust," >&2
+        echo "      which serves a different project (rpi, v0.6.1)" >&2
+        status=1
+    }
+done
+
 if [ "$status" -eq 0 ]; then
     echo "docs: install instructions match the manifests ($unpublished crates, publish = false)"
 fi
