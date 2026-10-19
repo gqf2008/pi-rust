@@ -577,20 +577,29 @@ fn resolve_strict(tool: &Tool, supports_strict_tools: bool) -> Option<bool> {
         // `prefer`, and surface an error for `require`.
         match make_strict_json_schema(tool.parameters.as_value()) {
             Ok(_) => Some(true),
-            Err(_) => {
+            Err(()) => {
+                // Both strictness levels end up non-strict here, because this
+                // function has no error channel and `convert_tools` returns a plain
+                // `Vec`. The old code branched on `Require` and returned `None` from
+                // both arms — a distinction computed and then discarded, so a caller
+                // that asked for `require` was silently downgraded with nothing to
+                // observe. Say so instead; promoting this to a real provider error
+                // needs a `Result` through `convert_tools` and its callers, which is
+                // a larger change than this behaviour warrants today (every in-tree
+                // caller uses `Prefer`).
                 if matches!(
                     config,
                     crate::types::ConstrainedSamplingConfig::JsonSchema {
                         strict: crate::types::ConstrainedStrictness::Require,
                     }
                 ) {
-                    // v1 simplification: downgrade to non-strict rather than
-                    // panic the request; the agent loop surfaces coercion
-                    // failures separately. TODO: propagate as a provider error.
-                    None
-                } else {
-                    None
+                    tracing::warn!(
+                        tool = %tool.name,
+                        "tool requires strict JSON-schema sampling, but its schema cannot \
+                         be made strict; sending it non-strict"
+                    );
                 }
+                None
             }
         }
     } else {
@@ -1485,6 +1494,62 @@ mod tests {
         UserMessage,
     };
     use serde_json::json;
+
+    /// `Require` is honoured only when the schema *can* be made strict.
+    ///
+    /// When it cannot, both strictness levels fall back to non-strict — this
+    /// function has no error channel, and `convert_tools` returns a plain `Vec`.
+    /// Before this test existed the failure arm branched on `Require` and returned
+    /// `None` from both sides, so the intent was computed and thrown away; now the
+    /// `require` case emits a `tracing::warn!` so the downgrade is at least
+    /// observable.
+    ///
+    /// The assertion deliberately pins "Require behaves like Prefer here": that is
+    /// the known limitation, not a claim that `require` is satisfied. If someone
+    /// later threads a `Result` through `convert_tools`, this test should change to
+    /// assert an error instead.
+    #[test]
+    fn requires_strict_sampling_degrades_quietly_when_the_schema_cannot_be_strict() {
+        // A non-object root is not strictable (see `strict_schema`).
+        let schema = Schema::new(json!({ "type": "string" }));
+
+        for strict in [
+            crate::types::ConstrainedStrictness::Prefer,
+            crate::types::ConstrainedStrictness::Require,
+        ] {
+            let tool = Tool {
+                name: "unstrictable".to_string(),
+                description: String::new(),
+                parameters: schema.clone(),
+                constrained_sampling: Some(crate::types::ConstrainedSamplingConfig::JsonSchema {
+                    strict,
+                }),
+            };
+            assert_eq!(
+                resolve_strict(&tool, true),
+                None,
+                "{strict:?}: a schema that cannot be strict must not claim strict"
+            );
+        }
+
+        // A strictable schema still opts in at either level.
+        let ok = Tool {
+            name: "strictable".to_string(),
+            description: String::new(),
+            parameters: Schema::new(json!({
+                "type": "object",
+                "properties": { "x": { "type": "string" } },
+                "required": ["x"],
+                "additionalProperties": false
+            })),
+            constrained_sampling: Some(crate::types::ConstrainedSamplingConfig::JsonSchema {
+                strict: crate::types::ConstrainedStrictness::Require,
+            }),
+        };
+        assert_eq!(resolve_strict(&ok, true), Some(true));
+        // And the capability flag still gates it.
+        assert_eq!(resolve_strict(&ok, false), None);
+    }
 
     fn model_with_compat(compat: AnthropicMessagesCompat) -> Model {
         let mut m = Model::new(
