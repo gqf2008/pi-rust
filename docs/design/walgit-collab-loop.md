@@ -189,7 +189,15 @@ cargo test -p kiqi-plugin-host --test e2e --locked goal_injection_carries
 | 0 | `mcp-subscription-probe-20261019` | MCP 订阅通知测试（2026-10-19） | closed | —（探针，无提交） |
 | 0 | `ask-user-guest-call-panic` | 修 `ask_user` guest 在 call 路径 panic（tokio 上下文内嵌套运行时） | closed | `c42f95e` |
 | 0 | `review-4ad87ef-acf14ed` | 审查 `4ad87ef` / `acf14ed`，R1–R8 收口 | closed | `70fbfff` / `78dec42` / `453f976` / `63b1e63` |
-| 1 | | | | |
+| 1 | `r1-goal-state-isolation` | goal 测试把运行时状态写回源码树（`.ki/goals.json` 被 git 跟踪） | closed | `6204aac` / `2c892f0` |
+| 1 | `r1-ansi-slice-styles` | `slice_by_column` 的 `preserve_styles` 是空参数，裁剪丢色丢光标标记 | closed | `1f90026` / `ce191b2` |
+| 1 | `r1-hung-post-flaky` | `a_hung_post_does_not_wedge_the_worker_for_later_calls` 间歇失败（线缆超时文案不说超时） | closed | `5b741b3` / `b899a05` |
+
+第 1 轮三条卡片各走完「issue → status(owner) → worktree → patch → review → 修复 → 再审 →
+merge_result → status closed」。两条实质工作项的第一轮评审都是 `request_changes`
+（P1：三份文档仍在教用户跑已失效的 `git checkout --`；P2：修复本身引入窗口外零宽转义泄漏与
+OSC-8 不闭合），修复后第二轮 `approve`。`r1-hung-post-flaky` 是第一轮 `approve` 但带守卫缺口
+建议，补齐后合入。第 1 轮合入后 `main` = `b899a05`。
 
 第 0 轮的三条探针卡片在关闭时把 `status` 写成 `closed`，note 说明探针已验证、原始条目永久留在
 `refs/collab/inbox` 作为证据；两条实质工作项把提交 SHA 与复验命令写进 `status` 的 `note` 与
@@ -201,3 +209,15 @@ cargo test -p kiqi-plugin-host --test e2e --locked goal_injection_carries
 walgit collab board          # → closed 5 / open 0 / merged 0 / other 0
 walgit collab report --remote walgit | head -1   # → unpushed: 0 (vs walgit)
 ```
+
+复验第 1 轮合入后的现状：
+
+```bash
+walgit collab board                              # → closed 8（第 0 轮 5 + 第 1 轮 3）
+walgit collab report --remote walgit | head -1    # → unpushed: 0 (vs walgit)，38/38 entries verified
+git log --oneline -1                             # → b899a05
+```
+
+第 1 轮结束后 board 上仍留三条 `open`：软中断方案（`soft-interrupt-design`，已转 `needs-review`）
+与两条早期探针（`insert-probe-175642`、`restart-probe-175422`）。它们是下一轮 recon 的输入，
+不是遗留缺陷。
