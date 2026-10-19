@@ -292,11 +292,16 @@ pub fn bash_execution_to_text(data: &BashExecutionData) -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolCallRepairReport {
     pub repaired_call_ids: Vec<String>,
+    /// Tool results with no preceding assistant call (a branch whose assistant
+    /// message was never persisted) plus duplicate results. Kept out of the
+    /// provider context: every provider rejects a `tool` message that does not
+    /// answer a preceding `tool_calls`.
+    pub dropped_result_ids: Vec<String>,
 }
 
 impl ToolCallRepairReport {
     pub fn is_empty(&self) -> bool {
-        self.repaired_call_ids.is_empty()
+        self.repaired_call_ids.is_empty() && self.dropped_result_ids.is_empty()
     }
 }
 
@@ -311,13 +316,29 @@ const RECOVERY_TOOL_RESULT: &str = concat!(
 pub fn repair_orphaned_tool_calls(
     messages: Vec<AgentMessage>,
 ) -> (Vec<AgentMessage>, ToolCallRepairReport) {
+    // A result counts only when some assistant *preceding* it declared the
+    // call. A result before any such assistant is orphaned (the usual shape
+    // after a resume from a branch whose assistant message was never written)
+    // and must not reach the provider.
+    let mut declared: HashSet<String> = HashSet::new();
     let existing_results: HashSet<String> = messages
         .iter()
         .filter_map(|message| match message {
-            AgentMessage::ToolResult(result) => Some(result.tool_call_id.clone()),
+            AgentMessage::Assistant(assistant) => {
+                for content in &assistant.content {
+                    if let Content::ToolCall(call) = content {
+                        declared.insert(call.id.clone());
+                    }
+                }
+                None
+            }
+            AgentMessage::ToolResult(result) if declared.contains(&result.tool_call_id) => {
+                Some(result.tool_call_id.clone())
+            }
             _ => None,
         })
         .collect();
+    let mut kept_results: HashSet<String> = HashSet::new();
     let mut repaired = Vec::new();
     let mut report = ToolCallRepairReport::default();
     let mut pending_calls: Vec<(String, String, i64)> = Vec::new();
@@ -359,6 +380,14 @@ pub fn repair_orphaned_tool_calls(
                 pending_calls = calls;
             }
             AgentMessage::ToolResult(result) => {
+                // No assistant before it declared this call, or a second result
+                // for one call: providers reject both shapes.
+                if !existing_results.contains(&result.tool_call_id)
+                    || !kept_results.insert(result.tool_call_id.clone())
+                {
+                    report.dropped_result_ids.push(result.tool_call_id.clone());
+                    continue;
+                }
                 if let Some(index) = pending_calls
                     .iter()
                     .position(|(id, _, _)| id == &result.tool_call_id)
@@ -436,10 +465,12 @@ fn ensure_tool_results_adjacent(messages: Vec<AgentMessage>) -> Vec<AgentMessage
 pub fn convert_to_llm(messages: Vec<AgentMessage>) -> Vec<Message> {
     let messages = ensure_tool_results_adjacent(messages);
     let (messages, report) = repair_orphaned_tool_calls(messages);
-    if !report.repaired_call_ids.is_empty() {
+    if !report.is_empty() {
         tracing::warn!(
             repaired = report.repaired_call_ids.len(),
             call_ids = ?report.repaired_call_ids,
+            dropped = report.dropped_result_ids.len(),
+            dropped_ids = ?report.dropped_result_ids,
             "repaired orphaned tool calls while building provider context"
         );
     }
@@ -574,6 +605,38 @@ mod tests {
         let (repaired, report) = repair_orphaned_tool_calls(messages.clone());
         assert!(report.is_empty());
         assert_eq!(repaired, messages);
+    }
+
+    #[test]
+    fn tool_results_without_a_preceding_call_are_dropped() {
+        // The resumed-branch shape: the assistant message that declared the
+        // calls was never persisted, so the branch starts with its results.
+        let messages = vec![
+            tool_result("call-orphan-1", "ask_user"),
+            tool_result("call-orphan-2", "ask_user"),
+            assistant_with_calls(&[("call-1", "read")]),
+            tool_result("call-1", "read"),
+        ];
+        let (repaired, report) = repair_orphaned_tool_calls(messages);
+        assert_eq!(
+            report.dropped_result_ids,
+            vec!["call-orphan-1", "call-orphan-2"]
+        );
+        assert_eq!(repaired.len(), 2, "the orphan results are gone");
+        assert!(matches!(&repaired[0], AgentMessage::Assistant(_)));
+        assert!(matches!(&repaired[1], AgentMessage::ToolResult(r) if r.tool_call_id == "call-1"));
+    }
+
+    #[test]
+    fn a_duplicate_tool_result_is_dropped() {
+        let messages = vec![
+            assistant_with_calls(&[("call-1", "read")]),
+            tool_result("call-1", "read"),
+            tool_result("call-1", "read"),
+        ];
+        let (repaired, report) = repair_orphaned_tool_calls(messages);
+        assert_eq!(report.dropped_result_ids, vec!["call-1"]);
+        assert_eq!(repaired.len(), 2);
     }
 
     #[test]

@@ -13,6 +13,14 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **A resumed session can no longer become unsendable.** When a branch carries
+  tool results whose assistant message was never persisted — the shape left by
+  a crash during `ask_user` — every provider request started with `role: tool`
+  messages and failed with HTTP 400 (`Messages with role 'tool' must be a
+  response to a preceding message with 'tool_calls'`). The provider-context
+  repair now drops tool results with no preceding assistant `tool_calls` (and
+  duplicate results) instead of forwarding them; the dropped ids are recorded
+  in the repair report and the warning log. The durable session is untouched.
 - **A wasm `ask_user` dialog no longer deadlocks the TUI.** The observe event
   fan-out (including `UiPromptStart`, which the key loop dispatches right before
   it opens the dialog) called every wasm host's `on_event`; a guest call such as
