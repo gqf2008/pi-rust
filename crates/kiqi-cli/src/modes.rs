@@ -1659,6 +1659,7 @@ mod tests {
             broadcast: Arc::new(emitter),
             mailbox: kiqi_extensions::ReloadMailbox::default(),
             ui_dialog: kiqi_extensions::UiDialogMailbox::default(),
+            signal_host: Arc::new(crate::signal_host::SignalHost::new()),
             dev_extension: None,
             mcp: Arc::new(kiqi_mcp::McpManager::empty()),
         }

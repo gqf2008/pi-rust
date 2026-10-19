@@ -139,11 +139,11 @@ pub(super) fn abort_run_restoring_queue(
     editor: Arc<Editor>,
     state: Arc<TuiState>,
     tui: Arc<TuiAltScreen>,
-    wake_state: Arc<Mutex<crate::signal_wake::SignalWakeState>>,
+    wake_state: Arc<crate::signal_host::SignalHost>,
 ) {
     // Pressing Esc must not be followed by the agent getting up again on its
     // own: mute signal-triggered wakes until the user submits something.
-    wake_state.lock().unwrap().record_abort();
+    wake_state.record_abort();
     tokio::spawn(async move {
         let _ = restore_queued_messages_to_editor(lane.clone(), editor, state, tui.clone()).await;
         let _ = lane.abort().await;
@@ -160,7 +160,7 @@ pub(super) async fn drain_agent_events(
     harness: AgentHarness,
     mcp: Arc<kiqi_mcp::McpManager>,
     tx: mpsc::UnboundedSender<TuiMessage>,
-    wake_state: Arc<Mutex<crate::signal_wake::SignalWakeState>>,
+    wake_state: Arc<crate::signal_host::SignalHost>,
 ) {
     loop {
         match rx.recv().await {
@@ -199,7 +199,7 @@ pub(super) async fn handle_agent_event(
     harness: &AgentHarness,
     mcp: &Arc<kiqi_mcp::McpManager>,
     tx: &mpsc::UnboundedSender<TuiMessage>,
-    wake_state: &Arc<Mutex<crate::signal_wake::SignalWakeState>>,
+    wake_state: &Arc<crate::signal_host::SignalHost>,
 ) {
     match event {
         AgentEvent::AgentStart => {
@@ -231,15 +231,26 @@ pub(super) async fn handle_agent_event(
                     mcp.signal_config(&notice.server)
                         .is_some_and(|config| config.wake == kiqi_mcp::WakeMode::Auto)
                 });
-                let decision = wake_state.lock().unwrap().decide(
-                    &batch,
-                    std::time::Instant::now(),
-                    |server| mcp.signal_config(server),
-                );
+                let decision = wake_state.decide(&batch, std::time::Instant::now(), |server| {
+                    mcp.signal_config(server)
+                });
                 match decision {
                     crate::signal_wake::WakeDecision::Wake(servers) => {
+                        // The inbox is the durable disposition surface: the
+                        // agent can defer/resolve/dismiss through the `signals`
+                        // tool. A write failure must not stop the wake — the
+                        // notice entry is already on disk.
+                        let pending = match wake_state.add_to_inbox(&batch).await {
+                            Ok(count) => count,
+                            Err(error) => {
+                                eprintln!(
+                                    "warning: mcp: could not record the signal inbox: {error}"
+                                );
+                                0
+                            }
+                        };
                         eprintln!(
-                            "[ki mcp] signal wake: servers={servers:?} notices={} suppressed={}",
+                            "[ki mcp] signal wake: servers={servers:?} notices={} suppressed={} inbox={pending}",
                             batch.notices.len(),
                             batch.suppressed
                         );
@@ -249,7 +260,7 @@ pub(super) async fn handle_agent_event(
                         // already recorded, so nothing is lost.
                         if tx
                             .send(TuiMessage::SignalWake(crate::signal_wake::wake_message(
-                                &batch,
+                                &batch, pending,
                             )))
                             .is_err()
                         {

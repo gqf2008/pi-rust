@@ -680,6 +680,92 @@ impl SlashCommand for ReloadCommand {
     }
 }
 
+/// `/signals` — the user's view of the MCP signal host: session mute and the
+/// durable attention inbox. The agent-facing counterpart is the `signals` tool.
+pub(super) struct SignalsCommand;
+impl SlashCommand for SignalsCommand {
+    fn name(&self) -> &'static str {
+        "/signals"
+    }
+    fn description(&self) -> &'static str {
+        "Show MCP signals; /signals on|off controls automatic wakes"
+    }
+    fn execute(&self, ctx: &CommandContext, args: &str) {
+        match args.trim().to_ascii_lowercase().as_str() {
+            "" | "status" | "list" => {
+                add_note_message(
+                    &ctx.chat,
+                    &format!("MCP signals: muted={}", ctx.signal_wake.session_muted()),
+                );
+                let host = ctx.signal_wake.clone();
+                let chat = ctx.chat.clone();
+                let tui = ctx.tui.clone();
+                tokio::spawn(async move {
+                    match host.inbox_entries().await {
+                        Ok(entries) => add_note_message(&chat, &format_inbox(&entries)),
+                        Err(error) => add_error_message(
+                            &chat,
+                            &format!("Could not read the MCP signal inbox: {error}"),
+                        ),
+                    }
+                    tui.request_render(false);
+                });
+            }
+            "off" | "mute" => {
+                ctx.signal_wake.set_session_muted(true);
+                add_note_message(&ctx.chat, "MCP signal wake muted for this session.");
+                persist_mute(ctx, true);
+            }
+            "on" | "unmute" => {
+                ctx.signal_wake.set_session_muted(false);
+                add_note_message(&ctx.chat, "MCP signal wake enabled for this session.");
+                persist_mute(ctx, false);
+            }
+            other => add_note_message(
+                &ctx.chat,
+                &format!("Usage: /signals [on|off|list] (got {other:?})"),
+            ),
+        }
+        ctx.tui.request_render(false);
+    }
+}
+
+fn persist_mute(ctx: &CommandContext, muted: bool) {
+    let host = ctx.signal_wake.clone();
+    let chat = ctx.chat.clone();
+    let tui = ctx.tui.clone();
+    tokio::spawn(async move {
+        if let Err(error) = host.persist_session_muted(muted).await {
+            // Keep the in-memory flag honest if the durable write failed.
+            host.set_session_muted(!muted);
+            add_error_message(&chat, &error);
+        }
+        tui.request_render(false);
+    });
+}
+
+fn format_inbox(entries: &[crate::signal_host::InboxEntry]) -> String {
+    if entries.is_empty() {
+        return "MCP signal inbox is empty.".to_string();
+    }
+    let mut text = format!("MCP signal inbox: {} open\n", entries.len());
+    for entry in entries {
+        let status = match entry.status {
+            crate::signal_host::InboxStatus::Pending => "pending",
+            crate::signal_host::InboxStatus::Deferred => "deferred",
+        };
+        text.push_str(&format!(
+            "- id {} [{}] {}: {}",
+            entry.id, status, entry.server, entry.uri
+        ));
+        if let Some(note) = &entry.note {
+            text.push_str(&format!(" — {note}"));
+        }
+        text.push('\n');
+    }
+    text
+}
+
 /// Build the full command registry: active built-ins first (so they win on a
 /// fuzzy autocomplete tie), then the v1-out-of-scope stubs. Prompt-template
 /// commands are merged in separately by the autocomplete builder (they dispatch
@@ -702,6 +788,7 @@ pub(super) fn build_builtin_registry() -> CommandRegistry {
     r.register(Arc::new(HotkeysCommand));
     r.register(Arc::new(ContextCommand));
     r.register(Arc::new(UsageCommand));
+    r.register(Arc::new(SignalsCommand));
     // Recognized but inert in v1 (one struct backs them all). The TS builtins
     // out of v1 scope; each carries a description so autocomplete surfaces its
     // existence even though running it reports "not supported".

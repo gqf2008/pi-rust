@@ -243,6 +243,13 @@ pub struct Settings {
     /// rather than failing the whole file.
     #[serde(default)]
     pub mcp_servers: Option<serde_json::Value>,
+
+    /// Top-level MCP signal defaults (`signals`): `wake` / interval / run
+    /// budgets applied to every `mcpServers` entry unless that entry carries
+    /// its own `signals` block. Raw JSON for the same reasons as
+    /// `mcp_servers`; `kiqi-mcp` validates it.
+    #[serde(default)]
+    pub signals: Option<serde_json::Value>,
 }
 
 /// upstream's `terminal` settings block (`TerminalSettings`). Only the fields

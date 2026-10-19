@@ -67,7 +67,15 @@ use kiqi_extensions::{
 };
 
 /// The coding tools registered by the CLI by default.
-pub const BUILTIN_TOOL_NAMES: &[&str] = &["read", "bash", "edit", "write", "docs", "permissions"];
+pub const BUILTIN_TOOL_NAMES: &[&str] = &[
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "docs",
+    "permissions",
+    "signals",
+];
 
 /// The default coding system prompt. A condensed port of the TS
 /// `packages/coding-agent/src/core/system-prompt.ts` base prompt.
@@ -256,6 +264,9 @@ pub async fn build_with_selection(
     // before the tools are built, and completed with the session id below once
     // the session exists — the tool set has to exist before the harness does.
     let tool_context = kiqi_extensions::ToolCallContext::new(cwd_str.clone());
+    // Shared by the `signals` tool, the TUI boundary and `/signals`. Created
+    // before the tools (the tool needs it) and given the session below.
+    let signal_host = Arc::new(crate::signal_host::SignalHost::new());
     if !project_trusted && args.verbose {
         eprintln!(
             "warning: current-project settings, resources, and discovered extensions are explicitly disabled (use --approve or /trust yes to re-enable)"
@@ -344,7 +355,7 @@ pub async fn build_with_selection(
     // loaders below (borrowed); clone one branch so both hold a reference.
     let ctx = ExecutionToolContext::new(env_dyn.clone(), Some(mut_env));
 
-    let mut tools = build_tools(&ctx, args, cwd);
+    let mut tools = build_tools(&ctx, args, cwd, &signal_host);
 
     // ---- Extensions (Part B2) ----
     // Load cdylib plugins from the resolved extension dirs, merge their tools
@@ -408,6 +419,12 @@ pub async fn build_with_selection(
 
     // ---- Session storage ----
     let session = build_session(&selection, &cwd_str).await?;
+    // The signal tool and the TUI boundary share this host; the durable mute is
+    // a session value, so restore it before the first run can decide.
+    signal_host.attach_session(session.clone());
+    if let Err(error) = signal_host.load_session_mute().await {
+        eprintln!("warning: mcp: could not restore the signal mute: {error}");
+    }
     // Plugin tools now know which session they serve: `todo` and friends key
     // their per-session state off it. A session without an id (ephemeral) leaves
     // the field unset and a plugin is expected to fall back to project scope.
@@ -896,6 +913,7 @@ pub async fn build_with_selection(
         ext_status: ext_status_mailbox,
         editor_text: editor_text_mailbox,
         mcp: Arc::clone(&mcp_manager),
+        signal_host: Arc::clone(&signal_host),
         dev_extension: None,
     };
 
@@ -1145,6 +1163,10 @@ pub struct ReloadContext {
     /// and so the `Drop` of the last builder is a backstop. The tool adapters
     /// also hold `Arc`s into it, which is why the field is an `Arc`.
     pub mcp: Arc<kiqi_mcp::McpManager>,
+    /// Shared MCP-signal state: the wake budget, the durable session mute, and
+    /// the attention inbox. Created before the tools (the `signals` tool holds
+    /// it) and shared with the TUI boundary and `/signals`.
+    pub signal_host: Arc<crate::signal_host::SignalHost>,
 }
 
 /// Dispatch a no-payload lifecycle event (e.g. `SessionStart`, `SessionShutdown`,
@@ -1660,7 +1682,7 @@ where
     // on top, mirroring `build`.
     let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
     let tool_ctx = kiqi_tools::ExecutionToolContext::new(env_dyn.clone(), Some(mut_env));
-    let mut tools = build_tools(&tool_ctx, &effective_args, &ctx.cwd);
+    let mut tools = build_tools(&tool_ctx, &effective_args, &ctx.cwd, &ctx.signal_host);
     merge_extension_tools(
         &mut tools,
         &extension_session,
@@ -2028,7 +2050,12 @@ pub fn bash_options() -> kiqi_tools::tools::bash::BashToolOptions {
     }
 }
 
-fn build_tools(ctx: &ExecutionToolContext, args: &Args, cwd: &Path) -> Vec<HarnessTool> {
+fn build_tools(
+    ctx: &ExecutionToolContext,
+    args: &Args,
+    cwd: &Path,
+    signal_host: &Arc<crate::signal_host::SignalHost>,
+) -> Vec<HarnessTool> {
     if args.no_tools {
         return Vec::new();
     }
@@ -2069,6 +2096,12 @@ fn build_tools(ctx: &ExecutionToolContext, args: &Args, cwd: &Path) -> Vec<Harne
             HarnessTool::new(crate::permissions::create_permissions_tool(
                 cwd.to_path_buf(),
             )),
+        ),
+        (
+            "signals",
+            HarnessTool::new(crate::signals_tool::create_signals_tool(Arc::clone(
+                signal_host,
+            ))),
         ),
     ];
 
@@ -2361,11 +2394,28 @@ async fn start_mcp_manager(
     client_servers: &[kiqi_mcp::ServerConfig],
 ) -> Arc<kiqi_mcp::McpManager> {
     let global = crate::settings::load_settings().unwrap_or_default();
-    let (global_servers, mut issues) = kiqi_mcp::parse_servers(global.mcp_servers.as_ref());
+    let project_settings = crate::settings::load_project_settings(cwd);
+    // Top-level `signals` defaults: global first, a trusted project overrides
+    // field by field. Project defaults are parsed only when trusted (an
+    // untrusted project must not change host behavior), but project server
+    // entries are still parsed so `merge_servers` can report them as ignored.
+    let (mut defaults, mut issues) = kiqi_mcp::parse_signals_defaults(global.signals.as_ref());
+    if project_trusted {
+        for settings in &project_settings {
+            let (project_defaults, project_issues) =
+                kiqi_mcp::parse_signals_defaults(settings.signals.as_ref());
+            issues.extend(project_issues);
+            defaults = kiqi_mcp::merge_signals_defaults(defaults, project_defaults);
+        }
+    }
+    let (global_servers, server_issues) =
+        kiqi_mcp::parse_servers_with_defaults(global.mcp_servers.as_ref(), &defaults);
+    issues.extend(server_issues);
 
     let mut project_servers = Vec::new();
-    for settings in crate::settings::load_project_settings(cwd) {
-        let (servers, project_issues) = kiqi_mcp::parse_servers(settings.mcp_servers.as_ref());
+    for settings in &project_settings {
+        let (servers, project_issues) =
+            kiqi_mcp::parse_servers_with_defaults(settings.mcp_servers.as_ref(), &defaults);
         project_servers.extend(servers);
         issues.extend(project_issues);
     }
@@ -3737,7 +3787,8 @@ mod tests {
         let env_dyn: Arc<dyn kiqi_tools::ExecutionEnv> = env.clone();
         let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
         let context = ExecutionToolContext::new(env_dyn, Some(mut_env));
-        let tools = build_tools(&context, &Args::default(), Path::new("."));
+        let signal_host = Arc::new(crate::signal_host::SignalHost::new());
+        let tools = build_tools(&context, &Args::default(), Path::new("."), &signal_host);
 
         let replay_of = |name: &str| {
             tools
@@ -3770,10 +3821,12 @@ mod tests {
         let env_dyn: Arc<dyn kiqi_tools::ExecutionEnv> = env.clone();
         let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
         let context = ExecutionToolContext::new(env_dyn, Some(mut_env));
-        let names: Vec<String> = build_tools(&context, &Args::default(), Path::new("."))
-            .iter()
-            .map(|tool| tool.tool.schema().name.clone())
-            .collect();
+        let signal_host = Arc::new(crate::signal_host::SignalHost::new());
+        let names: Vec<String> =
+            build_tools(&context, &Args::default(), Path::new("."), &signal_host)
+                .iter()
+                .map(|tool| tool.tool.schema().name.clone())
+                .collect();
 
         // `docs` and the host-owned `permissions` policy tool are default
         // capabilities; the legacy kiqi-only lookup tools stay unregistered.
@@ -3782,6 +3835,9 @@ mod tests {
         // developer's environment.
         assert!(names.contains(&"docs".to_string()));
         assert!(names.contains(&"permissions".to_string()));
+        // The signal inbox tool is a host capability, not a plugin: it must be
+        // present so an auto-wake can settle its disposition durably.
+        assert!(names.contains(&"signals".to_string()));
         for legacy in ["grep", "find", "ls"] {
             assert!(
                 !names.contains(&legacy.to_string()),
@@ -4475,6 +4531,7 @@ mod tests {
             broadcast: Arc::new(kiqi_agent::CollectorEmitter::new().0),
             mailbox: kiqi_extensions::ReloadMailbox::default(),
             ui_dialog: kiqi_extensions::UiDialogMailbox::default(),
+            signal_host: Arc::new(crate::signal_host::SignalHost::new()),
             dev_extension: None,
             mcp: Arc::new(kiqi_mcp::McpManager::empty()),
         };

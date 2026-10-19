@@ -251,7 +251,7 @@ struct CommandContext {
     state: Arc<TuiState>,
     /// Arousal budget for MCP signals. The submit path resets the chain even
     /// when the message is queued as steering (the main loop never sees it).
-    signal_wake: Arc<Mutex<crate::signal_wake::SignalWakeState>>,
+    signal_wake: Arc<crate::signal_host::SignalHost>,
     editor: Arc<Editor>,
     editor_container: Arc<Container>,
     lane: Arc<dyn AgentLane>,
@@ -969,11 +969,11 @@ pub async fn interactive_tui(
 
     // Channel between the key/callback threads and the main async loop.
     let (tx, mut rx) = mpsc::unbounded_channel::<TuiMessage>();
-    // Per-session arousal budget for MCP resource signals (design:
-    // `signal-driven-agent.md`). Shared by the submit path (user input resets
-    // the chain), the event drain (AgentEnd decides whether to wake), and the
-    // interrupt path (Esc mutes the chain until the next user input).
-    let signal_wake = Arc::new(Mutex::new(crate::signal_wake::SignalWakeState::new()));
+    // Shared MCP-signal host state (design: `signal-driven-agent.md`): the
+    // wake budget, the durable session mute, and the attention inbox. Built
+    // before the tools (the `signals` tool holds it), so the TUI reuses that
+    // instance rather than creating a second one.
+    let signal_wake = Arc::clone(&reload_context.signal_host);
 
     // Apply the saved theme before constructing transcript components. Some
     // components keep styled text, so doing this after the welcome banner left
@@ -1415,7 +1415,7 @@ pub async fn interactive_tui(
         // and the consecutive chain counters before routing it. Done here (not
         // only in the main loop) because a message queued as steering while a
         // run is active never reaches the main loop as a `UserInput`.
-        ctx_for_cb.signal_wake.lock().unwrap().record_user_input();
+        ctx_for_cb.signal_wake.record_user_input();
 
         if text.starts_with('/') && dispatch_slash(text, &ctx_for_cb, &registry_for_cb) {
             return;
@@ -2764,7 +2764,7 @@ pub async fn interactive_tui(
                 // steering queued while a run is active, which never reaches
                 // this arm); voice auto-send and the idle Alt+Enter path send
                 // `UserInput` directly, so cover them here too.
-                signal_wake.lock().unwrap().record_user_input();
+                signal_wake.record_user_input();
                 // Clear the editor so the next prompt starts fresh (the submit
                 // handler runs on the blocking key thread and can't mutate the
                 // editor state safely there; clearing here, on the async loop,
