@@ -83,7 +83,7 @@ const STAGE_LOG_EVERY: Duration = Duration::from_secs(30);
 const POLL_SLICE: Duration = Duration::from_millis(100);
 
 /// Which pipe a byte count belongs to.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Stream {
     Out,
     Err,
@@ -355,8 +355,15 @@ fn run_with_limits(
         status.code().unwrap_or(-1),
         status.success()
     ));
-    let mut text = join_reader(out_reader, &out_sink, READER_JOIN_TIMEOUT);
-    let stderr_text = join_reader(err_reader, &err_sink, READER_JOIN_TIMEOUT);
+    let (mut text, out_abandoned) =
+        join_reader(out_reader, &out_sink, READER_JOIN_TIMEOUT, Stream::Out);
+    let (stderr_text, err_abandoned) =
+        join_reader(err_reader, &err_sink, READER_JOIN_TIMEOUT, Stream::Err);
+    // A pipe we had to abandon is the one fact that explains a later hang, so mark
+    // it once on the way out in addition to the per-reader line.
+    if out_abandoned || err_abandoned {
+        stage("readers-abandoned");
+    }
     stage("readers-joined");
     if !status.success() && !stderr_text.trim().is_empty() {
         text.push_str("\n[stderr]\n");
@@ -552,11 +559,27 @@ fn stage_timestamp() -> String {
 /// read is kept and the thread is left to finish on its own.
 const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The stage-log line for a reader that had to be abandoned.
+///
+/// Separate from the `stage()` call so the wording is testable without touching
+/// the process-global `KI_DEBUG_SUBAGENT` resolution (a `OnceLock`: whichever test
+/// calls `stage()` first freezes the destination for the whole binary, which makes
+/// any env-dependent assertion order-dependent).
+fn reader_join_timeout_line(stream: Stream, waited: Duration, bytes: usize) -> String {
+    format!("reader-join-timeout stream={stream:?} waited={waited:?} bytes={bytes}")
+}
+
 fn join_reader(
     handle: Option<std::thread::JoinHandle<()>>,
     sink: &OutputSink,
     timeout: Duration,
-) -> String {
+    stream: Stream,
+) -> (String, bool) {
+    // `abandoned` is returned, not just logged, so the giving-up decision is
+    // observable at the unit boundary. The stage line below is the operator-facing
+    // half, and a log path cannot be pinned in a test because `KI_DEBUG_SUBAGENT`
+    // resolves once per process.
+    let mut abandoned = false;
     if let Some(handle) = handle {
         let deadline = Instant::now() + timeout;
         while !handle.is_finished() && Instant::now() < deadline {
@@ -564,13 +587,27 @@ fn join_reader(
         }
         if handle.is_finished() {
             let _ = handle.join();
+        } else {
+            abandoned = true;
+            // The thread is left detached, still blocked in `read` on a pipe
+            // nobody will close. Dropping the handle is deliberate: joining it is
+            // what used to hang the whole run.
+            //
+            // This is the single most diagnostic event this module can emit: a
+            // reader that is still blocked *after* the child was killed and
+            // reaped means some process we could not reach still holds that pipe.
+            // That is the shape of the reported "parent run never recovers"
+            // incident, so it must be visible in the stage log rather than being
+            // a silent give-up.
+            stage(&reader_join_timeout_line(
+                stream,
+                timeout,
+                sink.lock().map(|buf| buf.len()).unwrap_or(0),
+            ));
         }
-        // Otherwise the thread is left detached, still blocked in `read` on a pipe
-        // nobody will close. Dropping the handle is deliberate: joining it is what
-        // used to hang the whole run.
     }
     let bytes = sink.lock().map(|buf| buf.clone()).unwrap_or_default();
-    String::from_utf8_lossy(&bytes).into_owned()
+    (String::from_utf8_lossy(&bytes).into_owned(), abandoned)
 }
 
 #[cfg(test)]
@@ -879,8 +916,13 @@ mod tests {
 
         let start = Instant::now();
         // A test-sized bound; production uses READER_JOIN_TIMEOUT.
-        let text = join_reader(Some(handle), &sink, Duration::from_millis(200));
+        let (text, abandoned) =
+            join_reader(Some(handle), &sink, Duration::from_millis(200), Stream::Out);
         let elapsed = start.elapsed();
+        assert!(
+            abandoned,
+            "the caller must learn that the pipe was abandoned, not just time out"
+        );
 
         assert!(
             elapsed < Duration::from_secs(5),
@@ -894,6 +936,17 @@ mod tests {
         let _ = release_tx.send(());
     }
 
+    fn a_reader_join_timeout_is_recorded_in_the_stage_log() {
+        assert_eq!(
+            reader_join_timeout_line(Stream::Out, Duration::from_secs(5), 42),
+            "reader-join-timeout stream=Out waited=5s bytes=42"
+        );
+        assert_eq!(
+            reader_join_timeout_line(Stream::Err, Duration::from_secs(5), 0),
+            "reader-join-timeout stream=Err waited=5s bytes=0"
+        );
+    }
+
     #[test]
     fn a_finished_reader_still_returns_all_of_its_output() {
         let sink: OutputSink = Arc::new(Mutex::new(Vec::new()));
@@ -905,8 +958,9 @@ mod tests {
             Stream::Out,
             Arc::clone(&sink),
         );
-        let text = join_reader(Some(handle), &sink, READER_JOIN_TIMEOUT);
+        let (text, abandoned) = join_reader(Some(handle), &sink, READER_JOIN_TIMEOUT, Stream::Out);
         assert_eq!(text, "all of it\n");
+        assert!(!abandoned, "a reader that reached EOF was not abandoned");
     }
 
     #[test]
@@ -942,8 +996,9 @@ mod tests {
             "the clock was not refreshed by the arriving chunk: silence={silence:?}"
         );
 
-        let text = join_reader(Some(handle), &sink, READER_JOIN_TIMEOUT);
+        let (text, abandoned) = join_reader(Some(handle), &sink, READER_JOIN_TIMEOUT, Stream::Err);
         assert_eq!(text, "one\ntwo\nthree\n");
+        assert!(!abandoned);
         assert_eq!(
             activity.bytes(),
             (0, text.len()),
