@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::assistant_tool_calls;
-use kiqi_agent::interrupt::InterruptControl;
+use kiqi_agent::interrupt::{ActionKind, InterruptControl};
 use kiqi_agent::{AgentContext, AgentEvent, AgentMessage, AgentTool, AgentToolResult};
 use kiqi_ai::types::{
     AssistantMessageEvent, Content, DoneReason, ErrorReason, Message, StopReason, Tool,
@@ -141,26 +141,31 @@ async fn a_soft_interrupt_does_not_cancel_later_tool_calls() {
     let (collector, events_buf) = kiqi_agent::CollectorEmitter::new();
     let emit: Arc<dyn kiqi_agent::AgentEmitter> = Arc::new(collector);
 
-    // Fire the soft interrupt as soon as the first tool call is installed.
+    // Fire the soft interrupt as soon as the first *tool call* is installed, and
+    // remember which kind the press reached. The first installed action of a
+    // turn is actually the model stream (the request that produces the tool
+    // call), so this waits past `Stream` slots instead of pressing on the first
+    // thing it sees: the subject of this test is the tool boundary.
     let interrupter = {
         let interrupt = Arc::clone(&interrupt);
         tokio::spawn(async move {
             for _ in 0..5_000 {
-                if interrupt.has_current() {
+                if interrupt.current_kind() == Some(ActionKind::Tool) {
                     interrupt.soft_interrupt();
-                    return true;
+                    return Some(ActionKind::Tool);
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            false
+            interrupt.current_kind()
         })
     };
 
     let run = kiqi_agent::run_agent_loop(Vec::new(), context, config, emit, stream_fn).await;
 
-    assert!(
+    assert_eq!(
         interrupter.await.expect("interrupter task"),
-        "the first tool call was never installed"
+        Some(ActionKind::Tool),
+        "the first action of a tool-use turn must be installed as `Tool`"
     );
     let events = events_buf.lock().expect("events lock").clone();
     assert!(run.is_ok(), "the run survives a soft interrupt: {run:?}");
@@ -263,7 +268,7 @@ fn a_press_with_nothing_installed_interrupts_the_next_action() {
     assert!(!interrupt.has_current(), "still nothing in flight");
 
     let next_action = CancellationToken::new();
-    let id = interrupt.install(next_action.clone());
+    let id = interrupt.install(next_action.clone(), ActionKind::Tool);
     assert!(
         next_action.is_cancelled(),
         "the latch cancels the next action — `NothingToInterrupt` promises this"
@@ -273,7 +278,7 @@ fn a_press_with_nothing_installed_interrupts_the_next_action() {
     assert!(interrupt.take_soft(), "the loop can tell why it died");
     interrupt.clear(id);
     let following = CancellationToken::new();
-    let _id = interrupt.install(following.clone());
+    let _id = interrupt.install(following.clone(), ActionKind::Tool);
     assert!(
         !following.is_cancelled(),
         "a one-shot latch must not cancel every later action"
@@ -394,18 +399,23 @@ fn role_tag(message: &Message) -> &'static str {
 }
 
 /// What `AgentHarness::interrupt()`'s soft arm does, fired as soon as a stream
-/// request is the installed action.
-fn soft_interrupter(interrupt: &Arc<InterruptControl>) -> tokio::task::JoinHandle<bool> {
+/// request is the installed action. Returns the kind the press reached, so the
+/// caller can pin *which* action was installed (`Stream` here, `Tool` for the
+/// tool-call tests): a loop that installed the wrong kind would still cancel the
+/// right token, but would tell the user the wrong thing.
+fn soft_interrupter(
+    interrupt: &Arc<InterruptControl>,
+) -> tokio::task::JoinHandle<Option<ActionKind>> {
     let interrupt = Arc::clone(interrupt);
     tokio::spawn(async move {
         for _ in 0..5_000 {
-            if interrupt.has_current() {
+            if let Some(kind) = interrupt.current_kind() {
                 interrupt.soft_interrupt();
-                return true;
+                return Some(kind);
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        false
+        None
     })
 }
 
@@ -474,9 +484,10 @@ async fn a_stream_soft_interrupt_drops_the_partial_message() {
     let run =
         kiqi_agent::run_agent_loop(vec![prompt], context, config, emit, provider.stream_fn()).await;
 
-    assert!(
+    assert_eq!(
         interrupter.await.expect("interrupter task"),
-        "the stream request was never installed"
+        Some(ActionKind::Stream),
+        "the in-flight action was a stream request, and the press must say so"
     );
     let new_messages = run.expect("a soft interrupt resolves Ok, not an error");
     let events = events_buf.lock().expect("events lock").clone();
@@ -601,9 +612,10 @@ async fn a_stream_soft_interrupt_continues_with_queued_steering() {
     let run =
         kiqi_agent::run_agent_loop(vec![prompt], context, config, emit, provider.stream_fn()).await;
 
-    assert!(
+    assert_eq!(
         interrupter.await.expect("interrupter task"),
-        "the stream request was never installed"
+        Some(ActionKind::Stream),
+        "the in-flight action was a stream request, and the press must say so"
     );
     let new_messages = run.expect("the run survives the soft interrupt");
     let events = events_buf.lock().expect("events lock").clone();

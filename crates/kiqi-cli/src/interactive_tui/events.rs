@@ -152,23 +152,38 @@ pub(super) fn abort_run_restoring_queue(
 }
 
 /// The dim transcript note a soft interrupt leaves behind, per
-/// `soft-interrupt.md` §3.5. Kept as constants so the wording is asserted by a
-/// test instead of drifting between the two `InterruptResult` arms.
+/// `soft-interrupt.md` §3.5. Two constants rather than one, because
+/// [`InterruptResult::Soft`] now carries the [`ActionKind`] the press actually
+/// reached: "the current tool call" and "the reply" are different things to the
+/// user, and a single note had to generalise to "step", which named neither.
 ///
-/// The note must hold for *both* things a soft interrupt can stop (phase 1: one
-/// tool call; phase 2: one provider request), and for both continuations: with
-/// queued input the loop injects it and asks again, without it the turn ends and
-/// the run survives. So: "step", not "tool", and "still runs", not "continues".
+/// Both must hold for both continuations: with queued input the loop injects it
+/// and asks again, without it the turn ends and the run survives. So "queued
+/// input will run next", and never "abort".
 ///
 /// The `NothingToInterrupt` note must not claim that nothing happened: the soft
 /// flag is latched in that arm, so the *next* action the run installs starts
 /// cancelled (`InterruptResult::NothingToInterrupt` documents this). A note that
 /// said "nothing to interrupt" would be lying to the user one edit later.
-pub(super) const SOFT_INTERRUPT_NOTE: &str =
-    "Interrupted the current step; queued input will run next.";
+pub(super) const SOFT_INTERRUPT_TOOL_NOTE: &str =
+    "Interrupted the current tool call; queued input will run next.";
+pub(super) const SOFT_INTERRUPT_STREAM_NOTE: &str =
+    "Interrupted the reply; queued input will run next.";
 pub(super) const NOTHING_TO_INTERRUPT_NOTE: &str =
     "Nothing in flight right now; the next step will be stopped.";
 pub(super) const NO_ACTIVE_RUN_TO_INTERRUPT_NOTE: &str = "No run to interrupt.";
+
+/// Pick the note for the action the press reached.
+///
+/// Kept as a pure function of [`ActionKind`] so the wording can be asserted
+/// without driving a whole key press, and so there is exactly one place that
+/// maps "what did I stop" to "what do I say".
+pub(super) fn soft_interrupt_note(action: ActionKind) -> &'static str {
+    match action {
+        ActionKind::Tool => SOFT_INTERRUPT_TOOL_NOTE,
+        ActionKind::Stream => SOFT_INTERRUPT_STREAM_NOTE,
+    }
+}
 
 /// `app.interrupt` when Esc is a *single* press: cancel the action in flight and
 /// let the run continue. Deliberately does none of the hard-abort side effects —
@@ -184,7 +199,7 @@ pub(super) fn soft_interrupt_run(
 ) {
     tokio::spawn(async move {
         let note = match lane.interrupt().await {
-            Ok(InterruptResult::Soft) => SOFT_INTERRUPT_NOTE,
+            Ok(InterruptResult::Soft { action }) => soft_interrupt_note(action),
             Ok(InterruptResult::NothingToInterrupt) => NOTHING_TO_INTERRUPT_NOTE,
             Ok(InterruptResult::NoActiveRun) => NO_ACTIVE_RUN_TO_INTERRUPT_NOTE,
             Err(error) => {

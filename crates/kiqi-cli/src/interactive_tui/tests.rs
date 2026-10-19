@@ -2598,18 +2598,43 @@ fn a_double_press_window_never_leaks_across_a_run_status_change() {
 fn soft_interrupt_notes_describe_what_the_press_reached() {
     // The dim note is the only feedback a soft interrupt gives (the status stays
     // Working and the queue stays queued), so the wording matters: it must not
-    // read like an abort, and the nothing-in-flight case must not promise that
-    // nothing will happen.
+    // read like an abort, and it must name what was actually stopped.
     //
-    // Phase 2 made the note cover provider requests as well as tool calls, so it
-    // says "step" rather than "tool" — `contains("tool")` would now be wrong.
-    assert!(SOFT_INTERRUPT_NOTE.contains("step"));
-    assert!(!SOFT_INTERRUPT_NOTE.contains("tool"));
-    // With queued input the loop asks again; without it the turn ends. Both
-    // outcomes keep the run alive, so the note must not say the queue "continues"
-    // unconditionally nor sound like a stop of the whole run.
-    assert!(SOFT_INTERRUPT_NOTE.contains("queued input"));
-    assert!(!SOFT_INTERRUPT_NOTE.to_ascii_lowercase().contains("abort"));
+    // Round 3 asserted the *opposite* — `SOFT_INTERRUPT_NOTE.contains("step")`
+    // and `!contains("tool")` — because `InterruptResult::Soft` carried no
+    // action kind: one note had to cover a tool call *and* a provider request,
+    // so the only honest wording was the generic "step". `Soft` now carries an
+    // `ActionKind`, which means a generic note is no longer an act of honesty but
+    // a regression: the arm knows what it stopped and should say so. Hence two
+    // notes, each naming its own target, and `assert_ne!` so an edit that points
+    // both arms at one string cannot pass.
+    let tool_note = soft_interrupt_note(ActionKind::Tool);
+    let stream_note = soft_interrupt_note(ActionKind::Stream);
+    assert_ne!(
+        tool_note, stream_note,
+        "the tool and stream arms must not share one note"
+    );
+    assert!(
+        tool_note.contains("tool"),
+        "the tool arm must name the tool call: got {tool_note:?}"
+    );
+    assert!(
+        !stream_note.contains("tool"),
+        "the stream arm must not talk about a tool call: got {stream_note:?}"
+    );
+    assert!(
+        stream_note.contains("reply"),
+        "the stream arm must name the reply it stopped: got {stream_note:?}"
+    );
+
+    // Both continuations hold for both arms: with queued input the loop asks
+    // again, without it the turn ends. Both keep the run alive, so neither note
+    // may say "queued" unconditionally or sound like an abort.
+    for note in [tool_note, stream_note] {
+        assert!(note.contains("queued input"), "got {note:?}");
+        assert!(!note.to_ascii_lowercase().contains("abort"), "got {note:?}");
+    }
+
     // The latch is armed in this arm (`InterruptResult::NothingToInterrupt`), so
     // the note has to say the next step is affected. "Nothing to interrupt"
     // would contradict the flag.

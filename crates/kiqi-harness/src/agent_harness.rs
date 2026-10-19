@@ -41,10 +41,10 @@ use tokio_util::sync::CancellationToken;
 
 use kiqi_agent::message::AgentMessage;
 use kiqi_agent::{
-    run_agent_loop, run_agent_loop_from_assistant, AfterToolCall, AfterToolResults, AgentContext,
-    AgentEmitter, AgentEvent, AgentLoopConfig, AgentTool, BeforeToolCall, BeforeToolCallContext,
-    ConvertToLlm, InterruptControl, QueueMode, ShouldStopAfterTurnContext, StreamFn,
-    TransformContext,
+    interrupt::ActionKind, run_agent_loop, run_agent_loop_from_assistant, AfterToolCall,
+    AfterToolResults, AgentContext, AgentEmitter, AgentEvent, AgentLoopConfig, AgentTool,
+    BeforeToolCall, BeforeToolCallContext, ConvertToLlm, InterruptControl, QueueMode,
+    ShouldStopAfterTurnContext, StreamFn, TransformContext,
 };
 use kiqi_ai::types::{
     AssistantMessage, Content, DeferredHandle, StopReason, ThinkingLevel, Usage, UserContent,
@@ -200,7 +200,12 @@ pub enum InterruptResult {
     /// A tool call (or stream request) was in flight and its token was
     /// cancelled. The run continues with the conversation after that action
     /// unwinds — it was *not* aborted.
-    Soft,
+    Soft {
+        /// Which of the two actions the press actually reached. The UI names it
+        /// in its note ("the current tool call" vs "the reply"), so the caller
+        /// does not have to guess or over-generalise the wording.
+        action: ActionKind,
+    },
     /// Nothing to interrupt: no operation is active on this lane (or the active
     /// one belongs to another lane). Best-effort, so this is `Ok`, not an error
     /// like [`AgentLane::abort`]'s idle case.
@@ -4313,12 +4318,16 @@ impl AgentLane for AgentHarness {
         // compaction, which installs none). `soft_interrupt()` latches the flag
         // either way, so a press that lands during a stream cancels the action
         // the loop installs next instead of being dropped.
-        let installed = interrupt.has_current();
+        //
+        // Read the kind in the same breath as the "is anything installed?"
+        // answer (`has_current` is defined on top of `current_kind`), then press:
+        // the value cannot change under us in a way that would make the verdict
+        // wrong, because `soft_interrupt` cancels that very slot.
+        let action = interrupt.current_kind();
         interrupt.soft_interrupt();
-        Ok(if installed {
-            InterruptResult::Soft
-        } else {
-            InterruptResult::NothingToInterrupt
+        Ok(match action {
+            Some(action) => InterruptResult::Soft { action },
+            None => InterruptResult::NothingToInterrupt,
         })
     }
 
@@ -5752,10 +5761,44 @@ mod soft_interrupt_tests {
         // installs next starts out cancelled (the "pressed during a stream"
         // case).
         let next = CancellationToken::new();
-        let id = interrupt.install(next.clone());
+        let id = interrupt.install(next.clone(), ActionKind::Stream);
         assert!(
             next.is_cancelled(),
             "a latched soft interrupt pre-cancels the next action"
+        );
+        interrupt.clear(id);
+
+        harness.release_run();
+    }
+
+    #[tokio::test]
+    async fn interrupt_on_an_installed_stream_reports_soft_stream() {
+        // Same plumbing as a tool press, different kind: a provider request in
+        // flight must come back as `Soft { action: Stream }`, not `Tool`. The UI
+        // names the action in its note, so a wrong kind is user-visible even
+        // though the cancelled token is the same one.
+        let harness = AgentHarness::create(opts()).await.unwrap();
+        let window = StartingGuard::new(&harness);
+        let (_, signal, _, interrupt) = harness
+            .acquire_run(OperationKind::Run, window.id())
+            .expect("run acquires");
+
+        // Stand in for the loop's stream path: one request's child token.
+        let request = signal.child_token();
+        let id = interrupt.install(request.clone(), ActionKind::Stream);
+        assert_eq!(interrupt.current_kind(), Some(ActionKind::Stream));
+
+        assert_eq!(
+            AgentLane::interrupt(&harness).await.expect("best effort"),
+            InterruptResult::Soft {
+                action: ActionKind::Stream,
+            },
+            "a request in flight must be reported as a stream, not a tool"
+        );
+        assert!(request.is_cancelled(), "the request token is cancelled");
+        assert!(
+            !signal.is_cancelled(),
+            "the run survives — that is what makes the interrupt soft"
         );
         interrupt.clear(id);
 
@@ -5772,11 +5815,14 @@ mod soft_interrupt_tests {
 
         // Stand in for the loop's `install`: the token handed to a tool call.
         let action = signal.child_token();
-        let id = interrupt.install(action.clone());
+        let id = interrupt.install(action.clone(), ActionKind::Tool);
 
         assert_eq!(
             AgentLane::interrupt(&harness).await.expect("best effort"),
-            InterruptResult::Soft
+            InterruptResult::Soft {
+                action: ActionKind::Tool,
+            },
+            "the verdict names the action that was actually in flight"
         );
         assert!(action.is_cancelled(), "the in-flight action is cancelled");
         assert!(

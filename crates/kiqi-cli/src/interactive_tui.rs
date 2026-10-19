@@ -66,7 +66,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use kiqi_agent::{AgentEvent, AgentMessage};
+use kiqi_agent::{interrupt::ActionKind, AgentEvent, AgentMessage};
 use kiqi_ai::types::{AssistantMessage, Content, UserMessage};
 use kiqi_harness::agent_harness::{AgentHarness, AgentLane, HarnessRunOutcome, InterruptResult};
 use kiqi_harness::session::types::{Entry, EntryOrder, EntryQuery};

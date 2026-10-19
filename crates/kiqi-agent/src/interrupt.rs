@@ -47,9 +47,29 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct InstallId(u64);
 
+/// Which kind of action an installed slot holds.
+///
+/// The loop installs exactly one token per in-flight action, and there are two
+/// kinds: one tool `execute` (installed by `run_one_tool_call`) and one provider
+/// request (installed by the stream path, before the response is folded).
+///
+/// A soft interrupt reports *what it reached* through this type: "interrupted
+/// the tool call" and "interrupted the reply" are different messages to the
+/// user, and the note the TUI leaves behind must name the right one. Recording
+/// the kind at install time is the only place that knows — by the time the press
+/// arrives, the installed token looks identical either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionKind {
+    /// One tool call's `execute`.
+    Tool,
+    /// One provider request / response stream.
+    Stream,
+}
+
 struct Current {
     id: InstallId,
     token: CancellationToken,
+    kind: ActionKind,
 }
 
 /// Cancels the currently installed action on request, and records whether the
@@ -100,20 +120,21 @@ impl InterruptControl {
     }
 
     /// Register `token` as the current cancellable action; the loop calls this
-    /// right before running a tool call (or a stream request).
+    /// right before running a tool call (or a stream request), passing which of
+    /// the two it is.
     ///
     /// Returns the id to pass to [`clear`](Self::clear). If a soft interrupt was
     /// latched while nothing was installed, the token is cancelled immediately:
     /// the next action is exactly the thing the caller wanted to interrupt. The
     /// flag itself is *not* consumed here — only
     /// [`take_soft`](Self::take_soft) drains it.
-    pub fn install(&self, token: CancellationToken) -> InstallId {
+    pub fn install(&self, token: CancellationToken, kind: ActionKind) -> InstallId {
         let id = InstallId(self.next_id.fetch_add(1, Ordering::SeqCst));
         if self.soft.load(Ordering::SeqCst) {
             token.cancel();
         }
         let mut guard = self.current.lock().expect("interrupt lock");
-        *guard = Some(Current { id, token });
+        *guard = Some(Current { id, token, kind });
         id
     }
 
@@ -136,13 +157,33 @@ impl InterruptControl {
         self.soft.swap(false, Ordering::SeqCst)
     }
 
+    /// Which action (if any) [`soft_interrupt`] would cancel right now.
+    ///
+    /// `None` while idle: between turns, or with a latched soft interrupt and
+    /// nothing running. A caller that only wants "is there anything to cancel"
+    /// uses [`has_current`](Self::has_current); one that reports *what* it hit
+    /// (the TUI note, the harness verdict) uses this.
+    ///
+    /// [`soft_interrupt`]: Self::soft_interrupt
+    pub fn current_kind(&self) -> Option<ActionKind> {
+        self.current
+            .lock()
+            .expect("interrupt lock")
+            .as_ref()
+            .map(|c| c.kind)
+    }
+
     /// Whether there is an installed action that [`soft_interrupt`] could
     /// cancel right now. `false` while idle (between turns, or a latched soft
     /// interrupt with nothing running).
     ///
+    /// Defined through [`current_kind`](Self::current_kind) so the "is there
+    /// something?" and "what is it?" answers can never disagree: one lock, one
+    /// definition of the slot.
+    ///
     /// [`soft_interrupt`]: Self::soft_interrupt
     pub fn has_current(&self) -> bool {
-        self.current.lock().expect("interrupt lock").is_some()
+        self.current_kind().is_some()
     }
 }
 
@@ -170,7 +211,7 @@ mod tests {
         let ctl = InterruptControl::new();
         let token = CancellationToken::new();
         assert!(!ctl.has_current());
-        let _id = ctl.install(token.clone());
+        let _id = ctl.install(token.clone(), ActionKind::Tool);
         assert!(ctl.has_current());
         assert!(!token.is_cancelled());
 
@@ -187,7 +228,7 @@ mod tests {
         let run_signal = CancellationToken::new();
         let ctl = InterruptControl::new();
         let child = run_signal.child_token();
-        let _id = ctl.install(child.clone());
+        let _id = ctl.install(child.clone(), ActionKind::Stream);
 
         ctl.soft_interrupt();
 
@@ -203,8 +244,8 @@ mod tests {
         let ctl = InterruptControl::new();
         let (a, b) = (CancellationToken::new(), CancellationToken::new());
 
-        let id_a = ctl.install(a.clone());
-        let id_b = ctl.install(b.clone());
+        let id_a = ctl.install(a.clone(), ActionKind::Tool);
+        let id_b = ctl.install(b.clone(), ActionKind::Tool);
         assert_ne!(id_a, id_b);
 
         // A finishes second and must not evict B.
@@ -226,7 +267,7 @@ mod tests {
     fn clear_is_idempotent() {
         let ctl = InterruptControl::new();
         let token = CancellationToken::new();
-        let id = ctl.install(token.clone());
+        let id = ctl.install(token.clone(), ActionKind::Tool);
 
         ctl.clear(id);
         ctl.clear(id);
@@ -235,10 +276,41 @@ mod tests {
     }
 
     #[test]
+    fn current_kind_reports_which_action_is_installed() {
+        // The press note / harness verdict names the action it reached, so the
+        // kind has to follow the *installed* slot rather than any earlier one.
+        let ctl = InterruptControl::new();
+        assert_eq!(ctl.current_kind(), None, "idle: nothing to name");
+
+        let tool = CancellationToken::new();
+        let tool_id = ctl.install(tool.clone(), ActionKind::Tool);
+        assert_eq!(ctl.current_kind(), Some(ActionKind::Tool));
+        assert!(ctl.has_current(), "has_current must agree with the kind");
+
+        // A newer install displaces the slot: a stream request starting while a
+        // parallel tool slot is still around reports `Stream`.
+        let stream = CancellationToken::new();
+        let stream_id = ctl.install(stream.clone(), ActionKind::Stream);
+        assert_eq!(
+            ctl.current_kind(),
+            Some(ActionKind::Stream),
+            "the kind tracks the newest install, not the first one"
+        );
+
+        // The displaced action's late `clear` must not lie about the kind.
+        ctl.clear(tool_id);
+        assert_eq!(ctl.current_kind(), Some(ActionKind::Stream));
+
+        ctl.clear(stream_id);
+        assert_eq!(ctl.current_kind(), None);
+        assert!(!ctl.has_current());
+    }
+
+    #[test]
     fn take_soft_is_one_shot() {
         let ctl = InterruptControl::new();
         let token = CancellationToken::new();
-        let _id = ctl.install(token.clone());
+        let _id = ctl.install(token.clone(), ActionKind::Tool);
 
         ctl.soft_interrupt();
         assert!(ctl.take_soft());
@@ -266,7 +338,7 @@ mod tests {
         ctl.soft_interrupt();
 
         let next = CancellationToken::new();
-        let _id = ctl.install(next.clone());
+        let _id = ctl.install(next.clone(), ActionKind::Stream);
 
         assert!(
             next.is_cancelled(),
@@ -275,7 +347,7 @@ mod tests {
         assert!(ctl.take_soft(), "installing does not drain the flag");
 
         let later = CancellationToken::new();
-        let _id2 = ctl.install(later.clone());
+        let _id2 = ctl.install(later.clone(), ActionKind::Tool);
         assert!(!later.is_cancelled());
     }
 
@@ -283,7 +355,7 @@ mod tests {
     fn installed_token_is_cleared_before_a_new_soft_interrupt() {
         let ctl = InterruptControl::new();
         let first = CancellationToken::new();
-        let id = ctl.install(first.clone());
+        let id = ctl.install(first.clone(), ActionKind::Tool);
         ctl.clear(id);
 
         ctl.soft_interrupt();

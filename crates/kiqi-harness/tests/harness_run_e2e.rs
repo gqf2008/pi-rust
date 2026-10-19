@@ -32,6 +32,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use kiqi_agent::interrupt::ActionKind;
 use kiqi_agent::{AgentEmitter, AgentEvent, AgentMessage, CollectorEmitter};
 use kiqi_ai::providers::faux::{faux_assistant_message, FauxProvider, FauxScript, FauxStep};
 use kiqi_ai::types::{UserContent, UserMessage};
@@ -4434,8 +4435,11 @@ async fn soft_interrupt_stops_the_running_tool_and_the_run_completes() {
         .expect("a soft interrupt is best-effort, never an error");
     assert_eq!(
         interrupted,
-        kiqi_harness::agent_harness::InterruptResult::Soft,
-        "a tool was in flight, so the interrupt had something to cancel"
+        kiqi_harness::agent_harness::InterruptResult::Soft {
+            action: ActionKind::Tool,
+        },
+        "a tool was in flight, so the interrupt had something to cancel — and it \
+         must name the tool, not the reply"
     );
 
     let result = run

@@ -24,6 +24,7 @@ use crate::agent_tool::AgentTool;
 use crate::error::AgentError;
 use crate::events::{AgentEmitter, AgentEvent};
 use crate::hooks::AgentLoopConfig;
+use crate::interrupt::ActionKind;
 use crate::message::AgentMessage;
 use crate::stream_fn::StreamFn;
 use crate::types::{
@@ -536,7 +537,9 @@ async fn stream_assistant_response(
     // request lives, mirroring `run_one_tool_call`; a *latched* soft interrupt
     // (pressed while nothing was in flight) cancels it right here.
     let stream_token = config.signal.child_token();
-    let install_id = config.interrupt.install(stream_token.clone());
+    let install_id = config
+        .interrupt
+        .install(stream_token.clone(), ActionKind::Stream);
 
     // `to_stream_options` forwards the run signal and other callers still rely
     // on that, so the per-request token is overridden here instead of inside it.
@@ -1201,7 +1204,9 @@ async fn execute_prepared_tool_call(
     // Register this action as the soft-interrupt target. A latched soft
     // interrupt (e.g. pressed while the loop was busy with a stream) cancels
     // `child_token` right here, so the tool starts out cancelled.
-    let install_id = config.interrupt.install(child_token.clone());
+    let install_id = config
+        .interrupt
+        .install(child_token.clone(), ActionKind::Tool);
     let outcome = tool
         .execute(&tool_call.id, args.clone(), child_token.clone(), on_update)
         .await;
