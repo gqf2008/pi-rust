@@ -52,6 +52,15 @@ impl<T> ToolHandles<T> {
     }
 
     /// Share the cancellation flag with a worker started by the plugin.
+    ///
+    /// `fetch_update` carries a `deprecated` warning on newer toolchains ("renamed
+    /// to `try_update`"), and following that advice would break the build: as of
+    /// 1.94, `try_update` is still `#[unstable(feature = "atomic_try_update",
+    /// issue = "135894")]`, so swapping the name fails with E0658 on anything but a
+    /// nightly — while this crate's `rust-version` is 1.78, where `fetch_update` is
+    /// the only stable spelling. The allow is scoped to this one function rather
+    /// than the crate so the next deprecation is still visible.
+    #[allow(deprecated)]
     pub fn insert_with_cancel(&self, state: T, cancelled: Arc<AtomicBool>) -> StepHandle {
         let token = NEXT_HANDLE
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
