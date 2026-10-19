@@ -193,3 +193,9 @@ SSE 超限、跨源重定向、会话头校验）+ 5 个 http e2e；19 个 stdio
 
 **剩余**：legacy SSE 传输（ACP `Sse` 变体）仍不做；prompts/sampling 不做；`.wasm` 签名与
 permissions 宿主化各自立批（见 §7 / 侦察记录）。
+
+## 13. 信号驱动唤醒（2026-10-19）
+
+通知的宿主侧唤醒策略（`subscribe` 即唤醒意图、预算、**记录与触发分离**、智能体处置）
+见 `signal-driven-agent.md`；阶段 1 已在交互式 TUI 实现。`kiqi-mcp` 仍只负责投递、
+合并与 `autoRead`，唤醒状态在 `crates/kiqi-cli/src/signal_wake.rs`。

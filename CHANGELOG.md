@@ -65,6 +65,16 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   the ported plugins came from) and `@juicesharp/rpiv-todo`.
 
 ### Added
+- **MCP resource updates can wake the session (`signals`, interactive TUI)**:
+  an explicit `subscribe` list is the user's opt-in to be told, so its
+  `signals.wake` defaults to `auto`. The host records the notice and, within a
+  per-server budget (`minIntervalSeconds` 30, `maxRunsPerHour` 6,
+  `maxConsecutiveRuns` 2), starts one run with a trigger that frames the change
+  as external, untrusted data; the agent decides whether to act, defer, shelve,
+  re-orchestrate, ignore, or ask. Wakes happen only at boundaries, user input
+  wins, Esc mutes the chain until the next prompt, and no `subscribe` means
+  today's behavior is unchanged. `wake: "off"` keeps record-only for an existing
+  subscription; print and ACP remain record-only.
 - **Permission policy is enforced by the host**: `permissions.json` (project
   `.ki/`, legacy `.pi/`, then the global agent dir) is evaluated in
   `before_tool_call` before any tool runs — explicit deny rules block, an allow
