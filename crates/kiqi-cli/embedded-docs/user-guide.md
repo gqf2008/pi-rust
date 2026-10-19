@@ -281,7 +281,9 @@ ki 会优先使用 ki 自己的目录，同时兼容原 Pi 的 `.pi` 布局：
 
 上下文文件按「越通用越靠前」排列：`~/.agents/AGENTS.md` → `~/.ki/agent/AGENTS.md` → 祖先目录 → `<项目>/AGENTS.md`。全局、通用的常驻指令放 `~/.agents/AGENTS.md`，只针对 ki 的放 `~/.ki/agent/AGENTS.md`；文件不存在时静默跳过。
 
-技能是**渐进式加载**的：系统提示只放名称、描述和位置，完整 `SKILL.md` 在任务匹配时才读取。`~/.agents` 只提供 `AGENTS.md` 与 `skills/`，ki 不从那里找 prompts、themes 或 extensions。
+技能是**渐进式加载**的：系统提示只放名称、描述和位置，完整 `SKILL.md` 在任务匹配时才读取。但列表本身有成本——描述无法省（模型靠它路由），实测 64 个技能的 `<available_skills>` 段约 39 KB / 7–9k tokens，**每次请求都要付一次**。想保留技能但不让某条进提示，给它写 `disable-model-invocation: true`。
+
+`~/.agents` 只提供 `AGENTS.md` 与 `skills/`，ki 不从那里找 prompts、themes 或 extensions。
 
 项目级 `.ki/settings.json` 可以追加资源目录：
 
