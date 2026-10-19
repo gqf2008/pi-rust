@@ -4,7 +4,7 @@
 //! `Cargo test` CI job installs it. The guest is built here rather than checked
 //! in, so the test cannot pass against a stale `.wasm`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -36,22 +36,60 @@ impl Log for NullLog {
 /// `CARGO_TARGET_DIR`) would otherwise move the artifact away from the path
 /// this helper returns, and the test would fail on a machine where it cannot be
 /// reproduced from the repo alone.
+/// Several tests in this binary build the same guest, and they run concurrently under
+/// the default `--test-threads`. They share one `--target-dir`, so while one `cargo
+/// build` is rewriting the component another test can be told "already fresh" and
+/// open it mid-write — observed as
+/// `load …/kiqi_conformance_guest.wasm: failed to read from …`.
+///
+/// The mutex serialises builds inside this binary, and the header check covers the
+/// cross-process window (a sibling `cargo test` sharing the same target dir). Both
+/// keep the shared target dir so cargo's incremental cache still applies.
+static BUILD_GUEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn build_guest(crate_dir: &str, artifact: &str) -> PathBuf {
+    // A poisoned lock means an earlier build panicked; that says nothing about the
+    // filesystem, so carry on rather than propagating the panic.
+    let _guard = BUILD_GUEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let manifest = root.join("plugins/wasm").join(crate_dir).join("Cargo.toml");
     let target_dir = root.join("plugins/wasm/target");
-    let status = Command::new(env!("CARGO"))
-        .args(["build", "--manifest-path"])
-        .arg(&manifest)
-        .args(["--target", "wasm32-wasip2", "--release", "--target-dir"])
-        .arg(&target_dir)
-        .status()
-        .unwrap_or_else(|error| panic!("run cargo build for {crate_dir}: {error}"));
+    let path = target_dir.join("wasm32-wasip2/release").join(artifact);
+    let build = || {
+        Command::new(env!("CARGO"))
+            .args(["build", "--manifest-path"])
+            .arg(&manifest)
+            .args(["--target", "wasm32-wasip2", "--release", "--target-dir"])
+            .arg(&target_dir)
+            .status()
+            .unwrap_or_else(|error| panic!("run cargo build for {crate_dir}: {error}"))
+    };
+    let status = build();
     assert!(
         status.success(),
         "building {crate_dir} failed; is the `wasm32-wasip2` target installed?"
     );
-    target_dir.join("wasm32-wasip2/release").join(artifact)
+    // A component still being written by another process reads as a prefix; the
+    // 4-byte module header tells a complete artifact from a torn write.
+    if !has_wasm_header(&path) {
+        assert!(
+            build().success(),
+            "rebuilding {crate_dir} after a torn artifact failed"
+        );
+    }
+    path
+}
+
+/// Whether `path` starts with the WebAssembly module magic (`\0asm`).
+fn has_wasm_header(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic).is_ok() && magic == *b"\0asm"
 }
 
 fn fixture_wasm() -> PathBuf {
