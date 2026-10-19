@@ -221,12 +221,14 @@ pub struct Args {
     /// JSON booleans (a bare flag) or strings (a flag with a value), matching
     /// Pi's `unknownFlags` contract so an extension can claim its own options.
     pub unknown_flags: BTreeMap<String, serde_json::Value>,
-    /// Misspelled known flags, reported unconditionally at startup.
+    /// Flags the user wrote but whose request could not be honoured — a misspelled
+    /// known flag, or an invalid value for one — reported unconditionally at startup.
     ///
     /// Kept apart from [`ignored`](Self::ignored), which is only printed under
-    /// `--verbose`: a typo silently changes what the run does (`--modle sonnet` used
-    /// the default model), so its warning must not depend on a flag the user has no
-    /// reason to pass.
+    /// `--verbose`. Every entry here means "the run will do something other than what
+    /// you asked", so the warning must not depend on a flag the user has no reason to
+    /// pass: `--modle sonnet` used the default model, and `--thinking bogus` used the
+    /// default level, both silently.
     pub mistyped_flags: Vec<String>,
     /// Warnings about recognized-but-ignored flags (v1 scope cuts). Surfaced
     /// to the user on startup when `--verbose`.
@@ -444,7 +446,12 @@ pub fn parse_args(args: &[String]) -> Args {
                 if let Some(v) = take_value(&mut result, "--thinking") {
                     match parse_thinking_level(&v) {
                         Some(lvl) => result.thinking = Some(lvl),
-                        None => result.ignored.push(format!(
+                        // An explicit but invalid value is a user error, not an
+                        // "recognized but unsupported" note: without a warning the run
+                        // silently uses the default level. `ignored` is printed only
+                        // under `--verbose`, so this belongs with the other
+                        // `mistyped_flags` entries, which are always shown.
+                        None => result.mistyped_flags.push(format!(
                             "Invalid --thinking \"{v}\". Valid: {}",
                             VALID_THINKING_LEVELS.join(", ")
                         )),
@@ -939,6 +946,32 @@ mod tests {
         assert!(a.print);
         assert!(a.messages.is_empty());
         assert_eq!(a.file_args, vec![PathBuf::from("file.md")]);
+    }
+
+    /// An explicit but invalid `--thinking` value silently fell back to the default
+    /// level: the note went to `ignored`, which only `--verbose` prints. It is the same
+    /// class as a misspelled flag — the run does something other than what was asked —
+    /// so it must be visible without any extra flag.
+    #[test]
+    fn an_invalid_thinking_value_is_reported_without_verbose() {
+        let parsed = parse_args(&s(&["--thinking", "bogus", "-p", "hi"]));
+        assert!(
+            parsed
+                .mistyped_flags
+                .iter()
+                .any(|note| note.contains("Invalid --thinking") && note.contains("bogus")),
+            "the invalid value must be reported: {:?}",
+            parsed.mistyped_flags
+        );
+        assert!(
+            parsed.thinking.is_none(),
+            "and the level stays unset rather than guessed"
+        );
+
+        // A valid value produces no warning.
+        let ok = parse_args(&s(&["--thinking", "high", "-p", "hi"]));
+        assert!(ok.mistyped_flags.is_empty(), "{:?}", ok.mistyped_flags);
+        assert_eq!(ok.thinking, parse_thinking_level("high"));
     }
 
     #[test]
