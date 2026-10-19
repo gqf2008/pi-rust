@@ -74,6 +74,22 @@ jobs:
       - name: Check workspace targets
         run: cargo check --workspace --all-targets --locked
 
+      # Every feature in the workspace, not the default set. A declared feature that
+      # does not compile is invisible otherwise: `kiqi-tools`'s `webp` called
+      # `WebPEncoder::new_with_quality`/`WebPQuality`, which `image` 0.25 does not
+      # have, so `cargo build --features webp` failed — and nothing ever enabled it.
+      - name: Check the workspace builds with every feature
+        run: cargo check --workspace --all-targets --all-features --locked
+
+      # Crates whose tests are gated behind a non-default feature. `cargo test -p
+      # kiqi-ai` alone compiles 49 tests instead of 208 (the whole anthropic provider
+      # is `cfg(feature = "providers")`), so running only that package silently skips
+      # the provider suite; the workspace run covers it by feature unification, but
+      # these two crates are where the gaps live.
+      - name: Test the crates whose tests need non-default features
+        run: >
+          cargo test -p kiqi-ai -p kiqi-tools --lib --locked --all-features
+
       # Every plugin with a wasm port is opt-in now, so the default build never
       # compiles their registration paths (nor the tests that exercise them).
       # Run those tests explicitly or the features rot unseen.

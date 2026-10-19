@@ -48,6 +48,12 @@
 ```bash
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
+# 全部 feature 也要能编：否则一个坏掉的公开 feature 会一直无人发现
+# （实例：`kiqi-tools` 的 `webp` 调用了 image 0.25 没有的 API，`--features webp` 直接编译失败）
+cargo check --workspace --all-targets --all-features --locked
+# 测试被非默认 feature 挡住的 crate：`cargo test -p kiqi-ai` 只编译 49 条而不是 208 条
+# （整个 anthropic provider 在 `cfg(feature = "providers")` 下），单跑该包会静默跳过
+cargo test  -p kiqi-ai -p kiqi-tools --lib --locked --all-features
 cargo test  --workspace --locked
 # 可选 feature（有 wasm 版的插件都不在默认构建里）必须单独跑，否则它们会腐烂：
 # 这份清单必须与 .github/workflows/ci.yml 的 "opt-in plugin features" 步骤逐项一致——
