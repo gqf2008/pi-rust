@@ -55,7 +55,7 @@ let agent = kiqi_agent::AgentBuilder::new()
 
 A complete, runnable version — a faux provider that writes a file through the
 real OS backend and reads it back — is in
-[`examples/tools`](https://github.com/bigfish1913/pi-rust/tree/main/examples/tools)
+[`examples/tools`](https://github.com/gqf2008/pi-rust/tree/main/examples/tools)
 (`cargo run -p tools`).
 
 ## Testing against the in-memory backend
@@ -110,9 +110,9 @@ Pi-compatible set — and exposes the rest through the `default_tools` setting.
 ## Documentation
 
 - Crate docs: <https://docs.rs/kiqi-tools>
-- Architecture: [docs/architecture/overview.md](https://github.com/bigfish1913/pi-rust/blob/main/docs/architecture/overview.md)
+- Architecture: [docs/architecture/overview.md](https://github.com/gqf2008/pi-rust/blob/main/docs/architecture/overview.md)
 
 ## License
 
-MIT. See [LICENSE](https://github.com/bigfish1913/pi-rust/blob/main/LICENSE)
-and [NOTICE](https://github.com/bigfish1913/pi-rust/blob/main/NOTICE).
+MIT. See [LICENSE](https://github.com/gqf2008/pi-rust/blob/main/LICENSE)
+and [NOTICE](https://github.com/gqf2008/pi-rust/blob/main/NOTICE).

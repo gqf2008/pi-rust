@@ -68,11 +68,11 @@ ki dev                                   # build + watch + live reload
 ## Docs
 
 - Crate docs: <https://docs.rs/kiqi-extensions>
-- [Extension authoring guide](https://github.com/bigfish1913/pi-rust/blob/main/docs/extensions/authoring.md)
+- [Extension authoring guide](https://github.com/gqf2008/pi-rust/blob/main/docs/extensions/authoring.md)
 - [Plugin ABI contract](https://docs.rs/kiqi-plugin-sdk)
 - [Ready-to-install extensions](https://github.com/pi-rust/rpi-package)
 
 ## License
 
-MIT. See [LICENSE](https://github.com/bigfish1913/pi-rust/blob/main/LICENSE)
-and [NOTICE](https://github.com/bigfish1913/pi-rust/blob/main/NOTICE).
+MIT. See [LICENSE](https://github.com/gqf2008/pi-rust/blob/main/LICENSE)
+and [NOTICE](https://github.com/gqf2008/pi-rust/blob/main/NOTICE).

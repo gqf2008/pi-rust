@@ -174,11 +174,11 @@ Rebuild extensions when the SDK contract they require changes.
 
 ## Examples and docs
 
-- [`examples/plugin-stub`](https://github.com/bigfish1913/pi-rust/tree/main/examples/plugin-stub) —
+- [`examples/plugin-stub`](https://github.com/gqf2008/pi-rust/tree/main/examples/plugin-stub) —
   a complete plugin registering an `echo` tool with the full four-function
   lifecycle (`execute` → `poll` → `cancel` → `destroy`), an event handler, and a
   resource-discovery handler.
-- [Extension authoring guide](https://github.com/bigfish1913/pi-rust/blob/main/docs/extensions/authoring.md) —
+- [Extension authoring guide](https://github.com/gqf2008/pi-rust/blob/main/docs/extensions/authoring.md) —
   templates, safety rules, testing and release checklist.
 - Host-side loader: [`kiqi-extensions`](https://crates.io/crates/kiqi-extensions).
 - Ready-to-install extensions:
@@ -186,8 +186,8 @@ Rebuild extensions when the SDK contract they require changes.
 
 ## License
 
-MIT. See [LICENSE](https://github.com/bigfish1913/pi-rust/blob/main/LICENSE)
-and [NOTICE](https://github.com/bigfish1913/pi-rust/blob/main/NOTICE).
+MIT. See [LICENSE](https://github.com/gqf2008/pi-rust/blob/main/LICENSE)
+and [NOTICE](https://github.com/gqf2008/pi-rust/blob/main/NOTICE).
 
 ## Exclusive stdio servers
 

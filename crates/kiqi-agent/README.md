@@ -84,10 +84,10 @@ fn make_stream_fn(provider: Arc<FauxProvider>) -> kiqi_agent::StreamFn {
 ```
 
 A runnable version of this lives in
-[`examples/minimal`](https://github.com/bigfish1913/pi-rust/tree/main/examples/minimal)
+[`examples/minimal`](https://github.com/gqf2008/pi-rust/tree/main/examples/minimal)
 (`cargo run -p minimal`), and a version that drives the real filesystem through
 the built-in tools lives in
-[`examples/tools`](https://github.com/bigfish1913/pi-rust/tree/main/examples/tools).
+[`examples/tools`](https://github.com/gqf2008/pi-rust/tree/main/examples/tools).
 
 ## Defining a tool
 
@@ -159,10 +159,10 @@ run (`AgentStart`/`AgentEnd`), each assistant message
 ## Documentation
 
 - Crate docs: <https://docs.rs/kiqi-agent>
-- Architecture: [docs/architecture/overview.md](https://github.com/bigfish1913/pi-rust/blob/main/docs/architecture/overview.md)
-- Project structure guide: [docs/agent/project-structure.md](https://github.com/bigfish1913/pi-rust/blob/main/docs/agent/project-structure.md)
+- Architecture: [docs/architecture/overview.md](https://github.com/gqf2008/pi-rust/blob/main/docs/architecture/overview.md)
+- Project structure guide: [docs/agent/project-structure.md](https://github.com/gqf2008/pi-rust/blob/main/docs/agent/project-structure.md)
 
 ## License
 
-MIT. See [LICENSE](https://github.com/bigfish1913/pi-rust/blob/main/LICENSE)
-and [NOTICE](https://github.com/bigfish1913/pi-rust/blob/main/NOTICE).
+MIT. See [LICENSE](https://github.com/gqf2008/pi-rust/blob/main/LICENSE)
+and [NOTICE](https://github.com/gqf2008/pi-rust/blob/main/NOTICE).

@@ -17,7 +17,7 @@ ki --help
 从本仓库源码安装开发版本：
 
 ```bash
-git clone https://github.com/bigfish1913/pi-rust.git
+git clone https://github.com/gqf2008/pi-rust.git
 cd pi-rust
 cargo install --path crates/kiqi-cli --force
 ```
@@ -492,7 +492,7 @@ kiqi-plugin-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
 ## 10. 文档查询入口
 
 - 在线文档：<https://ki.laofu.online/docs.html>
-- 源码仓库：<https://github.com/bigfish1913/pi-rust>
+- 源码仓库：<https://github.com/gqf2008/pi-rust>
 - Rust API：<https://docs.rs/kiqi-agent>、<https://docs.rs/kiqi-plugin-sdk>
 
 - Package 与扩展作者指南：<https://ki.laofu.online/extension-authoring.md>

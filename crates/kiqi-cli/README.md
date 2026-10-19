@@ -2,11 +2,11 @@
 
 [![crates.io](https://img.shields.io/crates/v/kiqi-cli.svg)](https://crates.io/crates/kiqi-cli)
 [![docs.rs](https://docs.rs/kiqi-cli/badge.svg)](https://docs.rs/kiqi-cli)
-[![CI](https://github.com/bigfish1913/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/bigfish1913/pi-rust/actions)
+[![CI](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/gqf2008/pi-rust/actions)
 
 The terminal coding-agent CLI — the `ki` binary — built on the `kiqi-*` library
 crates. It is the ready-to-run surface of the
-[ki](https://github.com/bigfish1913/pi-rust) project: an interactive TUI, a
+[ki](https://github.com/gqf2008/pi-rust) project: an interactive TUI, a
 one-shot `-p` mode, a JSON event mode, durable sessions, and Rust `cdylib`
 plugin loading.
 
@@ -100,7 +100,7 @@ ki --connect host:port --token T # zero-local-resource TUI client
 
 The client holds no local provider, tools, extensions or session files; all
 agent work happens on the server. See
-[docs/remote/user-guide.md](https://github.com/bigfish1913/pi-rust/blob/main/docs/remote/user-guide.md).
+[docs/remote/user-guide.md](https://github.com/gqf2008/pi-rust/blob/main/docs/remote/user-guide.md).
 
 ## Default tools
 
@@ -122,19 +122,19 @@ kiqi-cli = "0.3"
 For building your own agent, depend on
 [`kiqi-agent`](https://crates.io/crates/kiqi-agent) and
 [`kiqi-harness`](https://crates.io/crates/kiqi-harness) directly instead — see
-[docs/agent/project-structure.md](https://github.com/bigfish1913/pi-rust/blob/main/docs/agent/project-structure.md).
+[docs/agent/project-structure.md](https://github.com/gqf2008/pi-rust/blob/main/docs/agent/project-structure.md).
 
 ## Documentation
 
 - User guide: <https://ki.laofu.online/docs.html>
-- Architecture: [docs/architecture/overview.md](https://github.com/bigfish1913/pi-rust/blob/main/docs/architecture/overview.md)
-- Extension authoring: [docs/extensions/authoring.md](https://github.com/bigfish1913/pi-rust/blob/main/docs/extensions/authoring.md)
-- Changelog: [CHANGELOG.md](https://github.com/bigfish1913/pi-rust/blob/main/CHANGELOG.md)
+- Architecture: [docs/architecture/overview.md](https://github.com/gqf2008/pi-rust/blob/main/docs/architecture/overview.md)
+- Extension authoring: [docs/extensions/authoring.md](https://github.com/gqf2008/pi-rust/blob/main/docs/extensions/authoring.md)
+- Changelog: [CHANGELOG.md](https://github.com/gqf2008/pi-rust/blob/main/CHANGELOG.md)
 
 ## License
 
-MIT. See [LICENSE](https://github.com/bigfish1913/pi-rust/blob/main/LICENSE)
-and [NOTICE](https://github.com/bigfish1913/pi-rust/blob/main/NOTICE).
+MIT. See [LICENSE](https://github.com/gqf2008/pi-rust/blob/main/LICENSE)
+and [NOTICE](https://github.com/gqf2008/pi-rust/blob/main/NOTICE).
 
 This crate is part of a Rust port of the MIT-licensed TypeScript `pi` SDK
 (© Mario Zechner).

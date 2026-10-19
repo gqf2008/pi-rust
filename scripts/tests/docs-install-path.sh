@@ -69,18 +69,36 @@ for doc in "$ROOT/README.md" "$ROOT/docs/kiqi-tool/README.md"; do
     fi
 done
 
-# --- Install commands must fetch THIS repository -----------------------------
-# The other repo's `scripts/install.sh` has `REPO="bigfish1913/pi-rust"` and installs
-# an unrelated build (`rpi`, a different version line). Following a README that points
-# there gets you somebody else's tool.
-for doc in "$ROOT/README.md" "$ROOT/docs/kiqi-tool/README.md"; do
-    [ -f "$doc" ] || continue
-    rel=${doc#"$ROOT"/}
-    grep -n 'bigfish1913/pi-rust' "$doc" \
-        | grep -E 'raw\.githubusercontent\.com|releases/download|actions/workflows' \
-        | grep -v '^[0-9]*:>' >/dev/null && {
-        echo "FAIL: $rel points an install/badge URL at bigfish1913/pi-rust," >&2
-        echo "      which serves a different project (rpi, v0.6.1)" >&2
+# --- User-facing docs must describe THIS repository --------------------------
+# The other repo is not an older copy of this one: measured, it has 10 releases at
+# v0.6.1 with `rpi-v*` assets, while this one has 2 at v0.4.1 with `ki-v*`. Its
+# `scripts/install.sh` sets REPO="bigfish1913/pi-rust", and its copy of
+# docs/extensions/authoring.md is an `rpi` document (569 lines vs our 399). Every such
+# URL answers 200, so nothing errors -- the reader just gets a different tool.
+#
+# Two kinds of exemption, both deliberate:
+#   1. files whose mentions are historical record (rewriting falsifies provenance);
+#   2. lines that name it *as* the other project (the header note, star-history chart).
+is_exempt_file() {
+    case "$1" in
+        CHANGELOG.md) return 0 ;;
+        docs/promotion/*) return 0 ;;
+        docs/design/*) return 0 ;;
+        crates/kiqi-cli/embedded-docs/changelog.md) return 0 ;;
+        AGENTS.md) return 0 ;;
+        plugins/*/DESIGN.md) return 0 ;;
+    esac
+    return 1
+}
+
+cd "$ROOT" || exit 1
+for rel in $(git ls-files '*.md' 2>/dev/null); do
+    is_exempt_file "$rel" && continue
+    [ -f "$rel" ] || continue
+    grep -n 'bigfish1913/pi-rust' "$rel" \
+        | grep -vE 'star-history|Upstream|cherry-pick' >/dev/null && {
+        echo "FAIL: $rel links to bigfish1913/pi-rust," >&2
+        echo "      which serves a different project (rpi v0.6.1, rpi-v* assets)" >&2
         status=1
     }
 done
