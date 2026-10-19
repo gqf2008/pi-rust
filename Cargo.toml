@@ -41,7 +41,14 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.78"
+# 1.96, not 1.78: `wasmtime = 49` (crates/kiqi-plugin-host) pulls
+# cranelift-assembler-x64 0.136.2, which declares `rust-version = "1.96.0"`;
+# cargo refuses to resolve the workspace below that. Verified by building the
+# whole workspace on 1.94 (fails: "not supported by the following packages"),
+# 1.96 (passes) and 1.98 (passes). The old 1.78 was never re-checked after
+# wasmtime entered the tree — docs/design/ki-mcp-builtin.md already recorded that
+# it was stale.
+rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/bigfish1913/pi-rust"
 homepage = "https://ki.laofu.online/"
