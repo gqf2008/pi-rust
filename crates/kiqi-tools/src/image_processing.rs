@@ -310,20 +310,33 @@ fn encode_image(img: &DynamicImage, format: Option<OutputFormat>) -> Result<Vec<
                 .map_err(|e| format!("Failed to encode JPEG: {}", e))?;
         }
         Some(OutputFormat::WebP { quality }) => {
-            // WebP encoding requires the webp feature
+            // WebP encoding requires the webp feature.
             #[cfg(feature = "webp")]
             {
-                let encoder = image::codecs::webp::WebPEncoder::new_with_quality(
-                    &mut cursor,
-                    image::codecs::webp::WebPQuality::lossy(quality),
-                );
+                // `quality` is deliberately unused: the pinned `image` (0.25) can only
+                // write **lossless** WebP — `WebPEncoder` exposes `new_lossless()` and
+                // nothing else, and its own docs say lossy output needs `libwebp`. The
+                // previous code called `new_with_quality(WebPQuality::lossy(..))`, which
+                // is an API `image` 0.25 does not have, so enabling this feature was a
+                // compile error rather than a working encoder.
+                //
+                // Lossless is not a downgrade for the caller: it is the same format at
+                // strictly higher fidelity, just larger. Saying so here is better than
+                // dropping the parameter without explanation — a future reader will
+                // otherwise assume quality is applied.
+                let _ = quality;
+                let encoder = image::codecs::webp::WebPEncoder::new_lossless(&mut cursor);
                 img.write_with_encoder(encoder)
                     .map_err(|e| format!("Failed to encode WebP: {}", e))?;
             }
             #[cfg(not(feature = "webp"))]
             {
                 let _ = quality;
-                return Err("WebP encoding requires the 'webp' feature".to_string());
+                return Err(
+                    "WebP encoding requires the 'webp' feature (lossless only: the image \
+                     crate cannot write lossy WebP)"
+                        .to_string(),
+                );
             }
         }
         None => {
@@ -401,6 +414,44 @@ pub fn get_image_dimensions(data: &[u8]) -> Result<(u32, u32), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WebP encoding must actually work when the feature is on.
+    ///
+    /// The `webp` feature did not compile at all: the arm called
+    /// `WebPEncoder::new_with_quality(WebPQuality::lossy(..))`, and `image` 0.25 has
+    /// neither symbol (it can only write lossless WebP). A declared, public Cargo
+    /// feature that fails to compile cannot rot more quietly than that — but nothing
+    /// in CI ever enabled it, so nobody noticed. This test pins the encoder that does
+    /// exist, so the next `image` bump fails here instead of at a user's
+    /// `cargo build --features webp`.
+    #[cfg(feature = "webp")]
+    #[test]
+    fn webp_encodes_losslessly_when_the_feature_is_on() {
+        let bytes = encode_image(
+            &DynamicImage::new_rgba8(16, 16),
+            Some(OutputFormat::WebP { quality: 80 }),
+        )
+        .expect("webp encoding should succeed with the feature on");
+        // RIFF....WEBP container per the WebP spec.
+        assert_eq!(&bytes[0..4], b"RIFF", "not a RIFF container");
+        assert_eq!(&bytes[8..12], b"WEBP", "not a WebP payload");
+    }
+
+    /// Without the feature the caller gets a clear error, not a panic or silence.
+    #[cfg(not(feature = "webp"))]
+    #[test]
+    fn webp_reports_the_missing_feature_and_says_it_would_be_lossless() {
+        let error = encode_image(
+            &DynamicImage::new_rgba8(16, 16),
+            Some(OutputFormat::WebP { quality: 80 }),
+        )
+        .expect_err("webp is unavailable without the feature");
+        assert!(error.contains("'webp' feature"), "got: {error}");
+        assert!(
+            error.contains("lossless"),
+            "the message must not imply lossy output is available: {error}"
+        );
+    }
 
     #[test]
     fn inline_images_keep_small_bytes_and_resize_large_images() {
