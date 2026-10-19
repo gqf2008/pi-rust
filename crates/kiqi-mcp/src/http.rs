@@ -294,10 +294,14 @@ impl KiHttpClient {
             request = request.bearer_auth(auth_header);
         }
         request = apply_custom_headers(request, custom_headers)?;
+        // The long-lived GET stream deliberately carries no `.timeout()` of its
+        // own (it stays open for the session), so a deadline here would only
+        // relabel some other failure — a connect timeout, say — as "request
+        // timeout after 1s". Pass `None`: this path has no wire deadline.
         let response = request
             .send()
             .await
-            .map_err(|error| send_error(error, self.request_timeout))?;
+            .map_err(|error| send_error(error, None))?;
         if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
             return Err(StreamableHttpError::ServerDoesNotSupportSse);
         }
@@ -440,6 +444,9 @@ fn client_timeout_error(timeout: Duration) -> HttpError {
 /// [`client_error`], unless the wire gave up on our own deadline.
 fn send_error(error: reqwest::Error, timeout: Option<Duration>) -> HttpError {
     match timeout {
+        // Only a deadline *we* set can be reported as a timeout: without one the
+        // failure is whatever reqwest says it is (a connect error stays a
+        // connect error, it must not be dressed up as a timeout).
         Some(timeout) if error.is_timeout() => client_timeout_error(timeout),
         _ => client_error(error),
     }
@@ -687,36 +694,92 @@ mod tests {
     /// `PeerRequestOptions::with_timeout` uses the same `timeoutSeconds`, so the
     /// two deadlines race and the surfaced text used to depend on which fired
     /// first — the http e2e asserted on "timeout" and flaked when the wire won.
+    ///
+    /// This drives the real [`KiHttpClient::post_message`] (not `send_error`
+    /// directly): the wire deadline is then the only deadline, so the path that
+    /// actually aborts the request is covered without relying on the racy e2e.
     #[tokio::test]
     async fn a_wire_timeout_is_reported_as_a_timeout() {
         // Accept the connection and never answer: the wire timeout has to fire.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = tokio::spawn(async move {
-            let (_stream, _peer) = listener.accept().await.unwrap();
-            // Hold the socket open without writing a response.
-            tokio::time::sleep(Duration::from_secs(30)).await;
-        });
+        let (url, server) = silent_peer().await;
 
         let timeout = Duration::from_millis(150);
-        let error = reqwest::Client::new()
-            .post(format!("http://127.0.0.1:{port}/mcp"))
-            .timeout(timeout)
-            .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }))
-            .send()
-            .await
-            .expect_err("the peer never answers");
-        assert!(error.is_timeout(), "not a timeout: {error:?}");
+        let client = KiHttpClient::new(&url, None, Some(timeout), Arc::new(AtomicBool::new(false)))
+            .expect("loopback client");
 
-        let mapped = send_error(error, Some(timeout));
-        let text = mapped.to_string();
+        let error = client
+            .post_message(
+                Arc::from(url.as_str()),
+                json_rpc_ping(),
+                None,
+                None,
+                HashMap::new(),
+            )
+            .await
+            .err()
+            .expect("the peer never answers");
+        let text = error.to_string();
         assert!(
             text.contains("timeout"),
             "the caller must see a timeout, got {text:?}"
         );
+        // `{timeout:?}` is std's `Duration` Debug format; pin the shape.
         assert!(text.contains("150ms"), "got {text:?}");
 
         server.abort();
+    }
+
+    /// A failure that is *not* our deadline must not be relabelled as one.
+    ///
+    /// Without this, a regression that maps every wire failure to the timeout
+    /// wording would tell the user "request timeout after 1s" when the server
+    /// simply refused the connection — and every existing test stays green.
+    #[tokio::test]
+    async fn a_refused_connection_is_not_reported_as_a_timeout() {
+        // Port 9 (discard) is unbound on the loopback of a test machine, so the
+        // connect is refused immediately rather than timing out.
+        let client = KiHttpClient::new(
+            "http://127.0.0.1:9/mcp",
+            None,
+            Some(Duration::from_secs(5)),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("loopback client");
+
+        let error = client
+            .post_message(
+                Arc::from("http://127.0.0.1:9/mcp"),
+                json_rpc_ping(),
+                None,
+                None,
+                HashMap::new(),
+            )
+            .await
+            .err()
+            .expect("the connection must be refused");
+        let text = error.to_string();
+        assert!(!text.contains("timeout"), "got {text:?}");
+        assert!(text.contains("Client error"), "got {text:?}");
+    }
+
+    /// A peer that accepts the TCP connection and never writes a response.
+    async fn silent_peer() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (_stream, _peer) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        (format!("http://127.0.0.1:{port}/mcp"), handle)
+    }
+
+    fn json_rpc_ping() -> ClientJsonRpcMessage {
+        serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "ping"
+        }))
+        .expect("a well-formed request")
     }
 
     #[test]
