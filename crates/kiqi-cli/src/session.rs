@@ -3305,6 +3305,93 @@ mod tests {
             });
     }
 
+    /// `/reload` must re-read `~/.agents`, not just the ki dirs.
+    ///
+    /// `reload_extension_resources` re-runs the Part-A loaders, and the shared
+    /// directory is part of that chain (`load_project_context_files_with_globals`).
+    /// If the reload path ever stopped passing `agents_dir()`, a file added while
+    /// the session runs would never appear — and the initial-build test would stay
+    /// green, because it only checks the first composition.
+    ///
+    /// Subprocess-isolated: needs its own `KI_AGENTS_DIR` / `KI_CODING_AGENT_DIR`,
+    /// and the crate's env-mutating tests share one lock.
+    #[test]
+    fn reload_picks_up_a_shared_agents_file_added_mid_session() {
+        const CHILD: &str = "KI_SHARED_AGENTS_RELOAD_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "session::tests::reload_picks_up_a_shared_agents_file_added_mid_session",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env(crate::config::CONFIG_DIR_ENV, dir.path().join("agent"))
+                .env(crate::config::AGENTS_DIR_ENV, dir.path().join("shared"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let agent = crate::config::agent_dir().unwrap();
+                let shared = crate::config::agents_dir().expect("KI_AGENTS_DIR is set");
+                let cwd = agent.join("project");
+                std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::create_dir_all(&shared).unwrap();
+
+                let resolved = crate::provider::resolve(
+                    Some("anthropic"),
+                    Some(crate::provider::DEFAULT_MODEL_ID),
+                    None,
+                    Some("test-key"),
+                    None,
+                )
+                .unwrap();
+                let args = Args {
+                    no_session: true,
+                    no_extensions: true,
+                    no_skills: true,
+                    no_prompt_templates: true,
+                    trust_override: Some(true),
+                    ..Default::default()
+                };
+                let (harness, _events, context) =
+                    build(&resolved, &args, &cwd, true).await.unwrap();
+
+                // Nothing shared yet.
+                let before = harness.get_system_prompt().await.unwrap().unwrap();
+                assert!(
+                    !before.contains("SHARED_ARRIVED_LATER"),
+                    "precondition: the marker must not be there yet"
+                );
+
+                // The user drops a shared instruction file while the session runs.
+                std::fs::write(shared.join("AGENTS.md"), "SHARED_ARRIVED_LATER").unwrap();
+                assert!(
+                    !reload_extension_resources(&harness, &context)
+                        .await
+                        .had_errors
+                );
+
+                let after = harness.get_system_prompt().await.unwrap().unwrap();
+                assert!(
+                    after.contains("SHARED_ARRIVED_LATER"),
+                    "`/reload` must re-read `~/.agents`: {after}"
+                );
+            });
+    }
+
     #[test]
     fn loaded_context_paths_track_precedence_and_reload() {
         const CHILD: &str = "KI_CONTEXT_PATHS_REGRESSION_CHILD";
