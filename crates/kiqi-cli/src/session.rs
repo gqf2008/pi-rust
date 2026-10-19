@@ -1720,15 +1720,73 @@ where
         &effective_args,
         &ctx.tool_context,
     );
+    // ---- Rebuild the emitter (TeeEmitter over fresh ExtensionEmitter) ----
+    let emitter: Arc<dyn kiqi_agent::AgentEmitter> = match extension_session.snapshot_arc() {
+        Some(snapshot) => {
+            let ext = ExtensionEmitter::new(snapshot, extension_session.keepalive());
+            Arc::new(TeeEmitter::new(vec![ctx.broadcast.clone(), Arc::new(ext)]))
+        }
+        None => ctx.broadcast.clone(),
+    };
+
+    // ---- 5. Push the rebuilt state into the live harness via the B5d setters ----
+    let _ = harness.set_agent_emitter(Some(emitter)).await;
+    let _ = harness
+        .set_models(build_models_with_extensions_for_reload(
+            &ctx.providers,
+            &extension_session,
+            ctx.runtime.clone(),
+        ))
+        .await;
+    let _ = harness
+        .set_provider_hooks(Some(crate::plugins::compiled_prompt_hooks(
+            kiqi_extensions::ExtensionProviderHooks::from_session(&extension_session)
+                .map(|h| Arc::new(h) as Arc<dyn kiqi_ai::ProviderHooks>),
+        )))
+        .await;
+
+    // The rebuilt tool adapters get the session's UI mailboxes too, so a
+    // `/reload` no longer costs a compiled plugin its `ui.dialog` /
+    // `set_status` / `set_editor_text`. The mailboxes live in the reload
+    // context (not the bridge) precisely so they survive the swap, and the
+    // action bridge already exposes them — the "no accessor" note that used to
+    // be here was stale.
+    let plugin_caps = crate::plugins::reload_caps(
+        std::sync::Arc::clone(&host_for_plugins),
+        ctx.ui_dialog.clone(),
+        ctx.ext_status.clone(),
+        ctx.editor_text.clone(),
+    );
+    // Refresh the event sink and the process-wide caps with the same set, so
+    // events, commands, probes, prompt transforms and tools all run against one
+    // consistent capability set after the swap (they were otherwise still on the
+    // build-time set).
+    crate::plugins::install_compiled_event_sink(plugin_caps.clone());
+    crate::plugins::merge_compiled_plugin_tools(
+        &mut tools,
+        &crate::plugins::compiled_plugin_hosts(),
+        &plugin_caps,
+        &|name| tool_name_allowed(name, &effective_args),
+    );
+    // Re-inject the host-level MCP tools. This rebuild starts from an empty set
+    // (`build_tools` + extension + compiled-plugin tools) and `set_tools`
+    // REPLACES the harness registry, so without this a `/reload` would silently
+    // drop every `{server}__{tool}` for the rest of the session.
+    merge_mcp_tools(&mut tools, &ctx.mcp, &effective_args);
+    // Compose the prompt only now: it lists the tools this session has, and the
+    // compiled-plugin and MCP adapters are merged above. Composing earlier (as this
+    // path used to) named only the built-ins and extension tools, so a `/reload`
+    // advertised a set smaller than the one `set_tools` installed — and with the
+    // compiled plugins enabled, `todo` and friends were silently missing.
     let reload_tool_names: Vec<String> =
         tools.iter().map(|t| t.tool.schema().name.clone()).collect();
+    let mut context_paths = Vec::new();
 
     // ---- Re-compose the system prompt (same precedence as build) ----
     // Same working-state wording rule as `build`; a mid-session `/model` switch
     // re-composes the prompt on the next reload, which is the same staleness the
     // rest of this path already has (provider resolution is a startup concern).
     let prior_reasoning_replayed = kiqi_ai::model::prior_reasoning_is_replayed(&ctx.resolved_model);
-    let mut context_paths = Vec::new();
     let base_prompt = match effective_args.system_prompt.as_deref() {
         Some(explicit) => explicit.to_string(),
         None if project_trusted => match discover_system_prompt_file(&ctx.cwd) {
@@ -1786,17 +1844,9 @@ where
         },
         append_join.as_deref(),
     );
-
-    // ---- Rebuild the emitter (TeeEmitter over fresh ExtensionEmitter) ----
-    let emitter: Arc<dyn kiqi_agent::AgentEmitter> = match extension_session.snapshot_arc() {
-        Some(snapshot) => {
-            let ext = ExtensionEmitter::new(snapshot, extension_session.keepalive());
-            Arc::new(TeeEmitter::new(vec![ctx.broadcast.clone(), Arc::new(ext)]))
-        }
-        None => ctx.broadcast.clone(),
-    };
-
-    // ---- 5. Push the rebuilt state into the live harness via the B5d setters ----
+    // `resources.context_files` comes from the composition above: it is what
+    // `read_prompt_source` recorded while building the prompt, so the panel and the
+    // prompt cannot disagree about which instruction files are in force.
     let resources = AgentHarnessResources {
         context_files: context_paths,
         skills: if skills.is_empty() {
@@ -1810,51 +1860,8 @@ where
             Some(prompt_templates.clone())
         },
     };
-    let _ = harness.set_system_prompt(Some(system_prompt)).await;
     let _ = harness.set_resources(resources).await;
-    let _ = harness.set_agent_emitter(Some(emitter)).await;
-    let _ = harness
-        .set_models(build_models_with_extensions_for_reload(
-            &ctx.providers,
-            &extension_session,
-            ctx.runtime.clone(),
-        ))
-        .await;
-    let _ = harness
-        .set_provider_hooks(Some(crate::plugins::compiled_prompt_hooks(
-            kiqi_extensions::ExtensionProviderHooks::from_session(&extension_session)
-                .map(|h| Arc::new(h) as Arc<dyn kiqi_ai::ProviderHooks>),
-        )))
-        .await;
-
-    // The rebuilt tool adapters get the session's UI mailboxes too, so a
-    // `/reload` no longer costs a compiled plugin its `ui.dialog` /
-    // `set_status` / `set_editor_text`. The mailboxes live in the reload
-    // context (not the bridge) precisely so they survive the swap, and the
-    // action bridge already exposes them — the "no accessor" note that used to
-    // be here was stale.
-    let plugin_caps = crate::plugins::reload_caps(
-        std::sync::Arc::clone(&host_for_plugins),
-        ctx.ui_dialog.clone(),
-        ctx.ext_status.clone(),
-        ctx.editor_text.clone(),
-    );
-    // Refresh the event sink and the process-wide caps with the same set, so
-    // events, commands, probes, prompt transforms and tools all run against one
-    // consistent capability set after the swap (they were otherwise still on the
-    // build-time set).
-    crate::plugins::install_compiled_event_sink(plugin_caps.clone());
-    crate::plugins::merge_compiled_plugin_tools(
-        &mut tools,
-        &crate::plugins::compiled_plugin_hosts(),
-        &plugin_caps,
-        &|name| tool_name_allowed(name, &effective_args),
-    );
-    // Re-inject the host-level MCP tools. This rebuild starts from an empty set
-    // (`build_tools` + extension + compiled-plugin tools) and `set_tools`
-    // REPLACES the harness registry, so without this a `/reload` would silently
-    // drop every `{server}__{tool}` for the rest of the session.
-    merge_mcp_tools(&mut tools, &ctx.mcp, &effective_args);
+    let _ = harness.set_system_prompt(Some(system_prompt)).await;
     let mut active = active_tool_names(&tools, &effective_args);
     active = filter_active_tool_names(active, &effective_args);
     let _ = harness.set_tools(tools, Some(active)).await;
