@@ -234,6 +234,14 @@ Jev 的答案只作为决策依据，不能绕过权限门。删除/合并类如
 §9 剩余第 1 条（“goal 范围”的精确边界：goal notes / permissions / allowlist 三者优先级）未定。
 在边界未定的前提下实现“范围内自动授权”，等于现造一套策略再声称符合方案。1b 应先解该问题。
 
+该问题已拆到 `goal-scope.md`，并在那里发现一个比“优先级未定”更根本的事实：**权限门是拦截、
+不是询问**（`crates/kiqi-cli/src/session.rs:948-958` 返回 `block: true`；
+`crates/kiqi-cli/src/permissions.rs:514-551` 只可能答“放行”或“拦下并给理由”），权限路径上
+没有任何 `ask_user` 对话框。所以 1b 的“自动授权”**没有被授权方**：规则放行时无需授权，
+规则拒绝时没有对话框可自动回答。另：`goal.notes` 是自由文本且宿主视图
+`ActiveGoal`（`crates/kiqi-cli/src/goal_drive.rs:24-31`）根本不解析它，不能作为范围来源。
+1b 应作为“新增审批通道”单独立项（`goal-scope.md` 的方案 B），先选定方案。
+
 ## 9. 已定默认值 / 剩余问题
 
 **已定（2026-10-19）**
