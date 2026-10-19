@@ -541,7 +541,26 @@ fn install(args: &[String]) -> i32 {
 /// `pub(crate)` so the wasm tests in [`crate::plugins`] build their fixtures the
 /// same way: a hard-coded `plugins/wasm/target/...` silently breaks on a
 /// machine whose cargo config points `build.target-dir` elsewhere.
+/// Serialises `build_guest` inside one test binary.
+///
+/// Several tests build the *same* guest (four do for `kiqi-conformance-guest`), and
+/// they run concurrently under the default `--test-threads`. They share one
+/// `cargo --target-dir`, so while one `cargo build` rewrites the artifact another
+/// test can be told "already fresh" and open the file mid-write — observed as
+/// `failed to read from …/kiqi_conformance_guest.wasm`. The same shape appears across
+/// processes when two `cargo test -p kiqi-cli` runs share a target dir.
+///
+/// The mutex makes the in-binary case deterministic; the retry below covers the
+/// cross-process window. Both keep the shared target dir, so `cargo`'s incremental
+/// cache still applies — a per-process `--target-dir` would rebuild every guest.
+static BUILD_GUEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn build_guest(dir: &Path) -> Result<PathBuf, String> {
+    // A poisoned lock means an earlier build panicked; that says nothing about the
+    // filesystem, so carry on rather than propagating the panic.
+    let _guard = BUILD_GUEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let manifest = dir.join("Cargo.toml");
     if !manifest.is_file() {
         return Err(format!("{} has no Cargo.toml", dir.display()));
@@ -588,12 +607,39 @@ pub(crate) fn build_guest(dir: &Path) -> Result<PathBuf, String> {
             artifact = Some(PathBuf::from(found));
         }
     }
-    artifact.ok_or_else(|| {
+    let artifact = artifact.ok_or_else(|| {
         format!(
             "{} built no .wasm component (is it a guest crate: crate-type cdylib, wasm32-wasip2?)",
             dir.display()
         )
-    })
+    })?;
+
+    // Another process sharing this target dir may have been mid-write when cargo
+    // reported the artifact fresh, so the bytes on disk can be a truncated component.
+    // Checking the 4-byte module header (`\0asm`) catches that; a plain length check
+    // would not, because a half-written file is non-empty.
+    if !has_wasm_header(&artifact) {
+        let _ = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--manifest-path"])
+            .arg(&manifest)
+            .args(["--target", "wasm32-wasip2", "--release"])
+            .output();
+    }
+    Ok(artifact)
+}
+
+/// Whether `path` starts with the WebAssembly module magic (`\0asm`).
+///
+/// A component that is still being written by another process reads as empty or as a
+/// prefix, and loading it fails with a bare "failed to read"; this predicate lets
+/// `build_guest` tell "complete artifact" from "torn write".
+fn has_wasm_header(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic).is_ok() && magic == *b"\0asm"
 }
 
 /// Name suffix of the digest sidecar written next to a component.
