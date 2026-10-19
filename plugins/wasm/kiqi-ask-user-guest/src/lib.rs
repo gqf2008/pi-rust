@@ -23,6 +23,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Upper bound on how long `ask_user` waits for a human when the model does
 /// not name a shorter timeout. Without this the wait is unbounded.
+///
+/// **Threshold change (2026-10-19).** Old value: no upper bound — `deadline`
+/// came only from the model's `timeout`, so a question without one never timed
+/// out (one deletion-authorization question blocked a run for ~43 minutes).
+/// New value: 60 s, a ceiling only; a shorter model `timeout` still wins. 60 s
+/// covers a human answering an on-screen dialog while staying short enough for
+/// unattended flows. See `docs/design/decision-fallback.md` §9 item 1.
 const DEFAULT_ANSWER_TIMEOUT_SECS: u64 = 60;
 
 /// How long this question may stay open: the model's `timeout`, capped at

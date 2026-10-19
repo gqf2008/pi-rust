@@ -38,6 +38,23 @@ pub(crate) const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_
 
 /// Upper bound on how long `ask_user` waits for a human when the model does
 /// not name a shorter timeout. Without this the wait is unbounded.
+///
+/// **Threshold change (2026-10-19).**
+///
+/// - Old value: *no upper bound at all.* `deadline` came only from the model's
+///   own `timeout`, so a question without one got `deadline: None` and the
+///   plugin could never time out. Measured cost: a single deletion-authorization
+///   question blocked one run for about 43 minutes with no session entry
+///   (`docs/design/decision-fallback.md` §1).
+/// - New value: 60 s. A model-supplied `timeout` still works and still wins when
+///   it is *shorter* — this is a ceiling, not a replacement for `timeout`
+///   (`effective_timeout_secs` caps, it does not override).
+/// - Why 60 s: with nobody at the keyboard the wait has to be finite; 60 s covers
+///   "a human is in front of the dialog and answers" for the overwhelming
+///   majority of questions, and it is short enough that unattended flows resume
+///   instead of stalling for tens of minutes.
+/// - Decided in `docs/design/decision-fallback.md` §9 "已定（2026-10-19）" item 1
+///   (non-goal mode waits at most 60 s).
 const DEFAULT_ANSWER_TIMEOUT_SECS: u64 = 60;
 
 /// Host fn pointers captured once at register time. `runtime_action` lets the
