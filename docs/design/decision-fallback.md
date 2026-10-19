@@ -1,16 +1,15 @@
 # 方案：ask_user 兜底与 JEV 决策顾问
 
-> 状态：**方案（待评审，2026-10-19）**。目标：人不在时 `ask_user` 不再无限挂起；
+> 状态：**阶段 1a 已落地（2026-10-20，`886aac7` + `6e2b890` + `20eed47`）**；1b（goal 自动授权）与阶段 2/3 待做。
+> 目标：人不在时 `ask_user` 不再无限挂起；
 > 超时后由宿主执行**保守兜底**，并可调用 TypeSafe Jev 决策模型给出**建议**。
 > Jev 只建议，不代替人授权。
 > 关联：`soft-interrupt.md`（Esc 软中断）、`signal-driven-agent.md`（MUI 输入）、
 > `docs/design/plugin-abi-handover.md`（插件面）。
-> 本文件只写设计，未改代码。
 >
 > 来源与状态：本文件是第 2 轮（软中断阶段 1）实现期间产生的设计稿，**不是**该轮开卡的
 > 工作项，因此未随 `4902ab7` 进入 main；方案本体同时登记在 walgit 线程
-> `decision-fallback-design`。采纳时先做 §7 的四条实核（poll 循环现状、阈值常量是新增还是
-> 调整、编译期与 wasm 两侧是否都要改、外网调用默认开关），再拆阶段 1。
+> `decision-fallback-design`。§7 的四条实核已于 2026-10-20 完成，结论见 §7.1。
 
 ## 1. 问题（实核）
 
@@ -190,11 +189,50 @@ Jev 的答案只作为决策依据，不能绕过权限门。删除/合并类如
 
 ## 8. 分期
 
-| 阶段 | 内容 |
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| 1a | TTL + 结构化 `unanswered` + 保守兜底 + 审计（不依赖 Jev） | **已落地** `886aac7` + `6e2b890` + `20eed47`（见 §8.1） |
+| 1b | goal active 范围内自动授权 | 待做；**被 §9 剩余第 1 条阻塞**（“goal 范围”边界未定，见 §8.3） |
+| 2 | Jev 顾问 + confidence 阈值 + 缓存 + pending decision inbox | 待做 |
+| 3 | `/decisions`、MUI 提醒、策略细分（按工具/路径） | 待做 |
+
+### 8.0 §7 四条实核结论（2026-10-20）
+
+| 检查 | 结论 | 判据 |
+|---|---|---|
+| poll 循环现状 | `POLL_INTERVAL=25ms`；`deadline` **仅**来自模型传的 `timeout`，不传则 `None` → 无限等；宿主侧无 TTL；超时返 `Err` 而非结构化结果 | 落地前：`plugins/kiqi-ask-user/src/lib.rs:37` 与 `:519-546`；guest `:22` 与 `:309-316`；`crates/kiqi-cli/src` 内对话框路径搜 `timeout` 无命中 |
+| 阈值常量是新增还是调整 | **新增**。`timeout` 是模型可传参数（校验正整数），无上限；60s 是全新宿主上限 | 同上 |
+| 编译期与 wasm 两侧是否都改 | **是**，两处超时逻辑逐行平行 | 同上 |
+| 外网调用默认开关 | 阶段 1 不涉及（无 Jev）；属阶段 2 的 `decision.jev.enabled` | §6 |
+
+额外实核：**wasm guest 无法实现审计**——`plugins/kiqi-plugin.wit` 的 `world plugin` import 了
+`log`/`fs`/… 但**没有** `wasi:cli/environment`，guest 读不到 `KI_DEBUG_DECISION`；`fs` 又限制在
+插件自己的数据目录。故审计只能宿主侧，理由写进了 guest 文件头。
+
+### 8.1 阶段 1a 落地记录
+
+| 位置 | 实现 |
 |---|---|
-| 1 | TTL + 保守兜底 + 审计（不依赖 Jev） |
-| 2 | Jev 顾问 + confidence 阈值 + 缓存 + pending decision inbox |
-| 3 | `/decisions`、MUI 提醒、策略细分（按工具/路径） |
+| `plugins/kiqi-ask-user/src/lib.rs` | `DEFAULT_ANSWER_TIMEOUT_SECS = 60`；`effective_timeout_secs(requested) = requested.unwrap_or(60).min(60)`；`PendingQuestion.deadline` 由 `Option<Instant>` 改为 `Instant`——**“无限等”在类型上不再可表示** |
+| 同上 | 超时返回结构化 `unanswered`（`status`/`reason`/`fallback`/`question`），`Ok(Some(..))` 让 drive 正常完成；`cancel` 仍为 `Err` |
+| 同上 | `conservative_fallback(_) -> "keep"` 单一实现；schema 里没有 per-question `fallback` 字段，加它要动两侧 + `additionalProperties:false`，属破坏性变更，另开 |
+| 同上 | `truncate_on_char_boundary`：中文问题 3 字节/字，按字节直接切会 panic；有 `"删".repeat(100)` 的测试 |
+| 同上 | `KI_DEBUG_DECISION` → `<temp>/kiqi-decision.log`，一行一个超时 |
+| `plugins/wasm/kiqi-ask-user-guest/src/lib.rs` | 同样三处逐一对应；`ask_one` 返回 `AskOne::{Answered, Unanswered}`，超时不进 `Err` |
+| `crates/kiqi-plugin-host/tests/e2e.rs` | `ask_user_honours_timeout` 从「断言 `is_error` + 文案含 timed out」改为「断言非错误 + `details.status==unanswered` + 无 `answer` 键」 |
+
+两条**不可回退**的判断：
+
+1. **超时必须是结果，不是错误。** 它改变模型的后续行为：`Err` 会让模型以为工具坏了并可能重试，
+   结构化 `unanswered` 让它带着 `keep` 继续。载荷里**没有** `answer` 键——超时不是同意，
+   省略键是模型唯一无法误读的形式。
+2. **`deadline` 不能退回 `Option<Instant>`。** 类型上允许 `None` 就允许“无限等”，而“用户在场”
+   是很强的假设；做成 `Instant` 后，任何未来改动想恢复无限等都必须显式改类型，会被评审看见。
+
+### 8.3 阶段 1b 为何未做
+
+§9 剩余第 1 条（“goal 范围”的精确边界：goal notes / permissions / allowlist 三者优先级）未定。
+在边界未定的前提下实现“范围内自动授权”，等于现造一套策略再声称符合方案。1b 应先解该问题。
 
 ## 9. 已定默认值 / 剩余问题
 
