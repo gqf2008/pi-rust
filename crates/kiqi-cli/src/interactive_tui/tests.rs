@@ -2598,10 +2598,21 @@ fn a_double_press_window_never_leaks_across_a_run_status_change() {
 fn soft_interrupt_notes_describe_what_the_press_reached() {
     // The dim note is the only feedback a soft interrupt gives (the status stays
     // Working and the queue stays queued), so the wording matters: it must not
-    // read like an abort, and the nothing-to-interrupt case must say so.
+    // read like an abort, and the nothing-in-flight case must not promise that
+    // nothing will happen.
     assert!(SOFT_INTERRUPT_NOTE.contains("continues"));
     assert!(!SOFT_INTERRUPT_NOTE.to_ascii_lowercase().contains("abort"));
-    assert!(NOTHING_TO_INTERRUPT_NOTE.contains("Nothing to interrupt"));
+    // The latch is armed in this arm (`InterruptResult::NothingToInterrupt`), so
+    // the note has to say the next step is affected. "Nothing to interrupt"
+    // would contradict the flag.
+    assert!(
+        NOTHING_TO_INTERRUPT_NOTE.contains("next step"),
+        "got {NOTHING_TO_INTERRUPT_NOTE:?}"
+    );
+    assert!(
+        !NOTHING_TO_INTERRUPT_NOTE.contains("Nothing to interrupt"),
+        "got {NOTHING_TO_INTERRUPT_NOTE:?}"
+    );
     assert!(NO_ACTIVE_RUN_TO_INTERRUPT_NOTE.contains("No run"));
 }
 

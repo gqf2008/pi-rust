@@ -154,10 +154,15 @@ pub(super) fn abort_run_restoring_queue(
 /// The dim transcript note a soft interrupt leaves behind, per
 /// `soft-interrupt.md` §3.5. Kept as constants so the wording is asserted by a
 /// test instead of drifting between the two `InterruptResult` arms.
+///
+/// The `NothingToInterrupt` note must not claim that nothing happened: the soft
+/// flag is latched in that arm, so the *next* action the run installs starts
+/// cancelled (`InterruptResult::NothingToInterrupt` documents this). A note that
+/// said "nothing to interrupt" would be lying to the user one edit later.
 pub(super) const SOFT_INTERRUPT_NOTE: &str =
     "Interrupted the current tool; queued input continues.";
 pub(super) const NOTHING_TO_INTERRUPT_NOTE: &str =
-    "Nothing to interrupt yet (still waiting on the provider).";
+    "Nothing in flight right now; the next step will be stopped.";
 pub(super) const NO_ACTIVE_RUN_TO_INTERRUPT_NOTE: &str = "No run to interrupt.";
 
 /// `app.interrupt` when Esc is a *single* press: cancel the action in flight and

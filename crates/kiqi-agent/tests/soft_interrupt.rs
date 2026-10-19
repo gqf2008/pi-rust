@@ -231,3 +231,35 @@ async fn a_hard_abort_still_ends_the_run() {
     );
     assert!(run.is_ok(), "abort resolves Ok, not an error: {run:?}");
 }
+/// A press with nothing installed reports `NothingToInterrupt` *and* arms the
+/// latch, so the note the CLI shows must say the next step is affected rather
+/// than "nothing to interrupt".
+///
+/// This is the agent-side half of that contract: the switch the note describes
+/// really does cancel the next action.
+#[test]
+fn a_press_with_nothing_installed_interrupts_the_next_action() {
+    let interrupt = InterruptControl::new();
+    assert!(!interrupt.has_current(), "nothing is in flight");
+
+    // What `AgentHarness::interrupt()` does in this arm.
+    interrupt.soft_interrupt();
+    assert!(!interrupt.has_current(), "still nothing in flight");
+
+    let next_action = CancellationToken::new();
+    let id = interrupt.install(next_action.clone());
+    assert!(
+        next_action.is_cancelled(),
+        "the latch cancels the next action — `NothingToInterrupt` promises this"
+    );
+
+    // ...and the loop drains it at that action's boundary, so it hits once.
+    assert!(interrupt.take_soft(), "the loop can tell why it died");
+    interrupt.clear(id);
+    let following = CancellationToken::new();
+    let _id = interrupt.install(following.clone());
+    assert!(
+        !following.is_cancelled(),
+        "a one-shot latch must not cancel every later action"
+    );
+}
