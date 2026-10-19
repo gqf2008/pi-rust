@@ -124,7 +124,7 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 | `wasmtime` 常驻 `ki` | 由 `plugin-wasm`（默认开）控制；要瘦身需单独门控 |
 | `.wasm` 无签名/摘要校验 | 见 `plugin-abi.md` §7 待定项 |
 | 装完需重启 | `compiled_plugin_hosts()` 是进程级 `OnceLock` |
-| e2e 的 `exec_does_not_hang_when_the_command_leaves_a_background_child` 在满负载并行跑时偶发超时 | 15s 的 `recv_timeout` 窗口里含 wasmtime 编译 fixture 的时间，并行构建时可能不够；单跑必过。改阈值属 `RULE_阈值变更`，未动 |
+| ~~e2e 的 `exec_does_not_hang_when_the_command_leaves_a_background_child` 满负载偶发超时~~ | ✅ 已在 `dce1216` 缓解：把 `fixture_wasm()` 移到计时窗口**之外**（`e2e.rs:2425-2428` 的注释写明理由），15s 窗口里不再包含 wasmtime 编译时间。阈值未动，因为根因是窗口里混入了无关工作而非窗口太小。实测：e2e 单跑 3 次全绿；再与整个 workspace 测试**并行**跑一次，0 失败 |
 | **acp 不迁，宿主级立项** | `plugin-abi.md` §6.2 裁定（独占 stdio + 跨会话服务线程）；立项方案见 `ki-acp-serve.md`（`ki acp serve`：进程内驱动 AgentHarness、协议层用官方 `agent-client-protocol` crate、abb-agent 做语义层参照） |
 | 不迁 | `kiqi-permissions`（信任倒置：沙箱 guest 重写宿主权限策略，需先设计）——唯一保留的编译期插件。~~orchestrator~~ 已按业主要求以**阻塞波**形态迁走（§6.34：放弃后台波与中途重塑，其余语义保留）；~~codegraph~~ 随 `proc` 迁走 |
 
