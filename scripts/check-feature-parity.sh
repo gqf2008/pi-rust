@@ -1,20 +1,25 @@
 #!/bin/sh
-# Fail when AGENTS.md's opt-in feature list drifts from CI's.
+# Fail when AGENTS.md's local gate drifts from what CI actually runs.
 #
-# AGENTS.md tells contributors (and agents) to run the opt-in plugin features as
-# part of the local gate, and warns in the same breath that skipping them lets the
-# features rot. That instruction is only true if the list matches what CI runs: a
-# list that is one short makes the local gate *weaker* than CI, so everything
-# looks green here while CI is red — on exactly the plugin nobody exercised.
+# AGENTS.md tells contributors (and agents) to run the opt-in plugin features and
+# to build each plugin standalone, and warns that skipping the first lets the
+# features rot. Both instructions are only true if the lists match CI's: a list
+# that is one short makes the local gate *weaker* than CI, so everything looks
+# green here while CI is red — on exactly the plugin nobody exercised.
 #
-# That happened: plugin-kiqi-codegraph and plugin-kiqi-orchestrator were missing
-# from AGENTS.md while CI ran them.
+# That happened once already (plugin-kiqi-codegraph and plugin-kiqi-orchestrator
+# were missing), which is why this checks two things now:
 #
-# The two lists are compared as sets, so ordering and line wrapping are free.
+#   1. the `--features plugin-kiqi-*` list  → `cargo test -p kiqi-cli`
+#   2. the `-p kiqi-*` list of the standalone cdylib build
+#
+# The two CI lists are also compared with each other: every plugin with a wasm port
+# is opt-in and every opt-in plugin has a cdylib entrypoint, so a plugin that gets
+# added to one list but not the other is a forgotten registration, not a choice.
 #
 # POSIX sh only: no process substitution (`<(...)`), no `grep -f /dev/stdin`.
-# The first version used both and silently reported "agree" even after a feature
-# was removed — a check that cannot fail is worse than no check.
+# Earlier versions used both plus a `-`-containing character class, and each one
+# made the check silently pass while checking nothing.
 set -eu
 
 CI_FILE=".github/workflows/ci.yml"
@@ -26,43 +31,68 @@ DOC_FILE="AGENTS.md"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# Every `plugin-kiqi-*` token mentioned in each file, one per line, deduped.
-# Only lines that actually pass `--features` count. Scanning the whole document
-# would let prose mask a gap: this file's own explanatory comment names the two
-# features that were missing, so a document-wide scan reported "agree" even after
-# they were deleted from the command.
-#
-# `grep -o -w` with a word-character class: a class that also contains `-` makes
-# grep split at the hyphen and can emit a bare `plugin-kiqi-` token, and an empty
-# pattern line silently disables every `-f` lookup below.
-features_line() {
-    grep -- '--features' "$1" | grep -o -w -E 'plugin-kiqi-[[:alnum:]_]+' | sort -u
+# The feature names on the line that passes `--features` to cargo, as bare plugin
+# names (`plugin-kiqi-goal` -> `kiqi-goal`).
+feature_names() {
+    # The trailing character must not be a hyphen, and hyphens are allowed inside:
+    # `plugin-kiqi-ask-user` must survive whole. (A class ending in `-` used to make
+    # grep emit a bare `plugin-kiqi-` token.)
+    grep -- '--features' "$1" \
+        | grep -o -E 'plugin-kiqi-[[:alnum:]_][[:alnum:]_-]*[[:alnum:]_]' \
+        | sed 's/^plugin-//' \
+        | sort -u
 }
 
-features_line "$CI_FILE" > "$tmp/ci"
-features_line "$DOC_FILE" > "$tmp/doc"
+# The crate names on the line that builds the plugins standalone.
+standalone_names() {
+    # CI wraps the command over several lines with a trailing `\`, the document
+    # keeps it on one; collect the crates from either shape by scanning from the
+    # `cargo build --locked` line to the next blank line.
+    awk '/cargo build --locked/{flag=1} flag{print} flag && /^[[:space:]]*$/{exit}' "$1" \
+        | grep -o -E 'kiqi-[[:alnum:]_][[:alnum:]_-]*[[:alnum:]_]' \
+        | grep -v '^kiqi-cli$' \
+        | sort -u
+}
 
-# In CI but not in the doc: the doc's gate is looser than CI's. Hard error.
-grep -v -x -F -f "$tmp/doc" "$tmp/ci" > "$tmp/missing" || true
-# In the doc but not in CI: worth a note, not a failure (prose may name one).
-grep -v -x -F -f "$tmp/ci" "$tmp/doc" > "$tmp/extra" || true
+feature_names "$CI_FILE" > "$tmp/ci_features"
+feature_names "$DOC_FILE" > "$tmp/doc_features"
+standalone_names "$CI_FILE" > "$tmp/ci_standalone"
+standalone_names "$DOC_FILE" > "$tmp/doc_standalone"
 
 status=0
 
-if [ -s "$tmp/missing" ]; then
-    echo "AGENTS.md is missing feature(s) that CI runs:" >&2
-    sed 's/^/  /' "$tmp/missing" >&2
+report_missing() {
+    # $1 label, $2 file with the missing entries
+    if [ -s "$2" ]; then
+        echo "AGENTS.md is missing from the $1 list:" >&2
+        sed 's/^/  /' "$2" >&2
+        status=1
+    fi
+}
+
+grep -v -x -F -f "$tmp/doc_features" "$tmp/ci_features" > "$tmp/missing_features" || true
+grep -v -x -F -f "$tmp/doc_standalone" "$tmp/ci_standalone" > "$tmp/missing_standalone" || true
+
+report_missing "opt-in feature" "$tmp/missing_features"
+report_missing "standalone cdylib build" "$tmp/missing_standalone"
+
+# A plugin in one CI list but not the other is a forgotten registration.
+grep -v -x -F -f "$tmp/ci_standalone" "$tmp/ci_features" > "$tmp/ci_only_features" || true
+grep -v -x -F -f "$tmp/ci_features" "$tmp/ci_standalone" > "$tmp/ci_only_standalone" || true
+if [ -s "$tmp/ci_only_features" ]; then
+    echo "CI tests these as opt-in features but does not build them standalone:" >&2
+    sed 's/^/  /' "$tmp/ci_only_features" >&2
+    status=1
+fi
+if [ -s "$tmp/ci_only_standalone" ]; then
+    echo "CI builds these standalone but does not test them as opt-in features:" >&2
+    sed 's/^/  /' "$tmp/ci_only_standalone" >&2
     status=1
 fi
 
-if [ -s "$tmp/extra" ]; then
-    echo "note: AGENTS.md names feature(s) CI does not list:" >&2
-    sed 's/^/  /' "$tmp/extra" >&2
-fi
-
 if [ "$status" -eq 0 ]; then
-    count=$(wc -l < "$tmp/ci" | tr -d ' ')
-    echo "opt-in feature lists agree ($count features)"
+    count=$(wc -l < "$tmp/ci_features" | tr -d ' ')
+    echo "local gate lists agree with CI ($count plugins)"
 fi
 
 exit "$status"

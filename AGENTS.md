@@ -56,7 +56,11 @@ cargo test  --workspace --locked
 cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-lens,plugin-kiqi-webfetch,plugin-kiqi-websearch,plugin-kiqi-subagents,plugin-kiqi-goal,plugin-kiqi-plan-mode,plugin-kiqi-ask-user,plugin-kiqi-langfuse,plugin-kiqi-permissions,plugin-kiqi-codegraph,plugin-kiqi-orchestrator
 # 文档快照（改了 CHANGELOG.md / README.md 等必须重跑，CI 会比对）
 sh scripts/sync-embedded-docs.sh
-# 上面那份 feature 清单与 CI 的一致性（CI 也会跑；改任何一侧都要过这条）
+# CI 还会把每个插件单独编成 cdylib（compile-time feature 关闭时的入口），
+# 因为 workspace 整体构建会把它们都开成 compile-time、从而丢掉 cdylib 导出。
+# 本地不跑这一步，`ki dev` 的热载路径坏了也看不见：
+cargo build --locked -p kiqi-todo -p kiqi-lens -p kiqi-webfetch -p kiqi-websearch -p kiqi-subagents -p kiqi-permissions -p kiqi-goal -p kiqi-plan-mode -p kiqi-codegraph -p kiqi-ask-user -p kiqi-langfuse -p kiqi-orchestrator
+# 上面两份清单与 CI 的一致性（CI 也会跑；改任何一侧都要过这条）
 sh scripts/check-feature-parity.sh
 ```
 
