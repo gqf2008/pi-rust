@@ -25,6 +25,9 @@ target/*
 # to `crates/kiqi-cli` could still write into the tree; `**/.ki/*` covers every
 # depth. It sits before the skill negations on purpose: a pattern placed later
 # would match `.ki/skills` itself and silently kill the `!` re-includes below.
+# Note that this also ignores a *nested* `.ki/skills/**` (the negations only
+# re-include the root one), so a fixture that needs nested skill files has to
+# get its own `!` rule here.
 .ki/*
 **/.ki/*
 !.ki/skills/

@@ -1755,8 +1755,13 @@ mod tests {
         let caps_host = ActionCaps::new(fake.clone(), runtime.handle().clone());
         let silent = Silent;
         // `inject` is granted deliberately: kiqi-goal cannot advance without it,
-        // which is the capability gate doing its job (with `inject: None` the
-        // goal start below still succeeds but injects nothing).
+        // which is the capability gate doing its job.
+        //
+        // The goal start/state assertions live in
+        // `goal_tool_writes_state_into_the_project_cwd` below: they have to run
+        // in a child process whose cwd is a tempdir, otherwise the plugin writes
+        // `.ki/goals.json` into this checkout (`goals_path()` uses the process
+        // cwd).
         let caps = HostCaps {
             session: Some(&caps_host),
             control: Some(&caps_host),

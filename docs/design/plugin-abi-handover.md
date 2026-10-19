@@ -107,8 +107,8 @@ cargo test -p kiqi-extensions --lib                    # 102
 ```
 
 CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows installer）全绿。
-注意：`cargo test --workspace` 会一并构建 wasmtime（慢、体积大）；kiqi-cli 测试会改
-`crates/kiqi-cli/.ki/goals.json`，跑完 `git checkout --` 还原。
+注意：`cargo test --workspace` 会一并构建 wasmtime（慢、体量大）；kiqi-cli 的 goal 断言
+已在子进程 + tempdir 里跑，不再写源码树，跑完无需手动还原。
 
 ## 7. 未完成 / 已知限制
 

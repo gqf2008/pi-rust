@@ -55,8 +55,9 @@ cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-le
 sh scripts/sync-embedded-docs.sh
 ```
 
-注意：`cargo test -p kiqi-cli` 会改写 `crates/kiqi-cli/.ki/goals.json`（运行时状态被提交进仓库），
-跑完记得 `git checkout --`。wasm guest 只对 `wasm32-wasip2` 链接，**guest crate 里不写单测**，
+注意：goal 测试已用子进程 + tempdir 隔离，跑 `cargo test -p kiqi-cli` 不再改写源码树
+（`crates/kiqi-cli/.ki/` 已移出索引并被 `.gitignore` 的 `**/.ki/*` 忽略）。
+wasm guest 只对 `wasm32-wasip2` 链接，**guest crate 里不写单测**，
 行为一律由 `crates/kiqi-plugin-host/tests/e2e.rs` 从宿主侧验证。
 
 ## 两条插件通道（改动前先分清）
