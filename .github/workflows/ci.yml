@@ -68,6 +68,13 @@ jobs:
       - name: Verify the ABI section numbers and their citations
         run: sh scripts/check-abi-sections.sh
 
+      # The lock file must name every dependency of every feature. CI is online, so a
+      # missing entry would simply be fetched here — while an offline build (and this
+      # machine, whose uncommitted `.cargo/config.toml` sets `offline = true`) fails
+      # with what looks like a local misconfiguration.
+      - name: Verify the lock file covers every feature offline
+        run: sh scripts/check-offline-lock.sh
+
       - name: Run workspace tests
         run: cargo test --workspace --locked
 

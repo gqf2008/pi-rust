@@ -47,6 +47,9 @@
 
 ```bash
 cargo fmt --all -- --check
+# 本地可选加速：下面每条都可以加 `--offline`（`Cargo.lock` 覆盖全部 feature，
+# 离线也能全绿）。CI 在线跑，所以若某个 feature 引入了未锁定的依赖，
+# 症状只会是「CI 卡在下载」而你本地无感——偶尔用 --offline 跑一次能提前发现。
 cargo check --workspace --all-targets --locked
 # 全部 feature 也要能编：否则一个坏掉的公开 feature 会一直无人发现
 # （实例：`kiqi-tools` 的 `webp` 调用了 image 0.25 没有的 API，`--features webp` 直接编译失败）
@@ -60,6 +63,9 @@ cargo test  --workspace --locked
 # 少列一个，本地门禁就比 CI 松，而 CI 那边仍是红的（2026-10-20 就漏了
 # plugin-kiqi-codegraph 与 plugin-kiqi-orchestrator 两项，已补齐）。
 cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-lens,plugin-kiqi-webfetch,plugin-kiqi-websearch,plugin-kiqi-subagents,plugin-kiqi-goal,plugin-kiqi-plan-mode,plugin-kiqi-ask-user,plugin-kiqi-langfuse,plugin-kiqi-permissions,plugin-kiqi-codegraph,plugin-kiqi-orchestrator
+# Cargo.lock 必须覆盖全部 feature 的依赖（离线可解析）；CI 在线跑，
+# 缺项的后果只会是「CI 卡下载 / 本地离线报错」，两边都不像根因
+sh scripts/check-offline-lock.sh
 # 文档快照（改了 CHANGELOG.md / README.md 等必须重跑，CI 会比对）
 sh scripts/sync-embedded-docs.sh
 # CI 还会把每个插件单独编成 cdylib（compile-time feature 关闭时的入口），
