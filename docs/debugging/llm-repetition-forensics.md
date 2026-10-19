@@ -1,5 +1,10 @@
 # 「LLM 一直在重复思考」问题复盘
 
+> **行号说明（2026-10-20 补）**：本文写于 2026-09-25，其中的 `interactive_tui.rs:NNNN`
+> 是**当时的坐标**。该文件后来被拆分/重排，行数已从约 8000+ 降到 3396，原文里的
+> `:5956`、`:8188`、`:8219` 等已全部失效。下方引用已按当前代码更新为真实位置，并标出
+> 符号名——**请以符号名为准，行号会继续漂**。取证结论本身不受影响。
+
 审计日期：2026-09-25
 涉及仓库：`pi-rust`（`crates/kiqi-agent`、`crates/kiqi-ai`、`crates/kiqi-harness`、`crates/kiqi-cli`、`crates/kiqi-tui`）
 
@@ -51,7 +56,7 @@
 
 ```
 用户按 Enter
-└─ crates/kiqi-cli/src/interactive_tui.rs:5956   editor.on_submit 闭包（阻塞在 key 线程）
+└─ crates/kiqi-cli/src/interactive_tui.rs:1434   editor.on_submit 闭包（阻塞在 key 线程）
    ├─ text.starts_with('/')                 → dispatch_slash(..)
    ├─ parse_user_bash(text)                 → start_user_bash(..)     【! / !! 直连 shell】
    ├─ RunStatus != Idle                     → lane.steer(msg)
@@ -61,7 +66,7 @@
       ├─ add_user_message(chat, text)                                  ← 直发在此回显（见 §四.4）
       ├─ push_history(state, text)
       └─ tx.send(TuiMessage::UserInput(text))
-         └─ interactive_tui.rs:7719  run_prompt_streaming(..)
+         └─ interactive_tui/run.rs:152  run_prompt_streaming(..)
             ├─ state.set_status(Working)
             ├─ ensure_js_runtime_before_prompt(..)   ← JS 扩展 before_agent_start 可在此阻塞
             └─ lane.prompt_text(prompt, images)      ──────────────┐
@@ -168,19 +173,22 @@ crates/kiqi-ai/src/providers/anthropic/sse.rs
 ### 3.5 回到 TUI
 
 ```
-crates/kiqi-cli/src/interactive_tui.rs:8084  handle_agent_event（drain 任务，独立于主循环）
-  ├─ :8092  AgentStart        → set_status(Working)
-  ├─ :8097  AgentEnd          → set_status(Idle)
-  │                            + flush pending_bash_messages
-  │                            + refresh_pending_messages(..)
-  ├─ :8164  MessageStart
-  │    ├─ :8165 Assistant(a)  → 新建 AssistantMessageComponent, set_streaming(true)
-  │    └─ :8219 User(user)    → add_user_message(..)   ← 排队消息的回显路径
-  ├─          MessageUpdate(Assistant)
-  │                            → comp.update_blocks(assistant_blocks(a))   ← 每个 delta 重绘
-  └─          MessageEnd(Assistant)
-                               → cache-miss tracker / footer usage / notice
+crates/kiqi-cli/src/interactive_tui/events.rs  handle_agent_event（drain 任务，独立于主循环）
+  ├─ AgentStart        → set_status(Working)
+  ├─ AgentEnd          → set_status(Idle)
+  │                       + flush pending_bash_messages
+  │                       + refresh_pending_messages(..)
+  ├─ MessageStart
+  │    ├─ Assistant(a) → 新建 AssistantMessageComponent, set_streaming(true)
+  │    └─ User(user)   → add_user_message(..)   ← 排队消息的回显路径
+  ├─ MessageUpdate(Assistant)
+  │                       → comp.update_blocks(assistant_blocks(a))   ← 每个 delta 重绘
+  └─ MessageEnd(Assistant)
+                          → cache-miss tracker / footer usage / notice
 ```
+
+（该分支已从 `interactive_tui.rs` 拆到 `interactive_tui/events.rs`；按符号名定位，
+不要按行号。）
 
 ### 3.6 动画与耗时（与 §六、§七 相关）
 
@@ -228,8 +236,9 @@ crates/kiqi-cli/src/interactive_tui.rs  render-tick 任务
 ### 4.4 用户消息为什么看不到？——**确认为真 bug（已修）**
 
 链路：
-- `interactive_tui.rs:5956` 提交处理器**不再**在提交时 `add_user_message`；
-- 改为依赖 `AgentEvent::MessageStart`（`interactive_tui.rs:8219`）；
+- `interactive_tui.rs:1434` 的 `editor.on_submit` 处理器**不再**在提交时 `add_user_message`；
+- 改为依赖 `AgentEvent::MessageStart`（当时在 `interactive_tui.rs`，现已拆到
+  `interactive_tui/events.rs` 的 `MessageStart` 分支）；
 - 但 harness 在 `agent_harness.rs:2102` 传的是 `Vec::new()`；
 - 于是 `agent_loop.rs:92` 的 `for prompt in &new_messages` **一次都不执行** ⇒ 用户消息永远没有 `message_start`。
 
@@ -377,7 +386,7 @@ deltas= 8000  elapsed=105ms     (4× 增量 → 7.8× 时间)
 ### 4.10 Ctrl+C 无法退出——**确认为真 bug（已修）**
 
 链路事实：
-- `run_prompt_streaming(..).await` 在**主循环内联 await 整个 run**（`interactive_tui.rs:7719`），
+- `run_prompt_streaming(..).await` 在**主循环内联 await 整个 run**（`interactive_tui/run.rs:152`），
   所以 run 进行中主循环根本不会去读 channel；
 - 按键线程只在 `RunStatus::Idle` 时发 `TuiMessage::Exit`；
 - `RunStatus::Aborting` 分支原本是空的（注释：`Keep waiting for the in-flight cancellation…`）。
@@ -704,7 +713,8 @@ KI_MAX_TURNS_PER_RUN=120 ki     # 单次 run 超过 120 轮就停，并追一条
 `Completed`。如果不记，用户看到的就是「任务做完了」，而实际上是**被截断**了。
 所以 `run_core` 在 `persist_new_messages` 之后会往 lane 追加一条
 `customType = "runBudget"` 的 custom 消息；live 与 session-reload 两条渲染路径
-（`interactive_tui.rs:8188` / `:4202`）都走 `custom_message_fallback`，直接读 `content`，
+（`interactive_tui/events.rs:482` / `interactive_tui/sessions.rs:403`，定义在
+`sessions.rs:613`）都走 `custom_message_fallback`，直接读 `content`，
 所以两条路径都能看到这句话。
 
 验证：
