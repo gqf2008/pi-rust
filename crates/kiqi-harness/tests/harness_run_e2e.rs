@@ -49,6 +49,30 @@ use kiqi_tools::{
     InMemoryExecutionEnv, MutationQueueRegistry,
 };
 
+/// Serialises the tests that flip `KI_MAX_TURNS_PER_RUN`.
+///
+/// The run-budget switch is process-global, and two tests here move it in opposite
+/// directions: `run_budget_stops_a_looping_run_and_records_why` sets a ceiling and
+/// expects truncation, while `no_turn_ceiling_by_default_matches_native_pi` removes it
+/// and expects 200 turns to run through. Under the default parallel test threads they
+/// interleave — reproduced with `--test-threads=8`:
+///
+///     assertion `left == right` failed: the default must not truncate a long run
+///       left: 120   right: 200
+///
+/// (The opt-in test's comment used to claim "other tests never approach the ceiling",
+/// which was true until the no-ceiling test was added.) Every test that reads or
+/// writes the switch takes this lock for as long as it depends on the value.
+static TURN_BUDGET_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take [`TURN_BUDGET_ENV_LOCK`]; poisoning is ignored because a panicking test says
+/// nothing about the environment, and the next test sets its own value anyway.
+fn lock_turn_budget_env() -> std::sync::MutexGuard<'static, ()> {
+    TURN_BUDGET_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Build an `AgentHarness` over a faux provider + in-memory env + the read/
 /// write/bash tools. The faux script is caller-supplied so each test pins the
 /// exact LLM turns. Returns `(harness, provider, env)` so the test can inspect
@@ -953,9 +977,11 @@ async fn run_budget_stops_a_looping_run_and_records_why() {
     // the ceiling, so only the guard can end this run.
     //
     // The guard is off by default (upstream parity), so this test opts in for
-    // its duration. `std::env` is process-global — this is an integration-test
-    // binary whose other tests never approach the ceiling, so a parallel
-    // harness picking it up is harmless; the value is restored at the end.
+    // its duration. `std::env` is process-global, and this binary also contains
+    // `no_turn_ceiling_by_default_matches_native_pi`, which *removes* the switch and
+    // runs 200 turns — the two used to interleave and truncate each other (see
+    // `TURN_BUDGET_ENV_LOCK`). Hence the lock, and the restore at the end.
+    let _env = lock_turn_budget_env();
     let previous = std::env::var(kiqi_harness::run_budget::MAX_TURNS_ENV).ok();
     std::env::set_var(
         kiqi_harness::run_budget::MAX_TURNS_ENV,
@@ -1062,6 +1088,7 @@ async fn run_budget_stops_a_looping_run_and_records_why() {
 /// guard by default.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn no_turn_ceiling_by_default_matches_native_pi() {
+    let _env = lock_turn_budget_env();
     let previous = std::env::var(kiqi_harness::run_budget::MAX_TURNS_ENV).ok();
     std::env::remove_var(kiqi_harness::run_budget::MAX_TURNS_ENV);
 

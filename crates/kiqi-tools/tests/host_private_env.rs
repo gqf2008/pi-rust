@@ -19,6 +19,26 @@
 
 use kiqi_tools::{is_host_private_env, OsExecutionEnv, Shell, ShellExecOptions};
 
+/// Serialises the tests that write `KI_SESSION_ID` into this process.
+///
+/// Two tests here set and then remove it. Without a lock they interleave, and the
+/// dangerous direction is the *quiet* one: `a_host_private_variable_does_not_reach_the_shell`
+/// asserts the child sees the variable **empty**, so a neighbour removing it first
+/// makes that assertion pass without the exclusion being exercised at all. The
+/// test would keep "passing" after the exclusion broke.
+///
+/// (Verified load-bearing: emptying `HOST_PRIVATE_ENV` still fails it with the lock
+/// held — see the mutation noted in the commit message.)
+static SESSION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take [`SESSION_ENV_LOCK`]; poisoning is ignored because a panicking test says
+/// nothing about the environment.
+fn lock_session_env() -> std::sync::MutexGuard<'static, ()> {
+    SESSION_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Skip when the platform has no usable shell (the env resolves git-bash on
 /// Windows, `/bin/bash` on POSIX). Mirrors the guard other shell tests use.
 async fn shell_or_skip() -> Option<OsExecutionEnv> {
@@ -38,6 +58,7 @@ async fn a_host_private_variable_does_not_reach_the_shell() {
         return;
     };
 
+    let _env = lock_session_env();
     std::env::set_var("KI_SESSION_ID", "01a0f60b-parent-session");
 
     // A variable the host does NOT mark private still inherits, so this is a
@@ -71,6 +92,7 @@ async fn an_explicit_private_variable_still_reaches_the_shell() {
     // The exclusion is about *inheriting*, not about forbidding the name: a
     // caller that deliberately passes a value (a test fixture, a wrapper script)
     // must still be able to. Per-call env is applied after the inherit loop.
+    let _env = lock_session_env();
     std::env::set_var("KI_SESSION_ID", "01a0f60b-parent-session");
 
     let mut per_call = std::collections::HashMap::new();
