@@ -83,7 +83,44 @@ while IFS= read -r t; do
     }
 done < "$tmp/ps1"
 
+# --- every target must be executed before it is uploaded ----------------------
+# Each matrix entry builds on a native runner of its own architecture, so an `if:` on the
+# step that *runs* the binary would leave the rest shipped-but-never-started. That is
+# exactly how `x86_64-apple-darwin` came to be the only smoke-tested binary of five.
+#
+# Note the scope: steps that are legitimately target-specific (macOS signing/notarizing)
+# keep their `if:`, so this looks only at the block that executes `release/ki`.
+# Accumulate one step block at a time (blocks start at six-space `- name:`) and judge the
+# block as a whole, because `if:` sits above `run:`.
+#
+# "Executes the binary" means a line that *invokes* it -- `"${bin}" --version` -- not a
+# line that merely mentions the path. The signing step also references
+# `target/<t>/release/ki` (it signs that file) and is legitimately target-gated, so a
+# looser marker flags Apple signing as a violation.
+awk '
+    function flush() {
+        if (nruns) { found = 1; if (ngate) print nname "|" gate }
+    }
+    /^      - name:/ { flush(); nname=$0; nruns=0; ngate=0; gate=""; next }
+    /^[[:space:]]*"\$\{bin\}"/ { nruns=1 }
+    /^        if:/ { ngate=1; gate=$0 }
+    END { flush(); if (!found) print "NONE|" }
+' "$WF" > "$tmp/gated"
+
+if grep -q '^NONE|' "$tmp/gated"; then
+    echo "FAIL: $WF builds release binaries but never executes one" >&2
+    echo "      a binary that cannot start would be uploaded untested" >&2
+    status=1
+fi
+
+if grep -v '^NONE|' "$tmp/gated" | grep -q .; then
+    echo "FAIL: the step that executes the release binary is gated on a single target:" >&2
+    grep -v '^NONE|' "$tmp/gated" | sed 's/|/\n      /; s/^/      /' >&2
+    echo "      every target builds natively, so each can be executed" >&2
+    status=1
+fi
+
 if [ "$status" -eq 0 ]; then
-    echo "release targets agree across matrix, updates.rs, install.sh and install.ps1 ($(wc -l < "$tmp/producer" | tr -d ' ') triples)"
+    echo "release targets agree across matrix, updates.rs, install.sh and install.ps1 ($(wc -l < "$tmp/producer" | tr -d ' ') triples); all are smoke-tested"
 fi
 exit "$status"

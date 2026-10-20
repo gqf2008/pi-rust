@@ -79,9 +79,20 @@ jobs:
       - name: Build release binary
         run: cargo build -p kiqi-cli --release --locked --target ${{ matrix.target }}
 
-      - name: Smoke test Intel macOS binary
-        if: matrix.target == 'x86_64-apple-darwin'
-        run: target/${{ matrix.target }}/release/ki --version
+      # Every matrix entry builds on a native runner of its own architecture (ubuntu-latest
+      # and ubuntu-24.04-arm, macos-latest and macos-15-intel, windows-latest), so all five
+      # binaries can be executed here. Only one of them used to be: a binary that cannot
+      # start (bad dynamic linking, a missing runtime dependency) would have been uploaded
+      # and only failed on a user's machine. `--version` is the cheapest thing that proves
+      # the process loads and reaches main().
+      - name: Smoke test the release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/ki"
+          if [ -f "${bin}.exe" ]; then bin="${bin}.exe"; fi
+          "${bin}" --version
+          echo "smoke test passed for ${{ matrix.target }}"
 
       - name: Sign and notarize (macOS)
         if: contains(matrix.target, 'apple-darwin')
