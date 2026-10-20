@@ -399,6 +399,19 @@ pub fn install_compiled_event_sink(caps: OwnedCaps) {
     install_compiled_event_sink_locked(caps);
 }
 
+/// Remove the process-wide sink under the same test gate as
+/// [`install_compiled_event_sink`].
+///
+/// Test builds only: the running host never tears the sink down (see the
+/// `kiqi_extensions` function). Callers that already hold the gate -
+/// [`with_test_sink`] - must call the `kiqi_extensions` function directly; the
+/// gate is not reentrant.
+#[cfg(test)]
+fn clear_compiled_event_sink() {
+    let _guard = lock_test_sink();
+    kiqi_extensions::clear_compiled_event_sink();
+}
+
 /// [`install_compiled_event_sink`] without the test gate, for callers that
 /// already hold it ([`with_test_sink`]). Never call this from a
 /// `with_test_sink` closure: the gate is not reentrant.
@@ -424,7 +437,7 @@ fn install_compiled_event_sink_locked(caps: OwnedCaps) {
 // Test-only serialisation of the process-wide sink
 // ---------------------------------------------------------------------------
 
-/// Serialises the tests that install the process-wide compiled-event sink.
+/// Serialises every test that writes the process-wide compiled-event sink.
 ///
 /// `install_compiled_event_sink` writes a global and
 /// `clear_compiled_event_sink` sets it back to `None`. The tests here do
@@ -432,6 +445,14 @@ fn install_compiled_event_sink_locked(caps: OwnedCaps) {
 /// between our *install* and our *dispatch* leaves the fan-out with no sink:
 /// the plugin never sees the event, and the assertion then reports the
 /// plugin's empty state.
+///
+/// Both writes take this gate, so a clear cannot land inside another test's
+/// install-to-dispatch window. Only gating the install would leave the window
+/// open in the other direction: `session.rs` builds install a *real* sink and
+/// dispatch through it later, without holding the gate, so an ungated clear
+/// from a neighbour emptied the slot between that build and that dispatch.
+/// [`clear_compiled_event_sink`] is the gated spelling; `with_test_sink` calls
+/// the `kiqi_extensions` function directly because it already holds the gate.
 ///
 /// That is not a guess. Interleaving it deterministically (install, clear,
 /// dispatch) reproduces the observed failure verbatim:
@@ -2295,9 +2316,10 @@ mod tests {
             // Takes the same test gate, so this returns only once it is
             // released. A real session build calls the same function.
             install_compiled_event_sink(empty_caps());
-            // Leave the process-global slot as the test found it, on this side
-            // of the gate, so a later session build is not undone here.
-            kiqi_extensions::clear_compiled_event_sink();
+            // Leave the process-global slot as the test found it, under the gate:
+            // an ungated clear here could empty the slot in the window between
+            // another test's install and its dispatch.
+            clear_compiled_event_sink();
             done_tx.send(()).expect("done signal");
         });
 
@@ -2318,6 +2340,47 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(60))
             .expect("the intruder finishes once the gate is released");
         intruder.join().expect("the intruder thread does not panic");
+    }
+
+    /// A clear must not land inside another test's install-to-dispatch window.
+    ///
+    /// Both writes to the process-global sink take [`TEST_SINK_LOCK`]. Gating
+    /// only the install left the window open: `session.rs` builds install a real
+    /// sink and dispatch through it later without holding the gate, so a
+    /// neighbour's ungated clear emptied the slot in between - the same
+    /// "got No todos" failure the gate exists to prevent, from the other side.
+    ///
+    /// Deterministic, not timing-based: the gate is held here, so the clearing
+    /// thread can only proceed once this test releases it. Without the gate in
+    /// `clear_compiled_event_sink` the clearing happens immediately and the
+    /// "still present" assertion fails.
+    #[test]
+    fn a_sink_clear_cannot_land_inside_another_tests_window() {
+        let gate = lock_test_sink();
+        kiqi_extensions::set_compiled_event_sink(std::sync::Arc::new(|_, _, _| {
+            kiqi_extensions::CompiledVerdict::Continue
+        }));
+
+        let (cleared_tx, cleared_rx) = std::sync::mpsc::channel();
+        let clearer = std::thread::spawn(move || {
+            clear_compiled_event_sink();
+            cleared_tx.send(()).expect("cleared signal");
+        });
+
+        assert!(
+            cleared_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "clear_compiled_event_sink returned while a test held the gate"
+        );
+
+        drop(gate);
+        // A safety net rather than a timing assertion: under the full parallel
+        // suite the released thread can wait behind other gated writers.
+        cleared_rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the clearer finishes once the gate is released");
+        clearer.join().expect("the clearer thread does not panic");
     }
 
     /// One worker thread on purpose: parking it without `block_in_place` would
