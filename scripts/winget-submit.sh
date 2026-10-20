@@ -23,7 +23,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 me=$(gh api user --jq .login) || die "gh is not authenticated"
 branch="kiqi-$VERSION"
-dir="manifests/b/bigfish1913/ki/$VERSION"
+dir="manifests/b/gqf2008/ki/$VERSION"
 up=$(gh api repos/microsoft/winget-pkgs/commits/master --jq .sha) \
   || die "could not read upstream master"
 
@@ -36,26 +36,26 @@ gh api --method POST "repos/$me/winget-pkgs/git/refs" \
   || note "  (branch may already exist; continuing)"
 
 for f in \
-  packaging/winget/bigfish1913.ki.yaml \
-  packaging/winget/bigfish1913.ki.installer.yaml \
-  packaging/winget/bigfish1913.ki.locale.en-US.yaml; do
+  packaging/winget/gqf2008.ki.yaml \
+  packaging/winget/gqf2008.ki.installer.yaml \
+  packaging/winget/gqf2008.ki.locale.en-US.yaml; do
   name=$(basename "$f")
   [[ -f "$f" ]] || die "missing $f"
   content=$(base64 <"$f" | tr -d '\n')
   note "put $dir/$name"
   gh api --method PUT "repos/$me/winget-pkgs/contents/$dir/$name" \
-    -f message="New package: bigfish1913.ki version $VERSION" \
+    -f message="New package: gqf2008.ki version $VERSION" \
     -f content="$content" -f branch="$branch" >/dev/null 2>&1 \
     || die "failed to upload $name (a file may already exist at that path)"
 done
 
 note "open PR"
 gh pr create --repo microsoft/winget-pkgs --base master --head "$me:$branch" \
-  --title "New package: bigfish1913.ki version $VERSION" \
-  --body "Adds bigfish1913.ki $VERSION.
+  --title "New package: gqf2008.ki version $VERSION" \
+  --body "Adds gqf2008.ki $VERSION.
 
 Manifests are generated from the release assets of
-bigfish1913/pi-rust (tag v$VERSION); the installer is the portable Windows zip."
+gqf2008/pi-rust (tag v$VERSION); the installer is the portable Windows zip."
 
 note "PR opened — sign the CLA if prompted (comment at column 0):"
 note "  @microsoft-github-policy-service agree"

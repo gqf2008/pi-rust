@@ -4,7 +4,7 @@
 > `ki`, config lives in `~/.ki`, environment variables use the `KI_` prefix and
 > releases are cut from this repository only (the crates are **not** published
 > to crates.io, and `ki update` installs from this repo's GitHub Releases).
-> Upstream (`bigfish1913/pi-rust`) is tracked only as a source of cherry-picks.
+> This repository is the project home. `gqf2008/pi-rust` is an unrelated fork: do not use it as a source, release target, or upstream.
 
 [![license](https://img.shields.io/crates/l/kiqi-cli.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue.svg)](#install)
@@ -382,4 +382,4 @@ The `kiqi-*` crates are a Rust-native coding-agent stack.
 
 ## Star history
 
-[![Star History Chart](https://api.star-history.com/svg?repos=bigfish1913/pi-rust,pi-rust/rpi-package&type=Date)](https://www.star-history.com/#bigfish1913/pi-rust&pi-rust/rpi-package&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=gqf2008/pi-rust,pi-rust/rpi-package&type=Date)](https://www.star-history.com/#gqf2008/pi-rust&pi-rust/rpi-package&Date)

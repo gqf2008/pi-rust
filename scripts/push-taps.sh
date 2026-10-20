@@ -10,6 +10,9 @@ set -euo pipefail
 
 VERSION="${1:?usage: push-taps.sh X.Y.Z}"
 MSG="ki $VERSION"
+# The taps belong to this project's owner. bigfish1913/* is an unrelated fork and
+# its tap/bucket carry a different tool (`rpi`); never push there.
+TAP_OWNER="${KI_TAP_OWNER:-gqf2008}"
 
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "» $*"; }
@@ -35,7 +38,12 @@ put() {
   fi
 }
 
-put "bigfish1913/homebrew-tap" "Formula/ki.rb" "packaging/homebrew/ki.rb"
-put "bigfish1913/scoop-bucket" "bucket/ki.json" "packaging/scoop/ki.json"
+for repo in "$TAP_OWNER/homebrew-tap" "$TAP_OWNER/scoop-bucket"; do
+  gh api "repos/$repo" >/dev/null 2>&1 \
+    || die "$repo does not exist; create it first (or set KI_TAP_OWNER). Refusing to push."
+done
+
+put "$TAP_OWNER/homebrew-tap" "Formula/ki.rb" "packaging/homebrew/ki.rb"
+put "$TAP_OWNER/scoop-bucket" "bucket/ki.json" "packaging/scoop/ki.json"
 
 note "taps pushed"

@@ -14,4 +14,4 @@ edition = "2021"
 rust-version = "1.85"
 license = "MIT"
 authors = ["BigFish <bigfish1913@gmail.com>"]
-repository = "https://github.com/bigfish1913/pi-rust"
+repository = "https://github.com/gqf2008/pi-rust"

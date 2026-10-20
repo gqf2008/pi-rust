@@ -66,7 +66,7 @@ so a stale number lands the entry in the wrong slot.
 ### Entry, ready for the `### Open Source` section
 
 ```markdown
-- **[ki](https://github.com/bigfish1913/pi-rust)** `⭐ <refresh at submit time>` — Library-first Rust coding agent: nine composable crates (`kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-tui`, …) so the agent loop can be embedded in your own program, plus a ready-to-run `ki` terminal CLI. Crash-resumable JSONL sessions that self-heal a duplicated-seq log, a stable `#[repr(C)]` plugin ABI for tools and providers, and a provider-agnostic `StreamFn` boundary that makes the loop testable with no network. MIT.
+- **[ki](https://github.com/gqf2008/pi-rust)** `⭐ <refresh at submit time>` — Library-first Rust coding agent: nine composable crates (`kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-tui`, …) so the agent loop can be embedded in your own program, plus a ready-to-run `ki` terminal CLI. Crash-resumable JSONL sessions that self-heal a duplicated-seq log, a stable `#[repr(C)]` plugin ABI for tools and providers, and a provider-agnostic `StreamFn` boundary that makes the loop testable with no network. MIT.
 ```
 
 Placement: bottom of `### Open Source` (32★ is the lowest band in that section).
@@ -118,7 +118,7 @@ English, one entry per line, and **no entry without a note**.
 ### Entry, ready for `## Reference Implementations`
 
 ```markdown
-- [ki](https://github.com/bigfish1913/pi-rust) — A Rust agent harness that treats the session log as the durable tail of an in-memory mutation state, so a crash resumes mid-turn instead of losing it. Its loader also recovers a log corrupted by two concurrent writers — duplicate sequence numbers are dropped, a divergent counter is resynced, orphaned entries are re-chained onto the lane leaf — and republishes the file atomically, which is the rare case of session integrity being documented rather than assumed.
+- [ki](https://github.com/gqf2008/pi-rust) — A Rust agent harness that treats the session log as the durable tail of an in-memory mutation state, so a crash resumes mid-turn instead of losing it. Its loader also recovers a log corrupted by two concurrent writers — duplicate sequence numbers are dropped, a divergent counter is resynced, orphaned entries are re-chained onto the lane leaf — and republishes the file atomically, which is the rare case of session integrity being documented rather than assumed.
 ```
 
 ---

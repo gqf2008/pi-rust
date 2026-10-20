@@ -6,17 +6,18 @@
 #
 # The pipeline: bump -> changelog -> docs -> tag -> push -> wait for the
 # release binaries -> refresh the install channels (brew/scoop/winget + site)
-# -> push the taps -> open the winget PR -> publish to crates.io -> deploy site.
+# -> push the taps -> open the winget PR -> (crates.io is skipped while
+# `publish = false`) -> deploy site.
 #
 # Every step is printed before it runs. Mutating network steps still run under
 # --dry-run's shadow (nothing is executed), so you can review the exact plan
 # first. Phases are individually selectable (--only / --from / --skip).
 #
 # Credentials this expects (all optional until the phase that needs them):
-#   * git push access to bigfish1913/pi-rust, bigfish1913/homebrew-tap,
-#     bigfish1913/scoop-bucket
+#   * git push access to gqf2008/pi-rust, gqf2008/homebrew-tap,
+#     gqf2008/scoop-bucket
 #   * `gh` authenticated (release assets, taps, fork + PR to winget-pkgs)
-#   * `cargo login` for the crates.io publish phase
+#   * `cargo login` only once the crates are no longer `publish = false`
 #   * SSH to the ki web host for the site phase
 #
 # The winget phase only *opens* a PR: a winget-team moderator merges it, which
@@ -24,7 +25,7 @@
 
 set -euo pipefail
 
-REPO="bigfish1913/pi-rust"
+REPO="gqf2008/pi-rust"
 
 # Git remote that receives the release commit and tag. `origin` in this clone is
 # bigfish1913/pi-rust, which AGENTS.md forbids pushing to; `fork` is
@@ -251,6 +252,10 @@ phase_winget() {
 }
 
 phase_crates() {
+  if grep -q '^publish = false' crates/kiqi-cli/Cargo.toml 2>/dev/null; then
+    note "crates are publish = false; skipping crates.io publish"
+    return 0
+  fi
   note "publish nine crates to crates.io"
   confirm "Publish $release_version to crates.io (irreversible)?" || { note "  skipped"; return; }
   step task publish:crates RELEASE_VERSION="$release_version"

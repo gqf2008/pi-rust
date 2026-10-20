@@ -89,9 +89,10 @@ sh scripts/check-ci-locked.sh
 # 发布矩阵与三处消费清单（updates.rs 的 release_target_triple、install.sh、
 # install.ps1）必须给出同一组 target；只改一侧会得到「没人能下载」或「下载 404」
 sh scripts/check-release-targets.sh
-# 两个安装器帮助文本里推荐的版本号必须真的发布过（查 release，不查 tag——
-# 本地有 v0.3.0/v0.3.19 的 tag 但从未发布，正是漏掉的那类）。需要联网；
-# 完全无网时设 KI_CHECK_RELEASES_ALLOW_TAG_FALLBACK=1 才退回查 tag（较弱，会告警）
+# 所有「给用户看的示例版本号」（install.sh --help、install.ps1 的 .EXAMPLE 与
+# -Version 提示、release-binaries.yml 的 dispatch 输入说明）都必须真的发布过。
+# 查 release 而不是查 tag——本地有 v0.3.0/v0.3.19 的 tag 但从未发布，正是漏掉的那类。
+# 需要联网；完全无网时设 KI_CHECK_RELEASES_ALLOW_TAG_FALLBACK=1 才退回查 tag（较弱，会告警）
 sh scripts/check-install-version-hints.sh
 ```
 

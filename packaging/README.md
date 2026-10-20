@@ -1,30 +1,35 @@
 # Install channels
 
-ki reaches users six ways. Five are live today and the sixth is a manifest
-sitting in review. The point of this directory is that every manifest points at
-a **real release asset** and carries that asset's **real checksum** — none of it
-is a template with placeholders.
+ki has one live binary install path today (`scripts/install.sh`), plus a source build.
+The package-manager manifests in this directory are prepared for the project's
+own owner (`gqf2008`) but have **not been published**; the taps under
+`bigfish1913` belong to an unrelated fork and carry a different tool (`rpi`).
+Every manifest still points at a **real release asset** with its **real
+checksum** — none of it is a template with placeholders.
 
 ## Status
 
 | Channel | Lives in | Status | Remaining step |
 | --- | --- | --- | --- |
-| `cargo install kiqi-cli` | crates.io | **live** | none |
+| `cargo install kiqi-cli` | crates.io | **not published** | every crate is `publish = false`; use `install.sh` or a source build |
 | `curl … install.sh \| sh` | [`scripts/install.sh`](../scripts/install.sh) | **live** | none |
-| `cargo binstall kiqi-cli` | [`crates/kiqi-cli/Cargo.toml`](../crates/kiqi-cli/Cargo.toml) | **configured** | none — takes effect with the next published crate version |
-| Homebrew | [`bigfish1913/homebrew-tap`](https://github.com/bigfish1913/homebrew-tap) | **live** | none — `brew tap bigfish1913/tap && brew install ki` |
-| Scoop | [`bigfish1913/scoop-bucket`](https://github.com/bigfish1913/scoop-bucket) | **live** | none — `scoop bucket add bigfish1913 <bucket url>` |
-| winget | [open at `microsoft/winget-pkgs#441442`](https://github.com/microsoft/winget-pkgs/pull/441442) | **submitted** | review by the winget team; `winget install bigfish1913.ki` does not work until it merges |
+| `cargo binstall kiqi-cli` | [`crates/kiqi-cli/Cargo.toml`](../crates/kiqi-cli/Cargo.toml) | **not available** | takes effect only after the crates are published (`publish = false` today) |
+| Homebrew | `gqf2008/homebrew-tap` | **not published** | create the tap, then `scripts/push-taps.sh`; `bigfish1913/homebrew-tap` serves `rpi`, not `ki` |
+| Scoop | `gqf2008/scoop-bucket` | **not published** | create the bucket, then `scripts/push-taps.sh`; `bigfish1913/scoop-bucket` serves `rpi`, not `ki` |
+| winget | [open at `microsoft/winget-pkgs#441442`](https://github.com/microsoft/winget-pkgs/pull/441442) | **not published** | the open PR is for the old `bigfish1913.ki` identifier; a `gqf2008.ki` submission is still pending |
 
 The files in this directory are the source of truth for the two taps; the tap
-repos are copies. Homebrew-in-`homebrew-core` and `winget` carry the real
-discovery weight — both index by name inside a package manager the user already
-has open, which is traffic the website cannot reach.
+repos are copies. `scripts/push-taps.sh` refuses to run unless the target
+`gqf2008/*` repos exist, so it can never fall back to the unrelated fork.
+Homebrew-in-`homebrew-core` and `winget` carry the real discovery weight — both
+index by name inside a package manager the user already has open, which is
+traffic the website cannot reach.
 
 ## Cutting a release
 
 The whole pipeline — bump, tag, wait for the release binaries, refresh every
-manifest below, push the taps, open the winget PR, publish to crates.io, deploy
+manifest below, push the taps, open the winget PR, (skip crates.io while
+`publish = false`), deploy
 the site — is one command; see [`docs/maintaining/releasing.md`](../docs/maintaining/releasing.md):
 
 ```bash
@@ -68,7 +73,7 @@ Two consequences worth knowing:
 networks (this machine included), so use `gh`, which goes through the API:
 
 ```bash
-TAG=v0.3.21                      # the tag being packaged
+TAG=v0.4.1                      # the tag being packaged
 gh release download "$TAG" --pattern "*.sha256" --dir /tmp/kiqi-sha --clobber
 cat /tmp/kiqi-sha/*.sha256
 ```
@@ -106,11 +111,11 @@ gh repo fork microsoft/winget-pkgs --clone=false       # 2. server-side fork, no
 UP=$(gh api repos/microsoft/winget-pkgs/commits/master --jq .sha)
 gh api --method POST repos/<you>/winget-pkgs/git/refs \
   -f ref="refs/heads/kiqi-$V" -f sha="$UP"               # 3. branch off upstream master
-# 4. PUT each file to manifests/b/bigfish1913/ki/$V/ via the contents API.
+# 4. PUT each file to manifests/b/gqf2008/ki/$V/ via the contents API.
 #    Use `--input` with a JSON body: the README-sized payloads blow past the
 #    ~32 KB command-line limit if you pass them with -f content=.
 gh pr create --repo microsoft/winget-pkgs --base master --head <you>:kiqi-$V \
-  --title "New package: bigfish1913.ki version $V"     # 5. open the PR
+  --title "New package: gqf2008.ki version $V"     # 5. open the PR
 ```
 
 One trap in the CLA step, worth not rediscovering: the policy bot matches
@@ -127,9 +132,12 @@ as part of work for an employer. If you are, use `agree company="…"`.
 
 Verified on this machine:
 
-- `winget validate packaging/winget` → **Manifest validation succeeded.**
-- Every URL and hash above was read back from the published v0.3.2 assets
-  (`gh release download --pattern '*.sha256'`), not copied from a template.
+- `winget validate packaging/winget` validated the old `0.3.21` manifests. The
+  `gqf2008.ki` / `0.4.1` manifests were edited in this batch and have not been
+  re-validated here (no `winget` on this machine).
+- The current v0.4.1 URLs and hashes were read from the GitHub API
+  (`releases/tags/v0.4.1`, `assets[].digest`), not copied from a template. The
+  `v0.3.2` table below is historical and is not what the manifests carry now.
 - `scoop/ki.json` parses, and its `bin` (`ki.exe`) matches the zip's root
   entry produced by the workflow's `7z a -tzip … .` step.
 - The published archives themselves were downloaded and hashed here, byte for
@@ -137,9 +145,9 @@ Verified on this machine:
   `92e1851f…1842`, matching `scoop/ki.json` and `homebrew/ki.rb` exactly. The
   zip was listed to confirm `ki.exe` really is at the archive root — the thing
   `bin` claims and the only reason the Scoop manifest works.
-- Both taps are pushed and public (`bigfish1913/homebrew-tap`,
-  `bigfish1913/scoop-bucket`), so their files are fetchable at the URLs the
-  package managers will use.
+- The `gqf2008/*` taps do **not** exist yet, so `brew install ki` and
+  `scoop install ki` remain unavailable; `scripts/push-taps.sh` preflights both
+  repos and refuses to push elsewhere.
 
 **Not** verified here, and worth one manual pass before relying on them:
 

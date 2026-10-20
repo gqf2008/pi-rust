@@ -520,7 +520,7 @@ cargo build --package kiqi-langfuse --release
 | 🔍 Langfuse 官网     | [langfuse.com](https://langfuse.com)                                                                                |
 | 📚 Langfuse API 文档 | [langfuse.com/docs](https://langfuse.com/docs)                                                                      |
 | 🏠 ki 官网          | [ki.laofu.online](https://ki.laofu.online)                                                                        |
-| 💻 ki GitHub        | [bigfish1913/pi-rust](https://github.com/bigfish1913/pi-rust)                                                       |
+| 💻 ki GitHub        | [gqf2008/pi-rust](https://github.com/gqf2008/pi-rust)                                                       |
 
 ---
 

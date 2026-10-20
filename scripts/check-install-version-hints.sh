@@ -1,7 +1,7 @@
 #!/bin/sh
 # Assert the version numbers the installers suggest actually exist.
 #
-# `install.sh --help` is the first thing a user reads, and `install.ps1`'s `.EXAMPLE` plus
+# These are the version numbers shown as examples to a human: `install.sh --help` is the
 # its parse-error hint are the same kind of copy-pasteable instruction. Both used to name
 # versions this repository never released:
 #
@@ -24,8 +24,11 @@ set -u
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 SH="$ROOT/scripts/install.sh"
 PS1="$ROOT/scripts/install.ps1"
+# Workflow inputs are read by a human too -- `release-binaries.yml`'s `tag` description
+# told the maintainer to pass "e.g. v0.3.0", which this repository never released.
+RELEASE_WF="$ROOT/.github/workflows/release-binaries.yml"
 
-for f in "$SH" "$PS1"; do
+for f in "$SH" "$PS1" "$RELEASE_WF"; do
     [ -f "$f" ] || { echo "FAIL: $f not found" >&2; exit 1; }
 done
 
@@ -40,7 +43,10 @@ suggestions() {
     # NOTE: do *not* filter out `#` lines here. `install.sh --help` is literally
     # `sed -n '2,16p' "$0"`, so its user-facing option text lives in comments -- excluding
     # them skipped the one suggestion the user is most likely to copy.
-    grep -nE -- '--version [0-9]|-Version [0-9]|e\.g\. --version' "$SH" "$PS1" 2>/dev/null \
+    grep -HnE -- '--version [0-9]|-Version [0-9]|e\.g\. --version' "$SH" "$PS1" 2>/dev/null \
+        | sed 's/^/  /'
+    # `description: "... (e.g. v0.4.1)"` in the release workflow's dispatch input.
+    grep -HnE '^[[:space:]]*description:[[:space:]]*"[^"]*\(e\.g\. v[0-9]' "$RELEASE_WF" 2>/dev/null \
         | sed 's/^/  /'
 }
 
@@ -49,9 +55,11 @@ found=0
 
 while IFS= read -r line; do
     [ -n "$line" ] || continue
-    file=${line%%:*}
+    # `grep -n` emits `path:line:text`, but the file path itself may contain `:` on some
+    # systems, so strip the trailing `:line:` instead of splitting on the first colon.
+    file=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*//; s/:[0-9]+:.*$//')
     found=$((found + 1))
-    echo "$line" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | while IFS= read -r ver; do
+    printf '%s\n' "$line" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | while IFS= read -r ver; do
         echo "  suggested: $ver  (${file#"$ROOT"/})"
     done
 done <<EOF
@@ -89,14 +97,14 @@ for ver in $versions; do
     if printf '%s\n' "$released" | grep -qxF "$ver"; then
         echo "  ok: $ver is a real release"
     else
-        echo "FAIL: the installers suggest $ver, which is not a released version" >&2
-        echo "      a user who copies it gets a 404 at download time" >&2
+        echo "FAIL: $ver is suggested as an example, but it is not a released version" >&2
+        echo "      anyone who copies it gets a 404 at download time" >&2
         echo "      released: $(printf '%s' "$released" | tr '\n' ' ')" >&2
         status=1
     fi
 done
 
 if [ "$status" -eq 0 ]; then
-    echo "installers only suggest versions that exist"
+    echo "every suggested example version exists as a release"
 fi
 exit "$status"

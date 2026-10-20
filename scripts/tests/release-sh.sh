@@ -72,7 +72,7 @@ fi
 for manifest in \
     "$ROOT/packaging/homebrew/ki.rb" \
     "$ROOT/packaging/scoop/ki.json" \
-    "$ROOT/packaging/winget/bigfish1913.ki.installer.yaml" \
+    "$ROOT/packaging/winget/gqf2008.ki.installer.yaml" \
     "$ROOT/scripts/install.sh" \
     "$ROOT/scripts/install.ps1" \
     "$ROOT/scripts/tests/install.Tests.ps1"
@@ -104,7 +104,33 @@ grep -q 'PUSH_REMOTE="\${KI_RELEASE_REMOTE:-fork}"' "$RELEASE" || {
     status=1
 }
 
+# --- 3. The release target split is resolved: gqf2008 everywhere ----------
+# `release-target-split` found the pipeline publishing to an unrelated fork while
+# every runtime consumer read gqf2008. Keep the two sides from drifting apart again.
+for f in scripts/release.sh scripts/refresh-channels.sh; do
+    grep -q 'REPO="gqf2008/pi-rust"' "$ROOT/$f" || {
+        echo "FAIL: $f does not target gqf2008/pi-rust" >&2
+        status=1
+    }
+done
+if grep -v '^[[:space:]]*#' "$ROOT/scripts/push-taps.sh" | grep -q 'bigfish1913'; then
+    echo "FAIL: scripts/push-taps.sh still names bigfish1913 (unrelated fork)" >&2
+    status=1
+fi
+for manifest in     "$ROOT/packaging/homebrew/ki.rb"     "$ROOT/packaging/scoop/ki.json"     "$ROOT/packaging/winget/gqf2008.ki.yaml"     "$ROOT/packaging/winget/gqf2008.ki.installer.yaml"     "$ROOT/packaging/winget/gqf2008.ki.locale.en-US.yaml"
+do
+    [ -f "$manifest" ] || { echo "FAIL: missing $manifest" >&2; status=1; continue; }
+    grep -v '^[[:space:]]*#' "$manifest" | grep -q 'bigfish1913' && {
+        echo "FAIL: ${manifest#"$ROOT"/} still points at bigfish1913" >&2
+        status=1
+    }
+done
+grep -q 'PackageIdentifier: gqf2008.ki' "$ROOT/packaging/winget/gqf2008.ki.yaml" || {
+    echo "FAIL: the winget identifier is not gqf2008.ki" >&2
+    status=1
+}
+
 if [ "$status" -eq 0 ]; then
-    echo "release.sh: asset names match the workflow, push target is 'fork'"
+    echo "release.sh: asset names match the workflow, push target is 'fork', channels target gqf2008"
 fi
 exit "$status"

@@ -67,7 +67,7 @@ A nomination is a short forum post, not an article. Draft:
 > result — because no provider will accept that conversation.
 >
 > It is MIT licensed and part of the `ki` family
-> (<https://github.com/bigfish1913/pi-rust>), but the crate stands on its own as
+> (<https://github.com/gqf2008/pi-rust>), but the crate stands on its own as
 > an embeddable loop.
 
 Nominate it once. Repeatedly nominating the same crate is the fastest way to get
@@ -134,7 +134,7 @@ Exact template, from their CONTRIBUTING.md:
 Entry to paste (with the CI badge, which they also ask for):
 
 ```markdown
-* [bigfish1913/pi-rust](https://github.com/bigfish1913/pi-rust) [[kiqi-agent](https://crates.io/crates/kiqi-agent)] - Library-first coding-agent runtime: composable provider, agent-loop, tool and session crates, plus a terminal agent and a stable `#[repr(C)]` plugin ABI. [![CI](https://github.com/bigfish1913/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/bigfish1913/pi-rust/actions/workflows/ci.yml)
+* [gqf2008/pi-rust](https://github.com/gqf2008/pi-rust) [[kiqi-agent](https://crates.io/crates/kiqi-agent)] - Library-first coding-agent runtime: composable provider, agent-loop, tool and session crates, plus a terminal agent and a stable `#[repr(C)]` plugin ABI. [![CI](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml)
 ```
 
 **Where it goes:** `README.md` → `### Artificial Intelligence`. That section has

@@ -361,4 +361,4 @@ The `kiqi-*` crates are a Rust-native coding-agent stack.
 
 ## Star history
 
-[![Star History Chart](https://api.star-history.com/svg?repos=bigfish1913/pi-rust,pi-rust/rpi-package&type=Date)](https://www.star-history.com/#bigfish1913/pi-rust&pi-rust/rpi-package&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=gqf2008/pi-rust,pi-rust/rpi-package&type=Date)](https://www.star-history.com/#gqf2008/pi-rust&pi-rust/rpi-package&Date)

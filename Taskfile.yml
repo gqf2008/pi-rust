@@ -266,7 +266,7 @@ tasks:
     cmds:
       - ssh root@139.196.85.175 "curl --fail --silent --show-error --head https://{{.KI_DOMAIN}}/"
       - ssh root@139.196.85.175 "curl --fail --silent --show-error https://{{.KI_DOMAIN}}/data/packages.json"
-      - ssh root@139.196.85.175 "curl --fail --silent --show-error https://{{.KI_DOMAIN}}/index.html | grep -F 'bigfish1913/pi-rust'"
+      - ssh root@139.196.85.175 "curl --fail --silent --show-error https://{{.KI_DOMAIN}}/index.html | grep -F 'gqf2008/pi-rust'"
       # Fail the verify if local state is reachable, so a regression is caught here
       # rather than by someone discovering a session transcript over HTTP.
       - >-

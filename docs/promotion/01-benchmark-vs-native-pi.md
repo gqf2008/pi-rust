@@ -83,7 +83,7 @@ const startedAt = performance.now();   // 秒表却在这之后才起
 ## 复现
 
 ```bash
-git clone https://github.com/bigfish1913/pi-rust && cd pi-rust
+git clone https://github.com/gqf2008/pi-rust && cd pi-rust
 cargo build -p kiqi-cli --release
 
 npm install --prefix .bench @earendil-works/pi-coding-agent
@@ -97,10 +97,10 @@ node scripts/bench-vs-pi.mjs --pi .bench/node_modules/.bin/pi --runs 11 --warmup
 
 ki 是 Rust 原生、library-first 的 coding-agent runtime，九个 crate 同版本发布：`kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli`，另有 `kiqi-plugin-sdk`（稳定 `#[repr(C)]` ABI）与 `kiqi-extensions`（宿主加载器）。MIT 许可。
 
-- GitHub：https://github.com/bigfish1913/pi-rust
+- GitHub：https://github.com/gqf2008/pi-rust
 - 官网：https://ki.laofu.online/
-- 完整数据与方法：https://github.com/bigfish1913/pi-rust/blob/main/docs/performance/benchmark-vs-pi.md
-- 免 Rust 工具链安装：`curl -fsSL https://raw.githubusercontent.com/bigfish1913/pi-rust/main/scripts/install.sh | sh`
+- 完整数据与方法：https://github.com/gqf2008/pi-rust/blob/main/docs/performance/benchmark-vs-pi.md
+- 免 Rust 工具链安装：`curl -fsSL https://raw.githubusercontent.com/gqf2008/pi-rust/main/scripts/install.sh | sh`
 
 ---
 
@@ -185,7 +185,7 @@ That third number also says something about plugins: loading them costs time, so
 ### Reproduce
 
 ```bash
-git clone https://github.com/bigfish1913/pi-rust && cd pi-rust
+git clone https://github.com/gqf2008/pi-rust && cd pi-rust
 cargo build -p kiqi-cli --release
 
 npm install --prefix .bench @earendil-works/pi-coding-agent

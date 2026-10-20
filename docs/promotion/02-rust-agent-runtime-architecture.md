@@ -185,16 +185,16 @@ SDK 里写死了五条规则，违反任意一条都是 UB：
 
 ki 是 Rust 原生、library-first 的 coding-agent runtime，MIT 许可，九个 crate 同版本发布。
 
-- GitHub：https://github.com/bigfish1913/pi-rust
+- GitHub：https://github.com/gqf2008/pi-rust
 - 官网 / 文档：https://ki.laofu.online/
-- 架构文档：https://github.com/bigfish1913/pi-rust/blob/main/docs/architecture/overview.md
+- 架构文档：https://github.com/gqf2008/pi-rust/blob/main/docs/architecture/overview.md
 - 自己搭 agent 的项目结构建议：
-  https://github.com/bigfish1913/pi-rust/blob/main/docs/agent/project-structure.md
+  https://github.com/gqf2008/pi-rust/blob/main/docs/agent/project-structure.md
 - 与原生 TypeScript 版的实测对比：
-  https://github.com/bigfish1913/pi-rust/blob/main/docs/performance/benchmark-vs-pi.md
+  https://github.com/gqf2008/pi-rust/blob/main/docs/performance/benchmark-vs-pi.md
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bigfish1913/pi-rust/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/gqf2008/pi-rust/main/scripts/install.sh | sh
 # 或者
 cargo install kiqi-cli
 ```

@@ -25,6 +25,15 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **The release pipeline no longer targets the unrelated fork.**
+  `release.sh`, `refresh-channels.sh`, the Homebrew/Scoop/winget manifests, the
+  website and the user docs now point at `gqf2008/pi-rust`;
+  `push-taps.sh` refuses to push unless the `gqf2008/*` taps exist. The v0.4.1
+  manifests carry digests read from that release. Homebrew, Scoop and winget are
+  documented as **unpublished** until those taps and a `gqf2008.ki` winget
+  submission exist. `check-install-version-hints.sh` now also gates the release
+  workflow's example tag, so a suggestion with no matching release fails the
+  local gate.
 - **Esc can interrupt a wasm `dispatch` wave.** The wasm ABI gains an additive
   `proc.cancel-requested` host function (same ABI version; old guests are
   unaffected). The orchestrator guest polls it before and during a wave, kills

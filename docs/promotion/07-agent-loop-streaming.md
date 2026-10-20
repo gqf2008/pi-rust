@@ -75,7 +75,7 @@ async fn main() {
 - **可观察**：事件先归约到内部状态，再广播给多个订阅者。
 - **可替换**：Provider、工具和 UI 都是边界，不需要修改 loop。
 
-可以把这篇发到掘金、知乎或 Rust 中文社区；项目地址：<https://github.com/bigfish1913/pi-rust>。
+可以把这篇发到掘金、知乎或 Rust 中文社区；项目地址：<https://github.com/gqf2008/pi-rust>。
 
 ---
 
@@ -89,4 +89,4 @@ The important boundary is `StreamFn`. It returns ki’s event stream instead of 
 
 The faux provider follows the same path without an API key or network. That makes examples and regression tests repeatable. Start with `examples/minimal`, then read `crates/kiqi-agent/src/agent.rs` and `stream_fn.rs`.
 
-Project: <https://github.com/bigfish1913/pi-rust>
+Project: <https://github.com/gqf2008/pi-rust>

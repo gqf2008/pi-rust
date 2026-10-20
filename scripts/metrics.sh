@@ -11,7 +11,7 @@
 # site traffic number worth splitting by referrer.
 set -uo pipefail
 
-REPO="bigfish1913/pi-rust"
+REPO="gqf2008/pi-rust"
 CRATES=(
   kiqi-telemetry kiqi-ai kiqi-agent kiqi-plugin-sdk kiqi-extensions
   kiqi-tools kiqi-harness kiqi-tui kiqi-cli

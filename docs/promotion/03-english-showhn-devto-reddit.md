@@ -60,10 +60,10 @@ incomplete, Intel macOS prebuilt binaries are not built yet, and
 docs/native-pi-missing-features.md tracks the compatibility gaps rather than
 hiding them.
 
-  curl -fsSL https://raw.githubusercontent.com/bigfish1913/pi-rust/main/scripts/install.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/gqf2008/pi-rust/main/scripts/install.sh | sh
   # or: cargo install kiqi-cli
 
-https://github.com/bigfish1913/pi-rust
+https://github.com/gqf2008/pi-rust
 
 MIT licensed. Happy to answer questions about the crate split, the plugin ABI, or
 the crash-recovery model.
@@ -188,13 +188,13 @@ back a CLI, a server and an embedded agent.
 If you want to try the finished version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bigfish1913/pi-rust/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/gqf2008/pi-rust/main/scripts/install.sh | sh
 # or: cargo install kiqi-cli
 ```
 
 Runnable offline example: `cargo run -p minimal`.
 
-Repo: https://github.com/bigfish1913/pi-rust (MIT)
+Repo: https://github.com/gqf2008/pi-rust (MIT)
 ```
 
 ---
@@ -249,7 +249,7 @@ real number is 17.7 ms, essentially its process-creation cost.
 Honest gaps: the JS/TS extension bridge is opt-in and incomplete, and
 `cargo fmt --all` does not currently pass across the workspace (tracked in #15).
 
-Repo: https://github.com/bigfish1913/pi-rust (MIT). Feedback on the crate split
+Repo: https://github.com/gqf2008/pi-rust (MIT). Feedback on the crate split
 especially welcome.
 ```
 
@@ -282,9 +282,9 @@ models behind an OpenAI-compatible endpoint.
 Not measured: real token throughput or latency, since that is a property of the
 provider and your hardware, not the agent.
 
-https://github.com/bigfish1913/pi-rust (MIT)
+https://github.com/gqf2008/pi-rust (MIT)
 
-  curl -fsSL https://raw.githubusercontent.com/bigfish1913/pi-rust/main/scripts/install.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/gqf2008/pi-rust/main/scripts/install.sh | sh
 ```
 
 **Notes**
@@ -323,7 +323,7 @@ type may cross the boundary: strings cross as ptr+len with an explicit free
 function, structured data crosses as JSON, and both sides contain panics with
 `catch_unwind` because unwinding across `extern "C"` aborts the process.
 
-https://github.com/bigfish1913/pi-rust
+https://github.com/gqf2008/pi-rust
 
 (Disclosure: this is my project.)
 ```

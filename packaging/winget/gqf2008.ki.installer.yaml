@@ -1,0 +1,17 @@
+# Created by hand for ki; see packaging/README.md in gqf2008/pi-rust
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+
+PackageIdentifier: gqf2008.ki
+PackageVersion: 0.4.1
+InstallerType: zip
+NestedInstallerType: portable
+ReleaseDate: 2026-10-14
+Installers:
+- Architecture: x64
+  NestedInstallerFiles:
+  - RelativeFilePath: ki.exe
+    PortableCommandAlias: ki
+  InstallerUrl: https://github.com/gqf2008/pi-rust/releases/download/v0.4.1/ki-v0.4.1-x86_64-pc-windows-msvc.zip
+  InstallerSha256: 1EDC47C0BDF20C01BDED668CF87FAEEE7023E8F9852FA4625197277A1CD8E273
+ManifestType: installer
+ManifestVersion: 1.12.0

@@ -19,7 +19,7 @@
 set -euo pipefail
 
 VERSION="${1:?usage: refresh-channels.sh X.Y.Z}"
-REPO="bigfish1913/pi-rust"
+REPO="gqf2008/pi-rust"
 TAG="v$VERSION"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -96,15 +96,15 @@ perl -pi -e "s/\"version\": \"$OLD\"/\"version\": \"$VERSION\"/; s/v$OLD/v$VERSI
 # --------------------------------------------------------------------------
 note "packaging/winget/*.yaml"
 DATE=$(date -u +%Y-%m-%d)
-OLD_WINGET=$(grep -m1 -oE 'InstallerSha256: [0-9A-Fa-f]+' packaging/winget/bigfish1913.ki.installer.yaml | grep -oE '[0-9A-Fa-f]{64}')
+OLD_WINGET=$(grep -m1 -oE 'InstallerSha256: [0-9A-Fa-f]+' packaging/winget/gqf2008.ki.installer.yaml | grep -oE '[0-9A-Fa-f]{64}')
 [[ -n "$OLD_WINGET" ]] || die "could not read the winget InstallerSha256"
 WIN_UPPER=$(printf '%s' "$SHA_WIN_X64" | tr 'a-f' 'A-F')
 perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/; s/v$OLD/v$VERSION/g; s/$OLD_WINGET/$WIN_UPPER/; s/ReleaseDate: [0-9-]+/ReleaseDate: $DATE/" \
-  packaging/winget/bigfish1913.ki.installer.yaml
+  packaging/winget/gqf2008.ki.installer.yaml
 perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/; s/v$OLD/v$VERSION/g" \
-  packaging/winget/bigfish1913.ki.locale.en-US.yaml
+  packaging/winget/gqf2008.ki.locale.en-US.yaml
 perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/" \
-  packaging/winget/bigfish1913.ki.yaml
+  packaging/winget/gqf2008.ki.yaml
 
 # --------------------------------------------------------------------------
 # Site data: the "current release" card + the version string.
