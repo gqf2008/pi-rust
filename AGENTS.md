@@ -83,6 +83,9 @@ sh scripts/check-feature-parity.sh
 # `plugin-abi.md` 的 §6.x 编号连续性，以及全仓 `§6.N` 引用是否都能落到真实小节
 # （曾经的缺陷：四处引用 §6.34，而它从未被写过）
 sh scripts/check-abi-sections.sh
+# CI 里每一条 cargo build/check/test 都必须带 --locked（曾经的缺陷：
+# `windows-check` 独独没带，于是红叉不再指向某个提交，可能只是上游发了新版本）
+sh scripts/check-ci-locked.sh
 ```
 
 注意：goal 测试已用子进程 + tempdir 隔离，跑 `cargo test -p kiqi-cli` 不再改写源码树

@@ -68,6 +68,13 @@ jobs:
       - name: Verify the ABI section numbers and their citations
         run: sh scripts/check-abi-sections.sh
 
+      # `windows-check` ran `cargo check --workspace --all-targets` without `--locked`
+      # while the other three jobs pinned it. Both forms read as "check the workspace",
+      # but unpinned the resolver can pick versions absent from Cargo.lock, so a red X
+      # no longer names a commit.
+      - name: Verify every CI cargo command pins the lock file
+        run: sh scripts/check-ci-locked.sh
+
       # The lock file must name every dependency of every feature. CI is online, so a
       # missing entry would simply be fetched here — while an offline build (and this
       # machine, whose uncommitted `.cargo/config.toml` sets `offline = true`) fails
@@ -161,7 +168,11 @@ jobs:
           key: windows-check
 
       - name: Check the workspace compiles on Windows
-        run: cargo check --workspace --all-targets
+        # `--locked` matters here more than anywhere else: without it this job lets the
+        # resolver pick newer dependency versions than every other job and than the
+        # committed Cargo.lock, so a red X could mean "an unrelated crate published a
+        # Windows-breaking release" rather than "this commit broke Windows".
+        run: cargo check --workspace --all-targets --locked
 
   # Every other job runs whatever `@stable` currently is (1.99 at the time of
   # writing), so `rust-version` in `[workspace.package]` was never exercised: it sat
