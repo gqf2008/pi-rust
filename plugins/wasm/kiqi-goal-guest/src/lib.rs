@@ -56,7 +56,7 @@ const MAX_NOTES_CHARS: usize = 20_000;
 const TURN_END_KIND: &str = "TurnEnd";
 
 const DESCRIPTION: &str = "Codex-style goal mode: record one persistent, context-injected objective per project and let the agent advance it across turns. Actions: start, update, pause, resume, complete, limit, show, list.";
-const SCHEMA: &str = r#"{"type":"object","properties":{"action":{"type":"string","enum":["start","update","pause","resume","complete","limit","show","list"]},"title":{"type":"string","description":"Goal title (required for start)"},"notes":{"type":"string","description":"Goal notes or progress update (start/update)"},"status":{"type":"string","enum":["active","paused"],"description":"Explicit status change (update)"},"maxTurns":{"type":"integer","minimum":1,"description":"Optional turn budget (start/limit)"},"maxMinutes":{"type":"integer","minimum":1,"description":"Optional wall-clock budget in minutes (start/limit)"}},"required":["action"]}"#;
+const SCHEMA: &str = r#"{"type":"object","properties":{"action":{"type":"string","enum":["start","update","pause","resume","complete","limit","show","list"]},"title":{"type":"string","description":"Goal title (required for start)"},"notes":{"type":"string","description":"Goal notes or progress update (start/update)"},"status":{"type":"string","enum":["active","paused"],"description":"Explicit status change (update)"},"maxTurns":{"type":"integer","minimum":1,"description":"Optional turn budget (start/limit)"},"maxMinutes":{"type":"integer","minimum":1,"description":"Optional wall-clock budget in minutes (start/limit)"},"doneWhen":{"type":"string","description":"Definition of done: the condition that must hold before the agent marks the goal complete"}},"required":["action"]}"#;
 const COMMAND: &str = "goal";
 
 /// Last injected goal-state fingerprint (title + status + notes). Prevents
@@ -113,6 +113,10 @@ struct Goal {
     max_turns: Option<u32>,
     /// Absolute epoch-ms deadline. `None` = unlimited.
     deadline_ms: Option<i64>,
+    /// Explicit definition of done, injected as the stopping criterion. The
+    /// host cannot evaluate arbitrary conditions; the agent must check it
+    /// before calling `complete`.
+    done_when: Option<String>,
 }
 
 impl Goal {
@@ -126,6 +130,7 @@ impl Goal {
             "turns_used": self.turns_used,
             "max_turns": self.max_turns,
             "deadline_ms": self.deadline_ms,
+            "done_when": self.done_when,
         })
     }
 
@@ -153,6 +158,10 @@ impl Goal {
                 .and_then(Value::as_u64)
                 .map(|value| value as u32),
             deadline_ms: value.get("deadline_ms").and_then(Value::as_i64),
+            done_when: value
+                .get("done_when")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         })
     }
 
@@ -288,7 +297,13 @@ fn now_ms() -> i64 {
 /// Goal-state fingerprint used to dedupe injections. Deliberately excludes the
 /// live counters (`turns_used`) so a running budget does not re-inject each turn.
 fn fingerprint(goal: &Goal) -> String {
-    format!("{}|{}|{}", goal.title, goal.status, goal.notes)
+    format!(
+        "{}|{}|{}|{}",
+        goal.title,
+        goal.status,
+        goal.notes,
+        goal.done_when.as_deref().unwrap_or("")
+    )
 }
 
 /// Mark the current active-goal status as already injected.
@@ -384,6 +399,7 @@ fn append_custom_message(host: &dyn GoalHost, goal: &Goal, text: String) -> Resu
                 "turnsUsed": goal.turns_used,
                 "maxTurns": goal.max_turns,
                 "deadlineMs": goal.deadline_ms,
+                "doneWhen": goal.done_when,
                 "startedAt": goal.started_at,
                 "updatedAt": goal.updated_at,
             }
@@ -425,6 +441,10 @@ fn append_goal_custom_message(host: &dyn GoalHost, goal: &Goal) -> Result<(), St
     } else {
         format!("{tag}: {} — {}.{budget}", goal.title, notes)
     };
+    let mut text = text;
+    if let Some(done_when) = goal.done_when.as_deref() {
+        text.push_str(&format!("\nDefinition of done: {done_when}"));
+    }
     let nudge = if hint_allowed {
         orchestration_hint()
     } else {
@@ -470,6 +490,16 @@ fn validate_title(title: &str) -> Result<String, String> {
     Ok(title.to_string())
 }
 
+fn validate_done_when(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.chars().count() > MAX_NOTES_CHARS {
+        return Err(format!(
+            "definition of done must not exceed {MAX_NOTES_CHARS} characters"
+        ));
+    }
+    Ok(value.to_string())
+}
+
 fn validate_notes(notes: &str) -> Result<String, String> {
     let notes = notes.trim();
     if notes.chars().count() > MAX_NOTES_CHARS {
@@ -496,9 +526,14 @@ fn op_start(
     notes: &str,
     max_turns: Option<u32>,
     deadline_ms: Option<i64>,
+    done_when: Option<&str>,
 ) -> Result<Goal, String> {
     let title = validate_title(title)?;
     let notes = validate_notes(notes)?;
+    let done_when = done_when
+        .map(validate_done_when)
+        .transpose()?
+        .filter(|value| !value.is_empty());
     let now = now_ms();
     let goal = Goal {
         title,
@@ -509,6 +544,7 @@ fn op_start(
         turns_used: 0,
         max_turns,
         deadline_ms,
+        done_when,
     };
     let mut goals = read_goals();
     if let Some(old) = goals.active.take() {
@@ -604,12 +640,18 @@ fn render_status_text(goal: Option<&Goal>) -> String {
             } else {
                 goal.notes.clone()
             };
+            let done = goal
+                .done_when
+                .as_deref()
+                .map(|value| format!("\ndefinition of done: {value}"))
+                .unwrap_or_default();
             format!(
-                "🎯 {}\nstatus: {}\nnotes: {}\n{}",
+                "🎯 {}\nstatus: {}\nnotes: {}\n{}{}",
                 goal.title,
                 goal.status,
                 notes,
-                goal.budget_summary(now)
+                goal.budget_summary(now),
+                done
             )
         }
         None => "🎯 No active goal. Start one with `/goal start <title>`.".to_string(),
@@ -645,6 +687,7 @@ fn goal_summary_json(goal: &Goal) -> Value {
         "turnsUsed": goal.turns_used,
         "maxTurns": goal.max_turns,
         "deadlineMs": goal.deadline_ms,
+        "doneWhen": goal.done_when,
         "startedAt": goal.started_at,
         "updatedAt": goal.updated_at,
     })
@@ -740,7 +783,8 @@ fn start_goal(host: &dyn GoalHost, params: &Value) -> Result<String, String> {
     let deadline_ms = param_u32(params, "maxMinutes")
         .filter(|value| *value > 0)
         .map(|minutes| now_ms().saturating_add((minutes as i64) * 60_000));
-    let goal = op_start(host, title, notes, max_turns, deadline_ms)?;
+    let done_when = params.get("doneWhen").and_then(Value::as_str);
+    let goal = op_start(host, title, notes, max_turns, deadline_ms, done_when)?;
     let text = format!(
         "## 🎯 Goal started\n\n**{}**\n\n{}\n\n_{}_",
         goal.title,
@@ -956,7 +1000,7 @@ fn run_command(host: &dyn GoalHost, args: &str) -> String {
         "help" => Ok(COMMAND_HELP.to_string()),
         "start" => {
             let (title, notes) = split_title_notes(rest);
-            op_start(host, &title, notes.as_deref().unwrap_or(""), None, None).map(|goal| {
+            op_start(host, &title, notes.as_deref().unwrap_or(""), None, None, None).map(|goal| {
                 format!(
                     "🎯 Goal started: {}\n{}",
                     goal.title,
@@ -1014,7 +1058,7 @@ fn run_command(host: &dyn GoalHost, args: &str) -> String {
         // Unknown verb → treat the whole input as a title (shorthand start).
         _ => {
             let (title, notes) = split_title_notes(args);
-            op_start(host, &title, notes.as_deref().unwrap_or(""), None, None)
+            op_start(host, &title, notes.as_deref().unwrap_or(""), None, None, None)
                 .map(|goal| format!("🎯 Goal started: {}", goal.title))
         }
     };
