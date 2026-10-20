@@ -70,6 +70,17 @@ walgit collab entry --kind patch --id <thread-id> --actor ki-agent --parent <sta
 
 每条 entry 都会打印出新的 entry oid，下一条的 `--parent` 用它。
 
+### 3.1 瞬态推送失败
+
+`walgit collab entry` 偶发网络/5xx 失败（本会话至少 5 次，重试即过，不是 schema 错误）。
+用 `scripts/collab-entry-retry.sh` 包装同一条命令：默认 3 次、指数退避；
+`schema` / `validation` / `signature` / `invalid` 等错误第一次就失败，不重试、不掩盖。
+
+```bash
+scripts/collab-entry-retry.sh --kind status --id <thread> --actor ki-agent \
+  --parent <oid> --body '{...}' --push walgit
+```
+
 ## 4. board 投影规则（`walgit collab board` 的实际行为）
 
 - 列：`open` / `merged` / `closed` / `other`。

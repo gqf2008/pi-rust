@@ -25,6 +25,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **Transient `walgit collab entry` pushes are retried, bounded.** The
+  collaboration loop observed intermittent network/5xx failures that succeeded
+  on retry. `scripts/collab-entry-retry.sh` wraps the command with three
+  exponential-backoff attempts; schema, validation and signature errors fail on
+  the first attempt instead of being masked.
 - **The extension catalogue no longer promises unpublished installs.** The 20
   extension cards told visitors to run `ki install <name>`, which resolves
   through crates.io and cannot work while every crate is `publish = false`.
