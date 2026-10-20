@@ -2183,7 +2183,7 @@ fn merge_extension_tools(
 /// Default bash timeout: 120s when the model doesn't pass one (prevents a
 /// forgotten `timeout` from hanging the run forever — the "卡住" report).
 /// `KI_BASH_TIMEOUT` overrides; a model-supplied timeout always wins.
-pub fn bash_options() -> kiqi_tools::tools::bash::BashToolOptions {
+pub fn bash_options(cwd: &Path) -> kiqi_tools::tools::bash::BashToolOptions {
     use kiqi_tools::tools::bash::BashToolOptions;
     let default = std::env::var("KI_BASH_TIMEOUT")
         .ok()
@@ -2195,10 +2195,19 @@ pub fn bash_options() -> kiqi_tools::tools::bash::BashToolOptions {
     // `BashToolOptions` nor `ShellCaptureOptions` carries a shell binary today, so
     // honouring it means plumbing one through pi-tools first.
     let settings = crate::settings::load_settings().unwrap_or_default();
+    // macOS: wrap the shell child tree so no command can rewrite the policy
+    // after the call returns (the lexical guard and post-call restore remain
+    // the second layer). `KI_SHELL_SANDBOX=0` opts out; Linux is a follow-up.
+    let sandbox = if std::env::var("KI_SHELL_SANDBOX").ok().as_deref() == Some("0") {
+        None
+    } else {
+        kiqi_tools::sandbox::ShellSandbox::macos_for(crate::permissions::shell_sandbox_paths(cwd))
+    };
     BashToolOptions {
         command_prefix: settings.shell_command_prefix.clone(),
         default_timeout: Some(default),
         prepare: None,
+        sandbox,
     }
 }
 
@@ -2235,7 +2244,7 @@ fn build_tools(
         ),
         (
             "bash",
-            HarnessTool::new(create_bash_tool(ctx, Some(bash_options()))),
+            HarnessTool::new(create_bash_tool(ctx, Some(bash_options(cwd)))),
         ),
         ("edit", HarnessTool::new(create_edit_tool(ctx))),
         ("write", HarnessTool::new(create_write_tool(ctx))),

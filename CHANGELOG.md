@@ -25,6 +25,15 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **On macOS a shell command can no longer rewrite the permission policy after
+  it returns.** The lexical guard and the post-call restore could not stop
+  `some-daemon &` from changing `.ki/permissions.json` after the last tool call
+  of a session. Every `bash` child tree now runs under a `sandbox-exec` profile
+  that allows everything by default but denies writes to the policy files and
+  their directories; workspace builds, git and ordinary commands are
+  unaffected. `KI_SHELL_SANDBOX=0` opts out, and machines without
+  `sandbox-exec` fall back to the previous two layers. Linux Landlock remains a
+  follow-up (`docs/design/policy-sandbox.md`).
 - **Goal auto-continue stops when the board is empty.** A goal whose
   `doneWhen` is `"board-open-0"` is checked at the AgentEnd boundary with a
   bounded `walgit collab board` call; zero open cards skips the next

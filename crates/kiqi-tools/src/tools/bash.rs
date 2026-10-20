@@ -80,6 +80,8 @@ pub struct BashToolOptions {
     pub default_timeout: Option<f64>,
     /// Optional async hook that can adjust command, cwd, and environment.
     pub prepare: Option<BashPrepare>,
+    /// Optional OS sandbox for the shell child tree (macOS `sandbox-exec`).
+    pub sandbox: Option<crate::sandbox::ShellSandbox>,
 }
 
 /// The built-in `bash` tool. Holds an `Arc<dyn ExecutionEnv>` (read-only view
@@ -221,7 +223,11 @@ impl AgentTool for BashTool {
         let cwd = execution.cwd;
         let env = self.env.clone();
         let capture_opts = ShellCaptureOptions {
-            shell: None,
+            shell: self
+                .options
+                .sandbox
+                .as_ref()
+                .and_then(|sandbox| sandbox.shell_override()),
             cwd: Some(cwd),
             env: Some(execution.env),
             inherit_env: execution.inherit_env,

@@ -1,8 +1,9 @@
 # 方案：权限策略的后台写入与 OS 沙箱
 
-> 状态：**设计记录（2026-10-20）**。当前已落地词法守卫 + 调用前后快照/恢复；
-> 本文件记录仍无法在纯进程内关闭的残余，以及把残余关掉需要的 OS 能力。
-> 关联：`crates/kiqi-cli/src/permissions.rs`、`docs/design/signal-driven-agent.md`。
+> 状态：**macOS 已落地（2026-10-20）**。词法守卫 + 调用前后快照/恢复 + macOS
+> `sandbox-exec` 三层；Linux（Landlock）仍是后续项。本文件记录实现边界和残余。
+> 关联：`crates/kiqi-cli/src/permissions.rs`、`crates/kiqi-tools/src/sandbox.rs`、
+> `docs/design/signal-driven-agent.md`。
 
 ## 1. 现在已经覆盖的
 
@@ -12,6 +13,7 @@
 | 调用后恢复 | `PolicySnapshot` / `PolicyGuard`（`permissions.rs`） | shell 命令在返回前改写的策略文件 |
 | 跨调用基线 | `PolicyGuard::check_baseline` | 两次工具调用之间（含后台进程）写坏策略 |
 | 合法编辑识别 | 每文件写代数（`save` 递增） | `permissions` 工具的合法修改不被基线覆盖 |
+| macOS OS 沙箱 | `kiqi-tools/src/sandbox.rs`（`ShellSandbox`） | 每次 `bash` 子进程树都被 `sandbox-exec` profile 限制：策略文件与所在目录只读，其余 `(allow default)` |
 
 ## 2. 仍存在的残余
 
@@ -33,18 +35,37 @@
 
 原则：**沙箱是唯一 sound 的关闭方式**；继续在词法层加拼写只能降低概率，不能消除。
 
-## 4. 建议的落地顺序（未实现）
+## 4. 已实现：macOS `sandbox-exec`
 
-1. 在 `kiqi-tools` 的 shell 执行点引入一个可选的 `SandboxSpec`：策略路径只读、
-   工作区可写；默认关闭，配置开启。
-2. macOS 先做（目标机器），Linux 用 Landlock；无沙箱能力时回退到当前基线机制，
-   并在启动时明确告知残余。
-3. 验收：
-   - 后台进程 `sleep 1; echo '{}' > .ki/permissions.json` 在沙箱开启时失败；
-   - 正常 `cargo test`、`git`、编辑工作区不受影响；
-   - 沙箱不可用时行为与当前一致，且 `KI_DEBUG_DECISION`/日志明确说明。
+`BashToolOptions` 增加 `sandbox: Option<ShellSandbox>`。`bash_options(cwd)` 在
+macOS 上默认构造它：
+
+- 保护路径来自 `permissions::shell_sandbox_paths(cwd)`：本地 `.ki/permissions.json`、
+  `.pi/permissions.json`、全局 `~/.ki/agent/…/permissions.json`，以及它们所在的目录。
+- profile 为 `(version 1) (allow default) (deny file-write* (literal "…"))`。
+  `literal` 只匹配路径本身，不匹配子项：`.ki/sessions`、`.ki/goals.json` 仍可写，
+  但 `permissions.json` 本身、`mv .ki …`、`rm -rf .ki` 会被拒绝。
+- 路径先 `canonicalize`（`/var` → `/private/var`），因为 `sandbox-exec` 匹配解析后的
+  vnode；策略文件尚不存在时解析其父目录。
+- shell 覆盖为 `/usr/bin/sandbox-exec -p <profile> /bin/bash -c <command>`，
+  由现有 `ShellOverride` 拼进 `OsExecutionEnv`，不新增执行路径。
+- `KI_SHELL_SANDBOX=0` 显式关闭；非 macOS 或找不到 `sandbox-exec` 时
+  `macos_for` 返回 `None`，行为退回前两层。
+
+验收测试：`crates/kiqi-tools/src/sandbox.rs`（profile 与直接执行）和
+`crates/kiqi-tools/tests/bash.rs::the_os_sandbox_wraps_the_real_bash_tool`
+（走真实 `BashTool` → `OsExecutionEnv`，验证普通命令可跑、策略写/删被拒）。
+
+残余（有意保留）：
+
+1. **硬链接/重命名竞态**：沙箱按路径拒绝，不能按 inode 拒绝；一个已有目录写权限的
+   进程可先把策略 `ln` 到别处再写。这是路径沙箱的边界，不是词法守卫能补的。
+2. **Linux**：尚未接 Landlock；Linux 上仍是前两层。
+3. **非 bash 的写入面**：宿主自己的 `write`/`edit` 工具仍由词法/路径检查保护；
+   沙箱只包 `bash` 子进程树（`powershell` 仅 Windows，有独立执行点）。
 
 ## 5. 当前结论
 
-本轮已把可在宿主内关闭的部分做完（调用前基线、调用后恢复、合法编辑代数）。
-后台写入/新会话残余保持文档化；不引入持久化哈希恢复，避免误杀用户的外部编辑。
+macOS 上「后台写入/新会话」残余已由 OS 沙箱关闭：命令返回后，即使留下后台进程，
+它也不能写策略文件或把策略目录搬走。Linux 仍保持文档化的残余，待 Landlock。
+不引入持久化哈希恢复，避免误杀用户的外部编辑。

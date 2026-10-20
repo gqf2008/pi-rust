@@ -228,6 +228,7 @@ async fn supports_command_prefix() {
             command_prefix: Some("value=hello".into()),
             default_timeout: None,
             prepare: None,
+            sandbox: None,
         }),
     );
     // The shell_script prefix-matches on the composed command start; echo is the
@@ -238,4 +239,53 @@ async fn supports_command_prefix() {
         .await
         .expect("ok");
     assert_eq!(text_output(&r), "hello");
+}
+
+/// The sandbox override must survive the real `BashTool` → `OsExecutionEnv`
+/// path, not just the direct `sandbox-exec` invocation in the unit test.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn the_os_sandbox_wraps_the_real_bash_tool() {
+    let tmp = tempfile::tempdir().unwrap();
+    let protected = tmp.path().join("protected");
+    std::fs::create_dir_all(&protected).unwrap();
+    std::fs::write(protected.join("permissions.json"), "original").unwrap();
+
+    let Some(sandbox) = kiqi_tools::sandbox::ShellSandbox::macos_for(vec![
+        protected.join("permissions.json"),
+        protected.clone(),
+    ]) else {
+        return; // no sandbox-exec on this machine
+    };
+    let env = Arc::new(kiqi_tools::OsExecutionEnv::with_cwd(
+        tmp.path().to_path_buf(),
+    ));
+    let env_dyn: Arc<dyn kiqi_tools::ExecutionEnv> = env.clone();
+    let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
+    let ctx = ExecutionToolContext::new(env_dyn, Some(mut_env));
+    let tool = kiqi_tools::create_bash_tool(
+        &ctx,
+        Some(BashToolOptions {
+            command_prefix: None,
+            default_timeout: Some(10.0),
+            prepare: None,
+            sandbox: Some(sandbox),
+        }),
+    );
+
+    let ok = run_bash(tool.clone(), serde_json::json!({ "command": "echo hello" }))
+        .await
+        .expect("normal commands run under the sandbox");
+    assert!(text_output(&ok).contains("hello"), "{ok:?}");
+
+    let denied = run_bash(
+        tool,
+        serde_json::json!({ "command": "echo replaced > protected/permissions.json" }),
+    )
+    .await;
+    assert!(denied.is_err(), "the protected policy write must fail");
+    assert_eq!(
+        std::fs::read_to_string(protected.join("permissions.json")).unwrap(),
+        "original"
+    );
 }

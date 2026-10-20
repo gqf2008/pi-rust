@@ -581,6 +581,23 @@ fn policy_paths(cwd: &Path) -> Vec<PathBuf> {
     paths
 }
 
+/// Paths the shell sandbox must keep read-only: the policy files themselves
+/// plus their directories, so a `mv .ki …` or `rm -rf .ki` cannot detach a
+/// policy that the next shell call would no longer find. Children of those
+/// directories (sessions, goals) stay writable.
+pub(crate) fn shell_sandbox_paths(cwd: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for policy in policy_paths(cwd) {
+        if let Some(parent) = policy.parent() {
+            paths.push(parent.to_path_buf());
+        }
+        paths.push(policy);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 fn targets_policy_file(cwd: &Path, raw: &str) -> bool {
     let candidate = resolve_tool_path(cwd, raw);
     let comparable_candidate = comparable_path(&candidate);
