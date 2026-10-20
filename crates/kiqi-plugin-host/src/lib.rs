@@ -1483,6 +1483,32 @@ pub struct Options {
 /// any real plugin needs and far below the wasm32 address space.
 pub const DEFAULT_MAX_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 
+/// The wasmtime configuration every engine in this process is built from.
+///
+/// On macOS this turns off wasmtime's Mach-port trap handler. That handler runs
+/// a process-wide thread receiving with `MACH_RCV_MSG | MACH_RCV_INTERRUPT`;
+/// any signal delivered to it (SIGCHLD from a child process is the common one
+/// here) makes `mach_msg` return `MACH_RCV_INTERRUPTED`, and wasmtime answers
+/// that by aborting the whole process (upstream wasmtime#14393, still unfixed
+/// on main). POSIX signal handlers are inherited across forks and spawn no such
+/// thread, so they are also the right choice for an embedder that forks and
+/// spawns subprocesses, as `exec` does.
+///
+/// wasmtime requires every engine in the process to agree on this setting
+/// (`Config::validate` panics otherwise), so build engines through this helper
+/// and nowhere else.
+fn wasmtime_config(options: &Options) -> wasmtime::Config {
+    let mut config = wasmtime::Config::new();
+    if options.fuel.is_some() {
+        // Metering is off unless a bound is asked for, so ordinary plugins do
+        // not pay for it.
+        config.consume_fuel(true);
+    }
+    #[cfg(target_os = "macos")]
+    config.macos_use_mach_ports(false);
+    config
+}
+
 /// A plugin loaded from a wasm component.
 pub struct WasmPlugin {
     id: String,
@@ -1523,13 +1549,7 @@ impl WasmPlugin {
         options: Options,
     ) -> Result<Self, PluginError> {
         let id = id.into();
-        let mut config = wasmtime::Config::new();
-        if options.fuel.is_some() {
-            // Metering is off unless a bound is asked for, so ordinary plugins
-            // do not pay for it.
-            config.consume_fuel(true);
-        }
-        let engine = Engine::new(&config)
+        let engine = Engine::new(&wasmtime_config(&options))
             .map_err(|error| PluginError::Failed(format!("wasmtime engine: {error}")))?;
         let component = Component::from_file(&engine, wasm)
             .map_err(|error| PluginError::Failed(format!("load {}: {error}", wasm.display())))?;
@@ -2142,6 +2162,77 @@ mod tests {
         assert!(
             !outside.join("newdir").exists(),
             "the refusal must not have created directories outside the jail"
+        );
+    }
+
+    /// macOS only: a signal delivered to every thread must not abort the
+    /// process. wasmtime's default Mach-port trap handler runs a process-wide
+    /// thread that receives with `MACH_RCV_INTERRUPT`; any signal (SIGCHLD from
+    /// the children this workspace's suite spawns is the usual one) makes
+    /// `mach_msg` return `MACH_RCV_INTERRUPTED` and wasmtime calls
+    /// `libc::abort()` (wasmtime#14393). `macos_use_mach_ports(false)` installs
+    /// POSIX signal handlers instead and spawns no such thread.
+    ///
+    /// The child does the delivery so a regression cannot take the whole test
+    /// binary down: the parent only reads the exit status. Without the config
+    /// line the child dies with SIGABRT (signal 6); with it, every thread just
+    /// runs the no-op handler.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_signal_delivered_to_every_thread_does_not_abort_the_process() {
+        const CHILD_ENV: &str = "KI_TEST_WASMTIME_SIGNAL_CHILD";
+        const TEST_NAME: &str =
+            "tests::a_signal_delivered_to_every_thread_does_not_abort_the_process";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            extern "C" fn ignore(_: libc::c_int) {}
+            unsafe {
+                libc::signal(libc::SIGUSR1, ignore as *const () as libc::sighandler_t);
+            }
+            // Creating the engine is what installs wasmtime's trap handler
+            // (and, on the default config, spawns the Mach receive thread).
+            let _engine =
+                Engine::new(&wasmtime_config(&Options::default())).expect("engine builds");
+
+            // Deliver SIGUSR1 to every thread, including the wasmtime handler
+            // thread when one exists. A signal the thread does not expect is
+            // exactly what an interrupted `mach_msg` sees.
+            let mut threads: libc::thread_act_array_t = std::ptr::null_mut();
+            let mut count: libc::mach_msg_type_number_t = 0;
+            let kret =
+                unsafe { libc::task_threads(libc::mach_task_self_, &mut threads, &mut count) };
+            assert_eq!(kret, libc::KERN_SUCCESS, "task_threads");
+            for index in 0..count as usize {
+                let thread = unsafe { *threads.add(index) };
+                let pthread = unsafe { libc::pthread_from_mach_thread_np(thread) };
+                if pthread != 0 {
+                    unsafe {
+                        libc::pthread_kill(pthread, libc::SIGUSR1);
+                    }
+                }
+            }
+            unsafe {
+                libc::vm_deallocate(
+                    libc::mach_task_self_,
+                    threads as libc::vm_address_t,
+                    count as libc::vm_size_t
+                        * std::mem::size_of::<libc::thread_t>() as libc::vm_size_t,
+                );
+            }
+            return;
+        }
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(TEST_NAME)
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "a signal to every thread killed the child ({status}); wasmtime's \
+             Mach-port trap handler aborts on MACH_RCV_INTERRUPTED"
         );
     }
 }

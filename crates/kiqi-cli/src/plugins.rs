@@ -389,7 +389,20 @@ pub fn reload_caps(
 ///
 /// The tag discriminant maps straight through: the two `EventTag` enums are
 /// pinned together by `event_tags_match_the_native_abi`.
+///
+/// Test builds serialise installs through [`TEST_SINK_LOCK`]: a test that has
+/// installed its own sink and is about to dispatch must not have a session
+/// build elsewhere in this binary replace it first.
 pub fn install_compiled_event_sink(caps: OwnedCaps) {
+    #[cfg(test)]
+    let _guard = lock_test_sink();
+    install_compiled_event_sink_locked(caps);
+}
+
+/// [`install_compiled_event_sink`] without the test gate, for callers that
+/// already hold it ([`with_test_sink`]). Never call this from a
+/// `with_test_sink` closure: the gate is not reentrant.
+fn install_compiled_event_sink_locked(caps: OwnedCaps) {
     // Remember the same capabilities for the surfaces that run outside a tool
     // call (commands, probes, prompt transforms): they are built here, once per
     // session, from the live action host.
@@ -405,6 +418,70 @@ pub fn install_compiled_event_sink(caps: OwnedCaps) {
             dispatch_to_compiled(&hosts, &caps, tag, payload, mode)
         });
     kiqi_extensions::set_compiled_event_sink(sink);
+}
+
+// ---------------------------------------------------------------------------
+// Test-only serialisation of the process-wide sink
+// ---------------------------------------------------------------------------
+
+/// Serialises the tests that install the process-wide compiled-event sink.
+///
+/// `install_compiled_event_sink` writes a global and
+/// `clear_compiled_event_sink` sets it back to `None`. The tests here do
+/// "install -> dispatch -> assert -> clear", so a neighbour's *clear* landing
+/// between our *install* and our *dispatch* leaves the fan-out with no sink:
+/// the plugin never sees the event, and the assertion then reports the
+/// plugin's empty state.
+///
+/// That is not a guess. Interleaving it deterministically (install, clear,
+/// dispatch) reproduces the observed failure verbatim:
+///
+///     probe: after a neighbour cleared the sink, todo list = "No todos"
+///
+/// - the same `got No todos` seen when the opt-in feature run failed. The same
+/// window exists in the other direction (a neighbour's *install* replacing ours
+/// between our install and dispatch), which would surface as the wrong plugin's
+/// data rather than nothing.
+///
+/// The window is not limited to the tests in this module: `session.rs` builds
+/// and `/reload`s install the sink too (`session::tests::*` exercise both
+/// paths), so the gate has to sit in `install_compiled_event_sink` itself
+/// rather than only around the tests that install a fake sink.
+///
+/// Note the ordering that matters: clearing *after* a test's own dispatch does
+/// nothing to it (the state is already restored), so a probe that clears late
+/// will not show the race - that was the first attempt, and it "passed".
+#[cfg(test)]
+static TEST_SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take [`TEST_SINK_LOCK`], ignoring poisoning: a test panicking mid-dispatch
+/// says nothing about the global, and the next test installs its own sink
+/// anyway.
+#[cfg(test)]
+fn lock_test_sink() -> std::sync::MutexGuard<'static, ()> {
+    TEST_SINK_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Install a test sink and hold the process-wide gate for `f`, clearing the
+/// sink before the gate is released.
+///
+/// Invariant: nothing called from `f` may call `install_compiled_event_sink`.
+/// The gate is a non-reentrant mutex, so that would deadlock. The closures here
+/// only dispatch events and call plugin tools, neither of which builds a
+/// session.
+///
+/// Only the kiqi-todo-gated tests use this, so it is dead code in a test build
+/// without that feature.
+#[cfg(test)]
+#[allow(dead_code)]
+fn with_test_sink<R>(caps: OwnedCaps, f: impl FnOnce() -> R) -> R {
+    let _guard = lock_test_sink();
+    install_compiled_event_sink_locked(caps);
+    let result = f();
+    kiqi_extensions::clear_compiled_event_sink();
+    result
 }
 
 /// Ask the plugins that should see `(tag, payload)` and fold their actions into
@@ -1285,40 +1362,6 @@ mod tests {
         fn log(&self, _level: LogLevel, _message: &str) {}
     }
 
-    /// Serialises the tests that install the process-wide compiled-event sink.
-    ///
-    /// `install_compiled_event_sink` writes a global and `clear_compiled_event_sink`
-    /// sets it back to `None`. Two tests here do "install → dispatch → assert →
-    /// clear", so a neighbour's *clear* landing between our *install* and our
-    /// *dispatch* leaves the fan-out with no sink: the plugin never sees the event,
-    /// and the assertion then reports the plugin's empty state.
-    ///
-    /// That is not a guess. Interleaving it deterministically (install, clear,
-    /// dispatch) reproduces the observed failure verbatim:
-    ///
-    ///     probe: after a neighbour cleared the sink, todo list = "No todos"
-    ///
-    /// — the same `got No todos` seen when the opt-in feature run failed. The same
-    /// window exists in the other direction (a neighbour's *install* replacing ours
-    /// between our install and dispatch), which would surface as the wrong plugin's
-    /// data rather than nothing.
-    ///
-    /// Note the ordering that matters: clearing *after* a test's own dispatch does
-    /// nothing to it (the state is already restored), so a probe that clears late
-    /// will not show the race — that was my first attempt, and it "passed".
-    ///
-    /// Every test that calls `install_compiled_event_sink` must hold this for the
-    /// whole install → assert → clear sequence.
-    static SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Take [`SINK_LOCK`], ignoring poisoning: a test panicking mid-dispatch says
-    /// nothing about the global, and the next test installs its own sink anyway.
-    fn lock_sink() -> std::sync::MutexGuard<'static, ()> {
-        SINK_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
     /// Build a guest fixture through the same path `ki plugin insmod --build`
     /// uses: the artifact is located from cargo's JSON output, so a
     /// machine-level `build.target-dir` cannot make the test look in the wrong
@@ -1945,31 +1988,40 @@ mod tests {
         }
 
         #[cfg(feature = "plugin-kiqi-todo")]
-        {
-            // And a plugin restoring through caps gets the branch the host served,
-            // not a stub: this is the kiqi-todo restore path end to end.
-            let host = PluginHost::new("kiqi-todo", kiqi_todo::kiqi::factory());
-            host.on_event(
-                &kiqi_plugin::Event::new(
-                    kiqi_plugin::EventTag::SessionStart,
-                    serde_json::Value::Null,
-                ),
-                &caps,
-            );
-            let listed = host
-                .call_tool(
-                    "todo",
-                    &serde_json::json!({"action": "list"}),
+        with_test_sink(
+            // The sink's capabilities do not matter here: the direct `on_event`
+            // below is what writes kiqi-todo's process-global list. Holding the
+            // gate is the point, so no concurrent session build can swap in a
+            // sink that restores that list from another (empty) branch while
+            // this test is reading it.
+            empty_caps(),
+            || {
+                // And a plugin restoring through caps gets the branch the host
+                // served, not a stub: this is the kiqi-todo restore path end to
+                // end.
+                let host = PluginHost::new("kiqi-todo", kiqi_todo::kiqi::factory());
+                host.on_event(
+                    &kiqi_plugin::Event::new(
+                        kiqi_plugin::EventTag::SessionStart,
+                        serde_json::Value::Null,
+                    ),
                     &caps,
-                    &NoProgress,
-                )
-                .unwrap();
-            let text = match &listed.blocks[0] {
-                kiqi_plugin::Block::Text(text) => text.clone(),
-                other => panic!("unexpected block {other:?}"),
-            };
-            assert!(text.contains("from the branch"), "got {text}");
-        }
+                );
+                let listed = host
+                    .call_tool(
+                        "todo",
+                        &serde_json::json!({"action": "list"}),
+                        &caps,
+                        &NoProgress,
+                    )
+                    .unwrap();
+                let text = match &listed.blocks[0] {
+                    kiqi_plugin::Block::Text(text) => text.clone(),
+                    other => panic!("unexpected block {other:?}"),
+                };
+                assert!(text.contains("from the branch"), "got {text}");
+            },
+        );
     }
 
     /// kiqi-goal's host access sits on the TOOL path (starting a goal injects the
@@ -2130,36 +2182,33 @@ mod tests {
             ui: None,
             log: std::sync::Arc::new(Silent),
         };
-        let _sink = lock_sink();
-        install_compiled_event_sink(owned);
+        with_test_sink(owned, || {
+            // A registry with no cdylib handlers still reaches the compiled plugin.
+            let snapshot = kiqi_extensions::ExtensionRegistry::new().snapshot();
+            let native_handled = kiqi_extensions::dispatch_empty_event(
+                &snapshot,
+                kiqi_plugin_sdk::EventTag::SessionStart,
+            );
+            assert!(!native_handled, "no cdylib subscribed");
 
-        // A registry with no cdylib handlers still reaches the compiled plugin.
-        let snapshot = kiqi_extensions::ExtensionRegistry::new().snapshot();
-        let native_handled = kiqi_extensions::dispatch_empty_event(
-            &snapshot,
-            kiqi_plugin_sdk::EventTag::SessionStart,
-        );
-        assert!(!native_handled, "no cdylib subscribed");
-
-        // kiqi-todo restored the task list the host served on the branch —
-        // through the sink, not a direct `host.on_event` call.
-        let host = PluginHost::new("kiqi-todo", kiqi_todo::kiqi::factory());
-        let silent = Silent;
-        let listed = host
-            .call_tool(
-                "todo",
-                &serde_json::json!({"action": "list"}),
-                &HostCaps::observer(&silent),
-                &NoProgress,
-            )
-            .unwrap();
-        let text = match &listed.blocks[0] {
-            kiqi_plugin::Block::Text(text) => text.clone(),
-            other => panic!("unexpected block {other:?}"),
-        };
-        assert!(text.contains("from the branch"), "got {text}");
-
-        kiqi_extensions::clear_compiled_event_sink();
+            // kiqi-todo restored the task list the host served on the branch —
+            // through the sink, not a direct `host.on_event` call.
+            let host = PluginHost::new("kiqi-todo", kiqi_todo::kiqi::factory());
+            let silent = Silent;
+            let listed = host
+                .call_tool(
+                    "todo",
+                    &serde_json::json!({"action": "list"}),
+                    &HostCaps::observer(&silent),
+                    &NoProgress,
+                )
+                .unwrap();
+            let text = match &listed.blocks[0] {
+                kiqi_plugin::Block::Text(text) => text.clone(),
+                other => panic!("unexpected block {other:?}"),
+            };
+            assert!(text.contains("from the branch"), "got {text}");
+        });
     }
 
     /// `SessionTree` (host emission on `/tree` navigate, `/session` switch,
@@ -2190,38 +2239,85 @@ mod tests {
             ui: None,
             log: std::sync::Arc::new(Silent),
         };
-        let _sink = lock_sink();
-        install_compiled_event_sink(owned);
+        with_test_sink(owned, || {
+            // A registry with no cdylib handlers still fans SessionTree out to the
+            // compiled+wasm tier.
+            let snapshot = kiqi_extensions::ExtensionRegistry::new().snapshot();
+            let native_handled = kiqi_extensions::dispatch_empty_event(
+                &snapshot,
+                kiqi_plugin_sdk::EventTag::SessionTree,
+            );
+            assert!(!native_handled, "no cdylib subscribed");
 
-        // A registry with no cdylib handlers still fans SessionTree out to the
-        // compiled+wasm tier.
-        let snapshot = kiqi_extensions::ExtensionRegistry::new().snapshot();
-        let native_handled = kiqi_extensions::dispatch_empty_event(
-            &snapshot,
-            kiqi_plugin_sdk::EventTag::SessionTree,
+            // kiqi-todo re-restored the task list the host served on the branch,
+            // triggered by SessionTree — through the sink, not a direct
+            // `host.on_event` call.
+            let host = PluginHost::new("kiqi-todo", kiqi_todo::kiqi::factory());
+            let silent = Silent;
+            let listed = host
+                .call_tool(
+                    "todo",
+                    &serde_json::json!({"action": "list"}),
+                    &HostCaps::observer(&silent),
+                    &NoProgress,
+                )
+                .unwrap();
+            let text = match &listed.blocks[0] {
+                kiqi_plugin::Block::Text(text) => text.clone(),
+                other => panic!("unexpected block {other:?}"),
+            };
+            assert!(text.contains("from the branch"), "got {text}");
+        });
+    }
+
+    /// Installing a sink must wait for a test that is mid-dispatch. Without the
+    /// gate, `install_compiled_event_sink` can replace the test's sink between
+    /// its install and its dispatch - a real-session rebuild in another test is
+    /// exactly such an install - so the dispatch restores plugin state from the
+    /// wrong branch (`got No todos` was the observable form).
+    ///
+    /// The 100 ms bound is one-sided: in the fixed build the intruder is
+    /// blocked on the mutex held below and cannot signal; in the unguarded
+    /// build the install takes microseconds.
+    #[test]
+    fn a_concurrent_sink_install_cannot_swap_the_sink_mid_dispatch() {
+        // Warm the process-global host pool first: `install_compiled_event_sink`
+        // builds it on first use, which loads every wasm guest and can take
+        // seconds. Doing it here keeps that cost out of the intruder's
+        // post-release window (the 100 ms bound below would otherwise conflate
+        // "blocked on the gate" with "still loading plugins").
+        let _ = compiled_plugin_hosts();
+        let gate = lock_test_sink();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let intruder = std::thread::spawn(move || {
+            started_tx.send(()).expect("started signal");
+            // Takes the same test gate, so this returns only once it is
+            // released. A real session build calls the same function.
+            install_compiled_event_sink(empty_caps());
+            // Leave the process-global slot as the test found it, on this side
+            // of the gate, so a later session build is not undone here.
+            kiqi_extensions::clear_compiled_event_sink();
+            done_tx.send(()).expect("done signal");
+        });
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the intruder starts");
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "install_compiled_event_sink returned while a test held the gate"
         );
-        assert!(!native_handled, "no cdylib subscribed");
 
-        // kiqi-todo re-restored the task list the host served on the branch,
-        // triggered by SessionTree — through the sink, not a direct
-        // `host.on_event` call.
-        let host = PluginHost::new("kiqi-todo", kiqi_todo::kiqi::factory());
-        let silent = Silent;
-        let listed = host
-            .call_tool(
-                "todo",
-                &serde_json::json!({"action": "list"}),
-                &HostCaps::observer(&silent),
-                &NoProgress,
-            )
-            .unwrap();
-        let text = match &listed.blocks[0] {
-            kiqi_plugin::Block::Text(text) => text.clone(),
-            other => panic!("unexpected block {other:?}"),
-        };
-        assert!(text.contains("from the branch"), "got {text}");
-
-        kiqi_extensions::clear_compiled_event_sink();
+        drop(gate);
+        // A safety net, not a timing assertion: under the full parallel suite
+        // the released thread can wait behind other gated installs.
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the intruder finishes once the gate is released");
+        intruder.join().expect("the intruder thread does not panic");
     }
 
     /// One worker thread on purpose: parking it without `block_in_place` would
