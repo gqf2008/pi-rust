@@ -11,7 +11,7 @@
 task-*.log
 release-*.log
 .claude/*
-target/*
+**/target/
 
 # Benchmark scratch: the npm-installed native pi that scripts/bench-vs-pi.mjs
 # compares against (~400 MiB of node_modules).
