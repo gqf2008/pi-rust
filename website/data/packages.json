@@ -80,7 +80,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-mcp-adapter",
+    "install": "not published",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-mcp-adapter"
   },
   {
@@ -92,7 +92,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-web-access",
+    "install": "not published",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-web-access"
   },
   {
@@ -104,7 +104,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-subagents",
+    "install": "ki insmod --build plugins/wasm/kiqi-subagents-guest",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-subagents"
   },
   {
@@ -116,7 +116,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-background-tasks",
+    "install": "not published",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-background-tasks"
   },
   {
@@ -128,7 +128,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-lens",
+    "install": "ki insmod --build plugins/wasm/kiqi-lens-guest",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-lens"
   },
   {
@@ -140,7 +140,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-todo",
+    "install": "ki insmod --build plugins/wasm/kiqi-todo-guest",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-todo"
   },
   {
@@ -152,7 +152,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-codegraph",
+    "install": "ki insmod --build plugins/wasm/kiqi-codegraph-guest",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-codegraph"
   },
   {
@@ -164,7 +164,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-memory",
+    "install": "not published",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-memory"
   },
   {
@@ -176,7 +176,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-token-usage",
+    "install": "not published",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-token-usage"
   },
   {
@@ -188,7 +188,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-ask-user",
+    "install": "ki insmod --build plugins/wasm/kiqi-ask-user-guest",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-ask-user",
     "featured": true
   },
@@ -201,7 +201,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-permissions",
+    "install": "cargo build -p kiqi-permissions",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-permissions",
     "featured": true
   },
@@ -214,7 +214,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-simplify",
+    "install": "not published",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-simplify",
     "featured": true
   },
@@ -227,7 +227,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-search",
+    "install": "not published",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-search",
     "featured": true
   },
@@ -240,7 +240,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-goal",
+    "install": "ki insmod --build plugins/wasm/kiqi-goal-guest",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-goal",
     "featured": true
   },
@@ -253,7 +253,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-websearch",
+    "install": "ki insmod --build plugins/wasm/kiqi-websearch-guest",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-websearch",
     "featured": true
   },
@@ -266,7 +266,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-webfetch",
+    "install": "ki insmod --build plugins/wasm/kiqi-webfetch-guest",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-webfetch",
     "featured": true
   },
@@ -279,7 +279,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-firecrawl",
+    "install": "not published",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-firecrawl",
     "featured": true
   },
@@ -292,7 +292,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-extension-rpc",
+    "install": "not published",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-extension-rpc",
     "featured": true
   },
@@ -305,7 +305,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-im-message",
+    "install": "not published",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-im-message",
     "featured": true
   },
@@ -318,7 +318,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki install kiqi-server",
+    "install": "not published",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-server",
     "featured": true
   },

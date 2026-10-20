@@ -162,13 +162,15 @@ if [ -f "$catalog" ]; then
             status=1
         fi
     fi
-    # NOTE: the catalogue's extension cards say `ki install <name>`, which
-    # resolves through crates.io as well and is equally unexecutable today (the
-    # extension crate names 404 too). That is not checked here because the
-    # replacement depends on a registry decision - which registry those
-    # extensions should be installed from - that this test cannot make. Tracked
-    # separately; see the thread "网站扩展目录的 ki install 同样不可执行".
-    :
+    # The extension cards used to say `ki install <name>`, which resolves
+    # through crates.io and is equally unexecutable while nothing is published.
+    # In-repo guests now show `ki insmod --build ...`, compiled plugins show a
+    # source build, and unknown external plugins are explicitly "not published".
+    if grep -n '"install"[[:space:]]*:[[:space:]]*"ki install ' "$catalog" >/dev/null; then
+        echo "FAIL: $rel tells users to 'ki install' a plugin that is not published" >&2
+        grep -n '"install"[[:space:]]*:[[:space:]]*"ki install ' "$catalog" | head -5 | sed 's/^/      /' >&2
+        status=1
+    fi
 fi
 
 if [ "$status" -eq 0 ]; then

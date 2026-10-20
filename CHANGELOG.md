@@ -25,6 +25,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **The extension catalogue no longer promises unpublished installs.** The 20
+  extension cards told visitors to run `ki install <name>`, which resolves
+  through crates.io and cannot work while every crate is `publish = false`.
+  In-repo wasm guests now show `ki insmod --build plugins/wasm/<name>-guest`,
+  the compiled permissions plugin shows a source build, and external plugins are
+  marked "not published". `docs-install-path.sh` rejects a bare `ki install` in
+  the catalogue.
 - **A shell command can no longer take over the permission policy.** Before a
   `bash`/`powershell` call the host snapshots every policy file; after the call
   it restores any change and flags the tool result. The lexical shell guard
