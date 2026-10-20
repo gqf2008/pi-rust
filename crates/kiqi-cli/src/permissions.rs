@@ -1657,8 +1657,94 @@ pub fn is_shell_tool(tool: &str) -> bool {
 #[derive(Clone, Debug)]
 enum SavedPolicy {
     Absent,
-    Content(Vec<u8>, Option<std::fs::Permissions>),
+    /// The file's bytes, its mode, and - when the policy path was a symlink -
+    /// the link's target.
+    ///
+    /// The target is part of the saved state, not decoration. A user who shares
+    /// one policy across checkouts links it in, and comparing only the bytes
+    /// through the link made every such file look modified: the old check
+    /// required `!is_symlink`, so a symlinked policy never matched its own
+    /// snapshot. Every shell call then "restored" it - replacing the link with a
+    /// regular file and flagging an untouched command as a policy rewrite.
+    Content {
+        bytes: Vec<u8>,
+        permissions: Option<std::fs::Permissions>,
+        link: Option<PathBuf>,
+    },
     Unknown,
+}
+
+impl SavedPolicy {
+    /// The saved state for `path`, read through the path the way the gate reads
+    /// it.
+    fn capture(path: &Path) -> Self {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_file() || meta.file_type().is_symlink() => {
+                match std::fs::read(path) {
+                    Ok(bytes) => Self::Content {
+                        bytes,
+                        // `metadata` follows the link, so this is the mode of the
+                        // file the policy is read from.
+                        permissions: std::fs::metadata(path).ok().map(|m| m.permissions()),
+                        // A link whose target cannot be read is not a state this can
+                        // restore faithfully, so it degrades to "regular file".
+                        link: meta
+                            .file_type()
+                            .is_symlink()
+                            .then(|| std::fs::read_link(path))
+                            .and_then(Result::ok),
+                    },
+                    Err(_) => Self::Unknown,
+                }
+            }
+            Ok(_) => Self::Unknown,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::Absent,
+            Err(_) => Self::Unknown,
+        }
+    }
+
+    /// Whether `path` is still in the saved state.
+    ///
+    /// A path that was a symlink is unchanged only while it is still a symlink
+    /// to the same target (`read` follows the link, so the bytes are compared
+    /// through it either way).
+    fn matches(&self, path: &Path) -> bool {
+        let is_symlink = std::fs::symlink_metadata(path)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false);
+        match self {
+            Self::Unknown => true,
+            Self::Absent => {
+                !is_symlink
+                    && std::fs::symlink_metadata(path)
+                        .map(|meta| !meta.is_dir())
+                        .unwrap_or(true)
+                    && std::fs::read(path).is_err()
+            }
+            Self::Content { bytes, link, .. } => match link {
+                Some(target) => {
+                    is_symlink
+                        && std::fs::read_link(path).ok().as_deref() == Some(target.as_path())
+                        && std::fs::read(path).ok().as_deref() == Some(bytes.as_slice())
+                }
+                None => {
+                    !is_symlink && std::fs::read(path).ok().as_deref() == Some(bytes.as_slice())
+                }
+            },
+        }
+    }
+}
+
+/// Create `link` pointing at `target`, the way the platform spells it.
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(target, link)
+    }
 }
 
 /// A snapshot of every policy file the gate can read.
@@ -1684,20 +1770,7 @@ impl PolicySnapshot {
             if files.iter().any(|(seen, _, _)| seen == &path) {
                 continue;
             }
-            let state = match std::fs::symlink_metadata(&path) {
-                Ok(meta) if meta.is_file() || meta.file_type().is_symlink() => {
-                    match std::fs::read(&path) {
-                        Ok(bytes) => SavedPolicy::Content(
-                            bytes,
-                            std::fs::metadata(&path).ok().map(|m| m.permissions()),
-                        ),
-                        Err(_) => SavedPolicy::Unknown,
-                    }
-                }
-                Ok(_) => SavedPolicy::Unknown,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => SavedPolicy::Absent,
-                Err(_) => SavedPolicy::Unknown,
-            };
+            let state = SavedPolicy::capture(&path);
             let version = policy_version(&path);
             files.push((path, state, version));
         }
@@ -1713,7 +1786,7 @@ impl PolicySnapshot {
             if policy_version(path) != *version {
                 continue;
             }
-            if saved_state_matches(path, saved) {
+            if saved.matches(path) {
                 continue;
             }
             match saved {
@@ -1736,11 +1809,46 @@ impl PolicySnapshot {
                         ))
                     }
                 },
-                SavedPolicy::Content(bytes, permissions) => {
+                SavedPolicy::Content {
+                    bytes,
+                    permissions,
+                    link,
+                } => {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent).map_err(|error| {
                             format!("could not recreate {}: {error}", parent.display())
                         })?;
+                    }
+                    // Put the link back before writing: writing through it then
+                    // restores the target's bytes, which is where the gate reads
+                    // the policy from. Writing a regular file at the path instead
+                    // would silently detach the user's shared policy.
+                    if let Some(target) = link {
+                        let intact = std::fs::read_link(path)
+                            .map(|current| &current == target)
+                            .unwrap_or(false);
+                        if !intact {
+                            if let Ok(meta) = std::fs::symlink_metadata(path) {
+                                if meta.is_dir() {
+                                    return Err(format!(
+                                        "policy path {} became a directory; refusing to overwrite it",
+                                        path.display()
+                                    ));
+                                }
+                                std::fs::remove_file(path).map_err(|error| {
+                                    format!(
+                                        "could not remove {} to restore its link: {error}",
+                                        path.display()
+                                    )
+                                })?;
+                            }
+                            if let Err(error) = symlink(target, path) {
+                                return Err(format!(
+                                    "could not restore the link at {}: {error}",
+                                    path.display()
+                                ));
+                            }
+                        }
                     }
                     if let Ok(meta) = std::fs::symlink_metadata(path) {
                         if meta.is_dir() {
@@ -1749,7 +1857,7 @@ impl PolicySnapshot {
                                 path.display()
                             ));
                         }
-                        if meta.file_type().is_symlink() {
+                        if meta.file_type().is_symlink() && link.is_none() {
                             let _ = std::fs::remove_file(path);
                         }
                     }
@@ -1768,25 +1876,6 @@ impl PolicySnapshot {
         } else {
             Some(changed)
         })
-    }
-}
-
-fn saved_state_matches(path: &Path, saved: &SavedPolicy) -> bool {
-    let is_symlink = std::fs::symlink_metadata(path)
-        .map(|meta| meta.file_type().is_symlink())
-        .unwrap_or(false);
-    match saved {
-        SavedPolicy::Unknown => true,
-        SavedPolicy::Absent => {
-            !is_symlink
-                && std::fs::symlink_metadata(path)
-                    .map(|meta| !meta.is_dir())
-                    .unwrap_or(true)
-                && std::fs::read(path).is_err()
-        }
-        SavedPolicy::Content(bytes, _) => {
-            !is_symlink && std::fs::read(path).ok().as_deref() == Some(bytes.as_slice())
-        }
     }
 }
 
@@ -2944,6 +3033,149 @@ mod tests {
 
         std::fs::remove_dir_all(dir).ok();
     }
+    /// A policy the user keeps in one place and links into each checkout.
+    ///
+    /// The snapshot compared only the bytes read through the path and required
+    /// `!is_symlink`, so a symlinked policy never matched its own snapshot: every
+    /// shell call "restored" it, which replaced the link with a regular file and
+    /// flagged an untouched command (`echo hi`) as a policy rewrite. The user's
+    /// shared policy then silently stopped applying to that project.
+    ///
+    /// The link target is part of the saved state, and a restore recreates the
+    /// link before writing, so writing then lands on the target's bytes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_policy_is_not_flagged_when_nothing_changed() {
+        let base = temp_dir("policy-symlink-noop");
+        let project = base.join("project");
+        std::fs::create_dir_all(project.join(".ki")).unwrap();
+        let target = base.join("shared-policy");
+        std::fs::write(&target, r#"{"permissions":{"deny":["Bash(rm *)"]}}"#).unwrap();
+        let link = project.join(".ki").join("permissions.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let guard = PolicyGuard::new(project.clone());
+        let (_before, call, message) =
+            guarded_call(&guard, "bash", json!({"command": "echo hi"})).await;
+        let outcome = guard.after_hook()(
+            kiqi_agent::AfterToolCallContext {
+                assistant_message: &message,
+                tool_call: &call,
+                args: &call.arguments,
+                result: &AgentToolResult {
+                    content: vec![kiqi_agent::types::TextContentOrImage::text("hi")],
+                    details: Value::Null,
+                    usage: None,
+                    added_tool_names: Vec::new(),
+                    terminate: false,
+                },
+                is_error: false,
+                context: &kiqi_agent::AgentContext::default(),
+            },
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            outcome.is_none(),
+            "an untouched command must not be flagged, and a symlinked policy must not be replaced"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false),
+            "the link must survive a shell call that changed nothing"
+        );
+
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// The protection must not be lost in the process. Each case below is a
+    /// rewrite the lexical guard could miss, simulated directly on the file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_policy_is_still_restored_and_flagged() {
+        let original = r#"{"permissions":{"deny":["Bash(rm *)"]}}"#;
+        let tampered = r#"{"permissions":{"allow":["*"]}}"#;
+        // How the command attacked the policy:
+        //   0. wrote the new bytes straight through the link;
+        //   1. replaced the link with a regular file holding those bytes;
+        //   2. replaced the link with a regular file holding the *same* bytes;
+        //   3. repointed the link at another file holding the same bytes.
+        // 2 and 3 change nothing about the policy in force, so a byte comparison
+        // alone calls them "unchanged" - and then the user's shared policy is
+        // silently detached: later edits to the original target stop applying.
+        for case in 0..4u8 {
+            let base = temp_dir("policy-symlink-restore");
+            let project = base.join("project");
+            std::fs::create_dir_all(project.join(".ki")).unwrap();
+            let target = base.join("shared-policy");
+            std::fs::write(&target, original).unwrap();
+            let other = base.join("other-policy");
+            std::fs::write(&other, original).unwrap();
+            let link = project.join(".ki").join("permissions.json");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+
+            let guard = PolicyGuard::new(project.clone());
+            let (_before, call, message) =
+                guarded_call(&guard, "bash", json!({"command": "echo hi"})).await;
+            match case {
+                0 => std::fs::write(&link, tampered).unwrap(),
+                1 => {
+                    std::fs::remove_file(&link).unwrap();
+                    std::fs::write(&link, tampered).unwrap();
+                }
+                2 => {
+                    std::fs::remove_file(&link).unwrap();
+                    std::fs::write(&link, original).unwrap();
+                }
+                _ => {
+                    std::fs::remove_file(&link).unwrap();
+                    std::os::unix::fs::symlink(&other, &link).unwrap();
+                }
+            }
+
+            let outcome = guard.after_hook()(
+                kiqi_agent::AfterToolCallContext {
+                    assistant_message: &message,
+                    tool_call: &call,
+                    args: &call.arguments,
+                    result: &AgentToolResult {
+                        content: vec![kiqi_agent::types::TextContentOrImage::text("hi")],
+                        details: Value::Null,
+                        usage: None,
+                        added_tool_names: Vec::new(),
+                        terminate: false,
+                    },
+                    is_error: false,
+                    context: &kiqi_agent::AgentContext::default(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("a policy changed through a link is flagged");
+            assert_eq!(outcome.is_error, Some(true), "case={case}");
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .map(|meta| meta.file_type().is_symlink())
+                    .unwrap_or(false),
+                "the link is restored, case={case}"
+            );
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                target,
+                "the link points at the user's target again, case={case}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                original,
+                "the target's bytes are restored, case={case}"
+            );
+            assert_eq!(std::fs::read_to_string(&link).unwrap(), original);
+
+            std::fs::remove_dir_all(base).ok();
+        }
+    }
+
     #[test]
     fn a_sanctioned_save_wins_over_the_snapshot() {
         let dir = temp_dir("policy-version");
