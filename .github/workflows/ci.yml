@@ -82,6 +82,13 @@ jobs:
       - name: Verify the release targets agree across producer and consumers
         run: sh scripts/check-release-targets.sh
 
+      # Both installers show a version in their own help text, and both used to name one
+      # this repository never released (`--version 0.3.0`, `-Version 0.3.19`) -- a
+      # copy-pasteable 404. Must ask what was *released*, not what was tagged: local tags
+      # include v0.3.0/v0.3.19, which is why a tag-based check missed this.
+      - name: Verify the installers only suggest released versions
+        run: sh scripts/check-install-version-hints.sh
+
       # The lock file must name every dependency of every feature. CI is online, so a
       # missing entry would simply be fetched here — while an offline build (and this
       # machine, whose uncommitted `.cargo/config.toml` sets `offline = true`) fails

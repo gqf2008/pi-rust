@@ -9,7 +9,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/gqf2008/pi-rust/main/scripts/install.sh | sh
 #
 # Options (pass after `sh -s --`, or export as env vars):
-#   --version <v>     Install a specific version, e.g. --version 0.3.0 (default: latest)
+#   --version <v>     Install a specific version, e.g. --version 0.4.1 (default: latest)
 #   --dir <path>      Install into <path> instead of ~/.local/bin or /usr/local/bin
 #   --dry-run         Print what would be downloaded, then exit
 #

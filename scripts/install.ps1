@@ -5,7 +5,7 @@ Install the prebuilt ki binary from GitHub Releases on Windows.
 .EXAMPLE
 & .\install.ps1
 .EXAMPLE
-& .\install.ps1 -Version 0.3.19 -Dir "$env:LOCALAPPDATA\Programs\ki" -DryRun
+& .\install.ps1 -Version <version> -Dir "$env:LOCALAPPDATA\Programs\ki" -DryRun
 .NOTES
 No Rust toolchain or administrator privileges are required. To build from
 source instead, run 'cargo build --release' in a checkout of this repository.
@@ -60,7 +60,7 @@ try {
     }
     $Version = $Version.Trim() -replace '^v', ''
     if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
-        throw 'Could not determine a valid release version; pass -Version (for example, -Version 0.3.19).'
+        throw 'Could not determine a valid release version; pass -Version <major>.<minor>.<patch> (for example -Version 0.4.1).'
     }
 
     $Asset = "ki-v$Version-$Target.zip"
