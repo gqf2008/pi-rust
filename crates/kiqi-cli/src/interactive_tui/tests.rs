@@ -2964,3 +2964,19 @@ fn the_tui_defaults_to_the_light_theme() {
     assert!(matches!(theme_preset(Some("dark")), ThemePreset::Dark));
     assert!(matches!(theme_preset(Some("claude")), ThemePreset::Claude));
 }
+
+/// Raw stderr during a TUI session lands at the renderer's cursor; a burst of
+/// MCP notices turned the screen into a staircase over the input box. Runtime
+/// diagnostics must go through `diagnostic_log` instead.
+#[test]
+fn the_tui_runtime_never_writes_diagnostics_to_stderr() {
+    for (name, src) in [
+        ("interactive_tui.rs", include_str!("../interactive_tui.rs")),
+        ("events.rs", include_str!("events.rs")),
+    ] {
+        assert!(
+            !src.contains("eprintln!"),
+            "{name} must use diagnostic_log, not eprintln"
+        );
+    }
+}

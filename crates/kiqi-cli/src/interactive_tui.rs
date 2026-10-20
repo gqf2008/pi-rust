@@ -918,6 +918,36 @@ pub(crate) fn theme_preset(name: Option<&str>) -> ThemePreset {
     }
 }
 
+/// Runtime diagnostics while the TUI owns the terminal.
+///
+/// A raw stderr line is written at the renderer's cursor, so it lands inside
+/// the transcript and shifts every row below it. A burst of MCP notices made
+/// the screen a staircase of `[ki mcp]` lines over the input box. Diagnostics
+/// go to `<agent_dir>/logs/ki.log` instead; the durable signal inbox remains
+/// the place the agent can act on.
+pub(crate) fn diagnostic_log(message: &str) {
+    use std::io::Write as _;
+    let Ok(dir) = crate::config::agent_dir() else {
+        return;
+    };
+    let path = dir.join("logs").join("ki.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = writeln!(file, "{secs} {message}");
+}
+
 pub async fn interactive_tui(
     harness: &AgentHarness,
     event_rx: Option<broadcast::Receiver<AgentEvent>>,
@@ -1620,9 +1650,9 @@ pub async fn interactive_tui(
                     }
                     let message = kiqi_mcp::notice_message(&batch);
                     if let Err(error) = lane_mui.steer(message).await {
-                        eprintln!(
+                        diagnostic_log(&format!(
                             "warning: mcp: could not queue the signal into the active run: {error}"
-                        );
+                        ));
                         // The run may have ended between the status check and
                         // the steer; persist rather than lose the notice.
                         let _ = harness_mui

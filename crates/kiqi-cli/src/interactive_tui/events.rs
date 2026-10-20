@@ -248,15 +248,17 @@ pub(super) async fn handle_signal_boundary(
             let pending = match wake_state.add_to_inbox(&batch).await {
                 Ok(count) => count,
                 Err(error) => {
-                    eprintln!("warning: mcp: could not record the signal inbox: {error}");
+                    super::diagnostic_log(&format!(
+                        "warning: mcp: could not record the signal inbox: {error}"
+                    ));
                     0
                 }
             };
-            eprintln!(
+            super::diagnostic_log(&format!(
                 "[ki mcp] signal wake: servers={servers:?} notices={} suppressed={} inbox={pending}",
                 batch.notices.len(),
                 batch.suppressed
-            );
+            ));
             // The main loop drives the run through the same streaming path as
             // a user prompt. A closed channel means the TUI is shutting down;
             // the notice is already recorded, so nothing is lost.
@@ -266,7 +268,9 @@ pub(super) async fn handle_signal_boundary(
                 )))
                 .is_err()
             {
-                eprintln!("warning: mcp: signal wake dropped: the TUI channel is closed");
+                super::diagnostic_log(
+                    "warning: mcp: signal wake dropped: the TUI channel is closed",
+                );
             }
             true
         }
@@ -275,7 +279,9 @@ pub(super) async fn handle_signal_boundary(
                 // Only `auto` servers produce a skip line: with the default
                 // `off`, every notification would otherwise log, which is noise.
                 let servers: Vec<&str> = batch.notices.iter().map(|n| n.server.as_str()).collect();
-                eprintln!("[ki mcp] signal recorded without wake: {reason} (servers={servers:?})");
+                super::diagnostic_log(&format!(
+                    "[ki mcp] signal recorded without wake: {reason} (servers={servers:?})"
+                ));
             }
             false
         }
@@ -326,9 +332,9 @@ pub(super) async fn maybe_continue_goal(
         return;
     };
     if goal.done_when.as_deref() == Some("board-open-0") && board_open_zero(&cwd).await {
-        eprintln!(
+        super::diagnostic_log(
             "[ki goal] doneWhen 'board-open-0' satisfied; not auto-continuing \
-             (run /goal stop to archive the goal)"
+             (run /goal stop to archive the goal)",
         );
         return;
     }
@@ -337,21 +343,21 @@ pub(super) async fn maybe_continue_goal(
     }
     let unbounded = goal.max_turns.is_none() && goal.deadline_ms.is_none();
     if !wake_state.allow_goal_continuation(&goal.key(), unbounded) {
-        eprintln!(
+        super::diagnostic_log(&format!(
             "[ki goal] auto-continue stopped: unbounded goal reached {} host runs",
             crate::goal_drive::MAX_GOAL_AUTO_RUNS
-        );
+        ));
         return;
     }
-    eprintln!(
+    super::diagnostic_log(&format!(
         "[ki goal] auto-continue: {} (turns {})",
         goal.title, goal.turns_used
-    );
+    ));
     if tx
         .send(TuiMessage::GoalContinue(goal.continuation_prompt()))
         .is_err()
     {
-        eprintln!("warning: goal continuation dropped: the TUI channel is closed");
+        super::diagnostic_log("warning: goal continuation dropped: the TUI channel is closed");
     }
 }
 

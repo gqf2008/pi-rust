@@ -34,6 +34,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **Runtime diagnostics no longer paint over the TUI.** MCP notifications
+  arriving while a session was muted logged `[ki mcp] signal recorded without
+  wake` with `eprintln!`; each raw stderr line landed at the renderer's cursor
+  and shifted the transcript, footer and input box, producing a staircase of
+  repeated lines. Signal and goal-continuation diagnostics now append to
+  `<agent_dir>/logs/ki.log` instead. A source guard keeps `eprintln!` out of
+  the interactive TUI runtime paths.
 - **A wide transcript row can no longer shift the input area.** Rendering now
   wraps every transcript row to the viewport width at the scroll-view
   boundary (wide CJK graphemes, long unbroken tokens, ANSI styling and OSC-8
