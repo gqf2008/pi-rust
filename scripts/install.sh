@@ -121,8 +121,17 @@ case "${asset}" in
   *) if ! command -v tar >/dev/null 2>&1; then die "tar is required"; fi ;;
 esac
 
+# Every release workflow run publishes a checksum beside each archive, and it always has
+# (introduced together with the binaries in 9436a0e; verified for v0.4.0 and v0.4.1: 5 of
+# 5 archives each). So a missing checksum does not mean "an old release", it means the
+# publish step broke -- and the previous behaviour here was to print a note and install
+# unverified bytes anyway. `install.ps1` has always thrown in this case
+# ("checksum verification is required"), so the two installers disagreed, and the Unix
+# one resolved the disagreement in the unsafe direction.
 if ! download_optional "${url}.sha256" "${tmp}/${asset}.sha256"; then
-  log "note: no checksum published for ${asset}; skipping verification"
+  die "no checksum published for ${asset}; refusing to install unverified bytes
+Every release attaches one, so this means the download failed or the release is damaged.
+Inspect ${url}.sha256 yourself if you want to proceed anyway."
 fi
 
 # A published checksum must actually be checked. The old form was

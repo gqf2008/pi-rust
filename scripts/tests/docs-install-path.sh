@@ -96,6 +96,7 @@ is_exempt_file() {
 # is not Markdown. Same for the issue templates (they send users to a repository).
 cd "$ROOT" || exit 1
 for rel in $(git ls-files '*.md' 'scripts/install.sh' 'scripts/install.ps1' \
+    'scripts/tests/install.Tests.ps1' \
     '.github/ISSUE_TEMPLATE/*.yml' 'website/*.json' 2>/dev/null); do
     is_exempt_file "$rel" && continue
     [ -f "$rel" ] || continue

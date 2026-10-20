@@ -83,6 +83,39 @@ while IFS= read -r t; do
     }
 done < "$tmp/ps1"
 
+# --- the PowerShell test fixture must name the same asset ---------------------
+# `install.Tests.ps1` cannot run here (no `pwsh` on CI's Unix jobs -- it runs only in the
+# Windows job), so a rename can pass every local gate and fail there. That happened:
+# changing `install.ps1` to `ki-v$Version-$Target.zip` left the fixture's checksum naming
+# `kiqi-v0.3.19-...`, which the installer rejects as "Invalid SHA-256 checksum file" -- the
+# test would have failed while testing something other than what it claims.
+#
+# Compare the two templates with variable names normalised away, so both sides must agree
+# on the literal prefix and suffix `$Asset` is built from.
+ps1_test="$ROOT/scripts/tests/install.Tests.ps1"
+if [ -f "$ps1_test" ]; then
+    ps1_tmpl() {
+        # `$Asset = "ki-v$Version-$Target.zip"` -> `ki-v$X-$X.zip`
+        grep -E '^[[:space:]]*\$[A-Za-z_]*[Aa]sset[[:space:]]*=' "$1" 2>/dev/null \
+            | head -n 1 \
+            | sed -E 's/^[^"'"'"']*["'"'"']//; s/["'"'"'][[:space:]]*$//' \
+            | sed -E 's/\$[A-Za-z_][A-Za-z0-9_]*/$X/g'
+    }
+    tmpl_installer=$(ps1_tmpl "$PS1")
+    tmpl_test=$(ps1_tmpl "$ps1_test")
+    if [ -z "$tmpl_installer" ] || [ -z "$tmpl_test" ]; then
+        echo "FAIL: could not parse the asset template from install.ps1 ('$tmpl_installer')" >&2
+        echo "      or from install.Tests.ps1 ('$tmpl_test')" >&2
+        status=1
+    elif [ "$tmpl_installer" != "$tmpl_test" ]; then
+        echo "FAIL: the Windows installer and its test fixture disagree on the asset name:" >&2
+        echo "      install.ps1        $tmpl_installer" >&2
+        echo "      install.Tests.ps1  $tmpl_test" >&2
+        echo "      the fixture's checksum must name the file the installer requests" >&2
+        status=1
+    fi
+fi
+
 # --- every target must be executed before it is uploaded ----------------------
 # Each matrix entry builds on a native runner of its own architecture, so an `if:` on the
 # step that *runs* the binary would leave the rest shipped-but-never-started. That is

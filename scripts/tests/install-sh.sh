@@ -172,6 +172,39 @@ else
 fi
 cp "$tmp/pristine.tar.gz" "$fixtures/$asset"
 
+# A missing checksum must fail, matching install.ps1. Tolerating it was the original
+# behaviour and it disagreed with the Windows installer; since the workflow publishes one
+# for every archive (v0.4.0 and v0.4.1: 5 of 5), tolerating it only masks a broken publish.
+nosec="$tmp/nosec"
+mkdir -p "$nosec"
+cp "$tmp/pristine.tar.gz" "$nosec/$asset"
+cat > "$nosec/curl" <<'SHIM'
+#!/bin/sh
+# Serve the archive but 404 on any .sha256, i.e. a release missing its checksums.
+dest=""; url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) dest=$2; shift 2 ;;
+        -*) shift ;;
+        *) url=$1; shift ;;
+    esac
+done
+case "$url" in *.sha256) exit 22 ;; esac
+cp "$FAKE_FIXTURES/$(basename "$url")" "$dest"
+SHIM
+chmod +x "$nosec/curl"
+rm -rf "$tmp/out6"
+if out=$(PATH="$nosec:/usr/bin:/bin" FAKE_FIXTURES="$fixtures" FAKE_OS=Darwin FAKE_ARCH=arm64 \
+        sh "$INSTALL" --version "$VERSION" --dir "$tmp/out6" 2>&1); then
+    echo "FAIL: installed without a published checksum" >&2
+    status=1
+else
+    case "$out" in
+        *"refusing to install unverified bytes"*) echo "ok: a missing checksum fails the install" ;;
+        *) echo "FAIL: failed for another reason: $out" >&2; status=1 ;;
+    esac
+fi
+
 # A published checksum with no way to verify it must fail loudly, not install.
 if command -v env >/dev/null 2>&1; then
     nover="$tmp/nover"

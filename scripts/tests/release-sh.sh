@@ -74,7 +74,8 @@ for manifest in \
     "$ROOT/packaging/scoop/ki.json" \
     "$ROOT/packaging/winget/bigfish1913.ki.installer.yaml" \
     "$ROOT/scripts/install.sh" \
-    "$ROOT/scripts/install.ps1"
+    "$ROOT/scripts/install.ps1" \
+    "$ROOT/scripts/tests/install.Tests.ps1"
 do
     [ -f "$manifest" ] || continue
     rel=${manifest#"$ROOT"/}

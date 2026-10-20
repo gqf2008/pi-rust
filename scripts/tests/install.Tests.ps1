@@ -12,6 +12,17 @@ foreach ($Name in @('PROCESSOR_ARCHITECTURE', 'PROCESSOR_ARCHITEW6432', 'LOCALAP
     $SavedEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
 }
 
+# The archive name and download URL `install.ps1` must produce, in one place. The checksum
+# fixture has to name the same file the installer asked for (it validates that), so when
+# these were written out twice, renaming the prefix updated the installer and left the
+# fixture behind -- the test then failed on "Invalid SHA-256 checksum file" instead of
+# testing what it claimed to test.
+$ExpectedVersion = '0.3.19'
+$ExpectedTarget = 'x86_64-pc-windows-msvc'
+$ExpectedAsset = "ki-v$ExpectedVersion-$ExpectedTarget.zip"
+$ExpectedUrl = "https://github.com/gqf2008/pi-rust/releases/download/v$ExpectedVersion/$ExpectedAsset"
+$ExpectedApiUrl = 'https://api.github.com/repos/gqf2008/pi-rust/releases/latest'
+
 function Assert-True($Condition, [string] $Message) {
     if (-not $Condition) { throw $Message }
 }
@@ -32,7 +43,7 @@ function Invoke-WebRequest {
         if ($TestState.Mode -eq 'MissingChecksum') { throw 'HTTP 404' }
         $Hash = (Get-FileHash -LiteralPath $TestState.FixtureArchive -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($TestState.Mode -eq 'Mismatch') { $Hash = '0' * 64 }
-        $Checksum = "$Hash  kiqi-v0.3.19-x86_64-pc-windows-msvc.zip"
+        $Checksum = "$Hash  $ExpectedAsset"
         if ($TestState.Mode -eq 'MalformedChecksum') { $Checksum = 'not a sha256 checksum' }
         if ($TestState.Mode -eq 'WrongChecksumAsset') { $Checksum = "$Hash  another.zip" }
         [IO.File]::WriteAllText($OutFile, "$Checksum`n")
@@ -97,7 +108,7 @@ function Assert-Installed {
     Assert-True ((Get-FileHash -LiteralPath $Installed).Hash -eq $TestState.BinaryHash) 'Installed binary differs from the archive.'
     Assert-True ($TestState.Output -match 'ki fixture 0\.3\.19') 'Installed binary did not print its version.'
     Assert-True ($TestState.Downloads.Count -eq 2) 'Expected archive and checksum downloads.'
-    Assert-True ($TestState.Downloads[0] -eq 'https://github.com/bigfish1913/pi-rust/releases/download/v0.3.19/kiqi-v0.3.19-x86_64-pc-windows-msvc.zip') 'Wrong archive URL.'
+    Assert-True ($TestState.Downloads[0] -eq $ExpectedUrl) "Wrong archive URL: $($TestState.Downloads[0])"
     Assert-True ($TestState.Downloads[1] -eq "$($TestState.Downloads[0]).sha256") 'Wrong checksum URL.'
 }
 
@@ -154,7 +165,7 @@ try {
     Invoke-Test 'latest-release' { $TestState.Options = @{} } {
         Assert-Installed
         Assert-True ($TestState.ApiCalls.Count -eq 1) 'Latest version did not call the API once.'
-        Assert-True ($TestState.ApiCalls[0] -eq 'https://api.github.com/repos/bigfish1913/pi-rust/releases/latest') 'Wrong release API URL.'
+        Assert-True ($TestState.ApiCalls[0] -eq $ExpectedApiUrl) "Wrong release API URL: $($TestState.ApiCalls[0])"
     }
     Invoke-Test 'pinned-preview' { $TestState.Options.DryRun = $true } {
         Assert-Preview
