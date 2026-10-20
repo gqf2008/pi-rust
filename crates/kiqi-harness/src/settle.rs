@@ -90,10 +90,15 @@ pub struct SettleState {
     /// Per-tool replay policy, from the run's tool snapshot. A `ToolStarted`
     /// record has to carry it, and the settle observer sees only the event.
     tool_replays: BTreeMap<String, ToolReplay>,
-    /// How many assistant messages have settled. The n-th settled assistant
-    /// message is the recorder's stream n: both are assigned in event order, and
-    /// only assistant messages create streams.
-    assistant_settled: AtomicUsize,
+    /// Next assistant stream index. Mirrors the frame recorder, which numbers
+    /// **every** assistant message, including text-only ones that never settle
+    /// early; counting settled messages instead retires the wrong stream.
+    assistant_stream: AtomicUsize,
+    /// The stream currently streaming, if any.
+    current_stream: Mutex<Option<usize>>,
+    /// An assistant `Start` happened since the last `set_attempt`. A retry
+    /// discards that attempt's message, so `seen` must be rolled back with it.
+    attempt_started: AtomicBool,
     /// Indices already committed, so the run-end pass does not duplicate them.
     committed: Mutex<BTreeSet<usize>>,
     /// The assistant entry each settled message produced, by index.
@@ -138,7 +143,9 @@ impl SettleState {
             max_retries,
             run_id: run_id.into(),
             tool_replays,
-            assistant_settled: AtomicUsize::new(0),
+            assistant_stream: AtomicUsize::new(0),
+            current_stream: Mutex::new(None),
+            attempt_started: AtomicBool::new(false),
             committed: Mutex::new(BTreeSet::new()),
             assistant_entries: Mutex::new(BTreeMap::new()),
             pending_calls: Mutex::new(BTreeMap::new()),
@@ -157,19 +164,31 @@ impl SettleState {
     /// `announced` means the loop emitted `MessageStart` for it: `seen` was
     /// advanced for a message that never enters `new_messages`, so retract it,
     /// and arm the latch that swallows the following `MessageEnd`.
-    pub fn note_soft_interrupted(&self, message: AssistantMessage, announced: bool) {
+    pub fn note_soft_interrupted(
+        &self,
+        message: AssistantMessage,
+        announced: bool,
+    ) -> Option<usize> {
         *self.soft_tail.lock().unwrap() = Some(message);
         self.soft_tail_pending.store(true, Ordering::Release);
-        if announced {
-            // Saturating: a provider that restarts a stream without a terminal
-            // event must not make this underflow.
-            let _ = self
-                .seen
-                .try_update(Ordering::AcqRel, Ordering::Acquire, |seen| {
-                    Some(seen.saturating_sub(1))
-                });
-            self.skip_next_assistant_end.store(true, Ordering::Release);
+        if !announced {
+            return None;
         }
+        // The stream the dropped message created. The caller retires it so a
+        // crash cannot salvage the partial back into history.
+        let stream = self.current_stream.lock().unwrap().take();
+        // Saturating: a provider that restarts a stream without a terminal
+        // event must not make this underflow.
+        let _ = self
+            .seen
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |seen| {
+                Some(seen.saturating_sub(1))
+            });
+        self.skip_next_assistant_end.store(true, Ordering::Release);
+        // The retraction above already removed this Start; a later retry must
+        // not roll it back a second time.
+        self.attempt_started.store(false, Ordering::Release);
+        stream
     }
 
     /// The last soft-interrupted message, if it is still the newest event.
@@ -194,6 +213,19 @@ impl SettleState {
     /// Advance the attempt counter; called by the retry loop so the settle
     /// observer sees the same number the loop's next attempt will use.
     pub fn set_attempt(&self, attempt: u32) {
+        // A retried attempt discarded its partial assistant message, but its
+        // `MessageStart` already advanced `seen`. Roll that one event back so
+        // the accepted attempt's commit indices stay in `new_messages` space.
+        // Committed indices are deliberately left alone: a retry only happens
+        // before a message is committed (`from_assistant` disables retries once
+        // tools ran).
+        if self.attempt_started.swap(false, Ordering::AcqRel) {
+            let _ = self
+                .seen
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |seen| {
+                    Some(seen.saturating_sub(1))
+                });
+        }
         self.attempt.store(attempt, Ordering::Release);
     }
 
@@ -259,7 +291,7 @@ impl SettlingEmitter {
     async fn settle_assistant(
         &self,
         index: usize,
-        stream_index: usize,
+        stream_index: Option<usize>,
         message: &AssistantMessage,
     ) {
         let entry = ProvisionedEntry {
@@ -277,12 +309,14 @@ impl SettlingEmitter {
                 // The message is an entry now, so its frames are no longer
                 // progress. Retiring the stream is what stops a crash in a *later*
                 // turn from replaying this one and duplicating it.
-                if let Err(error) = self.recorder.clear_stream(stream_index).await {
-                    tracing::warn!(
-                        stream_index,
-                        %error,
-                        "could not retire a committed assistant stream"
-                    );
+                if let Some(stream_index) = stream_index {
+                    if let Err(error) = self.recorder.clear_stream(stream_index).await {
+                        tracing::warn!(
+                            stream_index,
+                            %error,
+                            "could not retire a committed assistant stream"
+                        );
+                    }
                 }
                 // One assistant generation = one step attempt. The entry id is
                 // the one just committed, so recovery can check whether the step
@@ -433,11 +467,16 @@ impl SettlingEmitter {
 
     fn handle(&self, event: &AgentEvent) -> Option<BoxFuture<'static, ()>> {
         match event {
-            AgentEvent::MessageStart { .. } => {
+            AgentEvent::MessageStart { message } => {
                 // A later message makes a previous soft tail stale: it is no
                 // longer the newest thing the run produced.
                 self.state.soft_tail_pending.store(false, Ordering::Release);
                 self.state.seen.fetch_add(1, Ordering::AcqRel);
+                if matches!(message, AgentMessage::Assistant(_)) {
+                    let stream = self.state.assistant_stream.fetch_add(1, Ordering::AcqRel);
+                    *self.state.current_stream.lock().unwrap() = Some(stream);
+                    self.state.attempt_started.store(true, Ordering::Release);
+                }
                 None
             }
             AgentEvent::MessageEnd {
@@ -473,9 +512,7 @@ impl SettlingEmitter {
                     state: Arc::clone(&self.state),
                     harness: self.harness.clone(),
                 };
-                // Ordinal first, then increment: the message that just settled is
-                // stream `ordinal`.
-                let stream_index = self.state.assistant_settled.fetch_add(1, Ordering::AcqRel);
+                let stream_index = self.state.current_stream.lock().unwrap().take();
                 let message = (**assistant).clone();
                 Some(Box::pin(async move {
                     emitter
@@ -561,10 +598,49 @@ impl AgentEmitter for SettlingEmitter {
     ) -> BoxFuture<'static, ()> {
         // Apply the retraction synchronously: the loop emits the matching
         // `MessageEnd` right after awaiting this future, and the skip latch must
-        // already be armed by then.
-        self.state.note_soft_interrupted(message.clone(), announced);
-        // Forward like `try_emit`: a decorator must not swallow a signal meant
-        // for an emitter further in.
-        self.inner.request_soft_interrupted(message, announced)
+        // already be armed by then. The returned index names the frame stream
+        // the dropped message created, so it can be retired before a crash
+        // salvages it back into history.
+        let stream = self.state.note_soft_interrupted(message.clone(), announced);
+        let recorder = Arc::clone(&self.recorder);
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            if let Some(stream_index) = stream {
+                if let Err(error) = recorder.clear_stream(stream_index).await {
+                    tracing::warn!(
+                        stream_index,
+                        %error,
+                        "could not retire a soft-interrupted assistant stream"
+                    );
+                }
+            }
+            // Forward like `try_emit`: a decorator must not swallow a signal
+            // meant for an emitter further in.
+            inner.request_soft_interrupted(message, announced).await;
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn a_retry_rolls_back_the_failed_attempts_assistant_start() {
+        let state = SettleState::new("run", true, 3, BTreeMap::new());
+        // The failed attempt announced an assistant message that the retry
+        // discarded from `new_messages`.
+        state.seen.fetch_add(1, Ordering::AcqRel);
+        state.attempt_started.store(true, Ordering::Release);
+        state.set_attempt(1);
+        assert_eq!(state.seen.load(Ordering::Acquire), 0);
+        assert!(!state.attempt_started.load(Ordering::Acquire));
+
+        // A retry with no assistant start rolls back nothing.
+        state.seen.store(2, Ordering::Release);
+        state.set_attempt(2);
+        assert_eq!(state.seen.load(Ordering::Acquire), 2);
     }
 }
