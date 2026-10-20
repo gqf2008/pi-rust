@@ -143,11 +143,15 @@ impl InterruptControl {
     /// [`take_soft`](Self::take_soft) drains it.
     pub fn install(&self, token: CancellationToken, kind: ActionKind) -> InstallId {
         let id = InstallId(self.next_id.fetch_add(1, Ordering::SeqCst));
+        // Read the latch *under* the same lock that `soft_interrupt` takes
+        // after storing it. Reading it before the lock left a window in which
+        // the press latched while the slot was still empty (so it cancelled
+        // nothing) and this install then published an uncancelled token.
+        let mut guard = self.current.lock().expect("interrupt lock");
         let latched = self.soft.load(Ordering::SeqCst);
         if latched {
             token.cancel();
         }
-        let mut guard = self.current.lock().expect("interrupt lock");
         *guard = Some(Current { id, token, kind });
         // Release before tracing: `install` runs once per action of every run, so
         // a slow log path here must not serialize the agent loop.
