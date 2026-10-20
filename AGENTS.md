@@ -86,6 +86,9 @@ sh scripts/check-abi-sections.sh
 # CI 里每一条 cargo build/check/test 都必须带 --locked（曾经的缺陷：
 # `windows-check` 独独没带，于是红叉不再指向某个提交，可能只是上游发了新版本）
 sh scripts/check-ci-locked.sh
+# 发布矩阵与三处消费清单（updates.rs 的 release_target_triple、install.sh、
+# install.ps1）必须给出同一组 target；只改一侧会得到「没人能下载」或「下载 404」
+sh scripts/check-release-targets.sh
 ```
 
 注意：goal 测试已用子进程 + tempdir 隔离，跑 `cargo test -p kiqi-cli` 不再改写源码树

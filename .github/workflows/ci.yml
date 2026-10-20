@@ -75,6 +75,13 @@ jobs:
       - name: Verify every CI cargo command pins the lock file
         run: sh scripts/check-ci-locked.sh
 
+      # Four lists name the same target triples: the release matrix (producer) and
+      # `release_target_triple`, `install.sh`, `install.ps1` (consumers). Nothing tied
+      # them together, so adding a target to one side yields either a release no install
+      # path asks for, or a 404 on a platform the project claims to support.
+      - name: Verify the release targets agree across producer and consumers
+        run: sh scripts/check-release-targets.sh
+
       # The lock file must name every dependency of every feature. CI is online, so a
       # missing entry would simply be fetched here — while an offline build (and this
       # machine, whose uncommitted `.cargo/config.toml` sets `offline = true`) fails
