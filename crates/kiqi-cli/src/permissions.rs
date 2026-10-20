@@ -95,26 +95,50 @@ pub fn effective_path_for(cwd: &Path, project_trusted: bool) -> PathBuf {
     }
 }
 
+/// Human-readable JSON kind, for errors that must say what the file actually
+/// contains instead of silently dropping it.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
 pub fn parse_rules(value: Value) -> Result<Rules, String> {
     let root = value.get("permissions").unwrap_or(&value);
     if let Some(obj) = root.as_object() {
-        let strings = |key: &str| {
-            obj.get(key)
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(ToOwned::to_owned)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
+        let strings = |key: &str| -> Result<Vec<String>, String> {
+            let Some(value) = obj.get(key) else {
+                return Ok(Vec::new());
+            };
+            let Some(items) = value.as_array() else {
+                return Err(format!(
+                    "permissions.{key} must be an array of rule strings, not {}",
+                    json_kind(value)
+                ));
+            };
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(rule) = item.as_str() else {
+                    return Err(format!(
+                        "permissions.{key} must contain only strings, found {}",
+                        json_kind(item)
+                    ));
+                };
+                let rule = rule.trim();
+                if !rule.is_empty() {
+                    out.push(rule.to_owned());
+                }
+            }
+            Ok(out)
         };
         return Ok(Rules {
-            allow: strings("allow"),
-            deny: strings("deny"),
+            allow: strings("allow")?,
+            deny: strings("deny")?,
         });
     }
     // Compatibility with the first ki release, which stored capability
@@ -321,7 +345,11 @@ fn target_candidates(tool: &str, args: &Value) -> Vec<String> {
     let keys: &[&str] = match lower.as_str() {
         "bash" | "powershell" => &["command"],
         "read" | "write" | "edit" => &["path"],
-        _ => &["value", "command", "path"],
+        // `url` (webfetch) and `query` (websearch) are the target-bearing keys
+        // of the shipped tools; without them a deny rule like
+        // `webfetch(https://169.254.169.254/*)` compared against "" and never
+        // matched.
+        _ => &["value", "command", "path", "url", "query"],
     };
     let targets: Vec<String> = keys
         .iter()
@@ -455,6 +483,65 @@ fn normalize_path(cwd: &Path, path: &Path) -> PathBuf {
     out
 }
 
+/// Resolve the spellings a tool accepts but the gate would otherwise see
+/// literally: `write {"path":"@x"}` strips the attachment marker, and the OS
+/// env expands `~` and `file://` before touching disk.
+fn resolve_tool_path(cwd: &Path, raw: &str) -> PathBuf {
+    let mut p = raw.trim().to_string();
+    if let Some(rest) = p.strip_prefix('@') {
+        p = rest.to_string();
+    }
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from);
+    if let Some(home) = home {
+        let home = home.to_string_lossy();
+        if p == "~" {
+            p = home.into_owned();
+        } else if let Some(rest) = p.strip_prefix("~/") {
+            p = format!("{home}/{rest}");
+        } else if cfg!(windows) {
+            if let Some(rest) = p.strip_prefix("~\\") {
+                p = format!("{home}\\{rest}");
+            }
+        }
+    }
+    if let Some(rest) = p.strip_prefix("file://") {
+        // `file:///etc/shadow` and `file://localhost/etc/shadow` both name a
+        // local path; percent-encoding is left for the OS to reject.
+        p = rest.strip_prefix("localhost").unwrap_or(rest).to_string();
+    }
+    normalize_path(cwd, Path::new(&p))
+}
+
+/// Canonical form for comparing two spellings of a file. `canonicalize` fails
+/// for a path that does not exist yet (a `write` that would create it), so the
+/// parent is canonicalized instead and the file name is re-attached.
+fn comparable_path(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return Some(canonical);
+    }
+    let parent = std::fs::canonicalize(path.parent()?).ok()?;
+    Some(parent.join(path.file_name()?))
+}
+
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    // Default macOS and Windows filesystems are case-insensitive, so
+    // `.KI/permissions.json` reaches the same file as `.ki/permissions.json`.
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        a.to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy())
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        false
+    }
+}
+
 /// Files whose rules the gate reads. They are not writable through the
 /// model's file or shell tools: otherwise a denied call can restore itself by
 /// rewriting the policy that denies it.
@@ -471,10 +558,18 @@ fn policy_paths(cwd: &Path) -> Vec<PathBuf> {
 }
 
 fn targets_policy_file(cwd: &Path, raw: &str) -> bool {
-    let candidate = normalize_path(cwd, Path::new(raw));
-    policy_paths(cwd)
-        .iter()
-        .any(|path| normalize_path(cwd, path) == candidate)
+    let candidate = resolve_tool_path(cwd, raw);
+    let comparable_candidate = comparable_path(&candidate);
+    policy_paths(cwd).iter().any(|path| {
+        let policy = resolve_tool_path(cwd, &path.to_string_lossy());
+        if paths_equal(&candidate, &policy) {
+            return true;
+        }
+        match (comparable_candidate.as_deref(), comparable_path(&policy)) {
+            (Some(a), Some(b)) => paths_equal(a, &b),
+            _ => false,
+        }
+    })
 }
 
 fn policy_write_reason(cwd: &Path, tool: &str, args: &Value) -> Option<String> {
@@ -492,8 +587,15 @@ fn policy_write_reason(cwd: &Path, tool: &str, args: &Value) -> Option<String> {
         let command = args.get("command").and_then(Value::as_str)?;
         // A shell command can reach the file without naming a path the host
         // can resolve, so match the basename rather than trying to classify
-        // the command. Reading stays possible via `read`/`permissions list`.
-        if command.contains("permissions.json") {
+        // the command. Case-insensitive: default macOS/Windows filesystems are,
+        // so `PERMISSIONS.JSON` names the same file.
+        //
+        // Known limitation: a command that deletes the parent directory or a
+        // glob (`rm -rf .ki`, `rm .ki/permissions.*`) does not contain the
+        // basename and is not caught. The policy files are protected from the
+        // file tools; the shell guard is best-effort until the shell itself is
+        // sandboxed.
+        if command.to_ascii_lowercase().contains("permissions.json") {
             return Some(
                 "permission denied: the shell may not touch permission policy files; use the `permissions` tool (grant/revoke) or edit them outside the session".to_string(),
             );
