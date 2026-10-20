@@ -124,8 +124,27 @@ esac
 if ! download_optional "${url}.sha256" "${tmp}/${asset}.sha256"; then
   log "note: no checksum published for ${asset}; skipping verification"
 fi
-if [ -f "${tmp}/${asset}.sha256" ] && command -v sha256sum >/dev/null 2>&1; then
-  ( cd "${tmp}" && sha256sum -c "${asset}.sha256" ) || die "checksum verification failed"
+
+# A published checksum must actually be checked. The old form was
+#   [ -f ... ] && command -v sha256sum && sha256sum -c ...
+# which on a stock macOS PATH is silently false: macOS has no `sha256sum` (that is a
+# coreutils tool), it ships `shasum` in /usr/bin. The file was downloaded and then
+# ignored without printing anything -- worse than the no-checksum case, which at least
+# says so. Try the three tools that exist in practice, and if a checksum is present but
+# none of them is usable, fail rather than install unverified bytes.
+if [ -f "${tmp}/${asset}.sha256" ]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    ( cd "${tmp}" && sha256sum -c "${asset}.sha256" ) || die "checksum verification failed"
+  elif command -v shasum >/dev/null 2>&1; then
+    ( cd "${tmp}" && shasum -a 256 -c "${asset}.sha256" ) || die "checksum verification failed"
+  elif command -v openssl >/dev/null 2>&1; then
+    # openssl cannot read the "<hash>  <file>" form, so compare by hand.
+    expected=$(cut -d' ' -f1 "${tmp}/${asset}.sha256")
+    actual=$(openssl dgst -sha256 "${tmp}/${asset}" | sed 's/.*= *//')
+    [ "${expected}" = "${actual}" ] || die "checksum verification failed"
+  else
+    die "a checksum for ${asset} was published but no sha256 tool is available (tried sha256sum, shasum, openssl)"
+  fi
 fi
 
 if [ "${os_part}" = "pc-windows-msvc" ]; then
