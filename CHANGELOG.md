@@ -13,12 +13,15 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **The TUI now defaults to the `light` theme.** With no saved `theme`, ki
+  starts in the light palette; `dark`/`monochrome`/`claude` remain one
+  `/theme` away, and an unknown/custom name falls back to light instead of
+  silently keeping the previous palette.
 - **A `claude` theme preset matches Claude Code's palette.** `/theme claude`
   (or `"theme": "claude"` in settings) uses Claude's orange accent
-  (`#d97757`), neutral gray borders instead of the teal/blue pi palette,
-  near-white body text and blue links. The existing `dark`/`light`/
-  `monochrome` presets are unchanged, so the faithful pi default stays
-  available.
+  (`#d97757`), neutral gray borders and blue links. It deliberately leaves
+  page, code-block and tool backgrounds at the terminal default, so it adapts
+  to both light and dark terminals instead of painting near-black blocks.
 - **The declared minimum Rust version is now 1.96** (`rust-version` in
   `[workspace.package]`), up from a 1.78 that the workspace could no longer build
   against. `wasmtime 49` (via `kiqi-plugin-host`) pulls

@@ -450,7 +450,6 @@ fn theme_for_preset(preset: ThemePreset) -> Theme {
             let accent = Color::Rgb(215, 119, 87); // Claude orange (#d97757)
             let muted = Color::Ansi256(245); // #8a8a8a
             let border = Color::Ansi256(240); // #585858 neutral gray
-            let text = Color::Rgb(229, 229, 229);
             colors.text = Color::Default;
             colors.muted = muted;
             colors.dim = Color::Ansi256(240);
@@ -459,8 +458,11 @@ fn theme_for_preset(preset: ThemePreset) -> Theme {
             colors.success = Color::Rgb(78, 186, 101);
             colors.warning = Color::Rgb(210, 153, 34);
             colors.info = Color::Rgb(88, 166, 255);
-            colors.surface = Color::Rgb(38, 38, 38);
-            colors.surface_text = text;
+            // Claude Code leaves the page background to the terminal. Painting
+            // near-black panels here made the preset show up as "black blobs"
+            // on a light terminal, so every large surface stays Default.
+            colors.surface = Color::Default;
+            colors.surface_text = Color::Default;
             colors.border = border;
             colors.border_accent = accent;
             colors.border_muted = Color::Ansi256(237);
@@ -468,29 +470,29 @@ fn theme_for_preset(preset: ThemePreset) -> Theme {
             colors.cursor = accent;
             colors.thinking_text = Color::Ansi256(243);
 
-            colors.md_heading = text;
+            colors.md_heading = Color::Default;
             colors.md_link = Color::Rgb(88, 166, 255);
             colors.md_link_url = muted;
-            colors.md_code = text;
-            colors.md_code_bg = Color::Rgb(45, 45, 45);
-            colors.md_code_block = Color::Rgb(212, 212, 212);
-            colors.md_code_block_bg = Color::Rgb(30, 30, 30);
+            colors.md_code = Color::Default;
+            colors.md_code_bg = Color::Default;
+            colors.md_code_block = Color::Default;
+            colors.md_code_block_bg = Color::Default;
             colors.md_code_block_border = border;
             colors.md_quote = muted;
             colors.md_quote_border = border;
             colors.md_hr = border;
             colors.md_list_bullet = muted;
 
-            colors.tool_pending_bg = Color::Rgb(30, 30, 30);
-            colors.tool_success_bg = Color::Rgb(28, 38, 30);
-            colors.tool_error_bg = Color::Rgb(45, 28, 30);
+            colors.tool_pending_bg = Color::Default;
+            colors.tool_success_bg = Color::Default;
+            colors.tool_error_bg = Color::Default;
             colors.tool_title = Color::Default;
             colors.tool_output = muted;
             colors.bash_mode = colors.success;
 
-            colors.custom_message_bg = Color::Rgb(38, 38, 38);
+            colors.custom_message_bg = Color::Default;
             colors.custom_message_label = accent;
-            colors.custom_message_text = text;
+            colors.custom_message_text = Color::Default;
 
             colors.tool_diff_added = colors.success;
             colors.tool_diff_removed = colors.error;
@@ -612,7 +614,9 @@ mod tests {
         assert_eq!(theme.colors.accent, Color::Rgb(215, 119, 87));
         assert_eq!(theme.colors.border, Color::Ansi256(240));
         assert_eq!(theme.colors.md_link, Color::Rgb(88, 166, 255));
-        assert_eq!(theme.colors.surface_text, Color::Rgb(229, 229, 229));
+        assert_eq!(theme.colors.surface_text, Color::Default);
+        assert_eq!(theme.colors.tool_pending_bg, Color::Default);
+        assert_eq!(theme.colors.md_code_block_bg, Color::Default);
     }
 
     #[test]
@@ -647,15 +651,19 @@ mod tests {
             let manager = ThemeManager::new();
             manager.apply_preset(preset);
             let colors = manager.get().colors;
-            assert_ne!(
-                colors.custom_message_text,
-                Color::Default,
-                "{preset:?} must not inherit the terminal default on a painted background"
-            );
-            assert_ne!(
-                colors.custom_message_text, colors.custom_message_bg,
-                "{preset:?} custom-message text must contrast with its background"
-            );
+            // The Claude preset leaves the background to the terminal; only a
+            // painted background needs a paired foreground.
+            if colors.custom_message_bg != Color::Default {
+                assert_ne!(
+                    colors.custom_message_text,
+                    Color::Default,
+                    "{preset:?} must not inherit the terminal default on a painted background"
+                );
+                assert_ne!(
+                    colors.custom_message_text, colors.custom_message_bg,
+                    "{preset:?} custom-message text must contrast with its background"
+                );
+            }
         }
     }
 
@@ -672,15 +680,17 @@ mod tests {
             let manager = ThemeManager::new();
             manager.apply_preset(preset);
             let colors = manager.get().colors;
-            assert_ne!(
-                colors.surface_text,
-                Color::Default,
-                "{preset:?} must not inherit the terminal default on a painted surface"
-            );
-            assert_ne!(
-                colors.surface_text, colors.surface,
-                "{preset:?} surface text must contrast with its surface"
-            );
+            if colors.surface != Color::Default {
+                assert_ne!(
+                    colors.surface_text,
+                    Color::Default,
+                    "{preset:?} must not inherit the terminal default on a painted surface"
+                );
+                assert_ne!(
+                    colors.surface_text, colors.surface,
+                    "{preset:?} surface text must contrast with its surface"
+                );
+            }
         }
     }
 }

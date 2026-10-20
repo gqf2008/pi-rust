@@ -905,6 +905,19 @@ impl Drop for ExitOnUnwind {
 /// mirror `handleEvent`, and dispatch keys from a `spawn_blocking` crossterm
 /// loop (the `TuiAltScreen` start() handler is a stub). Selectors and
 /// autocomplete are layered on via the editor-container swap pattern.
+/// The theme a TUI session starts with. Light is the default; unknown names
+/// (including custom theme files this host does not load) also fall back to it
+/// rather than silently keeping the previous process palette.
+pub(crate) fn theme_preset(name: Option<&str>) -> ThemePreset {
+    match name {
+        Some("dark") => ThemePreset::Dark,
+        Some("light") => ThemePreset::Light,
+        Some("monochrome") => ThemePreset::Monochrome,
+        Some("claude") => ThemePreset::Claude,
+        _ => ThemePreset::Light,
+    }
+}
+
 pub async fn interactive_tui(
     harness: &AgentHarness,
     event_rx: Option<broadcast::Receiver<AgentEvent>>,
@@ -1003,18 +1016,12 @@ pub async fn interactive_tui(
 
     // Apply the saved theme before constructing transcript components. Some
     // components keep styled text, so doing this after the welcome banner left
-    // the first screen in the dark palette until it was rebuilt.
+    // the first screen in the previous palette until it was rebuilt. Light is
+    // the default when no theme is saved (and for an unknown/custom name).
     let theme_manager = Arc::new(ThemeManager::new());
-    if let Some(preset) = match theme {
-        Some("light") => Some(ThemePreset::Light),
-        Some("monochrome") => Some(ThemePreset::Monochrome),
-        Some("claude") => Some(ThemePreset::Claude),
-        Some("dark") => Some(ThemePreset::Dark),
-        _ => None,
-    } {
-        apply_theme_preset(preset);
-        theme_manager.apply_preset(preset);
-    }
+    let preset = theme_preset(theme);
+    apply_theme_preset(preset);
+    theme_manager.apply_preset(preset);
 
     // ---- TUI + containers ----
     let terminal = Box::new(ProcessTerminal::new());

@@ -2951,3 +2951,16 @@ fn a_panicking_key_worker_still_signals_shutdown() {
         "a panicking worker must send Exit, or the main loop waits forever"
     );
 }
+
+#[test]
+fn the_tui_defaults_to_the_light_theme() {
+    use crate::interactive_tui::theme_preset;
+    use kiqi_tui::ThemePreset;
+    assert!(matches!(theme_preset(None), ThemePreset::Light));
+    assert!(matches!(
+        theme_preset(Some("unknown-name")),
+        ThemePreset::Light
+    ));
+    assert!(matches!(theme_preset(Some("dark")), ThemePreset::Dark));
+    assert!(matches!(theme_preset(Some("claude")), ThemePreset::Claude));
+}
