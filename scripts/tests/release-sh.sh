@@ -87,8 +87,11 @@ do
 done
 
 # --- 2. Pushing goes to `fork`, never `origin` ------------------------------
-grep -q '要推送就推 `fork`' "$AGENTS" || {
-    echo "note: AGENTS.md no longer states the push rule; review this test" >&2
+grep -q '日常推送主远端 `walgit`' "$AGENTS" || {
+    echo "note: AGENTS.md no longer states the walgit/fork push model; review this test" >&2
+}
+grep -q '`fork` 只作 GitHub 镜像与发布目标' "$AGENTS" || {
+    echo "note: AGENTS.md no longer names fork as the release mirror; review this test" >&2
 }
 grep -n 'git push origin' "$RELEASE" && {
     echo "FAIL: scripts/release.sh pushes to 'origin', which is bigfish1913/pi-rust" >&2
