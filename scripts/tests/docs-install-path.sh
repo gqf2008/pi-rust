@@ -120,6 +120,57 @@ for rel in $(git ls-files '*.md' 'scripts/install.sh' 'scripts/install.ps1' \
     }
 done
 
+# --- The website catalogue makes the same claims as the docs -----------------
+# The Packages page is a copy-paste surface: every card shows an `install`
+# command and a link, and the counts next to them look like measured data. While
+# nothing is published the page claimed, for nine crates, `cargo install
+# <crate>`, a `crates.io/crates/<crate>` link and a download count. All nine
+# crate names return 404 from crates.io, so the command fails, the link is a
+# missing page, and the counts describe downloads that never happened. The
+# extension cards made the same two claims: `"author": "... / crates.io"` and
+# download counts of 31-102 for names that also return 404.
+#
+# The rule here is deliberately blunt: while nothing is published, the catalogue
+# may not mention crates.io at all, may not tell anyone to `cargo add` (there is
+# nothing to add from), and may only `cargo install` from a local path.
+catalog="$ROOT/website/data/packages.json"
+if [ -f "$catalog" ]; then
+    rel=${catalog#"$ROOT"/}
+    if [ "$published" -eq 0 ]; then
+        grep -n 'crates\.io' "$catalog" >/dev/null && {
+            echo "FAIL: $rel references crates.io, but no crate is published there" >&2
+            grep -n 'crates\.io' "$catalog" | head -5 | sed 's/^/      /' >&2
+            status=1
+        }
+        grep -n '"install"[[:space:]]*:[[:space:]]*"cargo add ' "$catalog" >/dev/null && {
+            echo "FAIL: $rel tells users to 'cargo add' a crate that is not published" >&2
+            status=1
+        }
+        # `cargo install --path` is fine; `cargo install <crate>` is not.
+        if grep -n '"install"[[:space:]]*:[[:space:]]*"cargo install ' "$catalog" \
+            | grep -v '"cargo install --path ' >/dev/null; then
+            echo "FAIL: $rel tells users to 'cargo install' a crate that is not published" >&2
+            grep -n '"install"[[:space:]]*:[[:space:]]*"cargo install ' "$catalog" \
+                | grep -v '"cargo install --path ' | head -5 | sed 's/^/      /' >&2
+            status=1
+        fi
+        # A download count for a crate nobody could download is a fabricated
+        # number. Zero is the honest value while nothing is published.
+        if grep -nE '"downloads"[[:space:]]*:[[:space:]]*[1-9]' "$catalog" >/dev/null; then
+            echo "FAIL: $rel reports downloads for crates that were never published" >&2
+            grep -nE '"downloads"[[:space:]]*:[[:space:]]*[1-9]' "$catalog" | head -5 | sed 's/^/      /' >&2
+            status=1
+        fi
+    fi
+    # NOTE: the catalogue's extension cards say `ki install <name>`, which
+    # resolves through crates.io as well and is equally unexecutable today (the
+    # extension crate names 404 too). That is not checked here because the
+    # replacement depends on a registry decision - which registry those
+    # extensions should be installed from - that this test cannot make. Tracked
+    # separately; see the thread "网站扩展目录的 ki install 同样不可执行".
+    :
+fi
+
 if [ "$status" -eq 0 ]; then
     echo "docs: install instructions match the manifests ($unpublished crates, publish = false)"
 fi
