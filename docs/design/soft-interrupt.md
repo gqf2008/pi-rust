@@ -1,6 +1,6 @@
 # 方案：软中断（Esc 只停当前动作，不终止整轮）
 
-> 状态：**阶段 1、2、3 已全部落地（2026-10-19，`4902ab7` / `3fa2aa7` / `cf7e9c5`+`7e9377f`）**。目标：把 Esc 从“终止整个 run”改为
+> 状态：**阶段 1、2、3、4 已全部落地（2026-10-19/20，`4902ab7` / `3fa2aa7` / `cf7e9c5`+`7e9377f` / §5.4）**。目标：把 Esc 从“终止整个 run”改为
 > “取消当前工具调用/模型流，保留 run 与 steering 队列”，由 LLM 在看到插入消息后
 > 决定停止、收尾还是继续。
 > 关联：`signal-driven-agent.md` §5（MUI 输入）、`plugin-abi.md` §6.38
@@ -120,6 +120,7 @@ UI：
 | 1 | 工具软中断：`InterruptControl` + `AgentLane::interrupt` + 单/双 Esc | **已落地** `f7013cb` + `4902ab7` |
 | 2 | 流软中断：provider token、丢弃半条消息、有排队则续流 | **已落地** 本卡（见 §5.2） |
 | 3 | 审计日志、`InterruptResult` 细化 | **已落地** `cf7e9c5` + `7e9377f`（见 §5.3） |
+| 4 | 持久化结算：丢弃消息的索引撤回 + `Completed` 的 `soft_tail` | **已落地**（见 §5.4） |
 
 阶段 1 先解决最痛的长工具（bash/dispatch）；阶段 2 覆盖“模型正在生成时按 Esc”。
 
@@ -196,6 +197,56 @@ UI：
 
 trace 是纯诊断：无人回读、不参与任何返回值或时序、所有 IO 错误被吞掉、env 未设时只花一次 `OnceLock` 查找。
 
+### 5.4 阶段 4 落地记录（持久化结算）
+
+阶段 2 把被软中断的 assistant 消息从 `context.messages` 与 `new_messages` 里丢掉了，但
+**事件流没有跟着回退**：`MessageStart` 已经发出，`MessageEnd` 仍然会发（TUI 要靠它收尾
+流式块）。据此派生的两个结算侧缺陷在阶段 4 修掉：
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| 结算索引偏移 | `SettleState.seen` 把被丢弃消息的 `MessageStart` 算进去了，而它永远不进入 `new_messages`；此后每条消息的 `MessageEnd` 索引都大 1，run-end 的 `persist_new_messages` 于是重复提交 steering、并跳过真正的最终回答（实测分支变成 `[hello, keep going, keep going]`） | `request_soft_interrupted` 信号里撤回 `seen`，并用 skip latch 吃掉紧随其后的 `MessageEnd` |
+| `no_assistant` 误判 | 若被丢弃的回复是唯一产物，`derive_outcome` 在 `new_messages` 里找不到 assistant，报 `Failed { code: "no_assistant" }`；但软中断按定义是 `Completed` | 结算状态记住被丢弃请求的 terminal message（`soft_tail`），`derive_outcome` 优先用它，报 `Completed` |
+
+| 位置 | 实现 |
+|---|---|
+| `crates/kiqi-agent/src/events.rs` | `AgentEmitter::request_soft_interrupted(message, announced)`：**默认 no-op** 的 trait 方法，不是 `AgentEvent` 变体 |
+| `crates/kiqi-agent/src/agent_loop.rs` | 软分支在四条判定成立后、`pop`/`MessageEnd` 之前调用一次；`announced = added_partial`（是否发过 `MessageStart`） |
+| `crates/kiqi-harness/src/settle.rs` | `note_soft_interrupted`：存 `soft_tail`；`announced` 时 `seen` 饱和减 1 并 arm skip latch；`MessageStart` 清 `soft_tail_pending`；assistant `MessageEnd` 先消费 latch 并返回 `None`（不分配索引、不早提交、不写 `step_attempt`）；`take_soft_tail()` 只在 pending 时返回 |
+| `crates/kiqi-harness/src/agent_harness.rs` | `derive_outcome(..., soft_tail)`：有 tail 就直接 `Completed`（tail 是 provider 的真实 terminal message，**不落盘**，因此“重载后看不到被中断的半条回复”保持不变） |
+
+四条不可回退的判断：
+
+1. **用 trait 方法而不是新 `AgentEvent` 变体。** `AgentEvent` 是插件契约（§5.2 判断 2），
+   而这条信号只有结算观察者关心，且带的是被丢弃的 `AssistantMessage`；加变体会改
+   `kiqi-extensions` 的 `EventTag` 与 `plugin-abi.md`，收益不成比例。代价是**树外
+   emitter 默认收不到**：它只是默认 no-op，不破坏源码兼容；只有负责持久化的观察者
+   （当前仅 `SettlingEmitter`）必须实现，装饰器要像 `try_emit` 一样转发。
+2. **`seen` 的撤回与 skip latch 必须成对。** 只减 `seen` 而不吃掉 `MessageEnd`，
+   该消息仍会按新索引尝试早提交（带工具调用时尤其危险：会提交一条 loop 已经 pop
+   掉的消息）；只吃 `MessageEnd` 而不减 `seen`，后续索引照样偏移。两者缺一，harness
+   的分支文本用例就会失败。
+3. **`soft_tail` 优先于 `new_messages` 里的 assistant。** pending 为真证明它是 run
+   产出的最新事件；否则 TUI 的 reconcile 可能用更早的 tool-call assistant 覆盖掉
+   正在显示的“被中断的回复”。后续 steering 的 `MessageStart` 会清掉 pending，新的
+   回答（或新的软中断 tail）接管。
+4. **`Completed.final_message` 可以是一条 `stop_reason == Aborted` 且不在会话里的
+   消息。** 现有消费者只用它取文本/usage/展示，并按 outcome 枚举分派状态与退出码；
+   把 `final_message` 改成 `Option` 会波及约 30 处匹配，收益不抵成本。`final_entry_id`
+   保持当前 leaf（通常是 prompt/steering 的 user entry），这是 lane 上诚实的答案。
+
+已知相邻缺陷（**本阶段未修**，各自需要独立测试）：
+
+- 帧进度：被丢弃的那条流没有 `ClearStream`，硬 abort/崩溃后的 salvage 仍可能把它
+  捞回历史；并且 `assistant_settled` 只数“早提交的 assistant”，与 recorder 给
+  **每条** assistant 流编号不一致，可能清错流。
+- `seen` 跨 retry attempt 只增不减（`set_attempt` 不重置），失败 attempt 在报错前
+  发过 `MessageStart` 时，接受 attempt 的早提交索引同样会偏移。修法要同时处理已提交
+  的死 tool turn，值得单独一轮。
+- `validate_record_log` 的 `InvalidQueueCancellation` 规则忽略记录顺序：任何被消费并
+  在 settle 提交的 steering 消息都会让整条日志被判“取消的目标后来存在”。与本阶段
+  无关（普通运行即可复现），需要单独修。
+
 ## 6. 开放问题
 
 1. 软中断后**没有**排队消息时：run 继续让 LLM 自行决定，还是直接结束本轮？
@@ -221,3 +272,12 @@ trace 是纯诊断：无人回读、不参与任何返回值或时序、所有 I
   仍被消费。
 - wasm orchestrator：已有 `a_cancelled_wasm_dispatch_returns_immediately`；再补一个
   宿主取消工具 token 的端到端用例（可选）。
+- 阶段 4（`crates/kiqi-agent/tests/soft_interrupt.rs`）：两个流软中断用例各用一个
+  记录型 emitter 断言 `request_soft_interrupted` **恰好一次**，且 `announced`
+  分别为 `true`（有 `Start` 的形状）/ `false`（连接期取消）；删掉 loop 里的调用即失败。
+- 阶段 4（`crates/kiqi-harness/tests/harness_run_e2e.rs`）：
+  `a_soft_interrupted_first_reply_completes_without_an_assistant`（唯一产物被丢时
+  仍是 `Completed`，分支只有 prompt；让 `derive_outcome` 忽略 tail 即退回
+  `no_assistant`）与 `a_soft_interrupted_reply_does_not_shift_the_committed_indices`
+  （软中断期间注入 steering，分支必须恰好是 `[hello, keep going, answer]`；只删
+  `seen` 撤回与 skip latch 即变成 `[hello, keep going, keep going]`）。

@@ -37,7 +37,7 @@
 //! reason this is a deliberate trade rather than an oversight.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
@@ -110,6 +110,18 @@ pub struct SettleState {
     /// settle a crash mid-run would lose the text the model was already given —
     /// while the queue item was already cancelled, making it unrecoverable.
     injected: Mutex<VecDeque<(String, AgentMessage)>>,
+    /// The terminal message of the last **soft-interrupted** provider request.
+    /// The loop drops it from `new_messages`, but it is still the newest thing
+    /// the run produced and the honest `final_message` to report.
+    soft_tail: Mutex<Option<AssistantMessage>>,
+    /// True while `soft_tail` is the newest event: cleared by the next
+    /// `MessageStart`, so a later reply (a steering-driven one, say) wins over
+    /// the stale tail.
+    soft_tail_pending: AtomicBool,
+    /// The `MessageEnd` the loop emits immediately after a *retracted* soft
+    /// message belongs to that message and must neither be index-assigned nor
+    /// committed.
+    skip_next_assistant_end: AtomicBool,
 }
 
 impl SettleState {
@@ -132,7 +144,42 @@ impl SettleState {
             pending_calls: Mutex::new(BTreeMap::new()),
             reserved_results: Mutex::new(BTreeMap::new()),
             injected: Mutex::new(VecDeque::new()),
+            soft_tail: Mutex::new(None),
+            soft_tail_pending: AtomicBool::new(false),
+            skip_next_assistant_end: AtomicBool::new(false),
         }
+    }
+
+    /// Record a soft-interrupted request whose assistant message the loop
+    /// dropped. Called from [`AgentEmitter::request_soft_interrupted`], i.e.
+    /// synchronously, before the loop emits that message's `MessageEnd`.
+    ///
+    /// `announced` means the loop emitted `MessageStart` for it: `seen` was
+    /// advanced for a message that never enters `new_messages`, so retract it,
+    /// and arm the latch that swallows the following `MessageEnd`.
+    pub fn note_soft_interrupted(&self, message: AssistantMessage, announced: bool) {
+        *self.soft_tail.lock().unwrap() = Some(message);
+        self.soft_tail_pending.store(true, Ordering::Release);
+        if announced {
+            // Saturating: a provider that restarts a stream without a terminal
+            // event must not make this underflow.
+            let _ = self
+                .seen
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |seen| {
+                    Some(seen.saturating_sub(1))
+                });
+            self.skip_next_assistant_end.store(true, Ordering::Release);
+        }
+    }
+
+    /// The last soft-interrupted message, if it is still the newest event.
+    ///
+    /// `None` once a later `MessageStart` arrived: that message is history now.
+    pub fn take_soft_tail(&self) -> Option<AssistantMessage> {
+        if !self.soft_tail_pending.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        self.soft_tail.lock().unwrap().take()
     }
 
     /// Register a message the run is about to inject, with the entry id its
@@ -387,12 +434,27 @@ impl SettlingEmitter {
     fn handle(&self, event: &AgentEvent) -> Option<BoxFuture<'static, ()>> {
         match event {
             AgentEvent::MessageStart { .. } => {
+                // A later message makes a previous soft tail stale: it is no
+                // longer the newest thing the run produced.
+                self.state.soft_tail_pending.store(false, Ordering::Release);
                 self.state.seen.fetch_add(1, Ordering::AcqRel);
                 None
             }
             AgentEvent::MessageEnd {
                 message: AgentMessage::Assistant(assistant),
             } => {
+                // The retracted soft-interrupted message. Its `MessageStart` was
+                // undone by `note_soft_interrupted`, and it is not in
+                // `new_messages`, so there is nothing to index or commit — in
+                // particular, a tool call it happened to contain must not be
+                // committed early or get a `step_attempt`.
+                if self
+                    .state
+                    .skip_next_assistant_end
+                    .swap(false, Ordering::AcqRel)
+                {
+                    return None;
+                }
                 // `seen` was advanced by this message's `MessageStart`; the index
                 // of the message that just settled is one less.
                 let index = self.state.seen.load(Ordering::Acquire).saturating_sub(1);
@@ -490,5 +552,19 @@ impl AgentEmitter for SettlingEmitter {
 
     fn try_emit(&self, event: AgentEvent) {
         self.inner.try_emit(event);
+    }
+
+    fn request_soft_interrupted(
+        &self,
+        message: AssistantMessage,
+        announced: bool,
+    ) -> BoxFuture<'static, ()> {
+        // Apply the retraction synchronously: the loop emits the matching
+        // `MessageEnd` right after awaiting this future, and the skip latch must
+        // already be armed by then.
+        self.state.note_soft_interrupted(message.clone(), announced);
+        // Forward like `try_emit`: a decorator must not swallow a signal meant
+        // for an emitter further in.
+        self.inner.request_soft_interrupted(message, announced)
     }
 }

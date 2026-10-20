@@ -129,6 +129,36 @@ pub trait AgentEmitter: Send + Sync {
     /// and must never block (it's called from a `&dyn Fn` closure inside
     /// `execute`). Default impl is a no-op so custom emitters opt in.
     fn try_emit(&self, _event: AgentEvent) {}
+
+    /// Announce that a model request was **soft-interrupted** and its assistant
+    /// message dropped.
+    ///
+    /// Unlike [`emit`](Self::emit) this is not an `AgentEvent`: it is a
+    /// loop → settle-observer contract, not part of the plugin-visible event
+    /// stream (`docs/design/soft-interrupt.md` §5.2 decision #2 keeps the event
+    /// enum unchanged). A settle observer needs it because the dropped message
+    /// leaves the transcript while the loop still emitted `MessageStart` for it;
+    /// without this signal the observer's message index runs one ahead for the
+    /// rest of the run and it tries to commit a message the loop popped.
+    ///
+    /// Contract: called exactly once, after the soft-vs-hard classification
+    /// succeeded and *before* the loop returns `StreamedTurn::SoftInterrupted`.
+    /// `message` is the request's terminal provider message (`stop_reason ==
+    /// Aborted`). `announced` is true iff the loop emitted `MessageStart` for it
+    /// and will emit `MessageEnd` immediately afterwards; an observer that
+    /// counted that `MessageStart` must retract it, and must not index or commit
+    /// the `MessageEnd` that follows.
+    ///
+    /// The default is a no-op so existing emitters stay source-compatible;
+    /// observers that assign indices to messages must implement it. Decorators
+    /// forward it to their inner emitter, like `try_emit`.
+    fn request_soft_interrupted(
+        &self,
+        _message: AssistantMessage,
+        _announced: bool,
+    ) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(async {})
+    }
 }
 
 /// An emitter that fans out to `broadcast::Sender<AgentEvent>` subscribers.

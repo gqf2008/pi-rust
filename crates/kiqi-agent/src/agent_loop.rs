@@ -564,6 +564,14 @@ async fn stream_assistant_response(
         && !config.signal.is_cancelled()
         && config.interrupt.take_soft()
     {
+        // Tell settle observers about the drop *before* the `MessageEnd` below.
+        // They counted this message's `MessageStart` (and will see its
+        // `MessageEnd`), but it never joins `new_messages`, so an index-based
+        // observer has to retract the count and skip the matching end — otherwise
+        // every later message is committed one slot off. A Rust-side signal, not
+        // an `AgentEvent`: the plugin-visible event stream is unchanged.
+        emit.request_soft_interrupted(final_message.clone(), added_partial)
+            .await;
         // A request with no `Start` has no live block: a provider cancelled
         // during connect answers `Error { reason: Aborted }` without ever
         // starting the message (`kiqi-ai`'s mapper takes the same path), so

@@ -3071,13 +3071,28 @@ impl AgentHarness {
     }
 
     /// Derive the harness `RunOutcome` from the terminal assistant message.
+    ///
+    /// `soft_tail` is the terminal message of a request the user soft-interrupted
+    /// after the last thing that settled (see [`crate::settle::SettleState`]).
+    /// The loop dropped it from `new_messages` — it is deliberately not history —
+    /// but it is the newest output, so it wins over an older committed assistant
+    /// and turns an otherwise `no_assistant` run into `Completed`: a soft
+    /// interrupt does not abort the run (`docs/design/soft-interrupt.md` §5.4).
     fn derive_outcome(
         new_messages: &[AgentMessage],
         leaf_id: Option<String>,
         final_entry_id: Option<String>,
+        soft_tail: Option<&AssistantMessage>,
     ) -> HarnessRunOutcome {
         let leaf = leaf_id.unwrap_or_default();
         let final_id = final_entry_id.unwrap_or_default();
+        if let Some(tail) = soft_tail {
+            return HarnessRunOutcome::Completed {
+                leaf_id: leaf,
+                final_entry_id: final_id,
+                final_message: tail.clone(),
+            };
+        }
         // Find the last assistant message.
         let last_assistant = new_messages.iter().rev().find_map(|m| match m {
             AgentMessage::Assistant(a) => Some(a.as_ref()),
@@ -3788,7 +3803,16 @@ impl AgentHarness {
                         );
                     }
                 }
-                let outcome = Self::derive_outcome(&new_messages, leaf.clone(), final_id.clone());
+                // Read after the loop: a pending soft tail proves nothing newer
+                // was produced, so it is the run's terminal output even though it
+                // never entered `new_messages`.
+                let soft_tail = settle_state.take_soft_tail();
+                let outcome = Self::derive_outcome(
+                    &new_messages,
+                    leaf.clone(),
+                    final_id.clone(),
+                    soft_tail.as_ref(),
+                );
                 // The run's messages are durable now, so its frames are no
                 // longer needed as progress. Retiring them here (rather than at
                 // each `MessageEnd`) is what keeps a *failed retry attempt*'s

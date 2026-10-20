@@ -29,14 +29,15 @@
 mod common;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::assistant_tool_calls;
 use kiqi_agent::interrupt::{ActionKind, InterruptControl};
 use kiqi_agent::{AgentContext, AgentEvent, AgentMessage, AgentTool, AgentToolResult};
 use kiqi_ai::types::{
-    AssistantMessageEvent, Content, DoneReason, ErrorReason, Message, StopReason, Tool,
+    AssistantMessage, AssistantMessageEvent, Content, DoneReason, ErrorReason, Message, StopReason,
+    Tool,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -398,6 +399,52 @@ fn role_tag(message: &Message) -> &'static str {
     }
 }
 
+/// Pass-through emitter that records every `request_soft_interrupted` call.
+///
+/// The loop → settle signal is not an `AgentEvent` (soft-interrupt.md §5.2), so
+/// the only way a test can see it is through the trait method. The payload is
+/// the dropped request's terminal message plus whether the loop had announced
+/// it with a `MessageStart`.
+struct SoftRecordingEmitter {
+    inner: Arc<dyn kiqi_agent::AgentEmitter>,
+    calls: Arc<Mutex<Vec<(AssistantMessage, bool)>>>,
+}
+
+impl SoftRecordingEmitter {
+    fn new(inner: Arc<dyn kiqi_agent::AgentEmitter>) -> Self {
+        Self {
+            inner,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn calls(&self) -> Vec<(AssistantMessage, bool)> {
+        self.calls.lock().expect("calls lock").clone()
+    }
+}
+
+impl kiqi_agent::AgentEmitter for SoftRecordingEmitter {
+    fn emit(&self, event: AgentEvent) -> futures::future::BoxFuture<'static, ()> {
+        self.inner.emit(event)
+    }
+
+    fn try_emit(&self, event: AgentEvent) {
+        self.inner.try_emit(event);
+    }
+
+    fn request_soft_interrupted(
+        &self,
+        message: AssistantMessage,
+        announced: bool,
+    ) -> futures::future::BoxFuture<'static, ()> {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push((message.clone(), announced));
+        self.inner.request_soft_interrupted(message, announced)
+    }
+}
+
 /// What `AgentHarness::interrupt()`'s soft arm does, fired as soon as a stream
 /// request is the installed action. Returns the kind the press reached, so the
 /// caller can pin *which* action was installed (`Stream` here, `Tool` for the
@@ -478,7 +525,8 @@ async fn a_stream_soft_interrupt_drops_the_partial_message() {
     };
     let prompt = common::user_message("hello");
     let (collector, events_buf) = kiqi_agent::CollectorEmitter::new();
-    let emit: Arc<dyn kiqi_agent::AgentEmitter> = Arc::new(collector);
+    let recorder = Arc::new(SoftRecordingEmitter::new(Arc::new(collector)));
+    let emit: Arc<dyn kiqi_agent::AgentEmitter> = recorder.clone();
 
     let interrupter = soft_interrupter(&interrupt);
     let run =
@@ -491,6 +539,26 @@ async fn a_stream_soft_interrupt_drops_the_partial_message() {
     );
     let new_messages = run.expect("a soft interrupt resolves Ok, not an error");
     let events = events_buf.lock().expect("events lock").clone();
+
+    // 0. The loop told settle observers exactly once, and the payload is the
+    //    terminal provider message it dropped. `announced` is true because a
+    //    `MessageStart` went out and a `MessageEnd` follows: an index-based
+    //    observer must retract that count and swallow the end.
+    let soft_calls = recorder.calls();
+    assert_eq!(
+        soft_calls.len(),
+        1,
+        "exactly one signal per soft-interrupted request: {soft_calls:?}"
+    );
+    assert!(
+        soft_calls[0].1,
+        "the dropped partial had been announced: {soft_calls:?}"
+    );
+    assert_eq!(
+        soft_calls[0].0.stop_reason,
+        StopReason::Aborted,
+        "the payload is the provider's terminal aborted message: {soft_calls:?}"
+    );
 
     // 1. Nothing finished: the prompt, and no assistant at all.
     assert_eq!(
@@ -742,7 +810,8 @@ async fn a_stream_soft_interrupt_without_a_start_leaves_no_assistant_behind() {
         tools: Vec::new(),
     };
     let (collector, events_buf) = kiqi_agent::CollectorEmitter::new();
-    let emit: Arc<dyn kiqi_agent::AgentEmitter> = Arc::new(collector);
+    let recorder = Arc::new(SoftRecordingEmitter::new(Arc::new(collector)));
+    let emit: Arc<dyn kiqi_agent::AgentEmitter> = recorder.clone();
 
     let new_messages = kiqi_agent::run_agent_loop(
         vec![common::user_message("hello")],
@@ -753,6 +822,25 @@ async fn a_stream_soft_interrupt_without_a_start_leaves_no_assistant_behind() {
     )
     .await
     .expect("the run survives the soft interrupt");
+
+    // Nothing was announced for this shape (cancelled during connect: no
+    // `Start`, no `MessageEnd`), so the signal must say so — otherwise a settle
+    // observer would swallow the *next* assistant `MessageEnd` instead.
+    let soft_calls = recorder.calls();
+    assert_eq!(
+        soft_calls.len(),
+        1,
+        "exactly one signal per soft-interrupted request: {soft_calls:?}"
+    );
+    assert!(
+        !soft_calls[0].1,
+        "the no-`Start` shape announced nothing: {soft_calls:?}"
+    );
+    assert_eq!(
+        soft_calls[0].0.stop_reason,
+        StopReason::Aborted,
+        "the payload is still the provider's terminal message: {soft_calls:?}"
+    );
 
     assert_eq!(
         requests.load(Ordering::SeqCst),

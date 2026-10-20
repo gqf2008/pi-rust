@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use kiqi_agent::interrupt::ActionKind;
 use kiqi_agent::{AgentEmitter, AgentEvent, AgentMessage, CollectorEmitter};
 use kiqi_ai::providers::faux::{faux_assistant_message, FauxProvider, FauxScript, FauxStep};
-use kiqi_ai::types::{UserContent, UserMessage};
+use kiqi_ai::types::{AssistantMessageEvent, ErrorReason, StopReason, UserContent, UserMessage};
 use kiqi_ai::Provider;
 use kiqi_harness::agent_harness::{AgentHarness, AgentLane, HarnessRunOutcome};
 use kiqi_harness::events::{HarnessEvent, RunEndOutcome};
@@ -4647,4 +4647,366 @@ async fn the_skills_listing_reaches_the_provider_without_the_skill_body() {
         !prompt.contains("BODY_MARKER"),
         "progressive loading: the SKILL.md body must not be inlined: {prompt}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Soft interrupt: persistence must survive the message the loop dropped.
+//
+// A soft-interrupted request is *not* history: the loop pops it from the
+// context, never pushes it into `new_messages`, and reports the run as
+// `Completed` (docs/design/soft-interrupt.md §5.2/§5.4). Two harness-side
+// defects used to follow from the events that still went out:
+//
+//   1. settle counted the dropped message's `MessageStart`, so every later
+//      message was committed one index too high at run end (duplicate steering
+//      prompt, skipped final answer);
+//   2. with nothing else produced, `derive_outcome` saw no assistant and
+//      reported `Failed { code: "no_assistant" }` for a run that completed.
+//
+// The fix is an explicit loop → settle signal (`AgentEmitter::
+// request_soft_interrupted`), not a new event.
+// ---------------------------------------------------------------------------
+
+/// Which provider shape the wrapper fakes for the first request only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SoftShape {
+    /// Cancelled while connecting: no `Start`, straight to `Error(Aborted)`.
+    Connect,
+    /// Streams a partial, then waits to be cancelled and reports `Aborted`.
+    Partial,
+}
+
+/// First request: hangs on the signal so the test can press Esc; later requests
+/// delegate to the scripted faux provider (that is the steering-driven re-ask).
+struct SoftInterruptingProvider {
+    inner: Arc<FauxProvider>,
+    shape: SoftShape,
+    /// Notified once the first request is waiting on its cancellation token,
+    /// i.e. after the loop installed it and it is safe to press.
+    ready: Arc<tokio::sync::Notify>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl SoftInterruptingProvider {
+    fn new(shape: SoftShape, inner: Arc<FauxProvider>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            shape,
+            ready: Arc::new(tokio::sync::Notify::new()),
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
+
+    async fn wait_until_waiting(&self) {
+        self.ready.notified().await;
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for SoftInterruptingProvider {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn models(&self) -> &[kiqi_ai::Model] {
+        self.inner.models()
+    }
+
+    async fn stream_simple(
+        &self,
+        model: &kiqi_ai::Model,
+        ctx: &kiqi_ai::types::Context,
+        opts: &kiqi_ai::SimpleStreamOptions,
+    ) -> kiqi_ai::AssistantMessageEventStream {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+            return self.inner.stream_simple(model, ctx, opts).await;
+        }
+
+        let (mut producer, stream) = kiqi_ai::event_stream::create_assistant_message_event_stream();
+        let shape = self.shape;
+        let signal = opts.signal.clone();
+        let ready = Arc::clone(&self.ready);
+        tokio::spawn(async move {
+            if shape == SoftShape::Partial {
+                // A visibly started reply: `Start` opens the live block and a
+                // delta makes it something the settle observer saw announced.
+                let partial = faux_assistant_message("half a thought", StopReason::Pending);
+                producer.push(AssistantMessageEvent::Start {
+                    partial: Arc::new(partial.clone()),
+                });
+                producer.push(AssistantMessageEvent::TextStart {
+                    content_index: 0,
+                    partial: Arc::new(partial.clone()),
+                });
+                producer.push(AssistantMessageEvent::TextDelta {
+                    content_index: 0,
+                    delta: "half a thought".into(),
+                    partial: Arc::new(partial),
+                });
+            }
+            // The loop installs this request before invoking the provider, so
+            // once we are here the press cannot miss it.
+            ready.notify_one();
+            // Safety net: report a plain failure rather than hanging if the
+            // press never lands.
+            match tokio::time::timeout(std::time::Duration::from_secs(5), signal.cancelled()).await
+            {
+                Ok(()) => {
+                    producer.push(AssistantMessageEvent::Error {
+                        reason: ErrorReason::Aborted,
+                        error: faux_assistant_message("half a thought", StopReason::Aborted),
+                    });
+                }
+                Err(_) => {
+                    producer.push(AssistantMessageEvent::Error {
+                        reason: ErrorReason::Error,
+                        error: faux_assistant_message("never cancelled", StopReason::Error),
+                    });
+                }
+            }
+            producer.close();
+        });
+        stream
+    }
+}
+
+/// `harness_with_options` with the provider supplied from outside (the soft
+/// wrapper must be reachable from the test to await its readiness).
+async fn harness_with_provider(provider: Arc<dyn Provider>, model: kiqi_ai::Model) -> AgentHarness {
+    let env = Arc::new(InMemoryExecutionEnv::new());
+    let env_dyn: Arc<dyn kiqi_tools::ExecutionEnv> = env.clone();
+    let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
+    let _registry = Arc::new(MutationQueueRegistry::new());
+    let tool_ctx = ExecutionToolContext::new(env_dyn, Some(mut_env));
+    let tools: Vec<HarnessTool> = vec![create_write_tool(&tool_ctx)]
+        .into_iter()
+        .map(HarnessTool::new)
+        .collect();
+    let active: Vec<String> = tools.iter().map(|t| t.tool.schema().name.clone()).collect();
+    let metadata = SessionMetadata {
+        id: "soft-interrupt".into(),
+        created_at: 0,
+        parent_session_id: None,
+    };
+    let storage = Arc::new(InMemorySessionStorage::new(
+        metadata,
+        Arc::new(SystemClock),
+        Arc::new(DefaultIdGenerator::new()),
+    ));
+    let session = Session::new(storage, None);
+    let options = AgentHarnessOptions {
+        model,
+        thinking_level: Default::default(),
+        active_tool_names: active,
+        tools,
+        system_prompt: None,
+        resources: Default::default(),
+        stream_options: Default::default(),
+        retry: RetryPolicy::default(),
+        compaction: Default::default(),
+        steering_mode: Default::default(),
+        follow_up_mode: Default::default(),
+        tool_execution: Default::default(),
+        drive: Default::default(),
+        session,
+        models: vec![provider],
+        to_provider_messages: None,
+        entry_projectors: Default::default(),
+        agent_emitter: None,
+        before_tool_call: None,
+        after_tool_call: None,
+        transform_context: None,
+        entry_transforms: Vec::new(),
+        provider_hooks: None,
+        allow_existing_session: false,
+    };
+    AgentHarness::create(options).await.expect("create harness")
+}
+
+fn entry_text(entry: &kiqi_harness::session::types::Entry) -> Option<String> {
+    let kiqi_harness::session::types::Entry::Message(message) = entry else {
+        return None;
+    };
+    match &message.message {
+        AgentMessage::User(user) => match &user.content {
+            UserContent::Text(text) => Some(text.clone()),
+            _ => None,
+        },
+        AgentMessage::Assistant(assistant) => Some(
+            assistant
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    kiqi_ai::types::Content::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+async fn branch_texts(harness: &AgentHarness) -> Vec<String> {
+    let leaf = harness
+        .session()
+        .get_leaf_id()
+        .await
+        .unwrap()
+        .expect("leaf present");
+    harness
+        .session()
+        .view("main")
+        .find_entries_on_branch(
+            &EntryQuery {
+                order: Some(EntryOrder::OldestFirst),
+                ..Default::default()
+            },
+            &BranchBounds {
+                start: Some(leaf),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("branch readable")
+        .iter()
+        .filter_map(entry_text)
+        .collect()
+}
+
+/// Defect 2: a run whose only reply was soft-interrupted completed; it did not
+/// fail for lack of an assistant.
+///
+/// Mutation: make `derive_outcome` ignore `soft_tail` and this gets
+/// `Failed { code: "no_assistant" }`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_soft_interrupted_first_reply_completes_without_an_assistant() {
+    let inner = FauxProvider::new(FauxScript::new().with_text("unused"));
+    let provider = SoftInterruptingProvider::new(SoftShape::Connect, Arc::clone(&inner));
+    let model = inner.default_model().clone();
+    let harness = harness_with_provider(provider.clone(), model).await;
+
+    let run = {
+        let harness = harness.clone();
+        tokio::spawn(async move { harness.prompt_text("hello", vec![]).await })
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        provider.wait_until_waiting(),
+    )
+    .await
+    .expect("the first request reached its cancellation wait");
+    assert_eq!(
+        harness.interrupt().await.expect("best effort"),
+        kiqi_harness::agent_harness::InterruptResult::Soft {
+            action: ActionKind::Stream,
+        },
+        "the press reached the in-flight request"
+    );
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("the run finishes")
+        .expect("task joined")
+        .expect("prompt completes");
+
+    match &result.outcome {
+        HarnessRunOutcome::Completed {
+            final_message,
+            final_entry_id,
+            ..
+        } => {
+            assert_eq!(
+                final_message.stop_reason,
+                StopReason::Aborted,
+                "the dropped request's terminal message is the honest final message"
+            );
+            assert!(
+                !final_entry_id.is_empty(),
+                "the prompt entry is the lane leaf and stays the final entry id"
+            );
+        }
+        other => {
+            panic!("a soft interrupt completes the run even with no assistant entry, got {other:?}")
+        }
+    }
+
+    // The dropped message is deliberately not history: the branch is the prompt
+    // alone, so a reload shows no interrupted partial.
+    assert_eq!(
+        branch_texts(&harness).await,
+        vec!["hello".to_string()],
+        "the soft-interrupted reply must not be persisted"
+    );
+}
+
+/// Defect 1: the dropped message must not shift the indices the settle observer
+/// reports, or the run-end pass duplicates the steering prompt and skips the
+/// real answer.
+///
+/// Mutation: keep the signal but drop the `seen` retraction / skip-latch in
+/// `SettleState` and the branch becomes `["hello", "keep going", "keep going"]`
+/// (the injected user committed at index 1 instead of 0, so the run-end pass
+/// re-persists it at 0 and considers the assistant at 1 already committed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_soft_interrupted_reply_does_not_shift_the_committed_indices() {
+    let inner = FauxProvider::new(FauxScript::new().with_text("answer"));
+    let provider = SoftInterruptingProvider::new(SoftShape::Partial, Arc::clone(&inner));
+    let model = inner.default_model().clone();
+    let harness = harness_with_provider(provider.clone(), model).await;
+
+    let run = {
+        let harness = harness.clone();
+        tokio::spawn(async move { harness.prompt_text("hello", vec![]).await })
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        provider.wait_until_waiting(),
+    )
+    .await
+    .expect("the first request reached its cancellation wait");
+
+    // Typed while the reply was streaming: the loop must inject it and re-ask.
+    harness
+        .steer(AgentMessage::User(UserMessage::new(
+            UserContent::Text("keep going".into()),
+            0,
+        )))
+        .await
+        .expect("steer is accepted during a run");
+    assert_eq!(
+        harness.interrupt().await.expect("best effort"),
+        kiqi_harness::agent_harness::InterruptResult::Soft {
+            action: ActionKind::Stream,
+        },
+        "the press reached the in-flight request"
+    );
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .expect("the run finishes")
+        .expect("task joined")
+        .expect("prompt completes");
+    assert!(
+        matches!(result.outcome, HarnessRunOutcome::Completed { .. }),
+        "a soft interrupt is not an abort: {:?}",
+        result.outcome
+    );
+
+    assert_eq!(
+        branch_texts(&harness).await,
+        vec![
+            "hello".to_string(),
+            "keep going".to_string(),
+            "answer".to_string()
+        ],
+        "prompt + injected steering (committed at its own settle) + the answer"
+    );
+
+    // NOTE: `validate_record_log` is deliberately not asserted here. It already
+    // rejects *any* run that consumes a steering message: `settle_injected`
+    // commits the message under the entry id its `queue_enqueued` reserved, and
+    // the reducer's `InvalidQueueCancellation` rule treats a cancel whose target
+    // later exists as corruption (reproduced on a plain, non-soft-interrupted
+    // run). That is a pre-existing validator/design conflict (the rule ignores
+    // record ordering), independent of this fix and out of this change's scope.
 }
