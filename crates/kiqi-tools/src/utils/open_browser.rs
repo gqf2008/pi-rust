@@ -18,7 +18,9 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```no_run
+//! // `no_run`: this example really launches the platform opener. Without it,
+//! // every `cargo test` would open a browser window on the developer's desktop.
 //! use kiqi_tools::utils::open_browser::open_browser;
 //!
 //! // Open a URL in the default browser
@@ -142,6 +144,18 @@ mod tests {
     //     let result = open_browser("https://example.com");
     //     assert!(result.is_ok());
     // }
+
+    #[test]
+    fn the_example_is_compile_only() {
+        // A `rust` (not `no_run`) doctest here executes on every `cargo test`,
+        // which launches the user's browser. Pin the fence so it cannot regress.
+        let source = include_str!("open_browser.rs");
+        assert!(
+            source.contains("```no_run"),
+            "the open_browser example must be `no_run`; an executable doctest \
+             launches a browser on every `cargo test`"
+        );
+    }
 
     #[test]
     fn test_platform_detection() {
