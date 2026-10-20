@@ -11,9 +11,10 @@
 //! tiny, and re-reading makes both an external edit and `/reload` take effect
 //! without a cache to invalidate.
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use kiqi_agent::agent_tool::AgentTool;
@@ -196,6 +197,28 @@ static RULES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// call in the process, so two calls would write the same temp path.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Per-file write generations, bumped by the sanctioned editor (`save`).
+///
+/// A shell call snapshots a policy and later restores it. If a `permissions`
+/// tool call edited the same file in between, restoring the snapshot would undo
+/// that sanctioned edit, so the restore skips any path whose generation changed.
+static POLICY_VERSIONS: Mutex<Option<HashMap<PathBuf, u64>>> = Mutex::new(None);
+
+fn policy_version(path: &Path) -> u64 {
+    POLICY_VERSIONS
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|map| map.get(path).copied()))
+        .unwrap_or(0)
+}
+
+fn bump_policy_version(path: &Path) {
+    if let Ok(mut guard) = POLICY_VERSIONS.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        *map.entry(path.to_path_buf()).or_insert(0) += 1;
+    }
+}
+
 fn write_store_atomically(path: &Path, text: &str) -> Result<(), String> {
     let name = path
         .file_name()
@@ -211,6 +234,7 @@ fn write_store_atomically(path: &Path, text: &str) -> Result<(), String> {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("commit permissions: {error}"));
     }
+    bump_policy_version(path);
     Ok(())
 }
 
@@ -1371,7 +1395,10 @@ fn policy_write_reason(cwd: &Path, tool: &str, args: &Value) -> Option<String> {
         // name, make/npm lifecycle hooks, `git clean -fdx` (`.ki` is
         // gitignored) and PowerShell backtick escaping all get through. The
         // real backstop is sandboxing the shell or restoring the policy after
-        // the call (`after_tool_call`), both larger than this guard.
+        // the call. The host installs a `PolicyGuard` `after_tool_call` hook
+        // (session.rs) that restores any policy changed during a shell call;
+        // that closes the policy-takeover class, though it does not undo the
+        // command's other effects.
         if shell_targets_policy_paths(cwd, command) {
             return Some(denied());
         }
@@ -1575,6 +1602,244 @@ impl AgentTool for PermissionsTool {
         }
         let text = permissions(&self.cwd, &params).map_err(AgentError::Tool)?;
         Ok(AgentToolResult::text(text))
+    }
+}
+
+/// Whether a tool runs an arbitrary shell command.
+///
+/// The post-call policy backstop snapshots the policy around these tools only:
+/// `permissions` is the sanctioned editor, and file tools are already gated by
+/// [`policy_write_reason`].
+pub fn is_shell_tool(tool: &str) -> bool {
+    matches!(tool, "bash" | "powershell")
+}
+
+#[derive(Clone, Debug)]
+enum SavedPolicy {
+    Absent,
+    Content(Vec<u8>, Option<std::fs::Permissions>),
+    Unknown,
+}
+
+/// A snapshot of every policy file the gate can read.
+///
+/// The shell guard is a hand-maintained lexical classifier and cannot cover
+/// every spelling. This is the backstop: capture the policy files before a
+/// shell call, restore any change after it returns, and flag the result. It
+/// does not undo the command's other effects, and a background process that
+/// writes after the call returns is still out of scope.
+#[derive(Clone, Debug)]
+pub struct PolicySnapshot {
+    files: Vec<(PathBuf, SavedPolicy, u64)>,
+}
+
+impl PolicySnapshot {
+    pub fn capture(cwd: &Path) -> Self {
+        Self::capture_paths(policy_paths(cwd))
+    }
+
+    fn capture_paths(paths: Vec<PathBuf>) -> Self {
+        let mut files: Vec<(PathBuf, SavedPolicy, u64)> = Vec::new();
+        for path in paths {
+            if files.iter().any(|(seen, _, _)| seen == &path) {
+                continue;
+            }
+            let state = match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.is_file() || meta.file_type().is_symlink() => {
+                    match std::fs::read(&path) {
+                        Ok(bytes) => SavedPolicy::Content(
+                            bytes,
+                            std::fs::metadata(&path).ok().map(|m| m.permissions()),
+                        ),
+                        Err(_) => SavedPolicy::Unknown,
+                    }
+                }
+                Ok(_) => SavedPolicy::Unknown,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => SavedPolicy::Absent,
+                Err(_) => SavedPolicy::Unknown,
+            };
+            let version = policy_version(&path);
+            files.push((path, state, version));
+        }
+        Self { files }
+    }
+
+    /// Restore every changed path. `Ok(None)` means nothing changed.
+    pub fn restore_if_changed(&self) -> Result<Option<Vec<PathBuf>>, String> {
+        let mut changed = Vec::new();
+        for (path, saved, version) in &self.files {
+            // A sanctioned `permissions` edit after the snapshot wins: restoring
+            // the old bytes would silently undo the user's own change.
+            if policy_version(path) != *version {
+                continue;
+            }
+            if saved_state_matches(path, saved) {
+                continue;
+            }
+            match saved {
+                SavedPolicy::Unknown => continue,
+                SavedPolicy::Absent => match std::fs::symlink_metadata(path) {
+                    Ok(meta) if meta.is_dir() => {
+                        return Err(format!(
+                            "policy path {} became a directory; refusing to remove it",
+                            path.display()
+                        ))
+                    }
+                    Ok(_) => std::fs::remove_file(path).map_err(|error| {
+                        format!("could not remove new policy {}: {error}", path.display())
+                    })?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "could not inspect policy {}: {error}",
+                            path.display()
+                        ))
+                    }
+                },
+                SavedPolicy::Content(bytes, permissions) => {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|error| {
+                            format!("could not recreate {}: {error}", parent.display())
+                        })?;
+                    }
+                    if let Ok(meta) = std::fs::symlink_metadata(path) {
+                        if meta.is_dir() {
+                            return Err(format!(
+                                "policy path {} became a directory; refusing to overwrite it",
+                                path.display()
+                            ));
+                        }
+                        if meta.file_type().is_symlink() {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    }
+                    std::fs::write(path, bytes).map_err(|error| {
+                        format!("could not restore policy {}: {error}", path.display())
+                    })?;
+                    if let Some(permissions) = permissions {
+                        let _ = std::fs::set_permissions(path, permissions.clone());
+                    }
+                }
+            }
+            changed.push(path.clone());
+        }
+        Ok(if changed.is_empty() {
+            None
+        } else {
+            Some(changed)
+        })
+    }
+}
+
+fn saved_state_matches(path: &Path, saved: &SavedPolicy) -> bool {
+    let is_symlink = std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false);
+    match saved {
+        SavedPolicy::Unknown => true,
+        SavedPolicy::Absent => {
+            !is_symlink
+                && std::fs::symlink_metadata(path)
+                    .map(|meta| !meta.is_dir())
+                    .unwrap_or(true)
+                && std::fs::read(path).is_err()
+        }
+        SavedPolicy::Content(bytes, _) => {
+            !is_symlink && std::fs::read(path).ok().as_deref() == Some(bytes.as_slice())
+        }
+    }
+}
+
+/// Snapshots policy files around shell calls so a lexical bypass cannot change
+/// the rules for later calls.
+///
+/// `guarded_before` wraps the host gate; it captures only after the gate allows
+/// a shell call. `after_hook` restores and flags a changed policy. Both share
+/// one map keyed by tool-call id, so parallel calls do not confuse snapshots.
+#[derive(Clone, Default)]
+pub struct PolicyGuard {
+    cwd: PathBuf,
+    snapshots: Arc<Mutex<HashMap<String, PolicySnapshot>>>,
+}
+
+impl PolicyGuard {
+    pub fn new(cwd: PathBuf) -> Self {
+        Self {
+            cwd,
+            snapshots: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn capture(&self, tool_call_id: &str) {
+        let snapshot = PolicySnapshot::capture(&self.cwd);
+        if let Ok(mut map) = self.snapshots.lock() {
+            map.insert(tool_call_id.to_string(), snapshot);
+        }
+    }
+
+    /// Wrap the host gate: capture the policy after it allows a shell call.
+    pub fn guarded_before(&self, inner: kiqi_agent::BeforeToolCall) -> kiqi_agent::BeforeToolCall {
+        let guard = self.clone();
+        Arc::new(
+            move |ctx: kiqi_agent::BeforeToolCallContext<'_>, signal: CancellationToken| {
+                let tool_call_id = ctx.tool_call.id.clone();
+                let tool_name = ctx.tool_call.name.clone();
+                let future = inner(ctx, signal);
+                let guard = guard.clone();
+                Box::pin(async move {
+                    let result = future.await;
+                    let allowed = result.as_ref().is_none_or(|result| !result.block);
+                    if allowed && is_shell_tool(&tool_name) {
+                        guard.capture(&tool_call_id);
+                    }
+                    result
+                })
+            },
+        )
+    }
+
+    /// Verify and restore the policy after a shell call, flagging the result.
+    pub fn after_hook(&self) -> kiqi_agent::AfterToolCall {
+        let guard = self.clone();
+        Arc::new(
+            move |ctx: kiqi_agent::AfterToolCallContext<'_>, _signal: CancellationToken| {
+                let tool_call_id = ctx.tool_call.id.clone();
+                let mut content = ctx.result.content.clone();
+                let snapshot = guard
+                    .snapshots
+                    .lock()
+                    .ok()
+                    .and_then(|mut map| map.remove(&tool_call_id));
+                Box::pin(async move {
+                    let snapshot = snapshot?;
+                    let note = match snapshot.restore_if_changed() {
+                        Ok(None) => return None,
+                        Ok(Some(paths)) => {
+                            let list = paths
+                                .iter()
+                                .map(|path| path.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            format!(
+                                "\n\n[permissions] the shell command modified the policy file(s) \
+                                 {list}; the previous policy was restored. The command's other \
+                                 effects were not undone."
+                            )
+                        }
+                        Err(error) => format!(
+                            "\n\n[permissions] the shell command modified a policy file and the \
+                             restore failed: {error}. The policy may be compromised."
+                        ),
+                    };
+                    content.push(kiqi_agent::types::TextContentOrImage::text(note));
+                    Some(kiqi_agent::AfterToolCallResult {
+                        content: Some(content),
+                        is_error: Some(true),
+                        ..Default::default()
+                    })
+                })
+            },
+        )
     }
 }
 
@@ -2418,6 +2683,165 @@ mod tests {
             "must block: cd && rm -rf .ki/agent"
         );
 
+        std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn policy_snapshot_restores_content_absence_and_new_files() {
+        let dir = temp_dir("policy-snapshot");
+        let local = dir.join(".ki").join("permissions.json");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, b"A").unwrap();
+        let new = dir.join(".pi").join("permissions.json");
+        let snapshot = PolicySnapshot::capture_paths(vec![local.clone(), new.clone()]);
+
+        std::fs::write(&local, b"B").unwrap();
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        std::fs::write(&new, b"NEW").unwrap();
+
+        let changed = snapshot.restore_if_changed().unwrap().expect("changed");
+        assert!(changed.contains(&local));
+        assert!(changed.contains(&new));
+        assert_eq!(std::fs::read(&local).unwrap(), b"A");
+        assert!(!new.exists());
+        assert!(snapshot.restore_if_changed().unwrap().is_none());
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    async fn guarded_call(
+        guard: &PolicyGuard,
+        tool: &str,
+        args: Value,
+    ) -> (
+        kiqi_agent::BeforeToolCall,
+        kiqi_ai::types::ToolCall,
+        kiqi_ai::types::AssistantMessage,
+    ) {
+        let inner: kiqi_agent::BeforeToolCall = Arc::new(|_ctx, _signal| Box::pin(async { None }));
+        let before = guard.guarded_before(inner);
+        let message = kiqi_ai::providers::faux::faux_assistant_message(
+            "policy-guard",
+            kiqi_ai::types::StopReason::ToolUse,
+        );
+        let kiqi_ai::types::Content::ToolCall(call) =
+            kiqi_ai::types::Content::tool_call("policy-guard-call", tool, args)
+        else {
+            unreachable!()
+        };
+        let result = before(
+            kiqi_agent::BeforeToolCallContext {
+                assistant_message: &message,
+                tool_call: &call,
+                args: &call.arguments,
+                context: &kiqi_agent::AgentContext::default(),
+            },
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(result.is_none(), "the inner hook allows the call");
+        (before, call, message)
+    }
+
+    #[tokio::test]
+    async fn a_shell_call_that_rewrites_the_policy_is_restored_and_flagged() {
+        let dir = temp_dir("policy-guard-shell");
+        write_project(&dir, r#"{"permissions":{}}"#);
+        let policy = dir.join(".ki").join("permissions.json");
+        let guard = PolicyGuard::new(dir.clone());
+        let (_before, call, message) =
+            guarded_call(&guard, "bash", json!({"command": "echo hi"})).await;
+
+        // Simulate the shell command rewriting the policy behind the lexical guard.
+        std::fs::write(&policy, r#"{"permissions":{"allow":["*"]}}"#).unwrap();
+
+        let result = AgentToolResult {
+            content: vec![kiqi_agent::types::TextContentOrImage::text("hi")],
+            details: Value::Null,
+            usage: None,
+            added_tool_names: Vec::new(),
+            terminate: false,
+        };
+        let outcome = guard.after_hook()(
+            kiqi_agent::AfterToolCallContext {
+                assistant_message: &message,
+                tool_call: &call,
+                args: &call.arguments,
+                result: &result,
+                is_error: false,
+                context: &kiqi_agent::AgentContext::default(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the changed policy is flagged");
+        assert_eq!(outcome.is_error, Some(true));
+        assert_eq!(
+            std::fs::read(&policy).unwrap(),
+            br#"{"permissions":{}}"#.as_slice()
+        );
+        let text = format!("{:?}", outcome.content.unwrap());
+        assert!(text.contains("[permissions]"), "{text}");
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn the_permissions_editor_is_not_snapshotted() {
+        let dir = temp_dir("policy-guard-editor");
+        write_project(&dir, r#"{"permissions":{}}"#);
+        let policy = dir.join(".ki").join("permissions.json");
+        let guard = PolicyGuard::new(dir.clone());
+        let (_before, call, message) =
+            guarded_call(&guard, "permissions", json!({"action": "list"})).await;
+
+        // The sanctioned editor is allowed to change the file; the backstop must
+        // not flag or restore it.
+        std::fs::write(&policy, r#"{"permissions":{"deny":["Bash(rm *)"]}}"#).unwrap();
+        let result = AgentToolResult {
+            content: vec![kiqi_agent::types::TextContentOrImage::text("ok")],
+            details: Value::Null,
+            usage: None,
+            added_tool_names: Vec::new(),
+            terminate: false,
+        };
+        let outcome = guard.after_hook()(
+            kiqi_agent::AfterToolCallContext {
+                assistant_message: &message,
+                tool_call: &call,
+                args: &call.arguments,
+                result: &result,
+                is_error: false,
+                context: &kiqi_agent::AgentContext::default(),
+            },
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(outcome.is_none(), "the permissions tool is not flagged");
+        assert_eq!(
+            std::fs::read(&policy).unwrap(),
+            br#"{"permissions":{"deny":["Bash(rm *)"]}}"#.as_slice()
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn a_sanctioned_save_wins_over_the_snapshot() {
+        let dir = temp_dir("policy-version");
+        let local = dir.join(".ki").join("permissions.json");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, b"OLD").unwrap();
+        let snapshot = PolicySnapshot::capture_paths(vec![local.clone()]);
+        save(
+            &local,
+            &Rules {
+                allow: vec!["Bash(ls)".into()],
+                deny: Vec::new(),
+            },
+        )
+        .unwrap();
+        let sanctioned = std::fs::read(&local).unwrap();
+        assert!(snapshot.restore_if_changed().unwrap().is_none());
+        assert_eq!(std::fs::read(&local).unwrap(), sanctioned);
         std::fs::remove_dir_all(dir).ok();
     }
 }

@@ -869,12 +869,13 @@ pub async fn build_with_selection(
     // Install the hook even when no plugins loaded yet: a later reload can
     // discover the first permission gate.
     let extension_session_cell = Arc::new(Mutex::new(extension_session.clone()));
-    let before_tool_call = Some(extension_tool_call_hook(
+    let policy_guard = crate::permissions::PolicyGuard::new(cwd.to_path_buf());
+    let before_tool_call = Some(policy_guard.guarded_before(extension_tool_call_hook(
         Arc::clone(&extension_session_cell),
         ui_dialog_mailbox.clone(),
         cwd.to_path_buf(),
         project_trusted,
-    ));
+    )));
 
     let options = AgentHarnessOptions {
         model: resolved.model.clone(),
@@ -931,11 +932,13 @@ pub async fn build_with_selection(
         entry_projectors: Default::default(),
         agent_emitter: Some(emitter),
         // B3b loop hooks. `before_tool_call` dispatches the pi `on("tool_call")`
-        // extension event and honors a veto (a permission gate can block a tool
-        // before it runs). `after_tool_call`/`transform_context` remain `None`
-        // (their host-side adapters are not wired yet).
+        // extension event and honors a veto; the policy guard wraps it and
+        // snapshots the policy files around shell calls. `after_tool_call`
+        // restores a policy changed by a shell command and flags the result —
+        // the lexical guard cannot cover every spelling. `transform_context`
+        // remains `None`.
         before_tool_call,
-        after_tool_call: None,
+        after_tool_call: Some(policy_guard.after_hook()),
         transform_context: None,
         entry_transforms: Vec::new(),
         // Extension provider hooks (B4): plugins subscribing to the

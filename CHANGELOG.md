@@ -25,6 +25,15 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **A shell command can no longer take over the permission policy.** Before a
+  `bash`/`powershell` call the host snapshots every policy file; after the call
+  it restores any change and flags the tool result. The lexical shell guard
+  remains best-effort (variables, interpreters, scripts and background writers
+  can still evade it at the parsing layer), but the restore closes the
+  policy-takeover class for commands that return. A sanctioned `permissions`
+  edit in the same batch bumps the file generation and wins over an older
+  snapshot instead of being silently undone. The restore does not undo the
+  command's other effects.
 - **Esc no longer poisons the rest of an orchestrator run.** The compile-time
   `kiqi-orchestrator` faces kept the run-wide abort set after a cancelled tool
   call. A soft interrupt lets the turn continue, so the next `dispatch`,
