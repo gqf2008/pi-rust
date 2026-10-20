@@ -8,7 +8,7 @@ Install the prebuilt ki binary from GitHub Releases on Windows.
 & .\install.ps1 -Version 0.3.19 -Dir "$env:LOCALAPPDATA\Programs\ki" -DryRun
 .NOTES
 No Rust toolchain or administrator privileges are required. To build from
-source instead, use 'cargo install kiqi-cli'.
+source instead, run 'cargo build --release' in a checkout of this repository.
 #>
 [CmdletBinding()]
 param(
@@ -19,7 +19,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$Repo = 'bigfish1913/pi-rust'
+$Repo = 'gqf2008/pi-rust'
 $TempDir = $null
 $PreviousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
 
@@ -34,7 +34,7 @@ try {
         $Architecture = $env:PROCESSOR_ARCHITEW6432
     }
     if ($Architecture -ne 'AMD64') {
-        throw "No prebuilt binary for Windows architecture '$Architecture'. Build from source with 'cargo install kiqi-cli'."
+        throw "No prebuilt binary for Windows architecture '$Architecture'. Build from source with 'cargo build --release' in a checkout of this repository."
     }
     $Target = 'x86_64-pc-windows-msvc'
 
@@ -50,7 +50,7 @@ try {
         try {
             $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers @{
                 Accept = 'application/vnd.github+json'
-                'User-Agent' = 'kiqi-installer'
+                'User-Agent' = 'ki-installer'
             }
             $Version = $Release.tag_name
         }
@@ -63,7 +63,7 @@ try {
         throw 'Could not determine a valid release version; pass -Version (for example, -Version 0.3.19).'
     }
 
-    $Asset = "kiqi-v$Version-$Target.zip"
+    $Asset = "ki-v$Version-$Target.zip"
     $Url = "https://github.com/$Repo/releases/download/v$Version/$Asset"
 
     if ($DryRun) {
@@ -85,7 +85,7 @@ try {
         Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $ArchivePath
     }
     catch {
-        throw "Could not download $Url. Check that v$Version has a prebuilt binary for $Target at https://github.com/$Repo/releases. Build from source with 'cargo install kiqi-cli'. $($_.Exception.Message)"
+        throw "Could not download $Url. Check that v$Version has a prebuilt binary for $Target at https://github.com/$Repo/releases. Build from source with 'cargo build --release' in a checkout of this repository. $($_.Exception.Message)"
     }
     try {
         Invoke-WebRequest -UseBasicParsing -Uri "$Url.sha256" -OutFile $ChecksumPath

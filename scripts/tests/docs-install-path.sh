@@ -91,8 +91,12 @@ is_exempt_file() {
     return 1
 }
 
+# Install scripts count as user-facing docs: `install.sh --help` prints its own header
+# verbatim, so a stale URL there is a copy-pasteable instruction even though the file
+# is not Markdown. Same for the issue templates (they send users to a repository).
 cd "$ROOT" || exit 1
-for rel in $(git ls-files '*.md' 2>/dev/null); do
+for rel in $(git ls-files '*.md' 'scripts/install.sh' 'scripts/install.ps1' \
+    '.github/ISSUE_TEMPLATE/*.yml' 'website/*.json' 2>/dev/null); do
     is_exempt_file "$rel" && continue
     [ -f "$rel" ] || continue
     grep -n 'bigfish1913/pi-rust' "$rel" \

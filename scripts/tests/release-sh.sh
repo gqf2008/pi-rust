@@ -65,10 +65,16 @@ fi
 # The manifests carry full URLs, so the rename has to reach them too. Their *repo*
 # and *version* are a separate question (see the `release-target-split` card); this
 # checks only the asset-name prefix owned by release-binaries.yml.
+# `scripts/install.{sh,ps1}` belong here too: they build the same asset name, and
+# `install.ps1` carried `kiqi-v$Version-$Target.zip` until 2026-10 — a name that
+# 404s on both repositories, making the Windows install path impossible while the
+# PowerShell twin test passed (it only drove `-DryRun` shapes).
 for manifest in \
     "$ROOT/packaging/homebrew/ki.rb" \
     "$ROOT/packaging/scoop/ki.json" \
-    "$ROOT/packaging/winget/bigfish1913.ki.installer.yaml"
+    "$ROOT/packaging/winget/bigfish1913.ki.installer.yaml" \
+    "$ROOT/scripts/install.sh" \
+    "$ROOT/scripts/install.ps1"
 do
     [ -f "$manifest" ] || continue
     rel=${manifest#"$ROOT"/}

@@ -10,7 +10,7 @@ body:
         contents of `~/.ki/agent/auth.json` — redact them first.
 
         For security vulnerabilities, stop here and follow
-        [SECURITY.md](https://github.com/bigfish1913/pi-rust/blob/main/SECURITY.md)
+        [SECURITY.md](https://github.com/gqf2008/pi-rust/blob/main/SECURITY.md)
         instead of opening a public issue.
 
   - type: dropdown

@@ -48,7 +48,7 @@
           "links": [
             {
               "label": "README / How you build an agent",
-              "url": "https://github.com/bigfish1913/pi-rust#how-you-build-an-agent"
+              "url": "https://github.com/gqf2008/pi-rust#how-you-build-an-agent"
             }
           ]
         },
@@ -58,18 +58,18 @@
           "title": "安装与运行",
           "summary": "Rust 1.78+、Cargo 和 Tokio 是开始使用的最低条件；也可以直接安装 kiqi-cli。",
           "body": [
-            "只想直接使用 CLI 时执行 cargo install kiqi-cli；想研究 Agent loop，再克隆仓库运行 minimal 示例。Cargo workspace 会按依赖顺序编译所有 crate。",
+            "只想直接使用 CLI 时用 scripts/install.sh 取预编译二进制，或克隆仓库后执行 cargo install --path crates/kiqi-cli --force——这些 crate 都没有发布到 crates.io，`cargo install kiqi-cli` 装不到任何东西；想研究 Agent loop，在克隆仓库里运行 minimal 示例。Cargo workspace 会按依赖顺序编译所有 crate。",
             "真实 Provider 的凭据可以通过命令行参数、~/.ki/auth.json、models.json 或环境变量提供。不要把密钥提交进仓库。"
           ],
           "code": {
             "language": "shell",
             "file": "README.md",
-            "content": "# 直接安装 CLI\ncargo install kiqi-cli\nki -p \"hello\"\n\n# 从源码运行示例\ngit clone https://github.com/bigfish1913/pi-rust.git\ncd pi-rust\ncargo run -p minimal"
+            "content": "# 安装 CLI（crate 未发布到 crates.io，需从仓库源码安装）\ngit clone https://github.com/gqf2008/pi-rust.git\ncd pi-rust\ncargo install --path crates/kiqi-cli --force\nki -p \"hello\"\n\n# 不安装，直接跑示例\ncargo run -p minimal"
           },
           "links": [
             {
               "label": "配置说明",
-              "url": "https://github.com/bigfish1913/pi-rust#configuration"
+              "url": "https://github.com/gqf2008/pi-rust#configuration"
             }
           ]
         },
@@ -90,7 +90,7 @@
           "links": [
             {
               "label": "kiqi-agent API",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-agent"
+              "url": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-agent"
             }
           ]
         },
@@ -111,7 +111,7 @@
           "links": [
             {
               "label": "内置工具与 ExecutionEnv",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-tools"
+              "url": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-tools"
             }
           ]
         },
@@ -132,7 +132,7 @@
           "links": [
             {
               "label": "Provider 配置",
-              "url": "https://github.com/bigfish1913/pi-rust#configuration"
+              "url": "https://github.com/gqf2008/pi-rust#configuration"
             }
           ]
         },
@@ -153,7 +153,7 @@
           "links": [
             {
               "label": "Harness 模块",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-harness"
+              "url": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-harness"
             }
           ]
         },
@@ -174,11 +174,11 @@
           "links": [
             {
               "label": "插件 stub",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/examples/plugin-stub"
+              "url": "https://github.com/gqf2008/pi-rust/tree/main/examples/plugin-stub"
             },
             {
               "label": "插件加载器",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-extensions"
+              "url": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-extensions"
             }
           ]
         },
@@ -199,7 +199,7 @@
           "links": [
             {
               "label": "faux provider 源码",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-ai"
+              "url": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-ai"
             }
           ]
         }
@@ -227,7 +227,7 @@
           "links": [
             {
               "label": "Workspace README",
-              "url": "https://github.com/bigfish1913/pi-rust#crates-published-as-kiqi-"
+              "url": "https://github.com/gqf2008/pi-rust#crates-published-as-kiqi-"
             }
           ]
         },
@@ -248,7 +248,7 @@
           "links": [
             {
               "label": "kiqi-ai exports",
-              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/kiqi-ai/src/lib.rs"
+              "url": "https://github.com/gqf2008/pi-rust/blob/main/crates/kiqi-ai/src/lib.rs"
             }
           ]
         },
@@ -269,7 +269,7 @@
           "links": [
             {
               "label": "kiqi-agent exports",
-              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/kiqi-agent/src/lib.rs"
+              "url": "https://github.com/gqf2008/pi-rust/blob/main/crates/kiqi-agent/src/lib.rs"
             }
           ]
         },
@@ -290,7 +290,7 @@
           "links": [
             {
               "label": "ExecutionEnv API",
-              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/kiqi-tools/src/lib.rs"
+              "url": "https://github.com/gqf2008/pi-rust/blob/main/crates/kiqi-tools/src/lib.rs"
             }
           ]
         },
@@ -311,7 +311,7 @@
           "links": [
             {
               "label": "Harness modules",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-harness"
+              "url": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-harness"
             }
           ]
         },
@@ -332,7 +332,7 @@
           "links": [
             {
               "label": "Agent loop",
-              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/kiqi-agent/src/lib.rs"
+              "url": "https://github.com/gqf2008/pi-rust/blob/main/crates/kiqi-agent/src/lib.rs"
             }
           ]
         },
@@ -353,7 +353,7 @@
           "links": [
             {
               "label": "AI event types",
-              "url": "https://github.com/bigfish1913/pi-rust/blob/main/crates/kiqi-ai/src/lib.rs"
+              "url": "https://github.com/gqf2008/pi-rust/blob/main/crates/kiqi-ai/src/lib.rs"
             }
           ]
         },
@@ -374,11 +374,11 @@
           "links": [
             {
               "label": "SDK crate",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-plugin-sdk"
+              "url": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-plugin-sdk"
             },
             {
               "label": "ABI smoke test",
-              "url": "https://github.com/bigfish1913/pi-rust/tree/main/crates/kiqi-extensions/tests"
+              "url": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-extensions/tests"
             }
           ]
         }

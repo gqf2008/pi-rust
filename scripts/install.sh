@@ -6,7 +6,7 @@
 # `ki` to /usr/local/bin and verifies without contacting Apple. This script
 # keeps using the tarball because it does not require sudo.
 #
-#   curl -fsSL https://raw.githubusercontent.com/bigfish1913/pi-rust/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/gqf2008/pi-rust/main/scripts/install.sh | sh
 #
 # Options (pass after `sh -s --`, or export as env vars):
 #   --version <v>     Install a specific version, e.g. --version 0.3.0 (default: latest)

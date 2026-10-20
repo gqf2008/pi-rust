@@ -465,7 +465,7 @@
                 "Provide real Provider credentials through CLI flags, ~/.ki/auth.json, models.json or environment variables. Never commit secrets."
               ],
               "code": {
-                "content": "# Install the CLI\ncargo install kiqi-cli\nki -p \"hello\"\n\n# Run the example from source\ngit clone https://github.com/bigfish1913/pi-rust.git\ncd pi-rust\ncargo run -p minimal"
+                "content": "# Install the CLI\ncargo install kiqi-cli\nki -p \"hello\"\n\n# Run the example from source\ngit clone https://github.com/gqf2008/pi-rust.git\ncd pi-rust\ncargo run -p minimal"
               },
               "links": [
                 "Configuration"
