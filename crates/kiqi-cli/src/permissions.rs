@@ -1471,7 +1471,9 @@ fn policy_write_reason(cwd: &Path, tool: &str, args: &Value) -> Option<String> {
         // the call. The host installs a `PolicyGuard` `after_tool_call` hook
         // (session.rs) that restores any policy changed during a shell call;
         // that closes the policy-takeover class, though it does not undo the
-        // command's other effects.
+        // command's other effects. A background writer after the last call (or
+        // between sessions) needs an OS sandbox; see
+        // `docs/design/policy-sandbox.md`.
         if shell_targets_policy_paths(cwd, command) {
             return Some(denied());
         }
