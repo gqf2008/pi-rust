@@ -97,9 +97,16 @@ impl KiHttpClient {
         // HTTP(S)_PROXY/ALL_PROXY must not route ki's MCP connection through a
         // proxy (which also makes the offline e2e tests proxy-env hermetic).
         let loopback = parsed.host_str().is_some_and(|host| {
+            // `Url::host_str` serializes an IPv6 literal with brackets
+            // (`[::1]`), which `IpAddr::from_str` rejects; strip them before
+            // parsing so an IPv6 loopback endpoint also bypasses the proxy.
+            let bare = host
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(host);
             host.eq_ignore_ascii_case("localhost")
                 || host.ends_with(".localhost")
-                || host
+                || bare
                     .parse::<std::net::IpAddr>()
                     .is_ok_and(|ip| ip.is_loopback())
         });

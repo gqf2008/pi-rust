@@ -89,6 +89,12 @@ const ACCEPTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-
 /// server broke. Bounded: a chatty server must not grow ki's memory.
 const STDERR_TAIL_LINES: usize = 40;
 
+/// The most bytes kept from a single stderr line. A progress bar written with
+/// `\r` and no `\n` is one unbounded "line"; the tail deque bounds the number
+/// of lines, not their size, so one such line would otherwise grow without
+/// limit and then be copied into every decorated error.
+const STDERR_LINE_MAX_BYTES: usize = 16 * 1024;
+
 /// `tools/list` pagination guards. A server that repeats a cursor or never
 /// terminates would otherwise spin forever during session build.
 const MAX_TOOL_PAGES: usize = 100;
@@ -791,6 +797,22 @@ impl ServerHandle {
         if already {
             return Ok(());
         }
+        // A model `watch_resource start` on a URI the user configured must not
+        // downgrade it: on a fresh connection `already` is false (the URI still
+        // has to be re-subscribed on the new session), and rotating with
+        // `Model` here would let a later model stop pass the "config watches
+        // are not removable" guard.
+        let existing_origin = self
+            .shared
+            .subscriptions
+            .lock()
+            .unwrap()
+            .get(uri)
+            .map(|entry| entry.origin);
+        let origin = match existing_origin {
+            Some(SubscriptionOrigin::Config) => SubscriptionOrigin::Config,
+            _ => origin,
+        };
         if origin == SubscriptionOrigin::Model {
             let model_count = self
                 .shared
@@ -2135,16 +2157,67 @@ fn signal_process_group(_server: &str, _client: &Client, _pgid: u32) {}
 
 /// Drain a child's stderr into the bounded tail buffer. Continuous draining is
 /// required regardless — a full pipe would block the server.
+///
+/// Reads bytes, not lines: `BufReader::lines` yields `Err(InvalidData)` on the
+/// first non-UTF-8 byte and the loop then exits, leaving the pipe undrained
+/// (the server blocks or gets EPIPE on its next write). Every chunk is decoded
+/// lossily instead, and a newline-less line is capped rather than accumulated.
 fn spawn_stderr_drain(stderr: tokio::process::ChildStderr, tail: Arc<Mutex<VecDeque<String>>>) {
     tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt;
-        let mut lines = tokio::io::BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        use tokio::io::AsyncReadExt;
+        let mut reader = stderr;
+        let mut chunk = [0u8; 8192];
+        let mut pending: Vec<u8> = Vec::new();
+        let push = |text: String| {
             let mut guard = tail.lock().unwrap();
             if guard.len() >= STDERR_TAIL_LINES {
                 guard.pop_front();
             }
-            guard.push_back(line);
+            guard.push_back(text);
+        };
+        // Truncate to a UTF-8 boundary so `String::truncate` cannot panic.
+        let bounded = |text: &mut String| {
+            let mut end = STDERR_LINE_MAX_BYTES.min(text.len());
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            text.push_str("…[truncated]");
+        };
+        loop {
+            let read = match reader.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            pending.extend_from_slice(&chunk[..read]);
+            while let Some(pos) = pending.iter().position(|&byte| byte == b'\n') {
+                let line: Vec<u8> = pending.drain(..=pos).collect();
+                let mut text = String::from_utf8_lossy(&line[..line.len() - 1]).into_owned();
+                if text.ends_with('\r') {
+                    text.pop();
+                }
+                if text.len() > STDERR_LINE_MAX_BYTES {
+                    bounded(&mut text);
+                }
+                push(text);
+            }
+            if pending.len() > STDERR_LINE_MAX_BYTES {
+                let mut text = String::from_utf8_lossy(&pending).into_owned();
+                pending.clear();
+                bounded(&mut text);
+                push(text);
+            }
+        }
+        if !pending.is_empty() {
+            let mut text = String::from_utf8_lossy(&pending).into_owned();
+            if text.ends_with('\r') {
+                text.pop();
+            }
+            if text.len() > STDERR_LINE_MAX_BYTES {
+                bounded(&mut text);
+            }
+            push(text);
         }
     });
 }
