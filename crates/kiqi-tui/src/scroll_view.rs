@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use super::component::Component;
 use super::layout_node::{LayoutNode, LayoutNodeProvider, ScrollNode};
+use crate::ansi::{slice_by_column, visible_width};
 
 /// Follow mode for ScrollView.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -390,7 +391,10 @@ impl ScrollView {
             None
         };
         let all_lines = cached.map(|cache| cache.lines).unwrap_or_else(|| {
-            let lines = Arc::new(self.child.render(content_width));
+            let lines = Arc::new(fit_lines_to_width(
+                self.child.render(content_width),
+                content_width,
+            ));
             if let Ok(mut cache) = self.render_cache.lock() {
                 *cache = Some(ScrollRenderCache {
                     content_width,
@@ -457,6 +461,44 @@ impl ScrollView {
     pub fn scrollbar_style(&self, text: &str) -> String {
         format!("\x1b[100m{}\x1b[49m", text)
     }
+}
+
+/// Guarantee that no rendered row is wider than the viewport.
+///
+/// A component that under-measures a line (wide CJK graphemes, ANSI styling,
+/// hyperlinks, or simply a missed wrap) returns a row wider than the terminal.
+/// The terminal then auto-wraps that row, the cursor advances one extra line,
+/// and every row after it — including the docked editor and footer — lands one
+/// line lower. Wrapping here, at the one place that hands lines to the screen,
+/// keeps the layout stable for every child component.
+fn fit_lines_to_width(lines: Vec<String>, width: usize) -> Vec<String> {
+    if width == 0 {
+        return lines;
+    }
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        // Image protocols paint outside the cell grid; slicing them would
+        // corrupt the payload rather than wrap it.
+        if line.contains("\x1b_G") || line.contains("\x1b]1337;File=") {
+            out.push(line);
+            continue;
+        }
+        let total = visible_width(&line);
+        if total <= width {
+            out.push(line);
+            continue;
+        }
+        let mut col = 0;
+        while col < total {
+            let chunk = slice_by_column(&line, col, width, true);
+            if chunk.is_empty() {
+                break;
+            }
+            out.push(chunk);
+            col += width;
+        }
+    }
+    out
 }
 
 impl Component for ScrollView {
@@ -637,5 +679,49 @@ mod scroll_tests {
         sv.scroll_to_start();
 
         assert!(sv.is_following_end());
+    }
+}
+
+#[cfg(test)]
+mod width_fit_tests {
+    use super::*;
+    use crate::ansi::visible_width;
+    use std::any::Any;
+
+    struct RawLines(Vec<String>);
+
+    impl Component for RawLines {
+        fn render(&self, _width: usize) -> Vec<String> {
+            self.0.clone()
+        }
+        fn invalidate(&self) {}
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// A child that under-measures a row (wide CJK, a long token, or a
+    /// hyperlink) must not make the terminal wrap it: that extra row shifts the
+    /// docked editor and footer by one line. The viewport clamps every row.
+    #[test]
+    fn overlong_rows_are_wrapped_to_the_viewport_width() {
+        let child = Arc::new(RawLines(vec![
+            "你好世界你好世界".to_string(),
+            "x".repeat(23),
+            "\x1b]8;;https://example.com\x07hello world\x1b]8;;\x07".to_string(),
+            "short".to_string(),
+        ]));
+        let sv = ScrollView::simple(child);
+        let out = sv.render_with_viewport(8, 20);
+        for line in &out {
+            assert!(
+                visible_width(line) <= 8,
+                "row exceeds viewport width: {line:?}"
+            );
+        }
+        assert!(
+            sv.content_height() > 4,
+            "wrapped continuation rows must count toward content height"
+        );
     }
 }

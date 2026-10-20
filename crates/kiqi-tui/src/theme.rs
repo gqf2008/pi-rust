@@ -445,6 +445,61 @@ fn theme_for_preset(preset: ThemePreset) -> Theme {
                 ..Default::default()
             }
         }
+        ThemePreset::Claude => {
+            let mut colors = ThemeColors::default();
+            let accent = Color::Rgb(215, 119, 87); // Claude orange (#d97757)
+            let muted = Color::Ansi256(245); // #8a8a8a
+            let border = Color::Ansi256(240); // #585858 neutral gray
+            let text = Color::Rgb(229, 229, 229);
+            colors.text = Color::Default;
+            colors.muted = muted;
+            colors.dim = Color::Ansi256(240);
+            colors.accent = accent;
+            colors.error = Color::Rgb(229, 83, 75);
+            colors.success = Color::Rgb(78, 186, 101);
+            colors.warning = Color::Rgb(210, 153, 34);
+            colors.info = Color::Rgb(88, 166, 255);
+            colors.surface = Color::Rgb(38, 38, 38);
+            colors.surface_text = text;
+            colors.border = border;
+            colors.border_accent = accent;
+            colors.border_muted = Color::Ansi256(237);
+            colors.selection = Color::Ansi256(238);
+            colors.cursor = accent;
+            colors.thinking_text = Color::Ansi256(243);
+
+            colors.md_heading = text;
+            colors.md_link = Color::Rgb(88, 166, 255);
+            colors.md_link_url = muted;
+            colors.md_code = text;
+            colors.md_code_bg = Color::Rgb(45, 45, 45);
+            colors.md_code_block = Color::Rgb(212, 212, 212);
+            colors.md_code_block_bg = Color::Rgb(30, 30, 30);
+            colors.md_code_block_border = border;
+            colors.md_quote = muted;
+            colors.md_quote_border = border;
+            colors.md_hr = border;
+            colors.md_list_bullet = muted;
+
+            colors.tool_pending_bg = Color::Rgb(30, 30, 30);
+            colors.tool_success_bg = Color::Rgb(28, 38, 30);
+            colors.tool_error_bg = Color::Rgb(45, 28, 30);
+            colors.tool_title = Color::Default;
+            colors.tool_output = muted;
+            colors.bash_mode = colors.success;
+
+            colors.custom_message_bg = Color::Rgb(38, 38, 38);
+            colors.custom_message_label = accent;
+            colors.custom_message_text = text;
+
+            colors.tool_diff_added = colors.success;
+            colors.tool_diff_removed = colors.error;
+            colors.tool_diff_context = muted;
+            Theme {
+                colors,
+                ..Theme::default()
+            }
+        }
         ThemePreset::Monochrome => {
             let mut colors = ThemeColors::default();
             for f in [
@@ -507,6 +562,9 @@ pub enum ThemePreset {
     Dark,
     Light,
     Monochrome,
+    /// Claude Code-style palette: orange accent, neutral gray borders,
+    /// near-white body text, blue links.
+    Claude,
 }
 
 /// Global theme helper functions.
@@ -549,6 +607,15 @@ mod tests {
     }
 
     #[test]
+    fn claude_preset_uses_an_orange_accent_and_neutral_border() {
+        let theme = theme_for_preset(ThemePreset::Claude);
+        assert_eq!(theme.colors.accent, Color::Rgb(215, 119, 87));
+        assert_eq!(theme.colors.border, Color::Ansi256(240));
+        assert_eq!(theme.colors.md_link, Color::Rgb(88, 166, 255));
+        assert_eq!(theme.colors.surface_text, Color::Rgb(229, 229, 229));
+    }
+
+    #[test]
     fn test_theme_manager() {
         let manager = ThemeManager::new();
         manager.apply_preset(ThemePreset::Dark);
@@ -575,6 +642,7 @@ mod tests {
             ThemePreset::Dark,
             ThemePreset::Light,
             ThemePreset::Monochrome,
+            ThemePreset::Claude,
         ] {
             let manager = ThemeManager::new();
             manager.apply_preset(preset);
@@ -599,6 +667,7 @@ mod tests {
             ThemePreset::Dark,
             ThemePreset::Light,
             ThemePreset::Monochrome,
+            ThemePreset::Claude,
         ] {
             let manager = ThemeManager::new();
             manager.apply_preset(preset);

@@ -1008,6 +1008,7 @@ pub async fn interactive_tui(
     if let Some(preset) = match theme {
         Some("light") => Some(ThemePreset::Light),
         Some("monochrome") => Some(ThemePreset::Monochrome),
+        Some("claude") => Some(ThemePreset::Claude),
         Some("dark") => Some(ThemePreset::Dark),
         _ => None,
     } {

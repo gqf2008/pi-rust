@@ -13,6 +13,12 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **A `claude` theme preset matches Claude Code's palette.** `/theme claude`
+  (or `"theme": "claude"` in settings) uses Claude's orange accent
+  (`#d97757`), neutral gray borders instead of the teal/blue pi palette,
+  near-white body text and blue links. The existing `dark`/`light`/
+  `monochrome` presets are unchanged, so the faithful pi default stays
+  available.
 - **The declared minimum Rust version is now 1.96** (`rust-version` in
   `[workspace.package]`), up from a 1.78 that the workspace could no longer build
   against. `wasmtime 49` (via `kiqi-plugin-host`) pulls
@@ -25,6 +31,12 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **A wide transcript row can no longer shift the input area.** Rendering now
+  wraps every transcript row to the viewport width at the scroll-view
+  boundary (wide CJK graphemes, long unbroken tokens, ANSI styling and OSC-8
+  hyperlinks included). Previously a component that under-measured one row let
+  the terminal auto-wrap it, which advanced the cursor one extra line and moved
+  the docked editor and footer down.
 - **On macOS a shell command can no longer rewrite the permission policy after
   it returns.** The lexical guard and the post-call restore could not stop
   `some-daemon &` from changing `.ki/permissions.json` after the last tool call

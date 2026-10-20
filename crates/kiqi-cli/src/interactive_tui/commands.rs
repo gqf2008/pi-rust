@@ -295,11 +295,14 @@ impl SlashCommand for ThemeCommand {
             let preset = match name.as_str() {
                 "light" => ThemePreset::Light,
                 "monochrome" => ThemePreset::Monochrome,
+                "claude" => ThemePreset::Claude,
                 "dark" => ThemePreset::Dark,
                 _ => {
                     add_error_message(
                         &ctx.chat,
-                        &format!("Unknown theme \"{name}\". Valid: dark, light, monochrome."),
+                        &format!(
+                            "Unknown theme \"{name}\". Valid: dark, light, monochrome, claude."
+                        ),
                     );
                     ctx.tui.request_render(false);
                     return;

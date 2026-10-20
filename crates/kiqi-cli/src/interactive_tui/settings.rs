@@ -406,6 +406,7 @@ pub(super) fn open_settings_theme_selector(
         let preset = match item.value.as_str() {
             "light" => Some(ThemePreset::Light),
             "monochrome" => Some(ThemePreset::Monochrome),
+            "claude" => Some(ThemePreset::Claude),
             "dark" => Some(ThemePreset::Dark),
             name => {
                 add_error_message(&chat_sel, &format!("Unknown theme `{name}`."));

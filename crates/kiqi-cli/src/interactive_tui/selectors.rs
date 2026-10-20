@@ -458,6 +458,8 @@ pub(super) fn open_theme_selector(
         SelectItem::new("dark", "Dark").with_description("Default dark theme"),
         SelectItem::new("light", "Light").with_description("Light background"),
         SelectItem::new("monochrome", "Monochrome").with_description("No color accents"),
+        SelectItem::new("claude", "Claude")
+            .with_description("Claude Code palette: orange accent, neutral gray"),
     ];
     let list = Arc::new(SelectList::new(items, 10));
 
@@ -470,6 +472,7 @@ pub(super) fn open_theme_selector(
         let preset = match item.value.as_str() {
             "light" => Some(ThemePreset::Light),
             "monochrome" => Some(ThemePreset::Monochrome),
+            "claude" => Some(ThemePreset::Claude),
             "dark" => Some(ThemePreset::Dark),
             name => {
                 add_error_message(&chat_sel, &format!("Unknown theme `{name}`."));
