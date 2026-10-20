@@ -29,9 +29,11 @@ impl Control {
         if let Some(flag) = &self.linked {
             if flag.load(Ordering::Acquire) {
                 // Latch: once a parent's abort is observed it must not be
-                // un-observed. The run-start reset clears `HOST_ABORT` for the
-                // *next* run; a node of the aborted run that had not polled yet
-                // stays cancelled instead of resuming under the new run.
+                // un-observed. The call-start reset (`begin_tool_call`) clears
+                // `HOST_ABORT` for the *next* call; a node of the aborted call
+                // that had not polled yet is cancelled outright at that
+                // boundary or stays cancelled here — it never resumes under the
+                // new call.
                 self.primary.store(true, Ordering::Release);
                 return true;
             }
@@ -79,7 +81,7 @@ impl Control {
 mod tests {
     use super::*;
 
-    /// A node that had not polled yet when the run-start reset cleared the
+    /// A node that had not polled yet when the call-start reset cleared the
     /// parent flag must still stay cancelled once it DID observe the abort —
     /// the observation latches into the child's own flag.
     #[test]

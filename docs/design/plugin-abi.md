@@ -933,8 +933,10 @@ interface proc {
   `false`。探针由 kiqi-cli 的 `HarnessCancel`（工具执行的 `CancellationToken`）
   提供。
 - **guest**：`kiqi-orchestrator-guest` 的 `dispatch` 在启动前和每轮 wave 轮询时
-  检查；命中后 `fail_remaining("cancelled by the host")` 杀掉仍存的子进程并返回。
-  宿主在调用返回时仍会统一收尸，这条只是让长等待提前结束。
+  检查；`subagent` 在 spawn 前、以及每个读 slice（`POLL_SLICE_MS = 100`）前检查。
+  命中后杀掉仍存的子进程并返回 `cancelled by the host`（`dispatch` 走
+  `fail_remaining`）。宿主在调用返回时仍会统一收尸，这条只是让长等待提前结束 —
+  单次 `subagent` 因此不再等满 `timeoutSeconds`（默认 300 s）而占着插件的调用锁。
 - **兼容性**：这是宿主提供的**新增导入**，旧 guest 不引用它，仍按 0.7.1 实例化；
   因此包版本不抬，避免让所有已安装 guest 一起失效。
 - **构建**：`plugins/wasm/kiqi-plugin-guest/build.rs` 增加

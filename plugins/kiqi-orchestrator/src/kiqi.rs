@@ -119,6 +119,10 @@ fn run_builder(
     caps: &HostCaps<'_>,
     sink: &dyn ProgressSink,
 ) -> Result<Result<String, String>, PluginError> {
+    // Every tool call starts clean: consume an abort left behind by the previous
+    // call (and latch it onto that call's unobserved background nodes) before
+    // this call creates any node token.
+    crate::begin_tool_call();
     let (tx, rx) = mpsc::channel::<Update>();
     let control = Control::default();
     let worker = {
@@ -228,6 +232,12 @@ mod tests {
 
     #[test]
     fn an_unknown_tool_is_an_error_and_validation_happens_before_spawning() {
+        // This test reaches `run_builder`, which now consumes the run-wide
+        // abort; without the guard it could clear the flag between another
+        // test's cancelled call and that test's assertion.
+        let _guard = crate::tests::ABORT_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let plugin = OrchestratorPlugin::new();
         let log = TestLog;
         let caps = HostCaps::observer(&log);
@@ -267,6 +277,78 @@ mod tests {
         assert_eq!(result, "cancelled");
         // And the run-wide abort flipped with it (background nodes die too).
         assert!(crate::host_abort_flag().load(Ordering::SeqCst));
+    }
+
+    /// A builder whose node token reports whether it was born cancelled —
+    /// exactly what `dispatch`/`subagent`/`plan` do when they create a node.
+    fn liveness_builder(
+        _params: &Value,
+        _control: &Control,
+        _progress: &crate::kit::Progress,
+    ) -> Result<String, String> {
+        let node = crate::node_control();
+        Ok(crate::kit::content_only(if node.is_cancelled() {
+            "born-cancelled"
+        } else {
+            "live"
+        }))
+    }
+
+    /// The reported bug: Esc during one tool call left the run-wide abort set,
+    /// and the next call's node tokens were born cancelled (so a following
+    /// `dispatch` failed without starting anything).
+    #[test]
+    fn a_new_call_does_not_inherit_the_previous_calls_abort() {
+        let _guard = crate::tests::ABORT_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::running()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        crate::host_abort_flag().store(true, Ordering::SeqCst);
+
+        let log = TestLog;
+        let caps = HostCaps::observer(&log);
+        let result = run_builder(liveness_builder, &Value::Null, &caps, &NoProgress)
+            .expect("the worker itself is fine")
+            .expect("the builder returns");
+        assert!(
+            result.contains("live"),
+            "a call that starts after an aborted call must create live nodes: {result}"
+        );
+        assert!(
+            !crate::host_abort_flag().load(Ordering::SeqCst),
+            "the new call consumed the previous abort"
+        );
+    }
+
+    /// Consuming the abort must not orphan a background node that had not
+    /// polled yet: it is latched cancelled at the call boundary.
+    #[test]
+    fn the_next_call_latches_the_previous_aborts_running_nodes() {
+        let _guard = crate::tests::ABORT_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let background = Control::default();
+        {
+            let mut map = crate::running().lock().unwrap_or_else(|p| p.into_inner());
+            map.clear();
+            map.insert("aborted-bg".to_string(), background.clone());
+        }
+        crate::host_abort_flag().store(true, Ordering::SeqCst);
+
+        crate::begin_tool_call();
+
+        assert!(
+            background.is_cancelled(),
+            "a still-registered node of the aborted call is cancelled outright"
+        );
+        assert!(!crate::host_abort_flag().load(Ordering::SeqCst));
+        crate::running()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
     }
 
     #[test]

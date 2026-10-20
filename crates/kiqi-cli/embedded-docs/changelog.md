@@ -25,6 +25,17 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **Esc no longer poisons the rest of an orchestrator run.** The compile-time
+  `kiqi-orchestrator` faces kept the run-wide abort set after a cancelled tool
+  call. A soft interrupt lets the turn continue, so the next `dispatch`,
+  `subagent` or `plan` call created node tokens that were born cancelled and
+  failed without starting anything. The abort is now consumed at the start of
+  every tool call (and at run start), latching it onto any still-registered
+  background node first so a pending node is killed rather than orphaned. The
+  wasm guest's `subagent` also polls `proc.cancel-requested` before spawning and
+  while its child runs, so a cancelled call kills the child and returns instead
+  of waiting out `timeoutSeconds` (default 300 s) while holding the plugin's
+  call mutex.
 - **The release pipeline no longer targets the unrelated fork.**
   `release.sh`, `refresh-channels.sh`, the Homebrew/Scoop/winget manifests, the
   website and the user docs now point at `gqf2008/pi-rust`;

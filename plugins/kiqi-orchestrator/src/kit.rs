@@ -120,6 +120,9 @@ macro_rules! tool_entry {
             ) -> StepHandle {
                 let text = params.to_string_lossy();
                 params.free_with(free);
+                // A call boundary: consume the previous call's run-wide abort so
+                // this call's node tokens are not born cancelled.
+                $crate::begin_tool_call();
                 let control = Control::default();
                 let worker_control = control.clone();
                 let (sender, receiver) = mpsc::channel();

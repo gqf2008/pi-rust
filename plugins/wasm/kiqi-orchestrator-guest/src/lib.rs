@@ -709,6 +709,12 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         }
     }
 
+    // Esc before we even start: do not spawn a child this call would have to
+    // abandon. Same guard (and message) as `dispatch`.
+    if proc::cancel_requested() {
+        return Err("cancelled by the host".into());
+    }
+
     let handle = proc::spawn(&program, &args, None).map_err(|error| match error {
         types::CapabilityError::Denied(reason) => format!(
             "{reason} — the subagent child needs `ki plugin grant {ID} proc \\
@@ -731,6 +737,15 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut output = String::new();
     loop {
+        // Esc while the child runs: kill it and return instead of waiting out
+        // `timeoutSeconds` (up to 1800 s) while this call holds the plugin's
+        // call mutex. `read_line` slices at POLL_SLICE_MS, so a cancel is
+        // noticed within ~100 ms; the host reaps the group on call return and
+        // `kill` is idempotent.
+        if proc::cancel_requested() {
+            let _ = proc::kill(handle);
+            return Err("cancelled by the host".into());
+        }
         match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
             Ok(Some(line)) => {
                 output.push_str(&line);

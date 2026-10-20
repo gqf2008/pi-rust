@@ -19,6 +19,10 @@ per-read timeouts until every node reaches a terminal state.
   `timeoutSeconds`.
 - **Esc/abort**: the guest polls `proc.cancel-requested`; a cancelled call
   kills the remaining children and returns without waiting for the wave.
+  `dispatch` checks before spawning and once per wave round; `subagent` checks
+  before spawning and on every ~100 ms read slice, so a cancelled single
+  delegation kills its child instead of running to `timeoutSeconds` (default
+  300 s) while holding the plugin's call mutex.
 
 Mid-wave reshape (add/remove/cancel while a wave is in flight) is therefore
 also gone — reshape between waves works as before.

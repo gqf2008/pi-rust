@@ -39,9 +39,15 @@ use crate::control::Control;
 static GRAPH: OnceLock<Mutex<graph::Graph>> = OnceLock::new();
 static RUNNING: OnceLock<Mutex<HashMap<String, Control>>> = OnceLock::new();
 
-/// Set when the host cancels a tool call (a run abort). Node workers link to this
+/// Set when the host cancels a tool call (an abort). Node workers link to this
 /// so an abort kills in-flight children, while a *normal* tool-call completion
 /// (`destroy`, which also cancels the call's own token) does not.
+///
+/// The flag outlives the cancelled call on purpose: a `waitSeconds:0` background
+/// node spawned by it must still see the abort. It is consumed at the next
+/// call boundary by [`begin_tool_call`] — *not* at cancel time and *not* only at
+/// run start, because the agent loop continues after a soft-interrupted tool
+/// call and a fresh call must not create tokens that are born cancelled.
 static HOST_ABORT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
 pub(crate) fn host_abort_flag() -> Arc<AtomicBool> {
@@ -69,6 +75,28 @@ pub(crate) fn node_control() -> Control {
 /// mid-wave `plan cancel` stop one node without stopping the whole call.
 pub(crate) fn running() -> &'static Mutex<HashMap<String, Control>> {
     RUNNING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The call-start boundary for the run-wide abort: consume a pending
+/// [`HOST_ABORT`] so the call about to run does not inherit the previous call's
+/// abort, and latch it onto every still-registered node first.
+///
+/// The latch is what a bare `store(false)` would miss: a background worker that
+/// had not polled the flag yet would otherwise be orphaned (its token would
+/// report "live" the moment the flag clears). Cancelling it directly makes
+/// `Control::is_cancelled` latch, so the node still dies with the aborted call.
+/// Holding the running-map lock across the swap keeps a concurrent insert from
+/// slipping in between the observation and the cancellation.
+///
+/// Called at the top of every tool call (`run_builder` for the compile-time
+/// face, the generated `execute` for the ABI face) and at a run start.
+pub(crate) fn begin_tool_call() {
+    let map = running().lock().unwrap_or_else(|p| p.into_inner());
+    if host_abort_flag().swap(false, Ordering::SeqCst) {
+        for control in map.values() {
+            control.cancel();
+        }
+    }
 }
 
 /// The one in-memory graph. A poisoned lock is recovered rather than panicking,
@@ -216,9 +244,10 @@ fn clear_run_state() {
 /// compile-time faces: `Some(next)` when the guidance section was appended,
 /// `None` to leave the host's prompt alone.
 ///
-/// A new run also resets the run-wide abort (a background node started now
-/// must not be cancelled on sight by the previous run's abort) and clears the
-/// graph when the event's session differs from the last one seen.
+/// A new run is a call boundary too: it consumes the run-wide abort through
+/// [`begin_tool_call`] (a background node started now must not be cancelled on
+/// sight by the previous run's abort) and clears the graph when the event's
+/// session differs from the last one seen.
 pub(crate) fn guide_for_prompt(event: &Value) -> Option<String> {
     let session = event.get("sessionId").and_then(Value::as_str);
     {
@@ -229,7 +258,7 @@ pub(crate) fn guide_for_prompt(event: &Value) -> Option<String> {
             clear_run_state();
         }
     }
-    host_abort_flag().store(false, Ordering::SeqCst);
+    begin_tool_call();
     if !guide_enabled() {
         return None;
     }
@@ -415,6 +444,28 @@ mod tests {
                 .is_none(),
             "the session switch cleared the graph"
         );
+    }
+
+    /// The ABI/cdylib face is a call boundary too: an `execute` that starts
+    /// after an aborted call must consume the abort before its worker creates
+    /// a node token (`plan show` is enough — no child is spawned).
+    #[test]
+    fn an_abi_call_starts_from_a_clean_abort_state() {
+        use kiqi_plugin_sdk::{StbString, StbStringRef};
+
+        let _guard = ABORT_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        host_abort_flag().store(true, Ordering::SeqCst);
+
+        let handle = plan_tool::execute(
+            StbStringRef::from_str("clean-abort"),
+            StbString::from_string("{\"action\":\"show\"}".to_string()),
+            Some(crate::kit::plugin_free_string),
+        );
+        assert!(
+            !host_abort_flag().load(Ordering::SeqCst),
+            "starting a call consumes the previous call's abort"
+        );
+        plan_tool::destroy(handle);
     }
 
     #[test]

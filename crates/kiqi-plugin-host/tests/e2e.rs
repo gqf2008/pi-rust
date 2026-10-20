@@ -6,11 +6,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use kiqi_plugin::{
-    Block, Event, EventAction, EventTag, HostCaps, Log, LogLevel, Plugin, PluginError, Progress,
-    ProgressSink, Verdict,
+    Block, CancelProbe, Event, EventAction, EventTag, HostCaps, Log, LogLevel, Plugin, PluginError,
+    Progress, ProgressSink, Verdict,
 };
 use kiqi_plugin_host::{Grants, NetHttpGrant, WasmPlugin};
 
@@ -1778,6 +1779,74 @@ fn orchestrator_guest_subagent_round_trips_via_cat() {
     assert!(
         denied.to_string().contains("proc is not granted"),
         "{denied}"
+    );
+}
+
+/// A probe that stays quiet through the pre-spawn check and the first in-loop
+/// polls, then flips: the guest must notice while the child is running, not
+/// merely refuse to spawn.
+struct PollThenCancel(AtomicUsize);
+
+impl CancelProbe for PollThenCancel {
+    fn is_cancelled(&self) -> bool {
+        // `fetch_add` returns the previous count: 0 = pre-spawn, 1 = first
+        // in-loop poll, 2 = second in-loop poll (cancelled from here on).
+        self.0.fetch_add(1, Ordering::SeqCst) >= 2
+    }
+}
+
+/// A cancelled `subagent` must kill its child and return promptly instead of
+/// waiting out `timeoutSeconds` while holding the plugin's call mutex.
+#[test]
+fn orchestrator_guest_subagent_stops_when_the_host_cancels() {
+    use kiqi_plugin_host::ProcGrant;
+
+    let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
+    let plugin = WasmPlugin::load_with_grants(
+        "kiqi-orchestrator",
+        &wasm,
+        Grants {
+            proc: Some(ProcGrant {
+                commands: vec!["sh".to_string()],
+                cwd: kiqi_plugin_host::ExecCwd::Project,
+                ..ProcGrant::default()
+            }),
+            ..Grants::default()
+        },
+    )
+    .expect("load");
+    let log = NullLog;
+    let probe = PollThenCancel(AtomicUsize::new(0));
+    let caps = HostCaps {
+        cancel: Some(&probe),
+        ..HostCaps::observer(&log)
+    };
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    let started = std::time::Instant::now();
+    let error = plugin
+        .call(
+            "subagent",
+            &serde_json::json!({
+                "program": "sh",
+                "task": "sleep 2; echo late",
+                "timeoutSeconds": 10
+            }),
+            &caps,
+            &sink,
+        )
+        .expect_err("the host cancelled the call");
+    let elapsed = started.elapsed();
+
+    assert!(
+        error.to_string().contains("cancelled by the host"),
+        "got {error}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the guest must kill the child instead of waiting out `sleep 2`: {elapsed:?}"
     );
 }
 
