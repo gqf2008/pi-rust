@@ -7,6 +7,20 @@ own owner (`gqf2008`) but have **not been published**; the taps under
 Every manifest still points at a **real release asset** with its **real
 checksum** — none of it is a template with placeholders.
 
+## Publication decision (2026-10-20)
+
+**No publication in this cycle.** The supported binary paths are
+`scripts/install.sh`, a source build, and `cargo binstall` once the crates are
+actually published (they remain `publish = false`). No crates, Homebrew/Scoop
+taps, or winget package are published; the catalogue, README and
+`docs-install-path.sh` state that, and the site no longer promises
+`cargo install`/`ki install` for unpublished packages.
+
+The manifests and scripts already point at `gqf2008/pi-rust` v0.4.1 with real
+digests. Publishing is a later owner decision: create the `gqf2008` taps, run
+`scripts/push-taps.sh`, submit a `gqf2008.ki` winget manifest, and publish the
+crates; only then should the catalogue claims change.
+
 ## Status
 
 | Channel | Lives in | Status | Remaining step |

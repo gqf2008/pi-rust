@@ -25,6 +25,12 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **Goal auto-continue stops when the board is empty.** A goal whose
+  `doneWhen` is `"board-open-0"` is checked at the AgentEnd boundary with a
+  bounded `walgit collab board` call; zero open cards skips the next
+  auto-continue instead of letting the agent invent more work. A failed or
+  timed-out board read means "not done", so a broken walgit cannot claim a
+  false completion.
 - **Transient `walgit collab entry` pushes are retried, bounded.** The
   collaboration loop observed intermittent network/5xx failures that succeeded
   on retry. `scripts/collab-entry-retry.sh` wraps the command with three
