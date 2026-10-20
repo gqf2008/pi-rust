@@ -696,118 +696,158 @@ fn ancestors(value: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Split a shell command at unquoted `;`, `&`, `|`, `(`, `)` and newlines, then
-/// each segment into words at unquoted whitespace. Quotes are stripped; on Unix
-/// a backslash escapes the next character (on Windows a backslash is a path
-/// separator, and PowerShell escapes with a backtick, which is left in place).
+/// each segment into arguments and redirection targets at unquoted whitespace
+/// and unquoted `>`. Quotes are stripped; on Unix a backslash escapes the next
+/// character (on Windows a backslash is a path separator, and PowerShell
+/// escapes with a backtick, which is left in place).
+///
+/// Redirections are collected here, in the same pass, because only this loop
+/// knows which characters were quoted. Splitting them in a second pass over the
+/// finished words made the quotes invisible: `printf '%s -> '` reduced to one
+/// word `%s -> `, whose `>` then read as an operator with a blank target, and a
+/// blank target resolves to the working directory — an ancestor of the policy —
+/// so a harmless `printf` was denied.
 ///
 /// This is lexical only: variables, command substitution and interpreter code
 /// are opaque to it (see the residual-risk note in [`policy_write_reason`]).
-fn shell_segments(command: &str) -> Vec<Vec<String>> {
-    let mut segments: Vec<Vec<String>> = vec![Vec::new()];
-    let mut word = String::new();
-    let mut has_word = false;
-    let mut quote: Option<char> = None;
+fn shell_segments(command: &str) -> Vec<ShellSegment> {
+    let mut scan = ShellScan::new();
     let mut chars = command.chars();
     while let Some(ch) = chars.next() {
-        if let Some(delimiter) = quote {
-            if ch == delimiter {
-                quote = None;
-            } else if ch == '\\' && delimiter == '"' && !cfg!(windows) {
-                if let Some(escaped) = chars.next() {
-                    word.push(escaped);
-                }
-            } else {
-                word.push(ch);
-            }
-            has_word = true;
+        if scan.inside_quote(ch, &mut chars) {
             continue;
         }
         match ch {
             '\'' | '"' => {
-                quote = Some(ch);
-                has_word = true;
+                scan.quote = Some(ch);
+                scan.has_word = true;
             }
             '\\' if !cfg!(windows) => {
                 if let Some(escaped) = chars.next() {
-                    word.push(escaped);
+                    scan.word.push(escaped);
                 }
-                has_word = true;
+                scan.has_word = true;
             }
-            ';' | '&' | '|' | '(' | ')' | '\n' | '\r' => {
-                if has_word {
-                    segments
-                        .last_mut()
-                        .expect("one segment is always present")
-                        .push(std::mem::take(&mut word));
-                    has_word = false;
-                }
-                segments.push(Vec::new());
-            }
-            c if c.is_whitespace() => {
-                if has_word {
-                    segments
-                        .last_mut()
-                        .expect("one segment is always present")
-                        .push(std::mem::take(&mut word));
-                    has_word = false;
-                }
-            }
+            '>' => scan.operator(),
+            ';' | '&' | '|' | '(' | ')' | '\n' | '\r' => scan.end_segment(),
+            c if c.is_whitespace() => scan.finish_word(),
             c => {
-                word.push(c);
-                has_word = true;
+                scan.word.push(c);
+                scan.has_word = true;
             }
         }
     }
-    if has_word {
-        segments
+    scan.finish_word();
+    scan.segments
+        .retain(|segment| !segment.words.is_empty() || !segment.redirects.is_empty());
+    scan.segments
+}
+
+/// One command segment: its argument words and its redirection targets.
+///
+/// Targets are candidates whatever the command is, because a redirect onto the
+/// policy truncates it just as surely as `rm` would.
+#[derive(Default)]
+struct ShellSegment {
+    words: Vec<String>,
+    redirects: Vec<String>,
+}
+
+/// The parser state behind [`shell_segments`].
+#[derive(Default)]
+struct ShellScan {
+    segments: Vec<ShellSegment>,
+    word: String,
+    has_word: bool,
+    quote: Option<char>,
+    /// A `>` has been seen and its target is not known yet, so the next word is
+    /// that target rather than an argument.
+    awaiting_target: bool,
+}
+
+impl ShellScan {
+    fn new() -> Self {
+        Self {
+            segments: vec![ShellSegment::default()],
+            ..Self::default()
+        }
+    }
+
+    /// Handle `ch` while a quote is open, including the escaped character after
+    /// a backslash. Returns false when no quote is open.
+    fn inside_quote(&mut self, ch: char, chars: &mut std::str::Chars<'_>) -> bool {
+        let Some(delimiter) = self.quote else {
+            return false;
+        };
+        if ch == delimiter {
+            self.quote = None;
+        } else if ch == '\\' && delimiter == '"' && !cfg!(windows) {
+            if let Some(escaped) = chars.next() {
+                self.word.push(escaped);
+            }
+        } else {
+            self.word.push(ch);
+        }
+        self.has_word = true;
+        true
+    }
+
+    /// A `>` outside quotes. `>>`, `2>` and `&>` spell the same operator, so the
+    /// extra operator characters are dropped.
+    fn operator(&mut self) {
+        if self.awaiting_target && !self.has_word {
+            return;
+        }
+        // `hi>x`: the word before the operator is still an argument, while `2>`
+        // is a file descriptor, not a word.
+        if self.has_word
+            && !self
+                .word
+                .chars()
+                .all(|c| matches!(c, '>' | '&' | '1' | '2'))
+        {
+            let word = std::mem::take(&mut self.word);
+            self.segment().words.push(word);
+        }
+        self.word.clear();
+        self.has_word = false;
+        self.awaiting_target = true;
+    }
+
+    /// A separator ends the operator too: the next segment's first word is a
+    /// command, never the previous segment's target.
+    fn end_segment(&mut self) {
+        self.finish_word();
+        self.awaiting_target = false;
+        self.segments.push(ShellSegment::default());
+    }
+
+    /// Complete the word in progress: a redirection target if an operator is
+    /// waiting for one, otherwise an argument.
+    ///
+    /// Empty and blank words are dropped. They name no path, and resolving them
+    /// lands on the working directory — which is an ancestor of every policy
+    /// file inside it, so `rm -rf ''` was rejected as if it deleted the project.
+    fn finish_word(&mut self) {
+        if !self.has_word || self.word.trim().is_empty() {
+            self.word.clear();
+            self.has_word = false;
+            return;
+        }
+        let word = std::mem::take(&mut self.word);
+        self.has_word = false;
+        if std::mem::take(&mut self.awaiting_target) {
+            self.segment().redirects.push(word);
+        } else {
+            self.segment().words.push(word);
+        }
+    }
+
+    fn segment(&mut self) -> &mut ShellSegment {
+        self.segments
             .last_mut()
             .expect("one segment is always present")
-            .push(word);
     }
-    segments.retain(|segment| !segment.is_empty());
-    segments
-}
-
-/// A redirection operator (`>`, `>>`, `2>`, `&>` …).
-fn is_redirection(word: &str) -> bool {
-    word.contains('>') && word.chars().all(|c| matches!(c, '>' | '&' | '1' | '2'))
-}
-
-/// Separate a segment's words from any redirection targets. Targets are
-/// candidates whatever the command is, because `cmd > .ki/permissions.json`
-/// truncates the policy just as surely as `rm` would.
-fn split_redirects(segment: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut words = Vec::new();
-    let mut targets = Vec::new();
-    let mut index = 0;
-    while index < segment.len() {
-        let word = &segment[index];
-        if is_redirection(word) {
-            if let Some(target) = segment.get(index + 1) {
-                targets.push(target.clone());
-                index += 2;
-            } else {
-                index += 1;
-            }
-            continue;
-        }
-        // `echo x>.ki/permissions.json`: the target is glued to the word.
-        if let Some(open) = word.find('>') {
-            let (prefix, rest) = word.split_at(open);
-            let target = rest.trim_start_matches(['>', '&']);
-            if !prefix.is_empty() {
-                words.push(prefix.to_string());
-            }
-            if !target.is_empty() {
-                targets.push(target.to_string());
-            }
-            index += 1;
-            continue;
-        }
-        words.push(word.clone());
-        index += 1;
-    }
-    (words, targets)
 }
 
 /// Path-valued arguments of a word list: options (and `--`) are skipped.
@@ -1200,7 +1240,7 @@ fn shell_targets_policy_paths(project: &Path, command: &str) -> bool {
         })
         .collect();
     for segment in shell_segments(command) {
-        let (words, redirects) = split_redirects(&segment);
+        let ShellSegment { words, redirects } = segment;
         if redirects.iter().any(|target| {
             shell_word_targets_policy(&policies, &base, target, PolicyReach::Ancestor)
         }) {
@@ -2216,6 +2256,76 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// A `>` inside quotes is text, not a redirection operator, and a blank
+    /// word names no path.
+    ///
+    /// Both were false *denials*, and both came from the same shortcut: the
+    /// parser stripped quotes first and a second pass looked for `>` in the
+    /// finished words. `printf '%s -> '` collapsed to one word `%s -> `, whose
+    /// `>` read as an operator with a blank target - and a blank target
+    /// resolves to the working directory, an ancestor of every policy file
+    /// inside it. `rm -rf ''` reached the same place by a different route: an
+    /// empty word, resolved to the project root, read as "delete the project".
+    ///
+    /// The report that found this was a real harness call:
+    /// `printf '%s -> ' hi` was rejected with the policy message.
+    #[test]
+    fn shell_quotes_hide_operators_and_blank_words_name_nothing() {
+        let dir = temp_dir("shell-quoted-operator");
+        write_project(&dir, "{}");
+        let bash = |command: &str| blocking_reason(&dir, "bash", &json!({ "command": command }));
+
+        // A quoted `>` is just text, whatever surrounds it.
+        for command in [
+            "printf '%s -> ' hi",
+            "printf '%s -> ' hi; echo done",
+            "printf '%s -> ' hi > out.txt",
+            "echo 'x -> y'",
+            "echo 'a > b'",
+            "echo 'a > b' > out.txt",
+            "printf 'a => b'",
+            "grep '->' file",
+            "awk '{print $1 -> $2}' f",
+            // Quoted text that *spells* a policy directory is still just text:
+            // `echo` prints it, nothing is written. This is the spelling that
+            // pins quote-awareness rather than the blank-target rule below.
+            //
+            // (The blunt basename check above `policy_write_reason` still
+            // denies anything that literally names the policy file, quoted or
+            // not - `echo 'a>.ki/permissions.json'` is rejected. That is a
+            // deliberate trade-off recorded on the check, not this test's
+            // subject, so these spellings avoid the literal name.)
+            "echo 'a>.ki'",
+            "grep 'x>.ki' file",
+            "printf '%s-> ' hi",
+            // A blank word names nothing; it cannot be an ancestor of the
+            // policy.
+            "rm -rf ''",
+            "rm -rf \"\"",
+            "mv '' x",
+            "cp x ''",
+        ] {
+            assert_eq!(bash(command), None, "must allow: {command}");
+        }
+
+        // The control: a genuine redirect into the policy is still a redirect,
+        // including when the same command also carries a quoted `>` earlier.
+        for command in [
+            "echo hi > .ki/permissions.json",
+            "cat x >> .ki/permissions.json",
+            "echo hi 2> .ki/permissions.json",
+            "echo 'a > b' > .ki/permissions.json",
+            "printf '%s -> ' hi > .ki/permissions.json",
+            // A separator ends the operator: `rm` here is a command, not the
+            // target of the `>` in the previous segment.
+            "echo hi > ; rm -rf .ki",
+        ] {
+            assert!(bash(command).is_some(), "must block: {command}");
+        }
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     /// Destinations are write targets, not deletions: copying or linking into
     /// the project root cannot rewrite the policy, while naming the policy file
     /// still can. Wrapper prefixes and absolute command paths must not hide a
@@ -2678,6 +2788,16 @@ mod tests {
 
         // A bare `cd` lands in the home directory; a relative `.ki/agent`
         // then names the global policy's directory.
+        //
+        // The global policy path comes from `KI_AGENT_DIR`/`HOME`
+        // ([`global_path`]), which is process-global: `session.rs`'s tests set
+        // `KI_AGENT_DIR` to a temp dir under [`crate::config::test_support::env_lock`],
+        // and a reader that does not take the same lock sees whichever value
+        // happens to be installed. Measured on this tree: this assertion failed
+        // in 4 of 10 runs of `permissions::` before the lock was taken here.
+        let _global_env = crate::config::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(
             bash("cd && rm -rf .ki/agent").is_some(),
             "must block: cd && rm -rf .ki/agent"
