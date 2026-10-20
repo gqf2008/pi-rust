@@ -51,6 +51,10 @@ macOS 上默认构造它：
   由现有 `ShellOverride` 拼进 `OsExecutionEnv`，不新增执行路径。
 - `KI_SHELL_SANDBOX=0` 显式关闭；非 macOS 或找不到 `sandbox-exec` 时
   `macos_for` 返回 `None`，行为退回前两层。
+- 启动时先探测能否真正 apply 一个 profile：**在已有沙箱内再套 `sandbox-exec` 会
+  `sandbox_apply: EPERM`**（外层只要有任何 `deny file-write*` 规则就会触发，
+  见 `an_outer_deny_rule_blocks_nested_sandbox_apply`）。探测失败时返回 `None`，
+  由外层沙箱继续约束；这样从 `ki` 的 bash 里再启动 `ki` 不会让每条命令都 spawn 失败。
 
 验收测试：`crates/kiqi-tools/src/sandbox.rs`（profile 与直接执行）和
 `crates/kiqi-tools/tests/bash.rs::the_os_sandbox_wraps_the_real_bash_tool`
@@ -63,6 +67,8 @@ macOS 上默认构造它：
 2. **Linux**：尚未接 Landlock；Linux 上仍是前两层。
 3. **非 bash 的写入面**：宿主自己的 `write`/`edit` 工具仍由词法/路径检查保护；
    沙箱只包 `bash` 子进程树（`powershell` 仅 Windows，有独立执行点）。
+4. **嵌套目录**：嵌套 `ki` 已由外层沙箱约束，但它若换了工作目录，新目录的本地
+   `.ki/permissions.json` 只受词法守卫与调用后恢复保护——外层 profile 不能追加规则。
 
 ## 5. 当前结论
 
