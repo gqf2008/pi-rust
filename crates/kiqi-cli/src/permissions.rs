@@ -1106,6 +1106,40 @@ struct DestructivePath<'a> {
 /// only when it will `-delete` or `-exec`; `dd` contributes its `of=`.
 /// Destinations are [`PolicyReach::FileOnly`]: only the policy file itself and
 /// the directory that directly holds it can be rewritten.
+/// `find` is only destructive when it deletes, or runs a command that can
+/// write. `-exec grep` must not be treated like `-exec rm`: the former is a
+/// common read-only pipeline and was denied whenever its root was an ancestor of
+/// the policy. Unknown commands stay destructive; the post-call policy restore
+/// is the backstop for read-only spellings that can still write (e.g. an
+/// interpreter one-liner).
+fn find_exec_is_destructive(words: &[String]) -> bool {
+    const READ_ONLY: &[&str] = &[
+        "grep", "rg", "wc", "cat", "head", "tail", "ls", "stat", "file", "echo", "printf", "awk",
+        "sed", "diff", "cmp", "sort", "uniq", "cut", "tr", "jq", "test", "[",
+    ];
+    let mut i = 0;
+    while i + 1 < words.len() {
+        if matches!(words[i].as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+            let name = command_name(&words[i + 1]);
+            if READ_ONLY.contains(&name.as_str()) {
+                // `sed` is read-only unless the exec segment asks for in-place.
+                if name == "sed"
+                    && words[i..]
+                        .iter()
+                        .any(|word| word == "-i" || word.starts_with("-i"))
+                {
+                    return true;
+                }
+                i += 1;
+                continue;
+            }
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn destructive_paths<'a>(command: &str, words: &'a [String]) -> Vec<DestructivePath<'a>> {
     let all = |reach: PolicyReach| -> Vec<DestructivePath<'a>> {
         path_arguments(words)
@@ -1178,9 +1212,8 @@ fn destructive_paths<'a>(command: &str, words: &'a [String]) -> Vec<DestructiveP
             paths
         }
         "find" => {
-            let destructive = words
-                .iter()
-                .any(|word| word == "-delete" || word.starts_with("-exec"));
+            let destructive =
+                words.iter().any(|word| word == "-delete") || find_exec_is_destructive(words);
             if destructive {
                 // Global options may precede the roots: `find -L .ki -delete`.
                 let mut start = 0;
@@ -1889,13 +1922,42 @@ impl PolicySnapshot {
 pub struct PolicyGuard {
     cwd: PathBuf,
     snapshots: Arc<Mutex<HashMap<String, PolicySnapshot>>>,
+    /// Last trusted policy state. Checked before every tool call so a
+    /// background writer between calls is restored before the next gate reads
+    /// the rules; a sanctioned `permissions` edit becomes the new baseline.
+    baseline: Arc<Mutex<Option<PolicySnapshot>>>,
 }
 
 impl PolicyGuard {
     pub fn new(cwd: PathBuf) -> Self {
+        let baseline = PolicySnapshot::capture(&cwd);
         Self {
             cwd,
             snapshots: Arc::new(Mutex::new(HashMap::new())),
+            baseline: Arc::new(Mutex::new(Some(baseline))),
+        }
+    }
+
+    /// Restore a policy changed between calls and refresh the trusted baseline.
+    fn check_baseline(&self) -> Option<Vec<PathBuf>> {
+        let mut baseline = self.baseline.lock().ok()?;
+        let snapshot = baseline.as_ref()?;
+        let changed = match snapshot.restore_if_changed() {
+            Ok(changed) => changed,
+            Err(error) => {
+                tracing::warn!(%error, "could not restore a policy changed between tool calls");
+                return None;
+            }
+        };
+        // Refresh after the check: a sanctioned edit bumps the file version, so
+        // `restore_if_changed` skipped it and the new bytes are now trusted.
+        *baseline = Some(PolicySnapshot::capture(&self.cwd));
+        changed
+    }
+
+    fn refresh_baseline(&self) {
+        if let Ok(mut baseline) = self.baseline.lock() {
+            *baseline = Some(PolicySnapshot::capture(&self.cwd));
         }
     }
 
@@ -1916,6 +1978,14 @@ impl PolicyGuard {
                 let future = inner(ctx, signal);
                 let guard = guard.clone();
                 Box::pin(async move {
+                    if let Some(paths) = guard.check_baseline() {
+                        let list = paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        tracing::warn!(%list, "restored a policy changed between tool calls");
+                    }
                     let result = future.await;
                     let allowed = result.as_ref().is_none_or(|result| !result.block);
                     if allowed && is_shell_tool(&tool_name) {
@@ -1939,9 +2009,12 @@ impl PolicyGuard {
                     .lock()
                     .ok()
                     .and_then(|mut map| map.remove(&tool_call_id));
+                let guard_async = guard.clone();
                 Box::pin(async move {
                     let snapshot = snapshot?;
-                    let note = match snapshot.restore_if_changed() {
+                    let outcome = snapshot.restore_if_changed();
+                    guard_async.refresh_baseline();
+                    let note = match outcome {
                         Ok(None) => return None,
                         Ok(Some(paths)) => {
                             let list = paths
@@ -3193,6 +3266,74 @@ mod tests {
         .unwrap();
         let sanctioned = std::fs::read(&local).unwrap();
         assert!(snapshot.restore_if_changed().unwrap().is_none());
+        assert_eq!(std::fs::read(&local).unwrap(), sanctioned);
+        std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn read_only_find_exec_is_not_destructive() {
+        let dir = temp_dir("find-exec");
+        write_project(&dir, "{}");
+        let bash = |command: &str| blocking_reason(&dir, "bash", &json!({ "command": command }));
+        for allowed in [
+            "find . -name '*.rs' -exec grep -n TODO {} +",
+            "find . -type f -exec wc -l {} +",
+            r"find -L . -exec stat {} \;",
+        ] {
+            assert_eq!(bash(allowed), None, "must allow: {allowed}");
+        }
+        for blocked in [
+            "find . -delete",
+            r"find . -exec rm -rf {} \;",
+            r"find . -exec sh -c 'rm -rf .ki' \;",
+            r"find . -exec sed -i s/x/y/ {} \;",
+        ] {
+            assert!(bash(blocked).is_some(), "must block: {blocked}");
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_policy_changed_between_calls_is_restored_before_the_next_call() {
+        let dir = temp_dir("policy-baseline");
+        write_project(&dir, r#"{"permissions":{}}"#);
+        let local = dir.join(".ki").join("permissions.json");
+        let guard = PolicyGuard::new(dir.clone());
+
+        // Simulate a background writer: no `save`, so the file version does not
+        // change and the baseline must notice the bytes directly.
+        std::fs::write(&local, r#"{"permissions":{"allow":["*"]}}"#).unwrap();
+        let changed = guard.check_baseline().expect("the change is detected");
+        assert!(changed.contains(&local));
+        assert_eq!(
+            std::fs::read(&local).unwrap(),
+            br#"{"permissions":{}}"#.as_slice()
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_sanctioned_edit_becomes_the_new_baseline() {
+        let dir = temp_dir("policy-baseline-sanctioned");
+        write_project(&dir, r#"{"permissions":{}}"#);
+        let local = dir.join(".ki").join("permissions.json");
+        let guard = PolicyGuard::new(dir.clone());
+
+        save(
+            &local,
+            &Rules {
+                allow: vec!["Bash(ls)".into()],
+                deny: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert!(
+            guard.check_baseline().is_none(),
+            "a sanctioned edit is accepted, not restored"
+        );
+        let sanctioned = std::fs::read(&local).unwrap();
+
+        std::fs::write(&local, r#"{"permissions":{"allow":["*"]}}"#).unwrap();
+        assert!(guard.check_baseline().is_some());
         assert_eq!(std::fs::read(&local).unwrap(), sanctioned);
         std::fs::remove_dir_all(dir).ok();
     }
