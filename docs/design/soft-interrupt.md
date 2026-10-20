@@ -41,15 +41,18 @@
 
 ```rust
 pub struct InterruptControl {
-    /// 当前正在执行的工具或流的 token（由 loop 安装/清除）。
-    current: Mutex<Option<CancellationToken>>,
+    /// 每个在飞动作一条（并行工具批次的每个工具各占一条，由 loop 安装/清除）。
+    current: Mutex<Vec<Current>>,
     /// 最近一次中断是否为软中断。
     soft: AtomicBool,
 }
 ```
 
-- `soft_interrupt()`：`soft = true`；取消 `current` 的 token。
-- `install(token)` / `clear(token)`：loop 在每次 stream/tool 前后安装和清除当前 token。
+- `soft_interrupt()`：`soft = true`；在同一把锁里取消 `current` 中**所有** token，
+  并返回最新一条（`InstallId` 最大）的 `ActionKind`；没有在飞动作时返回 `None`
+  （锁外才写 trace）。
+- `install(token, kind)` → `InstallId` / `clear(id)`：loop 在每次 stream/tool 前后安装
+  和清除；`clear` 只 `retain` 掉自己那条，并行同伴保持可中断。
 - run signal 仍然是父 token：硬 abort 会取消 run signal，从而取消当前工具/流。
 
 ### 3.2 工具调用
@@ -179,9 +182,9 @@ UI：
 
 | 位置 | 实现 |
 |---|---|
-| `crates/kiqi-agent/src/interrupt.rs` | `ActionKind { Tool, Stream }`；`install(token, kind)` 把它存进 `Current`；`current_kind()` 读取，`has_current()` 定义在它之上——「有没有动作」与「是什么动作」共用一次加锁，不会互相矛盾 |
+| `crates/kiqi-agent/src/interrupt.rs` | `ActionKind { Tool, Stream }`；`install(token, kind)` 把它存进 `Current`；`current_kind()` 读取最新一条，`has_current()` 定义在它之上——「有没有动作」与「是什么动作」共用一次加锁，不会互相矛盾。阶段 5（§5.5）改为每动作一条注册表，`soft_interrupt()` 返回它实际取消的最新的种类 |
 | `crates/kiqi-agent/src/agent_loop.rs` | 流请求 install `Stream`、工具调用 install `Tool` |
-| `crates/kiqi-harness/src/agent_harness.rs` | `InterruptResult::Soft { action: ActionKind }`；`interrupt()` 用 `current_kind()` 取代 `has_current()` 并把种类报给 UI |
+| `crates/kiqi-harness/src/agent_harness.rs` | `InterruptResult::Soft { action: ActionKind }`；`interrupt()` 直接用 `soft_interrupt()` 的返回值（取消与取种类同锁完成，取代了原先 `current_kind()` → `soft_interrupt()` 的两次读取） |
 | `crates/kiqi-cli/src/interactive_tui/events.rs` | 两条文案 + 纯函数 `soft_interrupt_note(ActionKind)`：「Interrupted the current tool call; …」/「Interrupted the reply; …」 |
 | `crates/kiqi-agent/src/interrupt_trace.rs` | `KI_DEBUG_INTERRUPT=1`（或路径）→ `<temp>/kiqi-interrupt.log`，记 `press installed=<bool> kind=<..>`、`latched-cancelled kind=<..>`、`decision=<soft\|nothing\|no-run> kind=<..>` |
 
@@ -246,6 +249,51 @@ trace 是纯诊断：无人回读、不参与任何返回值或时序、所有 I
 - `validate_record_log` 的 `InvalidQueueCancellation` 规则忽略记录顺序：任何被消费并
   在 settle 提交的 steering 消息都会让整条日志被判“取消的目标后来存在”。与本阶段
   无关（普通运行即可复现），需要单独修。
+
+### 5.5 阶段 5 落地记录（并行批次共享一个中断位）
+
+阶段 3 把「当前动作」实现成一个槽位（`Mutex<Option<Current>>`），默认的
+`ToolExecutionMode::Parallel` 下这是错的：`execute_tool_calls_parallel` 的每个工具各自
+`install`，后装的那个覆盖槽位；它先完成时 `clear` 把槽位清空，而先装的工具还在跑——
+此时 Esc 读到「无动作」，`soft_interrupt()` 什么也不取消却照样 latch，存活工具永远收不到
+取消，下一个动作还会被预先取消。
+
+| 位置 | 实现 |
+|---|---|
+| `crates/kiqi-agent/src/interrupt.rs` | `current: Mutex<Vec<Current>>`；`install` push 一条，`clear(id)` 只 `retain` 掉自己；`soft_interrupt()` 在同一临界区内取消**所有** token 并返回 `InstallId` 最大的那条 `ActionKind`（`None` = latch 落空）；`current_kind()` 取最新存活条目，`has_current()` 仍定义在它之上 |
+| `crates/kiqi-agent/src/interrupt.rs` | 新增 crate 内 RAII `InstallSlot<'_>`（`install_slot` 返回，`Drop` → `clear(id)`）：显式 `clear` 仍在原位置（流路径必须在 fold 与分类之间释放），`Drop` 只是工具 panic/任务中断时的幂等兜底，避免死条目让下一次 Esc 报 `Soft` 却不 latch |
+| `crates/kiqi-agent/src/agent_loop.rs` | `execute_prepared_tool_call` 与 `stream_assistant_response` 改用 `install_slot`；其余逻辑不变 |
+| `crates/kiqi-harness/src/agent_harness.rs` | `interrupt()` 改为 `let action = interrupt.soft_interrupt();`，`Some` → `Soft { action }`，`None` → `NothingToInterrupt` |
+
+四条不可回退的判断：
+
+1. **一次按键取消所有在飞动作。** 「当前动作」在并行批次里有多个；只取消最新那个等于
+   什么都没停。`soft_interrupt()` 必须遍历整个注册表。
+2. **`clear` 只删自己的 id，且幂等。** 完成顺序与安装顺序无关；把 `clear` 写成清空整个
+   注册表会让先完成的动作把同伴变成不可中断（这正是阶段 3 的缺陷形态，只是换了一处）。
+3. **latch 仍然一次性，只在动作边界 drain。** 先 `store(true)` 再取锁；`install` 在同一
+   把锁下读 latch 并预取消；只有 `take_soft()` 消费。按键与 install 的竞争两种顺序都不丢。
+   一个 latch 之后的并行批次会让**每个**动作都预取消（各自 install 都在第一次边界 drain
+   之前看到 flag）——与阶段 3 一致，是有意保留的行为。
+4. **报告的种类必须是真正被取消的动作之一。** 取 `InstallId` 最大者；loop 的相位从不混
+   种类（一次 `Stream`，或 N 个 `Tool`），所以「最新」在实践中是精确的；混合集合不可达，
+   但仍按 id 确定性取最大者并写进模块文档。没有 `ActionKind::Mixed`，TUI 文案与
+   `InterruptResult` 形状不变。
+
+回归用例（去掉修复即失败）：
+
+- `soft_interrupt_cancels_every_live_action` / `clear_of_a_finished_parallel_action_leaves_the_others_interruptible`
+  （`kiqi-agent` 单测；后者在旧的单槽位上返回 `None` 且存活 token 不被取消）。
+- `a_soft_interrupt_cancels_every_tool_of_a_parallel_batch`（`tests/soft_interrupt.rs`：
+  两个工具都进入 `execute` 后按一次 Esc，两个 token 都被取消、run signal 存活）。
+- `interrupt_cancels_every_live_action`（`kiqi-harness` 白盒：`AgentLane::interrupt` →
+  `Soft { action: Tool }`，两个 token 都取消）。
+- `install_slot_clears_on_drop`、`latched_press_pre_cancels_every_action_of_a_parallel_batch`
+  （RAII 兜底与 latch 语义）。
+
+已知相邻限制（**本轮未改**）：并行批次被 Esc 取消时 TUI 文案仍是单数
+（"Interrupted the current tool call"）——对每个动作仍属实，改成复数属于产品措辞决定；
+`take_soft` 由最先结束的取消动作 drain，与阶段 3 相同，未变差。
 
 ## 6. 开放问题
 

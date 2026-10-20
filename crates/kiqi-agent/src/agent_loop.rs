@@ -537,9 +537,9 @@ async fn stream_assistant_response(
     // request lives, mirroring `run_one_tool_call`; a *latched* soft interrupt
     // (pressed while nothing was in flight) cancels it right here.
     let stream_token = config.signal.child_token();
-    let install_id = config
+    let install_slot = config
         .interrupt
-        .install(stream_token.clone(), ActionKind::Stream);
+        .install_slot(stream_token.clone(), ActionKind::Stream);
 
     // `to_stream_options` forwards the run signal and other callers still rely
     // on that, so the per-request token is overridden here instead of inside it.
@@ -552,7 +552,7 @@ async fn stream_assistant_response(
     // classification below, so the slot is released *between* the two: every
     // path that gets past `install` runs `clear` exactly once.
     let folded = fold_assistant_stream(response, context, emit).await;
-    config.interrupt.clear(install_id);
+    config.interrupt.clear(install_slot.id());
     let (final_message, added_partial) = folded?;
 
     // Soft interrupt vs hard abort. All four must hold: the provider reported
@@ -1209,18 +1209,20 @@ async fn execute_prepared_tool_call(
     };
 
     let child_token = config.signal.child_token();
-    // Register this action as the soft-interrupt target. A latched soft
-    // interrupt (e.g. pressed while the loop was busy with a stream) cancels
-    // `child_token` right here, so the tool starts out cancelled.
-    let install_id = config
+    // Register this action as a soft-interrupt target (one registry entry per
+    // tool, so a parallel batch stays independently interruptible). A latched
+    // soft interrupt (e.g. pressed while the loop was busy with a stream)
+    // cancels `child_token` right here, so the tool starts out cancelled.
+    let install_slot = config
         .interrupt
-        .install(child_token.clone(), ActionKind::Tool);
+        .install_slot(child_token.clone(), ActionKind::Tool);
     let outcome = tool
         .execute(&tool_call.id, args.clone(), child_token.clone(), on_update)
         .await;
-    // Release the slot for both the Ok and Err paths: the action is over either
-    // way, and a late `clear` is a no-op if a parallel action displaced us.
-    config.interrupt.clear(install_id);
+    // Release this action's entry for both the Ok and Err paths: the action is
+    // over either way, and `clear` removes only our own entry so the parallel
+    // peers of this batch stay interruptible.
+    config.interrupt.clear(install_slot.id());
     // Drain the soft flag together with the action it killed. Leaving it
     // latched would make `install` pre-cancel every remaining tool call of the
     // run (and would make `interrupt()` keep reporting `Soft` when nothing is

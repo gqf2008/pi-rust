@@ -4341,9 +4341,9 @@ impl AgentLane for AgentHarness {
         })
     }
 
-    /// Soft interrupt: cancel the action in flight (one tool call for now, later
-    /// also one stream request) and let the run continue; `abort()` is the
-    /// opposite (end the whole run).
+    /// Soft interrupt: cancel the actions in flight (one stream request, or
+    /// every tool call of a parallel batch) and let the run continue; `abort()`
+    /// is the opposite (end the whole run).
     ///
     /// Deliberately best-effort — unlike [`Self::abort`], an idle press is
     /// `Ok(NoActiveRun)` rather than an error, so a TUI key binding can fire it
@@ -4371,12 +4371,12 @@ impl AgentLane for AgentHarness {
         // either way, so a press that lands during a stream cancels the action
         // the loop installs next instead of being dropped.
         //
-        // Read the kind in the same breath as the "is anything installed?"
-        // answer (`has_current` is defined on top of `current_kind`), then press:
-        // the value cannot change under us in a way that would make the verdict
-        // wrong, because `soft_interrupt` cancels that very slot.
-        let action = interrupt.current_kind();
-        interrupt.soft_interrupt();
+        // `soft_interrupt` cancels and picks the reported kind under one lock,
+        // so the verdict always names an action it actually cancelled — a
+        // concurrent `clear` can no longer race the read. A parallel tool batch
+        // cancels every tool but reports the newest one; kinds never mix within
+        // one phase, so that is exact in practice.
+        let action = interrupt.soft_interrupt();
         kiqi_agent::interrupt_trace::decision(
             if action.is_some() { "soft" } else { "nothing" },
             action,
@@ -5857,6 +5857,50 @@ mod soft_interrupt_tests {
             "the run survives — that is what makes the interrupt soft"
         );
         interrupt.clear(id);
+
+        harness.release_run();
+    }
+
+    #[tokio::test]
+    async fn interrupt_cancels_every_live_action() {
+        // A parallel tool batch installs one entry per tool. One press must
+        // reach all of them (the user pressed Esc to stop what is running), and
+        // the verdict names a kind it actually cancelled.
+        let harness = AgentHarness::create(opts()).await.unwrap();
+        let window = StartingGuard::new(&harness);
+        let (_, signal, _, interrupt) = harness
+            .acquire_run(OperationKind::Run, window.id())
+            .expect("run acquires");
+
+        let slow = signal.child_token();
+        let fast = signal.child_token();
+        let slow_id = interrupt.install(slow.clone(), ActionKind::Tool);
+        let fast_id = interrupt.install(fast.clone(), ActionKind::Tool);
+
+        assert_eq!(
+            AgentLane::interrupt(&harness).await.expect("best effort"),
+            InterruptResult::Soft {
+                action: ActionKind::Tool,
+            },
+            "a parallel batch is reported as the tool it cancelled"
+        );
+        assert!(slow.is_cancelled(), "the older parallel tool is cancelled");
+        assert!(fast.is_cancelled(), "the newer parallel tool is cancelled");
+        assert!(
+            !signal.is_cancelled(),
+            "the run survives — that is what makes the interrupt soft"
+        );
+        assert!(interrupt.take_soft(), "one latch for the whole batch");
+        assert!(!interrupt.take_soft(), "take_soft is one-shot");
+
+        interrupt.clear(slow_id);
+        assert_eq!(
+            interrupt.current_kind(),
+            Some(ActionKind::Tool),
+            "the peer stays interruptible after its sibling clears"
+        );
+        interrupt.clear(fast_id);
+        assert!(!interrupt.has_current());
 
         harness.release_run();
     }

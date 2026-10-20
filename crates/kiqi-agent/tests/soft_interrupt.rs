@@ -286,6 +286,145 @@ fn a_press_with_nothing_installed_interrupts_the_next_action() {
     );
 }
 
+/// Records which tool-call ids were cancelled while in flight, and stays
+/// installed until its own token fires so a press has a window to land. Both
+/// calls of a parallel batch use it; the 5s timeout is only a safety net so a
+/// broken interrupt fails the assertion instead of hanging the suite.
+struct ParallelBlockingTool {
+    schema: Tool,
+    started: Arc<AtomicUsize>,
+    cancelled_ids: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for ParallelBlockingTool {
+    fn schema(&self) -> &Tool {
+        &self.schema
+    }
+
+    fn label(&self) -> &str {
+        "ParallelBlocking"
+    }
+
+    async fn execute(
+        &self,
+        tool_call_id: &str,
+        _params: serde_json::Value,
+        signal: CancellationToken,
+        _on_update: Arc<dyn Fn(kiqi_agent::ToolResultPartial) + Send + Sync>,
+    ) -> Result<AgentToolResult, kiqi_agent::AgentError> {
+        // `install` runs before `execute`, so incrementing here is the test's
+        // proof that this action's registry entry is live.
+        self.started.fetch_add(1, Ordering::SeqCst);
+        if !signal.is_cancelled() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), signal.cancelled()).await;
+        }
+        if signal.is_cancelled() {
+            self.cancelled_ids
+                .lock()
+                .expect("cancelled ids lock")
+                .push(tool_call_id.to_string());
+            return Ok(AgentToolResult::text("cancelled"));
+        }
+        Ok(AgentToolResult::text("ran"))
+    }
+}
+
+/// One soft interrupt on a parallel tool batch cancels *every* tool of the
+/// batch, not only the one installed last.
+///
+/// The old single-slot registry lost this: the later-installed tool owned the
+/// slot, its `clear` emptied it while the earlier tool was still running, and
+/// the press then found nothing — the surviving tool ran to its timeout and the
+/// latch pre-cancelled the next action. This test synchronises on both
+/// `execute` entries (install already happened for both) and then presses once.
+#[tokio::test]
+async fn a_soft_interrupt_cancels_every_tool_of_a_parallel_batch() {
+    let interrupt = Arc::new(InterruptControl::new());
+    let started = Arc::new(AtomicUsize::new(0));
+    let cancelled_ids = Arc::new(Mutex::new(Vec::new()));
+
+    let scripted = vec![
+        assistant_tool_calls(
+            vec![
+                ("call-slow", "parallel", json!({})),
+                ("call-fast", "parallel", json!({})),
+            ],
+            StopReason::ToolUse,
+        ),
+        common::assistant_text("done", StopReason::Stop),
+    ];
+
+    let mut config = common::base_config();
+    assert_eq!(
+        config.tool_execution,
+        kiqi_agent::ToolExecutionMode::Parallel,
+        "this test is about the parallel path"
+    );
+    config.interrupt = Arc::clone(&interrupt);
+    let handle = kiqi_agent::AbortHandle::new();
+    config.signal = handle.token();
+
+    let context = AgentContext {
+        system_prompt: String::new(),
+        messages: Vec::new(),
+        tools: vec![Arc::new(ParallelBlockingTool {
+            schema: empty_schema("parallel"),
+            started: Arc::clone(&started),
+            cancelled_ids: Arc::clone(&cancelled_ids),
+        })],
+    };
+    let stream_fn = common::mock_stream_fn(scripted);
+    let (collector, events_buf) = kiqi_agent::CollectorEmitter::new();
+    let emit: Arc<dyn kiqi_agent::AgentEmitter> = Arc::new(collector);
+
+    // Wait for both tools to enter `execute` (so both entries are installed and
+    // neither can finish on its own), then press once.
+    let presser = {
+        let interrupt = Arc::clone(&interrupt);
+        let started = Arc::clone(&started);
+        tokio::spawn(async move {
+            for _ in 0..5_000 {
+                if started.load(Ordering::SeqCst) == 2 {
+                    return interrupt.soft_interrupt();
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            panic!("both parallel tools did not start in time");
+        })
+    };
+
+    let run = kiqi_agent::run_agent_loop(Vec::new(), context, config, emit, stream_fn).await;
+    let pressed = presser.await.expect("presser task");
+
+    assert_eq!(
+        pressed,
+        Some(ActionKind::Tool),
+        "the press names the live tool batch"
+    );
+    assert!(run.is_ok(), "the run survives a soft interrupt: {run:?}");
+
+    let events = events_buf.lock().expect("events lock").clone();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AgentEnd { .. })),
+        "the run reached AgentEnd: {events:?}"
+    );
+
+    let mut ids = cancelled_ids.lock().expect("cancelled ids lock").clone();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec!["call-fast".to_string(), "call-slow".to_string()],
+        "every tool of the batch observed its cancelled token"
+    );
+    assert!(
+        !handle.token().is_cancelled(),
+        "the run signal was never cancelled — that is what makes this soft"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2: the model stream is soft-interruptible too
 // ---------------------------------------------------------------------------
