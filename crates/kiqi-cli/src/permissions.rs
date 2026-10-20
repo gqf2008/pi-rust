@@ -572,6 +572,269 @@ fn targets_policy_file(cwd: &Path, raw: &str) -> bool {
     })
 }
 
+/// Collapse every shell-glob metacharacter cluster to a single `*`.
+///
+/// `glob_matches` lets `*` cross path separators, so the collapse can only make
+/// the pattern match *more*, never miss a spelling the original would have hit.
+fn collapse_glob_metacharacters(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    for ch in pattern.chars() {
+        if matches!(ch, '*' | '?' | '[' | ']' | '{' | '}') {
+            if !out.ends_with('*') {
+                out.push('*');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Whether one shell word names a policy file, the directory that holds one, or
+/// a glob that can spell either.
+///
+/// `project` anchors [`policy_paths`] (the gate's policy files); `base` is the
+/// directory the word resolves against, which follows `cd`/`pushd`. A hit is
+/// the word resolving to any ancestor of a policy path — that covers the file
+/// itself, its `.ki`/`.pi` directory, the project root, the home directory and
+/// `/` — so `rm -rf .ki` and `rm -rf .` are caught while `rm -rf .ki/skills/old`
+/// (a sibling, not an ancestor) stays allowed.
+fn shell_word_targets_policy(project: &Path, base: &Path, raw: &str) -> bool {
+    let candidate = resolve_tool_path(base, raw)
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    if candidate.is_empty() {
+        return false;
+    }
+    let wildcard = candidate.contains(['*', '?', '[', ']', '{', '}']);
+    let pattern = if wildcard {
+        collapse_glob_metacharacters(&candidate)
+    } else {
+        candidate
+    };
+    policy_paths(project).iter().any(|path| {
+        let policy = resolve_tool_path(project, &path.to_string_lossy())
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        let mut ancestor = Some(policy.as_str());
+        while let Some(value) = ancestor {
+            let hit = if wildcard {
+                glob_matches(&pattern, value)
+            } else {
+                value == pattern
+            };
+            if hit {
+                return true;
+            }
+            ancestor = Path::new(value).parent().and_then(Path::to_str);
+        }
+        false
+    })
+}
+
+/// Split a shell command at unquoted `;`, `&`, `|`, `(`, `)` and newlines, then
+/// each segment into words at unquoted whitespace. Quotes are stripped; on Unix
+/// a backslash escapes the next character (on Windows a backslash is a path
+/// separator, and PowerShell escapes with a backtick, which is left in place).
+///
+/// This is lexical only: variables, command substitution and interpreter code
+/// are opaque to it (see the residual-risk note in [`policy_write_reason`]).
+fn shell_segments(command: &str) -> Vec<Vec<String>> {
+    let mut segments: Vec<Vec<String>> = vec![Vec::new()];
+    let mut word = String::new();
+    let mut has_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars();
+    while let Some(ch) = chars.next() {
+        if let Some(delimiter) = quote {
+            if ch == delimiter {
+                quote = None;
+            } else if ch == '\\' && delimiter == '"' && !cfg!(windows) {
+                if let Some(escaped) = chars.next() {
+                    word.push(escaped);
+                }
+            } else {
+                word.push(ch);
+            }
+            has_word = true;
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                has_word = true;
+            }
+            '\\' if !cfg!(windows) => {
+                if let Some(escaped) = chars.next() {
+                    word.push(escaped);
+                }
+                has_word = true;
+            }
+            ';' | '&' | '|' | '(' | ')' | '\n' | '\r' => {
+                if has_word {
+                    segments
+                        .last_mut()
+                        .expect("one segment is always present")
+                        .push(std::mem::take(&mut word));
+                    has_word = false;
+                }
+                segments.push(Vec::new());
+            }
+            c if c.is_whitespace() => {
+                if has_word {
+                    segments
+                        .last_mut()
+                        .expect("one segment is always present")
+                        .push(std::mem::take(&mut word));
+                    has_word = false;
+                }
+            }
+            c => {
+                word.push(c);
+                has_word = true;
+            }
+        }
+    }
+    if has_word {
+        segments
+            .last_mut()
+            .expect("one segment is always present")
+            .push(word);
+    }
+    segments.retain(|segment| !segment.is_empty());
+    segments
+}
+
+/// A redirection operator (`>`, `>>`, `2>`, `&>` …).
+fn is_redirection(word: &str) -> bool {
+    word.contains('>') && word.chars().all(|c| matches!(c, '>' | '&' | '1' | '2'))
+}
+
+/// Separate a segment's words from any redirection targets. Targets are
+/// candidates whatever the command is, because `cmd > .ki/permissions.json`
+/// truncates the policy just as surely as `rm` would.
+fn split_redirects(segment: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut words = Vec::new();
+    let mut targets = Vec::new();
+    let mut index = 0;
+    while index < segment.len() {
+        let word = &segment[index];
+        if is_redirection(word) {
+            if let Some(target) = segment.get(index + 1) {
+                targets.push(target.clone());
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        // `echo x>.ki/permissions.json`: the target is glued to the word.
+        if let Some(open) = word.find('>') {
+            let (prefix, rest) = word.split_at(open);
+            let target = rest.trim_start_matches(['>', '&']);
+            if !prefix.is_empty() {
+                words.push(prefix.to_string());
+            }
+            if !target.is_empty() {
+                targets.push(target.to_string());
+            }
+            index += 1;
+            continue;
+        }
+        words.push(word.clone());
+        index += 1;
+    }
+    (words, targets)
+}
+
+/// Path-valued arguments of a word list: options (and `--`) are skipped.
+fn path_arguments(words: &[String]) -> Vec<&String> {
+    let mut out = Vec::new();
+    let mut options_done = false;
+    for word in words {
+        if !options_done {
+            if word == "--" {
+                options_done = true;
+                continue;
+            }
+            if word.starts_with('-') && word.len() > 1 {
+                continue;
+            }
+        }
+        out.push(word);
+    }
+    out
+}
+
+/// The path arguments that can destroy or rewrite the policy for `command`.
+///
+/// Empty when the command is not destructive. `mv` contributes both source and
+/// destination (moving `.ki` away is as fatal as moving something onto it);
+/// `cp`/`install`/`ln` contribute only the destination; `find` contributes its
+/// roots only when it will `-delete` or `-exec`; `dd` contributes its `of=`.
+fn destructive_paths<'a>(command: &str, words: &'a [String]) -> Vec<&'a String> {
+    match command {
+        "rm" | "rmdir" | "unlink" | "shred" | "truncate" | "mv" | "chmod" | "chown" | "chgrp"
+        | "del" | "erase" | "rd" | "remove-item" => path_arguments(words),
+        "cp" | "install" | "ln" => path_arguments(words)
+            .into_iter()
+            .last()
+            .into_iter()
+            .collect(),
+        "find" => {
+            let destructive = words
+                .iter()
+                .any(|word| word == "-delete" || word.starts_with("-exec"));
+            if destructive {
+                words
+                    .iter()
+                    .take_while(|word| !word.starts_with('-') && *word != "!" && *word != "(")
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        "dd" => words
+            .iter()
+            .filter(|word| word.starts_with("of="))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a shell command can reach the permission policy through a literal,
+/// directory or glob spelling. Strictly additive over the basename substring
+/// check: it only ever adds denials.
+fn shell_targets_policy_paths(project: &Path, command: &str) -> bool {
+    let mut base = project.to_path_buf();
+    for segment in shell_segments(command) {
+        let (words, redirects) = split_redirects(&segment);
+        if redirects
+            .iter()
+            .any(|target| shell_word_targets_policy(project, &base, target))
+        {
+            return true;
+        }
+        let Some((command, rest)) = words.split_first() else {
+            continue;
+        };
+        let command = command.to_ascii_lowercase();
+        if matches!(command.as_str(), "cd" | "pushd") {
+            if let Some(target) = path_arguments(rest).first() {
+                base = resolve_tool_path(&base, target);
+            }
+            continue;
+        }
+        if destructive_paths(&command, rest)
+            .iter()
+            .any(|target| shell_word_targets_policy(project, &base, target))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn policy_write_reason(cwd: &Path, tool: &str, args: &Value) -> Option<String> {
     let tool = tool.to_ascii_lowercase();
     if matches!(tool.as_str(), "write" | "edit") {
@@ -585,20 +848,32 @@ fn policy_write_reason(cwd: &Path, tool: &str, args: &Value) -> Option<String> {
     }
     if matches!(tool.as_str(), "bash" | "powershell") {
         let command = args.get("command").and_then(Value::as_str)?;
+        let denied = || {
+            "permission denied: the shell may not touch permission policy files; use the `permissions` tool (grant/revoke) or edit them outside the session".to_string()
+        };
         // A shell command can reach the file without naming a path the host
         // can resolve, so match the basename rather than trying to classify
         // the command. Case-insensitive: default macOS/Windows filesystems are,
         // so `PERMISSIONS.JSON` names the same file.
-        //
-        // Known limitation: a command that deletes the parent directory or a
-        // glob (`rm -rf .ki`, `rm .ki/permissions.*`) does not contain the
-        // basename and is not caught. The policy files are protected from the
-        // file tools; the shell guard is best-effort until the shell itself is
-        // sandboxed.
         if command.to_ascii_lowercase().contains("permissions.json") {
-            return Some(
-                "permission denied: the shell may not touch permission policy files; use the `permissions` tool (grant/revoke) or edit them outside the session".to_string(),
-            );
+            return Some(denied());
+        }
+        // The basename check misses the directory and glob spellings that
+        // destroy or rewrite the same file: `rm -rf .ki`, `rm -rf .`, a glob
+        // like `rm .ki/permissions.*`, `mv .ki /tmp`, `cd .ki && rm perm*`,
+        // `find .ki -delete`, or a redirection into the policy. `shell_*`
+        // below resolves each destructive word against its directories (it
+        // follows `cd`/`pushd`) and matches any ancestor of a policy path.
+        //
+        // Still best-effort, and deliberately not sound: variable indirection
+        // (`d=.ki; rm -rf $d`), command substitution/`eval`, interpreter
+        // one-liners (`python -c 'shutil.rmtree(".ki")'`), scripts invoked by
+        // name, make/npm lifecycle hooks, `git clean -fdx` (`.ki` is
+        // gitignored) and PowerShell backtick escaping all get through. The
+        // real backstop is sandboxing the shell or restoring the policy after
+        // the call (`after_tool_call`), both larger than this guard.
+        if shell_targets_policy_paths(cwd, command) {
+            return Some(denied());
         }
     }
     None
@@ -1131,6 +1406,51 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// The basename substring check alone lets the shell delete the policy's
+    /// directory or glob the file away. An empty policy keeps the rule engine
+    /// out of the way so only the path guard can produce the denial.
+    #[test]
+    fn shell_cannot_delete_the_policy_directory_or_glob_it() {
+        let dir = temp_dir("shell-policy");
+        write_project(&dir, "{}");
+        let bash = |command: &str| blocking_reason(&dir, "bash", &json!({ "command": command }));
+
+        for command in [
+            "rm -rf .ki",
+            "rm -rf .KI",
+            "rm -rf .pi",
+            "rm -f .ki/permissions.*",
+            "mv .ki /tmp/moved",
+            "cd .ki && rm -rf permissions.*",
+            "find .ki -delete",
+            "rm -rf .",
+            "echo '{}' > .ki/permissions.json",
+            "rm -rf .ki>/dev/null",
+        ] {
+            assert!(bash(command).is_some(), "must block: {command}");
+        }
+        assert!(
+            blocking_reason(
+                &dir,
+                "powershell",
+                &json!({ "command": "Remove-Item -Recurse -Force .ki" })
+            )
+            .is_some(),
+            "must block the PowerShell spelling"
+        );
+
+        // Siblings of the policy stay reachable; only its ancestors are sealed.
+        for command in [
+            "ls .ki/skills",
+            "rm -rf .ki/skills/old",
+            "rm -rf target/debug",
+        ] {
+            assert_eq!(bash(command), None, "must allow: {command}");
+        }
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn local_path_prefers_ki_then_the_legacy_pi_dir() {
         let dir = temp_dir("paths");
@@ -1180,7 +1500,7 @@ mod tests {
     fn gate_re_reads_the_file_on_every_call() {
         let dir = temp_dir("reload");
         write_project(&dir, r#"{"permissions":{}}"#);
-        let args = json!({"command": "rm -rf /"});
+        let args = json!({"command": "rm -rf build/out"});
         assert_eq!(blocking_reason(&dir, "bash", &args), None);
 
         // Simulates an external edit and the effect of `/reload`: the next call

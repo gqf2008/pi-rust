@@ -99,8 +99,24 @@ impl SignalHost {
         self.session.lock().unwrap().clone()
     }
 
-    /// Load the persisted session mute into the wake state. Called once after
-    /// `attach_session`.
+    /// Attach `session` and load its persisted mute in one step. The two must
+    /// not be separable: a host attached to one session while holding another's
+    /// mute would persist the flag into the wrong file.
+    pub(crate) async fn attach_session_and_load_mute(
+        &self,
+        session: Session,
+    ) -> Result<(), String> {
+        self.attach_session(session);
+        self.load_session_mute().await
+    }
+
+    /// Load the persisted session mute into the wake state. Called after
+    /// [`attach_session`](Self::attach_session) (or via
+    /// [`attach_session_and_load_mute`](Self::attach_session_and_load_mute)).
+    ///
+    /// The mute is per-session, so an absent value means "unmuted": it
+    /// overwrites the previous flag rather than leaving it alone, otherwise
+    /// switching from a muted session to an unmuted one would keep the old mute.
     pub(crate) async fn load_session_mute(&self) -> Result<(), String> {
         let Some(session) = self.session() else {
             return Ok(());
@@ -108,9 +124,8 @@ impl SignalHost {
         let values = SessionValues::load(&session)
             .await
             .map_err(|error| format!("could not read session values: {error}"))?;
-        if let Some(muted) = values.get_as::<bool>(SESSION_MUTE_KEY) {
-            self.wake.lock().unwrap().set_session_muted(muted);
-        }
+        let muted = values.get_as::<bool>(SESSION_MUTE_KEY).unwrap_or(false);
+        self.wake.lock().unwrap().set_session_muted(muted);
         Ok(())
     }
 
@@ -415,5 +430,30 @@ mod tests {
         fresh.attach_session(host.session().unwrap());
         fresh.load_session_mute().await.unwrap();
         assert!(fresh.session_muted());
+    }
+
+    /// The mute follows the attached session, not the host: a session without a
+    /// mute clears whatever the previous session carried.
+    #[tokio::test]
+    async fn attaching_an_unmuted_session_clears_a_previous_mute() {
+        let muted_session = session();
+        let host = SignalHost::new();
+        host.attach_session(muted_session.clone());
+        host.set_session_muted(true);
+        host.persist_session_muted(true).await.unwrap();
+        assert!(host.session_muted());
+
+        // A fresh in-memory session has no `mcp.signals.muted` value.
+        host.attach_session_and_load_mute(session()).await.unwrap();
+        assert!(
+            !host.session_muted(),
+            "an unmuted session must clear the previous session's mute"
+        );
+
+        // Re-attaching the muted session brings the flag back.
+        host.attach_session_and_load_mute(muted_session)
+            .await
+            .unwrap();
+        assert!(host.session_muted());
     }
 }

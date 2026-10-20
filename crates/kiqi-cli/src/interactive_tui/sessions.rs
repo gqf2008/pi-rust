@@ -116,20 +116,16 @@ pub(super) async fn switch_to_session(
     let cwd_str = cwd.to_string_lossy().to_string();
     match crate::session::open_session_by_id(id, &cwd_str).await {
         Ok(new_session) => {
-            // The signal host caches a Session handle (durable mute + attention
-            // inbox). `Session::clone` does NOT share the storage slot, so a
-            // swap that does not re-attach here keeps writing state into the
-            // previous session's JSONL.
-            let signal_session = new_session.clone();
-            // Route through the funnel so the plugin channels follow the swap;
-            // a bare `set_session` would leave every plugin naming the session
-            // it was serving before this call.
-            let _ =
-                crate::session::set_active_session(harness, new_session, Some(tool_context)).await;
-            reload_context.signal_host.attach_session(signal_session);
-            if let Err(error) = reload_context.signal_host.load_session_mute().await {
-                tracing::warn!(%error, "could not restore the signal mute for the new session");
-            }
+            // Route through the funnel so every session-scoped host follows the
+            // swap: the plugin channels (identity) and `SignalHost` (durable
+            // mute + attention inbox, which it caches a `Session` handle for).
+            let _ = crate::session::set_active_session(
+                harness,
+                new_session,
+                Some(tool_context),
+                &reload_context.signal_host,
+            )
+            .await;
             // `SessionTree`: the active session moved — plugins (compiled +
             // wasm) re-restore their state from the new branch. Fired after
             // the swap so handlers observe the NEW session; advisory.
@@ -267,12 +263,15 @@ pub(super) async fn fork_session(
         }
     };
     let new_session = kiqi_harness::session::session::Session::new(Arc::new(fork_storage), None);
-    let signal_session = new_session.clone();
-    let _ = crate::session::set_active_session(harness, new_session, Some(tool_context)).await;
-    reload_context.signal_host.attach_session(signal_session);
-    if let Err(error) = reload_context.signal_host.load_session_mute().await {
-        tracing::warn!(%error, "could not restore the signal mute for the forked session");
-    }
+    // The funnel re-attaches the signal host too; `Session::clone` inside it
+    // captures the fork's storage before the swap moves the original.
+    let _ = crate::session::set_active_session(
+        harness,
+        new_session,
+        Some(tool_context),
+        &reload_context.signal_host,
+    )
+    .await;
     // `SessionTree`: the active session moved to the fresh fork — plugins
     // (compiled + wasm) re-restore from the new (empty) branch. Fired after
     // the swap so handlers observe the NEW session; advisory.

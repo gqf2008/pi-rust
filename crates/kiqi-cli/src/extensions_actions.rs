@@ -78,6 +78,10 @@ pub struct HarnessActionHost {
     /// tool state keyed off the old id would otherwise keep serving the session
     /// it named before the swap.
     tool_context: kiqi_extensions::ToolCallContext,
+    /// Shared MCP-signal state. The same swap must move this host onto the new
+    /// session, or `mcp.signals.muted` and the attention inbox keep landing in
+    /// the previous session's JSONL; `set_active_session` owns that move.
+    signal_host: Arc<crate::signal_host::SignalHost>,
     #[allow(dead_code)]
     runtime: Handle,
 }
@@ -89,12 +93,13 @@ impl HarnessActionHost {
     /// runtime). Call [`set_harness`](Self::set_harness) once the harness is
     /// created. Returns `(host, harness_cell)` where `harness_cell` is the
     /// shared `OnceLock` the caller fills.
-    pub fn new_empty(
+    pub(crate) fn new_empty(
         catalog: Vec<kiqi_ai::Model>,
         cwd: PathBuf,
         runtime: Handle,
         cli_flags: BTreeMap<String, serde_json::Value>,
         tool_context: kiqi_extensions::ToolCallContext,
+        signal_host: Arc<crate::signal_host::SignalHost>,
     ) -> (Self, Arc<OnceLock<Arc<AgentHarness>>>) {
         let harness = Arc::new(OnceLock::new());
         (
@@ -104,6 +109,7 @@ impl HarnessActionHost {
                 cwd,
                 cli_flags,
                 tool_context,
+                signal_host,
                 runtime,
             },
             harness,
@@ -452,8 +458,13 @@ impl RuntimeActionHost for HarnessActionHost {
             .await
             .map_err(|e| format!("create session: {e}"))?;
         let id = session.storage().metadata().id.clone();
-        crate::session::set_active_session(self.harness()?, session, Some(&self.tool_context))
-            .await?;
+        crate::session::set_active_session(
+            self.harness()?,
+            session,
+            Some(&self.tool_context),
+            &self.signal_host,
+        )
+        .await?;
         Ok(serde_json::json!({ "sessionId": id }))
     }
 
@@ -463,8 +474,13 @@ impl RuntimeActionHost for HarnessActionHost {
             .await
             .map_err(|e| format!("fork session: {e}"))?;
         let id = new_session.storage().metadata().id.clone();
-        crate::session::set_active_session(self.harness()?, new_session, Some(&self.tool_context))
-            .await?;
+        crate::session::set_active_session(
+            self.harness()?,
+            new_session,
+            Some(&self.tool_context),
+            &self.signal_host,
+        )
+        .await?;
         Ok(serde_json::json!({ "sessionId": id }))
     }
 
@@ -499,8 +515,13 @@ impl RuntimeActionHost for HarnessActionHost {
             .await
             .map_err(|e| e.to_string())?;
         let new_id = new_session.storage().metadata().id.clone();
-        crate::session::set_active_session(self.harness()?, new_session, Some(&self.tool_context))
-            .await?;
+        crate::session::set_active_session(
+            self.harness()?,
+            new_session,
+            Some(&self.tool_context),
+            &self.signal_host,
+        )
+        .await?;
         Ok(serde_json::json!({ "sessionId": new_id }))
     }
 
@@ -509,5 +530,147 @@ impl RuntimeActionHost for HarnessActionHost {
         // B5d wires the reload callback at the bridge layer; this host impl is
         // the "not configured" fallback.
         Err("reload not configured (no /reload callback on this bridge)".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kiqi_ai::Api;
+    use kiqi_harness::agent_harness::AgentHarness;
+    use kiqi_harness::session::SessionValues;
+    use kiqi_harness::types::{
+        AgentHarnessOptions, AgentHarnessResources, DrivingMode, HarnessToolExecution, RetryPolicy,
+    };
+
+    fn harness_options(session: Session) -> AgentHarnessOptions {
+        AgentHarnessOptions {
+            model: kiqi_ai::Model::new("m", "m", Api::Faux, "faux", "http://x"),
+            thinking_level: Default::default(),
+            active_tool_names: Vec::new(),
+            tools: Vec::new(),
+            system_prompt: None,
+            resources: AgentHarnessResources::default(),
+            stream_options: Default::default(),
+            retry: RetryPolicy::default(),
+            compaction: Default::default(),
+            steering_mode: Default::default(),
+            follow_up_mode: Default::default(),
+            tool_execution: HarnessToolExecution::default(),
+            drive: DrivingMode::default(),
+            session,
+            allow_existing_session: true,
+            models: Vec::new(),
+            to_provider_messages: None,
+            entry_projectors: Default::default(),
+            agent_emitter: None,
+            before_tool_call: None,
+            after_tool_call: None,
+            transform_context: None,
+            entry_transforms: Vec::new(),
+            provider_hooks: None,
+        }
+    }
+
+    fn session_id(result: serde_json::Value) -> String {
+        result["sessionId"]
+            .as_str()
+            .expect("the action returns a sessionId")
+            .to_string()
+    }
+
+    async fn persisted_mute(cwd: &str, id: &str) -> Option<bool> {
+        let session = crate::session::open_session_by_id(id, cwd)
+            .await
+            .unwrap_or_else(|error| panic!("could not open session {id}: {error}"));
+        let values = SessionValues::load(&session).await.unwrap();
+        values.get_as::<bool>(crate::signal_host::SESSION_MUTE_KEY)
+    }
+
+    /// The plugin runtime actions (`new_session`/`fork`/`switch_session`) must
+    /// move the signal host with the harness. It caches a `Session` handle
+    /// whose clone snapshots the storage slot, so a swap that only calls
+    /// `set_session` keeps persisting `mcp.signals.*` into the previous JSONL.
+    #[tokio::test]
+    async fn plugin_session_actions_reattach_the_signal_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let cwd_str = cwd.to_string_lossy().to_string();
+        let sessions = crate::session::default_session_dir(cwd);
+        std::fs::create_dir_all(&sessions).unwrap();
+        let initial = crate::session::create_jsonl_session(&sessions, &cwd_str)
+            .await
+            .unwrap();
+        let harness = AgentHarness::create(harness_options(initial))
+            .await
+            .unwrap();
+
+        let signal_host = Arc::new(crate::signal_host::SignalHost::new());
+        let (host, cell) = HarnessActionHost::new_empty(
+            Vec::new(),
+            cwd.to_path_buf(),
+            Handle::current(),
+            BTreeMap::new(),
+            kiqi_extensions::ToolCallContext::new(cwd_str.clone()),
+            Arc::clone(&signal_host),
+        );
+        HarnessActionHost::set_harness(&cell, Arc::new(harness));
+
+        // The harness starts in the initial session; A becomes the muted one.
+        let a = session_id(host.new_session(serde_json::json!({})).await.unwrap());
+        signal_host.set_session_muted(true);
+        signal_host.persist_session_muted(true).await.unwrap();
+
+        // Switching to a fresh B re-attaches the host (a write would otherwise
+        // fail with "no session attached") and loads B's per-session mute: B
+        // has none, so the flag from A must be cleared.
+        let b = session_id(host.new_session(serde_json::json!({})).await.unwrap());
+        assert!(
+            !signal_host.session_muted(),
+            "an unmuted session must clear the mute carried over from the previous session"
+        );
+
+        // A write must land in B, leaving A untouched. (Before the fix the
+        // persist failed against the still-attached initial session.)
+        signal_host.set_session_muted(false);
+        signal_host.persist_session_muted(false).await.unwrap();
+        assert_eq!(persisted_mute(&cwd_str, &b).await, Some(false));
+        assert_eq!(
+            persisted_mute(&cwd_str, &a).await,
+            Some(true),
+            "B's write must not have reached A"
+        );
+
+        // Switching back loads A's mute and retargets subsequent writes at A.
+        host.switch_session(serde_json::json!({ "id": a }))
+            .await
+            .unwrap();
+        assert!(
+            signal_host.session_muted(),
+            "switching back must load A's persisted mute"
+        );
+        signal_host.set_session_muted(false);
+        signal_host.persist_session_muted(false).await.unwrap();
+        assert_eq!(persisted_mute(&cwd_str, &a).await, Some(false));
+
+        // `fork` goes through the same funnel. `fork_typed` forks at a message
+        // entry, and the mute writes above are custom entries, so give the
+        // branch a message tip first.
+        let harness = cell.get().expect("harness installed").clone();
+        harness
+            .session()
+            .append_message(kiqi_agent::AgentMessage::User(
+                kiqi_ai::types::UserMessage::new("fork point", 0),
+            ))
+            .await
+            .unwrap();
+        let fork = session_id(host.fork(serde_json::json!({})).await.unwrap());
+        signal_host.set_session_muted(true);
+        signal_host.persist_session_muted(true).await.unwrap();
+        assert_eq!(
+            persisted_mute(&cwd_str, &fork).await,
+            Some(true),
+            "the fork's mute must be written into the fork's file"
+        );
     }
 }

@@ -388,6 +388,7 @@ pub async fn build_with_selection(
         runtime.clone(),
         args.unknown_flags.clone(),
         tool_context.clone(),
+        Arc::clone(&signal_host),
     );
     let host_arc: Arc<dyn kiqi_extensions::RuntimeActionHost> = Arc::new(action_host);
     // Kept for the compiled-plugin capability adapter: `host_arc` itself is
@@ -509,8 +510,10 @@ pub async fn build_with_selection(
     let session = build_session(&selection, &cwd_str).await?;
     // The signal tool and the TUI boundary share this host; the durable mute is
     // a session value, so restore it before the first run can decide.
-    signal_host.attach_session(session.clone());
-    if let Err(error) = signal_host.load_session_mute().await {
+    if let Err(error) = signal_host
+        .attach_session_and_load_mute(session.clone())
+        .await
+    {
         eprintln!("warning: mcp: could not restore the signal mute: {error}");
     }
     // Plugin tools now know which session they serve: `todo` and friends key
@@ -1533,6 +1536,7 @@ where
                 ctx.runtime.clone(),
                 ctx.args.unknown_flags.clone(),
                 ctx.tool_context.clone(),
+                ctx.signal_host.clone(),
             );
             crate::extensions_actions::HarnessActionHost::set_harness(
                 &_cell,
@@ -3081,7 +3085,10 @@ fn publish_session_identity(tool_context: &kiqi_extensions::ToolCallContext, id:
 /// The single funnel for an in-process session change. Prefer this over calling
 /// `AgentHarness::set_session` directly: the harness holds no reference to the
 /// plugin channels, so a bare `set_session` would leave every plugin reporting
-/// the session it had before the swap.
+/// the session it had before the swap. The same holds for `SignalHost`, which
+/// caches a `Session` handle — a swap that does not re-attach there keeps
+/// persisting `mcp.signals.*` into the previous session's JSONL. Both moves live
+/// here so no activation path can forget one.
 ///
 /// `tool_context` is optional because not every caller has one (the harness's own
 /// tests, a headless embedder); the env channel is always published, since the
@@ -3090,6 +3097,7 @@ pub(crate) async fn set_active_session(
     harness: &AgentHarness,
     session: Session,
     tool_context: Option<&kiqi_extensions::ToolCallContext>,
+    signal_host: &crate::signal_host::SignalHost,
 ) -> Result<(), String> {
     if let Ok(metadata) = session.get_metadata().await {
         std::env::set_var(kiqi_plugin_sdk::SESSION_ID_ENV, &metadata.id);
@@ -3097,10 +3105,24 @@ pub(crate) async fn set_active_session(
             context.set_session_id(metadata.id);
         }
     }
+    // `Session::clone` snapshots the storage slot, so this handle keeps naming
+    // the session being installed even after `set_session` moves `session`.
+    let signal_session = session.clone();
     harness
         .set_session(session)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Only after a successful swap: on error the harness still serves the old
+    // session, which is where the signal host must stay too. A mute-read error
+    // must not fail a swap that already happened — keep the previous flag and
+    // say so (the same best-effort contract as the startup restore).
+    if let Err(error) = signal_host
+        .attach_session_and_load_mute(signal_session)
+        .await
+    {
+        tracing::warn!(%error, "could not restore the signal mute for the new session");
+    }
+    Ok(())
 }
 
 /// Fork the harness's current session into a new JSONL session (new id, parent
@@ -3934,9 +3956,15 @@ mod tests {
         );
 
         // An unmatched call is restricted while the allow list exists.
-        let result = invoke_tool_hook(&hook, "bash", serde_json::json!({"command": "rm -rf /"}))
-            .await
-            .expect("the allow list restricts");
+        // A target outside the policy's ancestors, so the allow-list rule (not
+        // the policy-path guard) is what produces the denial.
+        let result = invoke_tool_hook(
+            &hook,
+            "bash",
+            serde_json::json!({"command": "rm -rf build/out"}),
+        )
+        .await
+        .expect("the allow list restricts");
         assert!(result.block);
         assert!(result.reason.unwrap().contains("allow"));
 
