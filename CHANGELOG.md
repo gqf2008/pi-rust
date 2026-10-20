@@ -359,10 +359,10 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 ### Changed
 
 - **Fork release.** The project is now `kiqi` and the command is `ki` (was
-  `ki`): the executable, the startup lockup and window title, the config
-  directory (`~/.ki`, was `~/.ki`), the project-local directory (`.ki`) and
-  every environment variable (`KI_*`, was `KI_*`) were renamed. Existing
-  configs keep working after copying `~/.ki` to `~/.ki`.
+  `rpi`): the executable, the startup lockup and window title, the config
+  directory (`~/.ki`, was `~/.rpi`), the project-local directory (`.ki`) and
+  every environment variable (`KI_*`, was `RPI_*`) were renamed. Existing
+  configs keep working after copying `~/.rpi` to `~/.ki`.
 - Crates keep the `kiqi-*` names but are no longer published to crates.io
   (`publish = false`); releases are cut from this fork only.
 

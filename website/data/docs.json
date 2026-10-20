@@ -56,7 +56,7 @@
           "id": "install",
           "kicker": "02 / INSTALL",
           "title": "安装与运行",
-          "summary": "Rust 1.78+、Cargo 和 Tokio 是开始使用的最低条件；也可以直接安装 kiqi-cli。",
+          "summary": "Rust 1.96+、Cargo 和 Tokio 是开始使用的最低条件；crate 未发布到 crates.io，需从源码安装 CLI。",
           "body": [
             "只想直接使用 CLI 时用 scripts/install.sh 取预编译二进制，或克隆仓库后执行 cargo install --path crates/kiqi-cli --force——这些 crate 都没有发布到 crates.io，`cargo install kiqi-cli` 装不到任何东西；想研究 Agent loop，在克隆仓库里运行 minimal 示例。Cargo workspace 会按依赖顺序编译所有 crate。",
             "真实 Provider 的凭据可以通过命令行参数、~/.ki/auth.json、models.json 或环境变量提供。不要把密钥提交进仓库。"

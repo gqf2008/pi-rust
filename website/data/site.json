@@ -98,10 +98,10 @@
   ],
   "releases": [
     {
-      "version": "0.3.1",
+      "version": "0.4.1",
       "status": "current",
-      "title": "同机实测：启动快 9.7×、内存小 4.9×",
-      "description": "以同一套 JSONL RPC 协议、同一台机器实测：ki 启动快 9.7×、内存小 4.9×；并让每个 crate 在 crates.io 与 docs.rs 上正确展示。"
+      "title": "编译期插件收到事件，Langfuse 内建",
+      "description": "编译期插件现在接收 SessionStart、消息与工具调用事件，无需动态库也能追踪整轮运行；kiqi-langfuse 默认编入，提供 OTLP 追踪和三个 langfuse 工具。"
     },
     {
       "version": "next",

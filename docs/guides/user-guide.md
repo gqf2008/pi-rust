@@ -4,22 +4,17 @@
 
 ## 1. 安装
 
-### 直接安装 CLI
+### 安装 CLI
 
-需要 Rust/Cargo：
-
-```bash
-cargo install kiqi-cli
-ki --version
-ki --help
-```
-
-从本仓库源码安装开发版本：
+安装 CLI 需要 Rust 1.96+。这些 crate 没有发布到 crates.io（每个 manifest 都是
+`publish = false`），所以 `cargo install kiqi-cli` 装不到任何东西。从本仓库源码安装：
 
 ```bash
 git clone https://github.com/gqf2008/pi-rust.git
 cd pi-rust
 cargo install --path crates/kiqi-cli --force
+ki --version
+ki --help
 ```
 
 `cargo install` 安装的是可执行文件；它不等同于 `ki install`。后者用于安装由 `kiqi-plugin-sdk` 构建的 Rust 动态库扩展。

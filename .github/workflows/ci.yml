@@ -87,6 +87,11 @@ jobs:
       # copy-pasteable 404. Must ask what was *released*, not what was tagged: local tags
       # include v0.3.0/v0.3.19, which is why a tag-based check missed this.
       - name: Verify the installers only suggest released versions
+        # The release list is read from api.github.com. Without a token that is
+        # 60 requests/hour per IP; a rate-limited runner would fail this gate
+        # for a reason unrelated to the commit.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: sh scripts/check-install-version-hints.sh
 
       # The lock file must name every dependency of every feature. CI is online, so a

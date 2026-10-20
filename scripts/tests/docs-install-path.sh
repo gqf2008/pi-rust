@@ -35,7 +35,18 @@ if [ "$unpublished" -gt 0 ] && [ "$published" -gt 0 ]; then
     echo "      the README check below assumes none are"
 fi
 
-for doc in "$ROOT/README.md" "$ROOT/docs/kiqi-tool/README.md"; do
+# The user guides and the crate README are read at exactly the moment the
+# instruction matters (the first command a new user copies), so they are held
+# to the same rule as the top-level README. The crate README used to ship
+# `cargo install kiqi-cli` plus crates.io/docs.rs badges for a crate that is
+# not published; the guides' first install snippet was the same dead command.
+for doc in \
+    "$ROOT/README.md" \
+    "$ROOT/docs/kiqi-tool/README.md" \
+    "$ROOT/docs/kiqi-tool/user-guide.md" \
+    "$ROOT/docs/guides/user-guide.md" \
+    "$ROOT/crates/kiqi-cli/README.md"
+do
     [ -f "$doc" ] || continue
     rel=${doc#"$ROOT"/}
 
@@ -53,7 +64,8 @@ for doc in "$ROOT/README.md" "$ROOT/docs/kiqi-tool/README.md"; do
     if [ "$published" -eq 0 ]; then
         # A bare `cargo install <crate>` cannot work with publish = false. Mentioning it
         # in prose ("does not work") is fine; presenting it as an instruction is not.
-        if grep -n 'cargo install kiqi-cli' "$doc" | grep -v 'does not work' >/dev/null; then
+        if grep -n 'cargo install kiqi-cli' "$doc" \
+            | grep -vE 'does not work|装不到' >/dev/null; then
             echo "FAIL: $rel instructs 'cargo install kiqi-cli', which cannot succeed" >&2
             status=1
         fi
@@ -101,7 +113,7 @@ for rel in $(git ls-files '*.md' 'scripts/install.sh' 'scripts/install.ps1' \
     is_exempt_file "$rel" && continue
     [ -f "$rel" ] || continue
     grep -n 'bigfish1913/pi-rust' "$rel" \
-        | grep -vE 'star-history|Upstream|cherry-pick' >/dev/null && {
+        | grep -vE 'star-history|Upstream|cherry-pick|unrelated fork' >/dev/null && {
         echo "FAIL: $rel links to bigfish1913/pi-rust," >&2
         echo "      which serves a different project (rpi v0.6.1, rpi-v* assets)" >&2
         status=1

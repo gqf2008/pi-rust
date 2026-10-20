@@ -56,12 +56,12 @@ ki --version
 The crates are not published to crates.io, so `cargo install kiqi-cli` does not work —
 it would fetch a different (or no) package.
 
-**Package managers:** not available yet. The Homebrew tap and Scoop bucket this
-project would publish to currently carry a *different* tool (`rpi`, at v0.6.1) —
-there is no `ki.rb` or `ki.json` in them — so `brew install ki` / `scoop install ki`
-have nothing to install. `packaging/` holds a formula and manifests that have never
-been published; see `release-target-split` in the project's issue notes. A winget
-manifest is [open for review](https://github.com/microsoft/winget-pkgs/pull/444745).
+**Package managers:** not available yet. `gqf2008/homebrew-tap` and
+`gqf2008/scoop-bucket` do not exist, and the `bigfish1913` taps belong to the
+unrelated fork — they carry that project's `rpi` formula/manifest, not `ki` — so
+`brew install ki` / `scoop install ki` have nothing to install. `packaging/` holds
+a formula and manifests that have never been published. The open winget PRs
+(`#441442`, `#444745`) are for the other project's `bigfish1913.rpi`, not `ki`.
 
 Use the prebuilt installer or a source build until then:
 

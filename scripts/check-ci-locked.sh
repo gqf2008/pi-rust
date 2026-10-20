@@ -35,7 +35,7 @@ done
 
 # A silently-empty match would make this check vacuous.
 if ! printf '%s\n' "$joined" | grep -qE 'cargo (check|test|build|run|clippy)'; then
-    echo "FAIL: no cargo build/check/test commands found in $CI" >&2
+    echo "FAIL: no cargo build/check/test commands found in $WF_DIR" >&2
     echo "      (the parser probably broke, not CI)" >&2
     exit 1
 fi

@@ -24,26 +24,28 @@ set -u
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 SH="$ROOT/scripts/install.sh"
 PS1="$ROOT/scripts/install.ps1"
+# The README's Windows quick-start shows `-Version <x>`, which is just as
+# copy-pasteable as the installers' own help text (it had drifted to 0.3.21,
+# a tag this repository never released).
+README="$ROOT/README.md"
 # Workflow inputs are read by a human too -- `release-binaries.yml`'s `tag` description
 # told the maintainer to pass "e.g. v0.3.0", which this repository never released.
 RELEASE_WF="$ROOT/.github/workflows/release-binaries.yml"
 
-for f in "$SH" "$PS1" "$RELEASE_WF"; do
+for f in "$SH" "$PS1" "$README" "$RELEASE_WF"; do
     [ -f "$f" ] || { echo "FAIL: $f not found" >&2; exit 1; }
 done
-
-# `x.y.z`, not `x.y` — a two-part version would match prose like "0.4".
-semver_re='(^|[^0-9.])([0-9]+\.[0-9]+\.[0-9]+)([^0-9.]|$)'
 
 # Lines that suggest a version to the user, in both installers:
 #   sh : "--version <v>  Install a specific version, e.g. --version 0.4.1"
 #   ps1: ".EXAMPLE & .\install.ps1 -Version 0.4.1 ..."  and the -Version hint in a throw
+#   md : "Append -DryRun to preview, or use -Version 0.4.1 ..."
 suggestions() {
     # shellcheck disable=SC2016
     # NOTE: do *not* filter out `#` lines here. `install.sh --help` is literally
     # `sed -n '2,16p' "$0"`, so its user-facing option text lives in comments -- excluding
     # them skipped the one suggestion the user is most likely to copy.
-    grep -HnE -- '--version [0-9]|-Version [0-9]|e\.g\. --version' "$SH" "$PS1" 2>/dev/null \
+    grep -HnE -- '--version [0-9]|-Version [0-9]|e\.g\. --version' "$SH" "$PS1" "$README" 2>/dev/null \
         | sed 's/^/  /'
     # `description: "... (e.g. v0.4.1)"` in the release workflow's dispatch input.
     grep -HnE '^[[:space:]]*description:[[:space:]]*"[^"]*\(e\.g\. v[0-9]' "$RELEASE_WF" 2>/dev/null \
@@ -52,6 +54,7 @@ suggestions() {
 
 status=0
 found=0
+all=$(suggestions)
 
 while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -63,21 +66,31 @@ while IFS= read -r line; do
         echo "  suggested: $ver  (${file#"$ROOT"/})"
     done
 done <<EOF
-$(suggestions)
+$all
 EOF
 
-# Collect suggested versions, then check each against the tags.
-versions=$(suggestions | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -u)
+# Collect suggested versions, then check each against the release list.
+versions=$(printf '%s\n' "$all" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -u)
 
 if [ -z "$versions" ]; then
-    echo "FAIL: no version suggestion found in install.sh or install.ps1" >&2
+    echo "FAIL: no version suggestion found in install.sh, install.ps1 or README.md" >&2
     echo "      (the parser probably broke, not the installers)" >&2
     exit 1
 fi
 
-online=$(curl -fsSL --max-time 25 \
-    "https://api.github.com/repos/gqf2008/pi-rust/releases?per_page=100" 2>/dev/null \
-    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' | sort -u)
+# Use the workflow token when CI provides one: an unauthenticated request is
+# limited to 60/hour per IP, and a rate-limited runner would turn this gate
+# red for a reason that has nothing to do with the commit.
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    online=$(curl -fsSL --max-time 25 \
+        -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+        "https://api.github.com/repos/gqf2008/pi-rust/releases?per_page=100" 2>/dev/null \
+        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' | sort -u)
+else
+    online=$(curl -fsSL --max-time 25 \
+        "https://api.github.com/repos/gqf2008/pi-rust/releases?per_page=100" 2>/dev/null \
+        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\([^"]*\)".*/\1/p' | sort -u)
+fi
 
 if [ -n "$online" ]; then
     released="$online"

@@ -4,7 +4,7 @@
 > `ki`, config lives in `~/.ki`, environment variables use the `KI_` prefix and
 > releases are cut from this repository only (the crates are **not** published
 > to crates.io, and `ki update` installs from this repo's GitHub Releases).
-> This repository is the project home. `gqf2008/pi-rust` is an unrelated fork: do not use it as a source, release target, or upstream.
+> This repository is the project home. `bigfish1913/pi-rust` is an unrelated fork: do not use it as a source, release target, or upstream.
 
 [![license](https://img.shields.io/crates/l/kiqi-cli.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue.svg)](#install)
@@ -60,7 +60,7 @@ On **Windows (x64)**, run in PowerShell 5.1 or later:
 Verifies the published SHA-256 checksum and installs to
 `$env:LOCALAPPDATA\Programs\ki`. Follow the printed instructions to add it to
 PATH, then run `ki --version`. Append `-DryRun` to preview, or use
-`-Version 0.3.21` and `-Dir 'C:\Tools\ki'` to select a version and directory.
+`-Version 0.4.1` and `-Dir 'C:\Tools\ki'` to select a version and directory.
 
 **From source** (requires Rust 1.96+):
 
@@ -73,12 +73,12 @@ ki --version
 The crates are not published to crates.io, so `cargo install kiqi-cli` does not work —
 it would fetch a different (or no) package.
 
-**Package managers:** not available yet. The Homebrew tap and Scoop bucket this
-project would publish to currently carry a *different* tool (`rpi`, at v0.6.1) —
-there is no `ki.rb` or `ki.json` in them — so `brew install ki` / `scoop install ki`
-have nothing to install. `packaging/` holds a formula and manifests that have never
-been published; see `release-target-split` in the project's issue notes. A winget
-manifest is [open for review](https://github.com/microsoft/winget-pkgs/pull/444745).
+**Package managers:** not available yet. `gqf2008/homebrew-tap` and
+`gqf2008/scoop-bucket` do not exist, and the `bigfish1913` taps belong to the
+unrelated fork — they carry that project's `rpi` formula/manifest, not `ki` — so
+`brew install ki` / `scoop install ki` have nothing to install. `packaging/` holds
+a formula and manifests that have never been published. The open winget PRs
+(`#441442`, `#444745`) are for the other project's `bigfish1913.rpi`, not `ki`.
 
 Use the prebuilt installer or a source build until then:
 

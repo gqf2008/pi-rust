@@ -16,7 +16,7 @@ checksum** — none of it is a template with placeholders.
 | `cargo binstall kiqi-cli` | [`crates/kiqi-cli/Cargo.toml`](../crates/kiqi-cli/Cargo.toml) | **not available** | takes effect only after the crates are published (`publish = false` today) |
 | Homebrew | `gqf2008/homebrew-tap` | **not published** | create the tap, then `scripts/push-taps.sh`; `bigfish1913/homebrew-tap` serves `rpi`, not `ki` |
 | Scoop | `gqf2008/scoop-bucket` | **not published** | create the bucket, then `scripts/push-taps.sh`; `bigfish1913/scoop-bucket` serves `rpi`, not `ki` |
-| winget | [open at `microsoft/winget-pkgs#441442`](https://github.com/microsoft/winget-pkgs/pull/441442) | **not published** | the open PR is for the old `bigfish1913.ki` identifier; a `gqf2008.ki` submission is still pending |
+| winget | [open at `microsoft/winget-pkgs#441442`](https://github.com/microsoft/winget-pkgs/pull/441442) | **not published** | the open PRs are for the unrelated fork's `bigfish1913.rpi` package; no `gqf2008.ki` submission exists |
 
 The files in this directory are the source of truth for the two taps; the tap
 repos are copies. `scripts/push-taps.sh` refuses to run unless the target
@@ -61,8 +61,8 @@ target.
 Two consequences worth knowing:
 
 - Intel Macs can use `scripts/install.sh` for releases containing that asset,
-  or `cargo install kiqi-cli`. The Homebrew formula currently covers Apple
-  silicon on macOS.
+  or `cargo install --path crates/kiqi-cli --force` from a checkout. The
+  Homebrew formula currently covers Apple silicon on macOS.
 - The assets are named after the **binary** (`ki`), while the crate is
   `kiqi-cli`. Anything templating a URL from the crate name is wrong — which is
   why the binstall `pkg-url` uses `{ bin }` and not `{ name }`.
@@ -140,11 +140,11 @@ Verified on this machine:
   `v0.3.2` table below is historical and is not what the manifests carry now.
 - `scoop/ki.json` parses, and its `bin` (`ki.exe`) matches the zip's root
   entry produced by the workflow's `7z a -tzip … .` step.
-- The published archives themselves were downloaded and hashed here, byte for
-  byte: the Windows zip is `c5b572d7…0d7f` and the macOS tarball is
-  `92e1851f…1842`, matching `scoop/ki.json` and `homebrew/ki.rb` exactly. The
-  zip was listed to confirm `ki.exe` really is at the archive root — the thing
-  `bin` claims and the only reason the Scoop manifest works.
+- The v0.4.1 digests recorded in `scoop/ki.json` and `homebrew/ki.rb` match
+  the GitHub API's `assets[].digest` (Windows zip `1edc47c0…e273`, macOS arm64
+  tarball `f7f894fa…ceec`), and the API's asset list confirms the filenames the
+  manifests build. A downloaded archive was not re-hashed in this pass; older
+  releases had `ki.exe` at the zip root, which is what `bin` claims.
 - The `gqf2008/*` taps do **not** exist yet, so `brew install ki` and
   `scoop install ki` remain unavailable; `scripts/push-taps.sh` preflights both
   repos and refuses to push elsewhere.
@@ -152,7 +152,7 @@ Verified on this machine:
 **Not** verified here, and worth one manual pass before relying on them:
 
 - **Homebrew** — no `brew`/`ruby` on this machine, so the formula was never
-  syntax-checked or installed, even though it is published. `brew audit
+  syntax-checked or installed (nothing is published yet). `brew audit
   --new-formula ki` in the tap is the cheap check.
 - **binstall** — `cargo-binstall` is not installed here, so the metadata is
   written from the documented schema (`SUPPORT.md` in `cargo-bins/cargo-binstall`)

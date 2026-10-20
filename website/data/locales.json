@@ -5,7 +5,7 @@
       "action.build": "开始构建",
       "action.copy": "复制",
       "action.copyCode": "复制代码",
-      "action.crates": "crates.io",
+      "action.crates": "发布记录",
       "action.examples": "浏览 examples",
       "action.github": "GitHub 仓库",
       "action.learnExtensions": "了解插件系统",
@@ -126,13 +126,13 @@
       "section.extensionBody": "Rust cdylib 插件通过稳定 ABI 接入 Tool、Provider、Slash Command、事件和资源发现。Node/TypeScript 扩展与 TUI 技能渲染目前属于兼容性 Beta，建议先在本地评估，不建议用于生产。",
       "section.extensionTitle": "把你的能力<br /><em>插进 Agent。</em>",
       "section.installBinary": "或用预编译二进制（无需 Rust 工具链）",
-      "section.installCli": "直接安装 CLI",
+      "section.installCli": "从源码安装 CLI",
       "section.releaseBody": "核心能力优先稳定下来，再把更多 Provider、插件生态和 CLI 体验交给社区。",
       "section.releaseTitle": "小步发布，持续靠近。",
       "section.runExample": "从源码运行示例",
       "section.startBody": "两个示例覆盖最重要的学习路径：先用 faux provider 跑通 Agent，再把真实文件系统和工具接进循环。",
       "section.startTitle": "先跑起来，<br /><span>再加复杂度。</span>",
-      "section.startedBody": "想直接使用 CLI 就安装 kiqi-cli；想研究 Agent loop，再拉源码运行 faux provider。",
+      "section.startedBody": "想直接使用 CLI 就从源码安装 ki（这些 crate 未发布到 crates.io）；想研究 Agent loop，再拉源码运行 faux provider。",
       "section.startedTitle": "你的 Agent，<br /><span>从这里开始。</span>",
       "section.whyBody": "Agent 不应该被锁在一个 CLI 里。ki 把模型、循环、工具、会话和终端体验拆成可以独立替换的 Rust 层，让你从最小实验开始，逐步长成自己的产品。",
       "section.whyTitle": "从一条 prompt，<br /><span>长出完整系统。</span>"
@@ -144,7 +144,7 @@
       "action.build": "Start building",
       "action.copy": "Copy",
       "action.copyCode": "Copy code",
-      "action.crates": "crates.io",
+      "action.crates": "Releases",
       "action.examples": "Browse examples",
       "action.github": "GitHub repository",
       "action.learnExtensions": "Explore the plugin system",
@@ -265,13 +265,13 @@
       "section.extensionBody": "Rust cdylib plugins use a stable ABI to add tools, providers, slash commands, events and resources. Node/TypeScript extensions and TUI skill rendering are compatibility beta features for local evaluation, not recommended for production.",
       "section.extensionTitle": "Plug your capability<br /><em>into the Agent.</em>",
       "section.installBinary": "Or install a prebuilt binary (no Rust toolchain)",
-      "section.installCli": "Install the CLI",
+      "section.installCli": "Build the CLI from source",
       "section.releaseBody": "Stabilize core capabilities first, then hand more providers, plugin ecosystem and CLI experience to the community.",
       "section.releaseTitle": "Ship in small steps, keep moving.",
       "section.runExample": "Run the example from source",
       "section.startBody": "The two examples cover the essential path: run an Agent with a faux provider, then connect a real filesystem and tools to the loop.",
       "section.startTitle": "Start small,<br /><span>then add complexity.</span>",
-      "section.startedBody": "Install kiqi-cli for the command line, or clone the source and run the faux provider to study the Agent loop.",
+      "section.startedBody": "Build ki from source for the command line (the crates are not published to crates.io), or run the faux provider example to study the Agent loop.",
       "section.startedTitle": "Your Agent<br /><span>starts here.</span>",
       "section.whyBody": "An Agent should not be locked inside a CLI. ki separates models, loops, tools, sessions and terminal experiences into replaceable Rust layers, so a small experiment can grow into your product.",
       "section.whyTitle": "From one prompt,<br /><span>into a complete system.</span>"
@@ -374,10 +374,10 @@
       ],
       "releases": [
         {
-          "version": "0.3.21",
+          "version": "0.4.1",
           "status": "current",
-          "title": "A crashed session opens again",
-          "description": "Two writers on one session log used to make it unopenable; the loader now heals it and a second process is refused instead of double-writing. Plugin tools also receive the session they run in, so per-session state no longer has to be guessed."
+          "title": "Compile-time plugins receive events, Langfuse built in",
+          "description": "Compiled-in plugins now receive SessionStart, message and tool-call events, so a ki with no dynamic libraries still traces a run. kiqi-langfuse is compiled in by default with OTLP tracing and three langfuse tools."
         },
         {
           "version": "next",
@@ -459,13 +459,13 @@
             "install": {
               "kicker": "02 / INSTALL",
               "title": "Install and run",
-              "summary": "Rust 1.78+, Cargo and Tokio are the minimum; you can also install kiqi-cli directly.",
+              "summary": "Rust 1.96+, Cargo and Tokio are the minimum; the crates are not published to crates.io, so build the CLI from source.",
               "body": [
-                "Run cargo install kiqi-cli when you only need the CLI. Clone the repository and run the minimal example when you want to study the Agent loop. Cargo builds the workspace in dependency order.",
+                "Clone the repository and run `cargo install --path crates/kiqi-cli --force` when you only need the CLI (the crates are not published to crates.io). Run the minimal example when you want to study the Agent loop. Cargo builds the workspace in dependency order.",
                 "Provide real Provider credentials through CLI flags, ~/.ki/auth.json, models.json or environment variables. Never commit secrets."
               ],
               "code": {
-                "content": "# Install the CLI\ncargo install kiqi-cli\nki -p \"hello\"\n\n# Run the example from source\ngit clone https://github.com/gqf2008/pi-rust.git\ncd pi-rust\ncargo run -p minimal"
+                "content": "# Install the CLI from source (the crates are not on crates.io)\ngit clone https://github.com/gqf2008/pi-rust.git\ncd pi-rust\ncargo install --path crates/kiqi-cli --force\nki -p \"hello\"\n\n# Run the example without installing\ncargo run -p minimal"
               },
               "links": [
                 "Configuration"

@@ -1,7 +1,5 @@
 # kiqi-cli
 
-[![crates.io](https://img.shields.io/crates/v/kiqi-cli.svg)](https://crates.io/crates/kiqi-cli)
-[![docs.rs](https://docs.rs/kiqi-cli/badge.svg)](https://docs.rs/kiqi-cli)
 [![CI](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/gqf2008/pi-rust/actions)
 
 The terminal coding-agent CLI — the `ki` binary — built on the `kiqi-*` library
@@ -12,8 +10,12 @@ plugin loading.
 
 ## Install
 
+The crates are not published to crates.io (`publish = false`), so install the
+binary from a checkout:
+
 ```bash
-cargo install kiqi-cli
+git clone https://github.com/gqf2008/pi-rust && cd pi-rust
+cargo install --path crates/kiqi-cli --force
 ```
 
 Requires Rust 1.96 or newer. Then point it at a provider and start it:
@@ -107,7 +109,7 @@ agent work happens on the server. See
 The CLI loads the Pi-compatible `read`, `write`, `edit` and `bash` tools, the
 read-only `docs` lookup, and the host-owned `permissions` policy tool.
 Additional implementations (`grep`, `find`, `ls`, `powershell`) remain
-available in the [`kiqi-tools`](https://crates.io/crates/kiqi-tools) library and
+available in the [`kiqi-tools`](../../crates/kiqi-tools) library and
 through the `default_tools` setting.
 
 ## Library usage
@@ -116,12 +118,12 @@ The crate also exposes its internals, so the CLI surface can be embedded:
 
 ```toml
 [dependencies]
-kiqi-cli = "0.3"
+kiqi-cli = { git = "https://github.com/gqf2008/pi-rust" }
 ```
 
 For building your own agent, depend on
-[`kiqi-agent`](https://crates.io/crates/kiqi-agent) and
-[`kiqi-harness`](https://crates.io/crates/kiqi-harness) directly instead — see
+[`kiqi-agent`](../../crates/kiqi-agent) and
+[`kiqi-harness`](../../crates/kiqi-harness) directly instead — see
 [docs/agent/project-structure.md](https://github.com/gqf2008/pi-rust/blob/main/docs/agent/project-structure.md).
 
 ## Documentation
