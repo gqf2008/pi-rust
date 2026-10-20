@@ -69,6 +69,13 @@ impl UpdateReport {
 struct UpdateCache {
     /// Legacy aggregate timestamp retained for backward-compatible cache reads.
     checked_at: i64,
+    /// Cached latest `ki` release.
+    ///
+    /// **Deliberate legacy trace**: caches written before the rename store it
+    /// as `rpiLatest`; without the alias an upgrading user's cached release is
+    /// ignored (and then overwritten), disabling `ki update --offline` and the
+    /// transient-failure fallback.
+    #[serde(default, alias = "rpiLatest")]
     kiqi_latest: Option<String>,
     #[serde(default)]
     native_packages: BTreeMap<String, String>,
