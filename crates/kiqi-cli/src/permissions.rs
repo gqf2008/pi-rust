@@ -613,7 +613,12 @@ enum PolicyReach {
 /// are caught while `rm -rf .ki/skills/old` (a sibling, not an ancestor) stays
 /// allowed. [`PolicyReach::FileOnly`] is for destinations, where an ancestor
 /// such as `.` only means "write inside this directory".
-fn shell_word_targets_policy(project: &Path, base: &Path, raw: &str, reach: PolicyReach) -> bool {
+fn shell_word_targets_policy(
+    policies: &[String],
+    base: &Path,
+    raw: &str,
+    reach: PolicyReach,
+) -> bool {
     let candidate = resolve_tool_path(base, raw)
         .to_string_lossy()
         .to_ascii_lowercase();
@@ -626,22 +631,34 @@ fn shell_word_targets_policy(project: &Path, base: &Path, raw: &str, reach: Poli
     } else {
         candidate
     };
-    policy_paths(project).iter().any(|path| {
-        let policy = resolve_tool_path(project, &path.to_string_lossy())
-            .to_string_lossy()
-            .to_ascii_lowercase();
+    policies.iter().any(|policy| {
+        // The directory that directly holds a policy file is a write target
+        // of its own: `cp permissions.json .ki` and `mv /tmp/x/* .ki` land at
+        // `.ki/permissions.json` and replace it. Any other ancestor (`.`,
+        // `..`, the home directory) is a harmless destination.
+        let holds_policy = Path::new(policy).parent().is_some_and(|parent| {
+            let parent = parent.to_string_lossy();
+            if wildcard {
+                glob_matches(&pattern, parent.as_ref())
+            } else {
+                parent.as_ref() == pattern.as_str()
+            }
+        });
         if wildcard {
             // A glob is compared against the policy path itself (and, for
             // deletion, its ancestors). `*` crosses separators, so both
             // `.ki/permissions.*` and `.ki/*` hit the file.
-            let hit = glob_matches(&pattern, &policy);
+            let hit = glob_matches(&pattern, policy);
+            let dir_hit = reach == PolicyReach::FileOnly && holds_policy;
             let ancestor_hit = reach == PolicyReach::Ancestor
                 && ancestors(&policy).any(|value| glob_matches(&pattern, value));
-            return hit || ancestor_hit;
+            return hit || dir_hit || ancestor_hit;
         }
         if reach == PolicyReach::FileOnly {
-            return policy == pattern;
+            return *policy == pattern || holds_policy;
         }
+        // Bind the result so the iterator (which borrows `policy`) is dropped
+        // before `policy` goes out of scope.
         let hit = ancestors(&policy).any(|value| value == pattern);
         hit
     })
@@ -791,7 +808,19 @@ fn path_arguments(words: &[String]) -> Vec<&String> {
 /// Commands whose first non-option arguments name another command. The guard
 /// must look through them; otherwise `sudo rm -rf .ki` would read as "sudo".
 const COMMAND_WRAPPERS: &[&str] = &[
-    "sudo", "doas", "env", "command", "nice", "nohup", "time", "xargs", "busybox", "exec", "stdbuf",
+    "sudo", "doas", "env", "command", "nice", "nohup", "time", "xargs", "busybox", "exec",
+    "stdbuf", "setsid", "ionice", "timeout", "chroot", "flock",
+];
+
+/// Wrappers whose own first positional argument is not the command:
+/// `timeout 5 rm …`, `chroot /root rm …` and `flock /tmp/l rm …`.
+const WRAPPERS_WITH_LEADING_POSITIONAL: &[&str] = &["chroot", "flock", "timeout"];
+
+/// Shell reserved words that can sit in front of the command in one segment.
+/// `shell_segments` splits on `;`, so `then rm …` and `do rm …` keep the
+/// keyword; without skipping it the destructive verb stays invisible.
+const COMMAND_PREFIX_WORDS: &[&str] = &[
+    "!", "{", "if", "then", "elif", "else", "while", "until", "do",
 ];
 
 /// A leading `NAME=value` environment assignment.
@@ -804,24 +833,88 @@ fn is_assignment(word: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Wrapper options that consume the following word. Options spelled
-/// `--name=value` carry their value inline.
-fn wrapper_option_takes_value(wrapper: &str, option: &str) -> bool {
-    if option.starts_with("--") || option.contains('=') {
-        return false;
-    }
+/// Whether a long wrapper option takes a separate value (`--user root`).
+fn long_option_takes_value(wrapper: &str, option: &str) -> bool {
     match wrapper {
-        "sudo" | "doas" => matches!(option, "-u" | "-g" | "-p" | "-C" | "-r" | "-t" | "-U"),
-        "nice" => option == "-n",
+        "sudo" | "doas" => matches!(
+            option,
+            "--user"
+                | "--group"
+                | "--prompt"
+                | "--close-from"
+                | "--chdir"
+                | "--host"
+                | "--login-class"
+                | "--role"
+                | "--type"
+                | "--other-user"
+                | "--command-timeout"
+        ),
+        "nice" => option == "--adjustment",
         "xargs" => matches!(
             option,
-            "-n" | "-P" | "-I" | "-L" | "-s" | "-a" | "-d" | "-E"
+            "--max-args"
+                | "--max-procs"
+                | "--replace"
+                | "--max-lines"
+                | "--max-chars"
+                | "--arg-file"
+                | "--delimiter"
+                | "--eof"
+                | "--process-slot-var"
         ),
-        "env" => option == "-u",
-        "time" => option == "-f",
-        "stdbuf" => matches!(option, "-i" | "-o" | "-e"),
+        "env" => matches!(option, "--unset" | "--chdir" | "--split-string"),
+        "time" => matches!(option, "--format" | "--output"),
+        "stdbuf" => matches!(option, "--input" | "--output" | "--error"),
+        "chroot" => matches!(option, "--userspec" | "--groups"),
+        "flock" => matches!(option, "--timeout" | "--conflict-exit-code" | "--command"),
+        "timeout" => matches!(option, "--signal" | "--kill-after"),
+        "ionice" => matches!(option, "--class" | "--classdata" | "--pid" | "--pgid"),
         _ => false,
     }
+}
+
+/// Whether a short wrapper option letter takes a value (`-u root`, `-uroot`).
+fn short_option_takes_value(wrapper: &str, option: char) -> bool {
+    match wrapper {
+        "sudo" | "doas" => matches!(
+            option,
+            'u' | 'g' | 'p' | 'C' | 'r' | 't' | 'U' | 'D' | 'h' | 'R' | 'T'
+        ),
+        "nice" => option == 'n',
+        "xargs" => matches!(option, 'n' | 'P' | 'I' | 'L' | 's' | 'a' | 'd' | 'E'),
+        "env" => matches!(option, 'u' | 'C' | 'S'),
+        "time" => matches!(option, 'f' | 'o'),
+        "stdbuf" => matches!(option, 'i' | 'o' | 'e'),
+        "exec" => option == 'a',
+        "flock" => matches!(option, 'w' | 'E'),
+        "timeout" => matches!(option, 's' | 'k'),
+        "ionice" => matches!(option, 'c' | 'n' | 'p' | 'P' | 'u'),
+        _ => false,
+    }
+}
+
+/// How many following words a wrapper option consumes. `-u root` and
+/// `-uroot` both name a user, but only the separated spelling leaves a word
+/// to skip; clustered short options (`-iu root`) are walked letter by letter.
+fn wrapper_option_consumes(wrapper: &str, option: &str) -> usize {
+    if option.contains('=') {
+        // `--name=value` carries its value inline.
+        return 0;
+    }
+    if option.starts_with("--") {
+        return usize::from(long_option_takes_value(wrapper, option));
+    }
+    let Some(letters) = option.strip_prefix('-') else {
+        return 0;
+    };
+    for (index, letter) in letters.char_indices() {
+        if short_option_takes_value(wrapper, letter) {
+            // Anything after the value-taking letter is its value.
+            return usize::from(index + letter.len_utf8() == letters.len());
+        }
+    }
+    0
 }
 
 /// The lowercased file name of a command word: `/bin/rm` and `RM.EXE` both
@@ -841,8 +934,13 @@ fn command_name(word: &str) -> String {
 fn unwrap_command(words: &[String]) -> Option<(String, &[String])> {
     let mut rest = words;
     loop {
-        while rest.first().is_some_and(|word| is_assignment(word)) {
-            rest = &rest[1..];
+        // Assignments and shell keywords can precede the command.
+        while let Some(word) = rest.first() {
+            if is_assignment(word) || COMMAND_PREFIX_WORDS.contains(&word.as_str()) {
+                rest = &rest[1..];
+            } else {
+                break;
+            }
         }
         let word = rest.first()?;
         let name = command_name(word);
@@ -864,14 +962,15 @@ fn unwrap_command(words: &[String]) -> Option<(String, &[String])> {
                 continue;
             }
             if word.starts_with('-') && word.len() > 1 {
-                index += if wrapper_option_takes_value(&name, word) {
-                    2
-                } else {
-                    1
-                };
+                index += 1 + wrapper_option_consumes(&name, word);
                 continue;
             }
             break;
+        }
+        if WRAPPERS_WITH_LEADING_POSITIONAL.contains(&name.as_str()) {
+            // `timeout 5 cmd`, `chroot /root cmd`: the first positional is
+            // the duration or root, not the command.
+            index += 1;
         }
         rest = after.get(index..).unwrap_or(&[]);
         if rest.is_empty() {
@@ -886,20 +985,50 @@ fn target_directory(words: &[String]) -> Option<&str> {
     let mut index = 0;
     while index < words.len() {
         let word = &words[index];
+        if word == "--" {
+            break;
+        }
         if word == "-t" || word == "--target-directory" {
             return words.get(index + 1).map(String::as_str);
         }
         if let Some(value) = word.strip_prefix("--target-directory=") {
             return Some(value);
         }
+        // `-S/--suffix` takes a value that can itself look like `-t`:
+        // `mv -S -t .ki dest` renames `.ki`, it does not set a target.
+        if word == "-S" || word == "--suffix" {
+            index += 2;
+            continue;
+        }
+        if word.starts_with("-S") && word.len() > 2 {
+            index += 1;
+            continue;
+        }
+        // Short options accept an attached value: `-t/tmp`.
+        if let Some(value) = word.strip_prefix("-t") {
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
         index += 1;
     }
     None
 }
 
+/// Whether `sed` was asked to edit its file arguments in place.
+fn sed_in_place(words: &[String]) -> bool {
+    words.iter().any(|word| {
+        word.starts_with("--in-place")
+            || (word.starts_with('-')
+                && !word.starts_with("--")
+                && word.len() > 1
+                && word[1..].contains('i'))
+    })
+}
+
 /// A destructive path argument and how far it may reach into the policy.
 struct DestructivePath<'a> {
-    path: &'a String,
+    path: &'a str,
     reach: PolicyReach,
 }
 
@@ -908,22 +1037,29 @@ struct DestructivePath<'a> {
 /// Empty when the command is not destructive. `mv` contributes its sources
 /// (moving `.ki` away is as fatal as deleting it) and its destination (moving
 /// something *onto* the policy file); `cp`/`install`/`ln` contribute only the
-/// destination; `find` contributes its roots only when it will `-delete` or
-/// `-exec`; `dd` contributes its `of=`. Destinations are
-/// [`PolicyReach::FileOnly`]: copying or linking *into* a directory cannot
-/// modify the policy inside it.
+/// destination, including `-t`/`--target-directory`; `sed -i`, `tee` and
+/// `rsync` contribute the files they rewrite; `find` contributes its roots
+/// only when it will `-delete` or `-exec`; `dd` contributes its `of=`.
+/// Destinations are [`PolicyReach::FileOnly`]: only the policy file itself and
+/// the directory that directly holds it can be rewritten.
 fn destructive_paths<'a>(command: &str, words: &'a [String]) -> Vec<DestructivePath<'a>> {
     let all = |reach: PolicyReach| -> Vec<DestructivePath<'a>> {
         path_arguments(words)
             .into_iter()
-            .map(|path| DestructivePath { path, reach })
+            .map(|path| DestructivePath {
+                path: path.as_str(),
+                reach,
+            })
             .collect()
     };
     let only_last = |reach: PolicyReach| -> Vec<DestructivePath<'a>> {
         path_arguments(words)
             .into_iter()
             .last()
-            .map(|path| DestructivePath { path, reach })
+            .map(|path| DestructivePath {
+                path: path.as_str(),
+                reach,
+            })
             .into_iter()
             .collect()
     };
@@ -931,13 +1067,16 @@ fn destructive_paths<'a>(command: &str, words: &'a [String]) -> Vec<DestructiveP
         "rm" | "rmdir" | "unlink" | "shred" | "truncate" | "chmod" | "chown" | "chgrp" | "del"
         | "erase" | "rd" | "remove-item" => all(PolicyReach::Ancestor),
         "mv" => {
-            // Sources may be `.ki` itself; only the destination is a write
-            // target.
+            // Sources may be `.ki` itself; the destination is a write target.
             if let Some(target) = target_directory(words) {
-                // `mv -t DIR src…`: DIR is a directory (it cannot be the
-                // policy file), so every other path argument is a source.
+                // `mv -t DIR src…`: DIR receives the sources' basenames, so
+                // it is a destination like any other.
                 let mut paths = all(PolicyReach::Ancestor);
-                paths.retain(|path| path.path.as_str() != target);
+                paths.retain(|path| path.path != target);
+                paths.push(DestructivePath {
+                    path: target,
+                    reach: PolicyReach::FileOnly,
+                });
                 paths
             } else {
                 let mut paths = all(PolicyReach::Ancestor);
@@ -947,27 +1086,72 @@ fn destructive_paths<'a>(command: &str, words: &'a [String]) -> Vec<DestructiveP
                 paths
             }
         }
-        "cp" | "install" | "ln" => only_last(PolicyReach::FileOnly),
+        "cp" | "install" | "ln" => match target_directory(words) {
+            // `cp -t DIR src…`: DIR is the destination; the sources are read.
+            Some(target) => vec![DestructivePath {
+                path: target,
+                reach: PolicyReach::FileOnly,
+            }],
+            None => only_last(PolicyReach::FileOnly),
+        },
+        "sed" if sed_in_place(words) => all(PolicyReach::FileOnly),
+        "tee" => all(PolicyReach::FileOnly),
+        "rsync" => {
+            let mut paths = only_last(PolicyReach::FileOnly);
+            if words
+                .iter()
+                .any(|word| word.starts_with("--remove-source-files"))
+            {
+                // The last path argument is the destination; the ones before
+                // it are sources that rsync deletes after copying.
+                paths.extend(path_arguments(words).into_iter().rev().skip(1).map(|path| {
+                    DestructivePath {
+                        path: path.as_str(),
+                        reach: PolicyReach::Ancestor,
+                    }
+                }));
+            }
+            paths
+        }
         "find" => {
             let destructive = words
                 .iter()
                 .any(|word| word == "-delete" || word.starts_with("-exec"));
             if destructive {
-                words
+                // Global options may precede the roots: `find -L .ki -delete`.
+                let mut start = 0;
+                while start < words.len() {
+                    match words[start].as_str() {
+                        "-H" | "-L" | "-P" => start += 1,
+                        "-D" => start = (start + 2).min(words.len()),
+                        word if word.starts_with("-O") => start += 1,
+                        _ => break,
+                    }
+                }
+                let mut roots: Vec<DestructivePath<'a>> = words[start..]
                     .iter()
                     .take_while(|word| !word.starts_with('-') && *word != "!" && *word != "(")
                     .map(|path| DestructivePath {
-                        path,
+                        path: path.as_str(),
                         reach: PolicyReach::Ancestor,
                     })
-                    .collect()
+                    .collect();
+                if roots.is_empty() {
+                    // `find -delete` with no starting point defaults to `.`,
+                    // which holds the policy.
+                    roots.push(DestructivePath {
+                        path: ".",
+                        reach: PolicyReach::Ancestor,
+                    });
+                }
+                roots
             } else {
                 Vec::new()
             }
         }
         "dd" => words
             .iter()
-            .filter(|word| word.starts_with("of="))
+            .filter_map(|word| word.strip_prefix("of="))
             .map(|path| DestructivePath {
                 path,
                 reach: PolicyReach::Ancestor,
@@ -982,31 +1166,169 @@ fn destructive_paths<'a>(command: &str, words: &'a [String]) -> Vec<DestructiveP
 /// check: it only ever adds denials.
 fn shell_targets_policy_paths(project: &Path, command: &str) -> bool {
     let mut base = project.to_path_buf();
+    let policy_files = policy_paths(project);
+    let policies: Vec<String> = policy_files
+        .iter()
+        .map(|path| {
+            resolve_tool_path(project, &path.to_string_lossy())
+                .to_string_lossy()
+                .to_ascii_lowercase()
+        })
+        .collect();
     for segment in shell_segments(command) {
         let (words, redirects) = split_redirects(&segment);
-        if redirects
-            .iter()
-            .any(|target| shell_word_targets_policy(project, &base, target, PolicyReach::Ancestor))
-        {
+        if redirects.iter().any(|target| {
+            shell_word_targets_policy(&policies, &base, target, PolicyReach::Ancestor)
+        }) {
             return true;
         }
         let Some((command, rest)) = unwrap_command(&words) else {
             continue;
         };
         if matches!(command.as_str(), "cd" | "pushd") {
-            if let Some(target) = path_arguments(rest).first() {
-                base = resolve_tool_path(&base, target);
+            match path_arguments(rest).first() {
+                Some(target) => base = resolve_tool_path(&base, target),
+                // A bare `cd` goes to the home directory, not nowhere.
+                None if command == "cd" => base = resolve_tool_path(&base, "~"),
+                None => {}
             }
             continue;
         }
         if destructive_paths(&command, rest)
             .iter()
-            .any(|target| shell_word_targets_policy(project, &base, target.path, target.reach))
+            .any(|target| shell_word_targets_policy(&policies, &base, target.path, target.reach))
         {
+            return true;
+        }
+        if recursive_copy_touches_policy(project, &policy_files, &base, &command, rest) {
             return true;
         }
     }
     false
+}
+
+/// Whether a recursive copy can rewrite a policy file even though its
+/// destination is only an ancestor of that file.
+///
+/// `cp -r dist .` copies `dist` *into* `.` and is harmless, but
+/// `cp -r /tmp/evil/. .` merges the source's contents and writes
+/// `.ki/permissions.json`, and `rsync -a --delete build/ .` removes anything
+/// the source does not contain. The destination spelling cannot show that, so
+/// look for the policy's relative path inside each source tree.
+fn recursive_copy_touches_policy(
+    project: &Path,
+    policy_files: &[PathBuf],
+    base: &Path,
+    command: &str,
+    words: &[String],
+) -> bool {
+    if !matches!(command, "cp" | "rsync") {
+        return false;
+    }
+    let recursive = words.iter().any(|word| {
+        word == "--recursive"
+            || word == "--archive"
+            || (word.starts_with('-')
+                && !word.starts_with("--")
+                && word.len() > 1
+                && word[1..].chars().any(|c| matches!(c, 'r' | 'R' | 'a')))
+    });
+    if !recursive {
+        return false;
+    }
+    // `rsync -t` means "preserve times", not `--target-directory`.
+    let target = if command == "cp" {
+        target_directory(words)
+    } else {
+        None
+    };
+    let paths = path_arguments(words);
+    let (destination, sources) = match (target, paths.split_last()) {
+        (Some(target), _) => (target, paths.as_slice()),
+        (None, Some((destination, sources))) => (destination.as_str(), sources),
+        (None, None) => return false,
+    };
+    let destination = resolve_tool_path(base, destination);
+    // `rsync --delete` removes destination entries missing from the source,
+    // which includes the policy's directory.
+    let delete_extras = command == "rsync"
+        && words
+            .iter()
+            .any(|word| word == "--del" || word.starts_with("--delete"));
+    policy_files.iter().any(|policy| {
+        let policy = resolve_tool_path(project, &policy.to_string_lossy());
+        let Ok(relative) = policy.strip_prefix(&destination) else {
+            return false;
+        };
+        if relative.as_os_str().is_empty() {
+            return false;
+        }
+        if delete_extras {
+            return true;
+        }
+        sources.iter().any(|source| {
+            let source = source.as_str();
+            // rsync merges a source's contents when the spelling ends in `/`;
+            // cp merges for `.` and `/.`.
+            let merged = if command == "rsync" {
+                source.ends_with('/') || source.ends_with("/.")
+            } else {
+                source == "." || source.ends_with("/.")
+            };
+            let source_path = resolve_tool_path(base, source);
+            if !source.contains(['*', '?', '[', ']', '{', '}']) {
+                if merged {
+                    return source_path.join(relative).exists();
+                }
+                // A literal directory is copied *into* the destination under
+                // its own name; only a name on the policy's path can land on
+                // it.
+                let Some(name) = source_path.file_name().and_then(|name| name.to_str()) else {
+                    return false;
+                };
+                let Ok(rest) = relative.strip_prefix(name) else {
+                    return false;
+                };
+                return source_path.join(rest).exists();
+            }
+            // A glob can select the policy's directory itself
+            // (`cp -r src/.* .`). Shell wildcards never match a leading dot
+            // unless the pattern spells one.
+            let last = source
+                .trim_end_matches('/')
+                .trim_end_matches("/.")
+                .rsplit('/')
+                .next()
+                .unwrap_or(source);
+            let Some(first) = relative
+                .components()
+                .next()
+                .and_then(|part| part.as_os_str().to_str())
+            else {
+                return false;
+            };
+            if first.starts_with('.') && !last.starts_with('.') {
+                return false;
+            }
+            if !last.contains(['*', '?', '[', ']', '{', '}']) {
+                // The glob sits in an earlier component; a literal name still
+                // has to be on the policy's path.
+                return last.eq_ignore_ascii_case(first);
+            }
+            if !first.starts_with('.') {
+                return true;
+            }
+            let pattern = last.to_ascii_lowercase();
+            if !glob_matches(&pattern, &first.to_ascii_lowercase()) {
+                return false;
+            }
+            let root = source
+                .rfind('/')
+                .map(|slash| resolve_tool_path(base, &source[..slash]))
+                .unwrap_or_else(|| base.to_path_buf());
+            root.join(relative).exists()
+        })
+    })
 }
 
 fn policy_write_reason(cwd: &Path, tool: &str, args: &Value) -> Option<String> {
@@ -1996,5 +2318,106 @@ mod tests {
         }
         std::fs::remove_dir_all(project).ok();
         std::fs::remove_dir_all(global).ok();
+    }
+
+    /// A destination *directory* that directly holds a policy file still
+    /// receives the source's basename, so copying or moving a file called
+    /// `permissions.json` there replaces the policy. Ordinary writers and
+    /// wrappers must not hide that either.
+    #[test]
+    fn shell_destination_directories_and_writer_wrappers() {
+        let dir = temp_dir("shell-dest-dirs");
+        write_project(&dir, "{}");
+        let bash = |command: &str| blocking_reason(&dir, "bash", &json!({ "command": command }));
+
+        // A source tree that contains the policy's own relative path, which a
+        // recursive copy can merge into an ancestor of the policy.
+        let evil = dir.join("evil").join(".ki");
+        std::fs::create_dir_all(&evil).unwrap();
+        std::fs::write(evil.join("permissions.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.join("empty")).unwrap();
+
+        for command in [
+            // The policy's own directory is a write target, not a sibling.
+            "cp notes.txt .ki",
+            "cp -r src/. .ki/",
+            "cp -t .ki notes.txt",
+            "cp --target-directory=.ki notes.txt",
+            "install -m 644 file .ki",
+            "ln -sf file .ki",
+            "mv file .ki",
+            "mv -t .ki notes.txt",
+            "mv -t.ki notes.txt",
+            // Ordinary writers can rewrite the policy through a glob.
+            "sed -i 's/x/y/' .ki/perm*.json",
+            "tee .ki/perm*.json",
+            "rsync -a /tmp/x/ .ki/",
+            "rsync -a --remove-source-files .ki /tmp",
+            // Wrapper options that take a value must not become the command.
+            "sudo --user root rm -rf .ki",
+            "sudo -D /tmp rm -rf .ki",
+            "sudo -T 5 rm -rf .ki",
+            "sudo -iu root rm -rf .ki",
+            "sudo -uroot rm -rf .ki",
+            "timeout -sKILL 5 rm -rf .ki",
+            "xargs -I{} rm -rf .ki",
+            "env --unset FOO rm -rf .ki",
+            "nice --adjustment 5 rm -rf .ki",
+            "xargs --max-args 1 rm -rf .ki",
+            // Wrappers with a leading positional (or none at all).
+            "timeout 5 rm -rf .ki",
+            "chroot /tmp rm -rf .ki",
+            "setsid rm -rf .ki",
+            "exec -a x rm -rf .ki",
+            "flock /tmp/l rm -rf .ki",
+            // Shell keywords in front of the command.
+            "! rm -rf .ki",
+            "if true; then rm -rf .ki; fi",
+            "for x in a; do rm -rf .ki; done",
+            "{ rm -rf .ki; }",
+            // `--` ends option parsing; a later operand is not a target.
+            "mv -- -t .ki /tmp/x",
+            // `-S` consumes `-t` as its suffix value, so `.ki` is a source.
+            "mv -S -t .ki dest",
+            // find's global options precede the roots, and no root means `.`.
+            "find -L .ki -delete",
+            "find -delete",
+            // Recursive copies merge source contents into the destination.
+            "cp -r evil/. .",
+            "cp -r evil/.ki .",
+            "rsync -a evil/ .",
+            "rsync -a evil/. .",
+            "rsync -a --delete empty/ .",
+            "rsync -a --del empty/ .",
+            // dd's `of=` prefix is not part of the path.
+            "dd if=/dev/zero of=.ki/perm*.json",
+        ] {
+            assert!(bash(command).is_some(), "must block: {command}");
+        }
+
+        // The benign destinations the previous commit allowed stay allowed.
+        for command in [
+            "cp notes.txt .",
+            "mv notes.txt .",
+            "mv -t . notes.txt",
+            "cp notes.txt ..",
+            "sudo -n true",
+            "xargs -0 echo",
+            // A plain directory copy and a non-dot glob cannot reach `.ki`.
+            "cp -r empty .",
+            "cp -r evil/* .",
+            "rsync -a empty/ /tmp/out",
+        ] {
+            assert_eq!(bash(command), None, "must allow: {command}");
+        }
+
+        // A bare `cd` lands in the home directory; a relative `.ki/agent`
+        // then names the global policy's directory.
+        assert!(
+            bash("cd && rm -rf .ki/agent").is_some(),
+            "must block: cd && rm -rf .ki/agent"
+        );
+
+        std::fs::remove_dir_all(dir).ok();
     }
 }
