@@ -282,6 +282,23 @@ pub(super) async fn handle_signal_boundary(
     }
 }
 
+/// Whether the walgit board has no open cards, with a bounded wait so a hung
+/// `walgit` cannot stall the AgentEnd boundary. Any failure is "not done":
+/// auto-continue resumes normally rather than claiming a false completion.
+async fn board_open_zero(cwd: &std::path::Path) -> bool {
+    let mut command = tokio::process::Command::new("walgit");
+    command
+        .args(["collab", "board"])
+        .current_dir(cwd)
+        .kill_on_drop(true);
+    match tokio::time::timeout(std::time::Duration::from_secs(5), command.output()).await {
+        Ok(Ok(output)) if output.status.success() => {
+            crate::goal_drive::board_has_no_open_cards(&String::from_utf8_lossy(&output.stdout))
+        }
+        _ => false,
+    }
+}
+
 /// After a run ends, keep an active goal moving. The goal plugin injects the
 /// goal into context but cannot start runs; without this the session would sit
 /// idle between turns. A signal wake in the same boundary wins (its run already
@@ -308,6 +325,13 @@ pub(super) async fn maybe_continue_goal(
     let Some(goal) = crate::goal_drive::active_goal(&cwd) else {
         return;
     };
+    if goal.done_when.as_deref() == Some("board-open-0") && board_open_zero(&cwd).await {
+        eprintln!(
+            "[ki goal] doneWhen 'board-open-0' satisfied; not auto-continuing \
+             (run /goal stop to archive the goal)"
+        );
+        return;
+    }
     if !goal.can_continue(crate::goal_drive::unix_millis()) {
         return;
     }

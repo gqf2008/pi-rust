@@ -28,6 +28,11 @@ pub(crate) struct ActiveGoal {
     pub turns_used: u32,
     pub max_turns: Option<u32>,
     pub deadline_ms: Option<i64>,
+    /// Explicit stop condition. The host currently recognizes the literal
+    /// `"board-open-0"`: it runs `walgit collab board` at the AgentEnd boundary
+    /// and skips auto-continue when the board has no open cards. Unknown
+    /// conditions are documented to the model but not evaluated by the host.
+    pub done_when: Option<String>,
 }
 
 impl ActiveGoal {
@@ -89,7 +94,18 @@ pub(crate) fn active_goal(cwd: &Path) -> Option<ActiveGoal> {
         deadline_ms: active
             .get("deadline_ms")
             .and_then(serde_json::Value::as_i64),
+        done_when: active
+            .get("done_when")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     })
+}
+
+/// Whether a `walgit collab board` rendering says there are no open cards.
+/// The board prints headings such as `== open (0) ==`; a substring check would
+/// also match `10`, so match the trimmed line exactly.
+pub(crate) fn board_has_no_open_cards(stdout: &str) -> bool {
+    stdout.lines().any(|line| line.trim() == "== open (0) ==")
 }
 
 pub(crate) fn unix_millis() -> i64 {
@@ -156,6 +172,7 @@ mod tests {
             turns_used: 5,
             max_turns: Some(5),
             deadline_ms: Some(1_000),
+            done_when: None,
         };
         assert!(!goal.can_continue(0));
         let goal = ActiveGoal {
@@ -164,9 +181,35 @@ mod tests {
             turns_used: 0,
             max_turns: None,
             deadline_ms: Some(1_000),
+            done_when: None,
         };
         assert!(goal.can_continue(999));
         assert!(!goal.can_continue(1_000));
+    }
+
+    #[test]
+    fn active_goal_reads_the_definition_of_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_goal(
+            tmp.path(),
+            serde_json::json!({
+                "active": {
+                    "title": "finish the board",
+                    "status": "active",
+                    "started_at": 10,
+                    "done_when": "board-open-0"
+                }
+            }),
+        );
+        let goal = active_goal(tmp.path()).expect("active goal");
+        assert_eq!(goal.done_when.as_deref(), Some("board-open-0"));
+    }
+
+    #[test]
+    fn board_open_zero_marker_is_matched_exactly() {
+        assert!(board_has_no_open_cards("== open (0) ==\n"));
+        assert!(!board_has_no_open_cards("== open (1) ==\n"));
+        assert!(!board_has_no_open_cards(" == open (0) == trailing\n"));
     }
 
     #[test]
@@ -177,6 +220,7 @@ mod tests {
             turns_used: 0,
             max_turns: None,
             deadline_ms: None,
+            done_when: None,
         };
         let prompt = goal.continuation_prompt();
         assert!(prompt.contains("finish the board"));
