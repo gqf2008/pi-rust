@@ -13,6 +13,14 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **The compiled-in plugin channel is retired (2026-10-21).** The 12
+  `plugins/kiqi-*` crates, their `plugin-kiqi-*` features, the opt-in-feature
+  and standalone-cdylib CI steps, and `scripts/check-feature-parity.sh` are
+  gone; the website no longer advertises a `cargo build -p kiqi-permissions`
+  install for a host-owned policy. First-party plugins are wasm guests only
+  (`ki insmod --build plugins/wasm/kiqi-*-guest`). The
+  `kiqi_plugin::Plugin` trait and `ki dev` cdylib hot-load remain for
+  third-party extensions.
 - **The TUI now defaults to the `light` theme.** With no saved `theme`, ki
   starts in the light palette; `dark`/`monochrome`/`claude` remain one
   `/theme` away, and an unknown/custom name falls back to light instead of

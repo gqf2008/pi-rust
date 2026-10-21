@@ -135,9 +135,6 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
 cargo test  --workspace --locked
 
-# 可选 feature 的插件不在默认构建里，必须单独跑，否则会腐烂：
-cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-lens,plugin-kiqi-webfetch,plugin-kiqi-websearch,plugin-kiqi-subagents,plugin-kiqi-goal,plugin-kiqi-plan-mode,plugin-kiqi-ask-user,plugin-kiqi-langfuse,plugin-kiqi-permissions
-
 # 改了 CHANGELOG.md / README.md 等嵌入式快照文档时必须重跑，CI 会比对：
 sh scripts/sync-embedded-docs.sh
 ```

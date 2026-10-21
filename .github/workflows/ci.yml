@@ -62,9 +62,6 @@ jobs:
             exit 1
           fi
 
-      - name: Verify the documented gate matches this workflow
-        run: sh scripts/check-feature-parity.sh
-
       - name: Verify the ABI section numbers and their citations
         run: sh scripts/check-abi-sections.sh
 
@@ -141,25 +138,6 @@ jobs:
       - name: Test the crates whose tests need non-default features
         run: >
           cargo test -p kiqi-ai -p kiqi-tools --lib --locked --all-features
-
-      # Every plugin with a wasm port is opt-in now, so the default build never
-      # compiles their registration paths (nor the tests that exercise them).
-      # Run those tests explicitly or the features rot unseen.
-      - name: Test the opt-in plugin features
-        run: >
-          cargo test -p kiqi-cli --lib --locked
-          --features plugin-kiqi-todo,plugin-kiqi-lens,plugin-kiqi-webfetch,plugin-kiqi-websearch,plugin-kiqi-subagents,plugin-kiqi-goal,plugin-kiqi-plan-mode,plugin-kiqi-ask-user,plugin-kiqi-langfuse,plugin-kiqi-permissions,plugin-kiqi-codegraph,plugin-kiqi-orchestrator
-
-      # The workspace build links every plugin into `ki`, which enables each
-      # plugin's `compile-time` feature and so drops its cdylib entrypoint. This
-      # builds the plugins standalone, where that feature is off, keeping the
-      # `ki dev` cdylib export compiled (and linked) on a Linux toolchain.
-      - name: Build each plugin as a standalone cdylib
-        run: |
-          cargo build --locked \
-            -p kiqi-todo -p kiqi-lens -p kiqi-webfetch -p kiqi-websearch \
-            -p kiqi-subagents -p kiqi-permissions -p kiqi-goal -p kiqi-plan-mode \
-            -p kiqi-codegraph -p kiqi-ask-user -p kiqi-langfuse -p kiqi-orchestrator
 
   # Compile the workspace on Windows. Nothing else did: the release matrix is
   # the only place that built for Windows, so a Windows-only compile error

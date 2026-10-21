@@ -24,7 +24,7 @@
 2. **有意保留的旧数据/旧配置读取**，每处都在原位标注了 `legacy trace` 与失败模式：
    `rpi.value`（`crates/kiqi-harness/src/session/values.rs`）、更新缓存的
    `#[serde(alias = "rpi")]`（`crates/kiqi-cli/src/updates.rs`）、
-   `KI_*` 对 `RPI_*` 的回退（`plugins/kiqi-langfuse`、`plugins/kiqi-permissions`、`crates/kiqi-cli/src/permissions.rs`）。
+   `KI_*` 对 `RPI_*` 的回退（`crates/kiqi-cli/src/permissions.rs`）。
    删掉它们会静默丢数据或静默忽略用户已配置的路径。
 3. **历史记录**：CHANGELOG 旧条目、设计文档里的旧 worktree 名等。
 
@@ -66,11 +66,6 @@ cargo check --workspace --all-targets --all-features --locked
 # （整个 anthropic provider 在 `cfg(feature = "providers")` 下），单跑该包会静默跳过
 cargo test  -p kiqi-ai -p kiqi-tools --lib --locked --all-features
 cargo test  --workspace --locked
-# 可选 feature（有 wasm 版的插件都不在默认构建里）必须单独跑，否则它们会腐烂：
-# 这份清单必须与 .github/workflows/ci.yml 的 "opt-in plugin features" 步骤逐项一致——
-# 少列一个，本地门禁就比 CI 松，而 CI 那边仍是红的（2026-10-20 就漏了
-# plugin-kiqi-codegraph 与 plugin-kiqi-orchestrator 两项，已补齐）。
-cargo test -p kiqi-cli --lib --locked --features plugin-kiqi-todo,plugin-kiqi-lens,plugin-kiqi-webfetch,plugin-kiqi-websearch,plugin-kiqi-subagents,plugin-kiqi-goal,plugin-kiqi-plan-mode,plugin-kiqi-ask-user,plugin-kiqi-langfuse,plugin-kiqi-permissions,plugin-kiqi-codegraph,plugin-kiqi-orchestrator
 # Cargo.lock 必须覆盖全部 feature 的依赖（离线可解析）；CI 在线跑，
 # 缺项的后果只会是「CI 卡下载 / 本地离线报错」，两边都不像根因
 sh scripts/check-offline-lock.sh
@@ -86,12 +81,6 @@ sh scripts/tests/collab-entry-retry.sh
 sh scripts/tests/docs-install-path.sh
 # 文档快照（改了 CHANGELOG.md / README.md 等必须重跑，CI 会比对）
 sh scripts/sync-embedded-docs.sh
-# CI 还会把每个插件单独编成 cdylib（compile-time feature 关闭时的入口），
-# 因为 workspace 整体构建会把它们都开成 compile-time、从而丢掉 cdylib 导出。
-# 本地不跑这一步，`ki dev` 的热载路径坏了也看不见：
-cargo build --locked -p kiqi-todo -p kiqi-lens -p kiqi-webfetch -p kiqi-websearch -p kiqi-subagents -p kiqi-permissions -p kiqi-goal -p kiqi-plan-mode -p kiqi-codegraph -p kiqi-ask-user -p kiqi-langfuse -p kiqi-orchestrator
-# 上面两份清单与 CI 的一致性（CI 也会跑；改任何一侧都要过这条）
-sh scripts/check-feature-parity.sh
 # `plugin-abi.md` 的 §6.x 编号连续性，以及全仓 `§6.N` 引用是否都能落到真实小节
 # （曾经的缺陷：四处引用 §6.34，而它从未被写过）
 sh scripts/check-abi-sections.sh
@@ -113,23 +102,25 @@ sh scripts/check-install-version-hints.sh
 wasm guest 只对 `wasm32-wasip2` 链接，**guest crate 里不写单测**，
 行为一律由 `crates/kiqi-plugin-host/tests/e2e.rs` 从宿主侧验证。
 
-## 两条插件通道（改动前先分清）
+## 插件通道（改动前先分清）
 
-| 通道 | 形态 | 适用 |
-|---|---|---|
-| **编译期** `plugins/kiqi-*` | `kiqi_plugin::Plugin` trait（进程内、无沙箱），另带 cdylib 面供 `ki dev` 热载 | 一方插件 |
-| **wasm** `plugins/wasm/kiqi-*-guest` | 组件模型 + `plugins/kiqi-plugin.wit` 契约，跑在 wasmtime 沙箱里，按授权拿能力 | 第三方；契约版本见 WIT 的 `package` 行 |
+一方插件**只走 wasm**：`plugins/wasm/kiqi-*-guest`，组件模型 + `plugins/kiqi-plugin.wit`
+契约，跑在 wasmtime 沙箱里，按授权拿能力；契约版本见 WIT 的 `package` 行。
 
-**默认构建不再编入任何一方插件**：权限策略已宿主化（`crates/kiqi-cli/src/permissions.rs`），`kiqi-permissions` 与其余插件一样改为 `--features plugin-kiqi-<name>` 或装 wasm guest（保留一个版本；`kiqi-orchestrator` 已随 §6.34 迁 opt-in、`kiqi-codegraph` 随 `proc` 迁 wasm）。
-有 guest 的那些都是 `--features plugin-kiqi-<name>`，或用 `ki insmod --build plugins/wasm/kiqi-<name>-guest`
-装上 wasm 版。**新增/改插件能力时，两侧（trait 面与 WIT 面）必须一起改**，
-差异要写进 guest README，不许藏。
+**编译期一方插件通道已于 2026-10-21 退役**：`plugins/kiqi-*` crate、`plugin-kiqi-*`
+feature、CI 的 opt-in feature 测试与 cdylib 构建都已删除。`kiqi_plugin::Plugin` trait
+与 `ki dev` 的 cdylib 热载仍保留给第三方扩展，但不再有编入二进制的一方插件。
+权限策略由宿主拥有（`crates/kiqi-cli/src/permissions.rs`）。
+
+安装 wasm 版：`ki insmod --build plugins/wasm/kiqi-<name>-guest`。**新增/改插件能力时，
+trait 面（`kiqi_plugin`/`kiqi-plugin-sdk`）与 WIT 面必须一起改**，差异要写进 guest README。
 
 ## 设计文档在哪
 
 - `docs/design/plugin-abi.md`：wasm 契约与能力模型的**唯一真源**；每轮改动加一节 `### 6.x`，
   §7 是待定项。
-- `docs/design/plugin-trait.md`：编译期 trait 契约。
+- `docs/design/plugin-trait.md`：编译期 trait 契约（**历史存档**；一方编译期通道已退役，
+  trait/cdylib 面仍供第三方扩展）。
 - `docs/design/plugin-abi-handover.md`：**接手先读这个**（现状/能力表/上手命令/已知限制/提交轨迹）。
 - 未落地的大改走单独方案文件（如 `docs/design/plugin-process-capability.md`）。
 

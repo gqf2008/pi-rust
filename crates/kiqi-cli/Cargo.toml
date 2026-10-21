@@ -22,18 +22,6 @@ categories = [
 [dependencies]
 kiqi-plugin = { path = "../kiqi-plugin" }
 kiqi-plugin-host = { path = "../kiqi-plugin-host", optional = true }
-kiqi-todo = { path = "../../plugins/kiqi-todo", optional = true, features = ["compile-time"] }
-kiqi-lens = { path = "../../plugins/kiqi-lens", optional = true, features = ["compile-time"] }
-kiqi-orchestrator = { path = "../../plugins/kiqi-orchestrator", optional = true, features = ["compile-time"] }
-kiqi-webfetch = { path = "../../plugins/kiqi-webfetch", optional = true, features = ["compile-time"] }
-kiqi-websearch = { path = "../../plugins/kiqi-websearch", optional = true, features = ["compile-time"] }
-kiqi-subagents = { path = "../../plugins/kiqi-subagents", optional = true, features = ["compile-time"] }
-kiqi-permissions = { path = "../../plugins/kiqi-permissions", optional = true, features = ["compile-time"] }
-kiqi-goal = { path = "../../plugins/kiqi-goal", optional = true, features = ["compile-time"] }
-kiqi-plan-mode = { path = "../../plugins/kiqi-plan-mode", optional = true, features = ["compile-time"] }
-kiqi-codegraph = { path = "../../plugins/kiqi-codegraph", optional = true, features = ["compile-time"] }
-kiqi-ask-user = { path = "../../plugins/kiqi-ask-user", optional = true, features = ["compile-time"] }
-kiqi-langfuse = { path = "../../plugins/kiqi-langfuse", optional = true, features = ["compile-time"] }
 kiqi-telemetry = { workspace = true }
 kiqi-ai = { workspace = true, features = ["providers"] }
 kiqi-agent = { workspace = true }
@@ -106,36 +94,17 @@ pkg-fmt = "tgz"
 pkg-fmt = "zip"
 
 [features]
-# Every first-party plugin is opt-in now (`--features plugin-kiqi-<name>`, or
-# install the wasm guest with `ki insmod`). The crates, their features, their
-# cdylib faces and their tests all stay; CI builds every one of them so none
-# rots. Permission policy is host-owned (`src/permissions.rs`); the compiled
-# `kiqi-permissions` plugin stays behind its feature for one release.
+# First-party plugins are wasm guests only (`plugins/wasm/kiqi-*-guest`,
+# installed with `ki insmod`). The compiled-in channel was retired on
+# 2026-10-21: its crates, `plugin-kiqi-*` features and cdylib CI builds are
+# gone. The cdylib host surface (`kiqi_plugin::Plugin`, `ki dev`) remains for
+# third-party extensions.
 default = ["clipboard", "plugin-wasm"]
 # Loads `plugins/<id>/plugin.wasm` through `kiqi-plugin-host` (wasmtime). Off
 # only for builds that want the leaner binary without the wasm tier.
 plugin-wasm = ["dep:kiqi-plugin-host"]
 # Enables real clipboard support for `/copy` and image paste (best-effort).
 clipboard = ["dep:arboard"]
-# First-party plugins are compiled in. The cdylib channel keeps serving `ki dev`.
-plugin-kiqi-todo = ["dep:kiqi-todo"]
-plugin-kiqi-lens = ["dep:kiqi-lens"]
-plugin-kiqi-orchestrator = ["dep:kiqi-orchestrator"]
-plugin-kiqi-webfetch = ["dep:kiqi-webfetch"]
-plugin-kiqi-websearch = ["dep:kiqi-websearch"]
-plugin-kiqi-subagents = ["dep:kiqi-subagents"]
-plugin-kiqi-permissions = ["dep:kiqi-permissions"]
-plugin-kiqi-goal = ["dep:kiqi-goal"]
-plugin-kiqi-plan-mode = ["dep:kiqi-plan-mode"]
-plugin-kiqi-codegraph = ["dep:kiqi-codegraph"]
-plugin-kiqi-ask-user = ["dep:kiqi-ask-user"]
-# Not in `default` either: has a wasm port now (see `plugin-kiqi-langfuse`
-# below for the same shape).
-
-# Not in `default`: the tracing tier targets a Langfuse instance, and a user who
-# wants it turns it on explicitly. Kept (and CI-checked) rather than removed so
-# the compiled path keeps compiling.
-plugin-kiqi-langfuse = ["dep:kiqi-langfuse"]
 
 [dev-dependencies]
 # `term` is only needed by the pty-based tui_hangup regression test; keeping it
@@ -148,3 +117,12 @@ path = "src/lib.rs"
 [[bin]]
 name = "ki"
 path = "src/bin/ki.rs"
+
+[lints.rust]
+# The compiled-in plugin channel was retired; its historical test blocks still
+# carry `#[cfg(feature = "plugin-kiqi-*")]`. Those features are gone, so the
+# blocks never compile, but telling check-cfg the names keeps the warnings
+# meaningful rather than "unknown feature value".
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(feature, values("plugin-kiqi-todo", "plugin-kiqi-lens", "plugin-kiqi-orchestrator", "plugin-kiqi-webfetch", "plugin-kiqi-websearch", "plugin-kiqi-subagents", "plugin-kiqi-permissions", "plugin-kiqi-goal", "plugin-kiqi-plan-mode", "plugin-kiqi-codegraph", "plugin-kiqi-ask-user", "plugin-kiqi-langfuse"))',
+] }

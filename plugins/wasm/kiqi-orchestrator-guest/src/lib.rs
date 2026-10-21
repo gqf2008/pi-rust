@@ -781,9 +781,7 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     // truncated run now exits non-zero (a budget stop maps to exit 1), so this is
     // a backstop for a child that succeeds yet prints nothing at all: `ki -p`
     // prints its answer once, at the end of the run, so empty stdout means no
-    // final message was ever produced. The compile-time channel
-    // (`plugins/kiqi-orchestrator/src/spawn.rs`) rejects the same shape — keep
-    // both channels in step.
+    // final message was ever produced.
     if text.trim().is_empty() {
         return Err(format!(
             "subagent exited successfully but produced no output; the run may have \

@@ -1,3 +1,5 @@
+> 注（2026-10-21）：编译期一方插件通道已退役；文中 `plugins/kiqi-*` 路径与 `plugin-kiqi-*` feature 是历史记录，现行实现在 `plugins/wasm/kiqi-*-guest`。
+
 # 方案：wasm 插件层的「调用内交互式子进程」能力（`proc`，ABI 0.7.0）
 
 > 状态：**方案（待评审）**。目标是把 `kiqi-codegraph` 迁到 wasm；`kiqi-orchestrator` **不在本方案范围内**

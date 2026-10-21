@@ -1,3 +1,5 @@
+> 注（2026-10-21）：编译期一方插件通道已退役；文中 `plugins/kiqi-*` 路径与 `plugin-kiqi-*` feature 是历史记录，现行实现在 `plugins/wasm/kiqi-*-guest`。
+
 # wasm 插件层 — 交接文档
 
 > 状态：**可用**。契约 `kiqi:plugin@0.7.0`，能力全实现，限额齐全，CI 全绿。

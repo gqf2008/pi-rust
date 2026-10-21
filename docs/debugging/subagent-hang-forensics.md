@@ -1,3 +1,5 @@
+> 注（2026-10-21）：编译期一方插件通道已退役；文中 `plugins/kiqi-*` 路径与 `plugin-kiqi-*` feature 是历史记录，现行实现在 `plugins/wasm/kiqi-*-guest`。
+
 # 「subagent 挂起后父 run 无法恢复」排查记录
 
 排查日期：2026-10-19 ~ 2026-10-20

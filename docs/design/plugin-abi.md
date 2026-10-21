@@ -1,3 +1,5 @@
+> 注（2026-10-21）：编译期一方插件通道已退役；文中 `plugins/kiqi-*` 路径与 `plugin-kiqi-*` feature 是历史记录，现行实现在 `plugins/wasm/kiqi-*-guest`。
+
 # 插件 ABI：从 cdylib 到 wasm 组件
 
 状态：**推迟为第一方契约；作为第三方（不受信）层推进验证** · 目标版本 `kiqi:plugin@0.6.0`

@@ -1,3 +1,5 @@
+> 注（2026-10-21）：编译期一方插件通道已退役；文中 `plugins/kiqi-*` 路径与 `plugin-kiqi-*` feature 是历史记录，现行实现在 `plugins/wasm/kiqi-*-guest`。
+
 # 方案：ask_user 兜底与 JEV 决策顾问
 
 > 状态：**阶段 1a 已落地（2026-10-20，`886aac7` + `6e2b890` + `20eed47`）**；1b（goal 自动授权）与阶段 2/3 待做。

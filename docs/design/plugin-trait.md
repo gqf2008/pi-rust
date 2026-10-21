@@ -1,6 +1,10 @@
 # 插件契约：trait + cargo feature（编译期接入）
 
-状态：**落地中**（11 个插件已移植，见 §6）· 契约代码 `crates/kiqi-plugin`
+状态：**已退役（2026-10-21）**。一方编译期插件（`plugins/kiqi-*`、`plugin-kiqi-*`
+feature、cdylib CI 构建）已删除，一方插件只走 wasm guest。本文保留为历史契约；
+`kiqi_plugin::Plugin` trait 与 cdylib（`ki dev`）仍供第三方扩展。
+
+原状态：落地中（11 个插件已移植，见 §6）· 契约代码 `crates/kiqi-plugin`
 
 ## 1. 决定
 

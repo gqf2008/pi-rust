@@ -234,70 +234,15 @@ pub struct Registered {
 }
 
 /// Every first-party plugin compiled into this binary.
+///
+/// Empty since the compiled-in channel was retired (2026-10-21): first-party
+/// plugins ship as wasm guests (`plugins/wasm/kiqi-*-guest`). The cdylib host
+/// surface (`kiqi_plugin::Plugin`, `ki dev`) remains for third-party
+/// extensions, but no crate is linked into the binary here. The historical
+/// `plugin-kiqi-*` cfg blocks below stay as design history; those features no
+/// longer exist, so they can never be enabled.
 pub fn load_all() -> Vec<Registered> {
-    #[allow(unused_mut)]
-    let mut plugins = Vec::new();
-    #[cfg(feature = "plugin-kiqi-todo")]
-    plugins.push(Registered {
-        id: "kiqi-todo",
-        plugin: kiqi_todo::kiqi::factory(),
-    });
-    #[cfg(feature = "plugin-kiqi-lens")]
-    plugins.push(Registered {
-        id: "kiqi-lens",
-        plugin: kiqi_lens::kiqi::factory(),
-    });
-    #[cfg(feature = "plugin-kiqi-orchestrator")]
-    plugins.push(Registered {
-        id: "kiqi-orchestrator",
-        plugin: kiqi_orchestrator::kiqi::factory(),
-    });
-    #[cfg(feature = "plugin-kiqi-webfetch")]
-    plugins.push(Registered {
-        id: "kiqi-webfetch",
-        plugin: kiqi_webfetch::kiqi::factory(),
-    });
-    #[cfg(feature = "plugin-kiqi-goal")]
-    plugins.push(Registered {
-        id: "kiqi-goal",
-        plugin: kiqi_goal::kiqi::factory(),
-    });
-    #[cfg(feature = "plugin-kiqi-plan-mode")]
-    plugins.push(Registered {
-        id: "kiqi-plan-mode",
-        plugin: kiqi_plan_mode::kiqi::factory(),
-    });
-    #[cfg(feature = "plugin-kiqi-codegraph")]
-    plugins.push(Registered {
-        id: "kiqi-codegraph",
-        plugin: kiqi_codegraph::kiqi::factory(),
-    });
-    #[cfg(feature = "plugin-kiqi-ask-user")]
-    plugins.push(Registered {
-        id: "kiqi-ask-user",
-        plugin: kiqi_ask_user::kiqi::factory(),
-    });
-    #[cfg(feature = "plugin-kiqi-subagents")]
-    plugins.push(Registered {
-        id: "kiqi-subagents",
-        plugin: kiqi_subagents::kiqi::factory(),
-    });
-    #[cfg(feature = "plugin-kiqi-permissions")]
-    plugins.push(Registered {
-        id: "kiqi-permissions",
-        plugin: kiqi_permissions::kiqi::factory(),
-    });
-    #[cfg(feature = "plugin-kiqi-websearch")]
-    plugins.push(Registered {
-        id: "kiqi-websearch",
-        plugin: kiqi_websearch::kiqi::factory(),
-    });
-    #[cfg(feature = "plugin-kiqi-langfuse")]
-    plugins.push(Registered {
-        id: "kiqi-langfuse",
-        plugin: kiqi_langfuse::kiqi::factory(),
-    });
-    plugins
+    Vec::new()
 }
 
 /// Capabilities owned by the host, so they can be handed to a plugin per call.
