@@ -22,6 +22,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **MCP notices can suppress a session's own collab echoes.** A
+  `resources/updated` notification may now carry `_meta: {"actors": [...],
+  "self": "<principal>"}`; when every changed entry was authored by this
+  session's own principal, the notice is recorded without spending a turn.
+  Without that metadata the flag stays false and behavior is unchanged, so
+  the walgit side can land separately. The suppression is only sound with
+  one principal per agent (see `scripts/setup-collab-agents.sh`).
 - **Per-agent collaboration setup.** `scripts/setup-collab-agents.sh [n]`
   creates one worktree per agent and joins it as its own walgit principal
   (`ki-agent-1..n`), so entries are attributable and claim state is isolated;

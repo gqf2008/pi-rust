@@ -336,6 +336,7 @@ mod tests {
                     server: server.to_string(),
                     uri: uri.to_string(),
                     content: None,
+                    self_authored: false,
                 })
                 .collect(),
             suppressed: 0,

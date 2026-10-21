@@ -257,7 +257,7 @@ impl ClientHandler for KiClientHandler {
     async fn on_resource_updated(
         &self,
         params: ResourceUpdatedNotificationParam,
-        _context: NotificationContext<RoleClient>,
+        context: NotificationContext<RoleClient>,
     ) {
         // Hold the map lock across the live-token check AND the push, so a
         // concurrent subscribe/unsubscribe/restore (which rotates + purges
@@ -268,7 +268,11 @@ impl ClientHandler for KiClientHandler {
         if !map.contains_key(&params.uri) {
             return;
         }
-        self.mailbox.push(&self.server, &params.uri);
+        self.mailbox.push_with_provenance(
+            &self.server,
+            &params.uri,
+            self_authored_from_meta(&context.meta),
+        );
     }
 
     async fn on_tool_list_changed(&self, _context: NotificationContext<RoleClient>) {
@@ -2294,5 +2298,47 @@ mod tests {
         // The truncated text must still be valid to the last char boundary.
         assert!(bounded.ends_with("\n[truncated]"));
         assert!(String::from_utf8(bounded.into_bytes()).is_ok());
+    }
+}
+
+/// Whether a `resources/updated` notification says every changed entry was
+/// authored by this session's own principal. The walgit MCP server emits
+/// `_meta: {"actors": [...], "self": "<principal>"}`; without that metadata the
+/// answer is false, so behavior is unchanged for older servers.
+fn self_authored_from_meta(meta: &rmcp::model::Meta) -> bool {
+    let Some(self_actor) = meta.0.get("self").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(actors) = meta.0.get("actors").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    !actors.is_empty()
+        && actors
+            .iter()
+            .all(|actor| actor.as_str() == Some(self_actor))
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::self_authored_from_meta;
+
+    fn meta(value: serde_json::Value) -> rmcp::model::Meta {
+        rmcp::model::Meta(value.as_object().expect("object").clone())
+    }
+
+    #[test]
+    fn only_our_own_actors_mark_a_notice_as_self_authored() {
+        assert!(self_authored_from_meta(&meta(serde_json::json!({
+            "actors": ["me"], "self": "me"
+        }))));
+        assert!(!self_authored_from_meta(&meta(serde_json::json!({
+            "actors": ["me", "peer"], "self": "me"
+        }))));
+        assert!(!self_authored_from_meta(&meta(serde_json::json!({
+            "actors": [], "self": "me"
+        }))));
+        assert!(!self_authored_from_meta(&meta(serde_json::json!({
+            "actors": ["me"]
+        }))));
     }
 }

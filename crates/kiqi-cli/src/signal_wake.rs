@@ -134,6 +134,13 @@ impl SignalWakeState {
         if self.muted_until_input {
             return WakeDecision::Skip("muted until the next user input");
         }
+        // A batch made only of our own writes is an echo: record it (the
+        // caller persists the notice), but do not spend a turn re-reading it.
+        // This is sound only with per-agent principals; without provenance the
+        // flag is false and the decision is unchanged.
+        if !batch.notices.is_empty() && batch.notices.iter().all(|notice| notice.self_authored) {
+            return WakeDecision::Skip("the update was authored by this session");
+        }
         let mut eligible = Vec::new();
         let mut seen = HashSet::new();
         for notice in &batch.notices {
@@ -249,6 +256,7 @@ mod tests {
                     server: server.to_string(),
                     uri: uri.to_string(),
                     content: None,
+                    self_authored: false,
                 })
                 .collect(),
             suppressed: 0,
@@ -268,6 +276,23 @@ mod tests {
             .map(|(name, cfg)| (name.to_string(), cfg.clone()))
             .collect();
         move |server: &str, _uri: &str| map.get(server).cloned()
+    }
+
+    #[test]
+    fn a_batch_of_our_own_writes_does_not_wake() {
+        let mut b = batch(&[("docs", "file:///a.md")]);
+        b.notices[0].self_authored = true;
+        let mut state = SignalWakeState::new();
+        let cfg = || configs(&[("docs", policy(WakeMode::Auto))]);
+        assert_eq!(
+            state.decide(&b, Instant::now(), cfg()),
+            WakeDecision::Skip("the update was authored by this session")
+        );
+        b.notices[0].self_authored = false;
+        assert!(matches!(
+            state.decide(&b, Instant::now(), cfg()),
+            WakeDecision::Wake(_)
+        ));
     }
 
     #[test]
@@ -468,6 +493,7 @@ mod tests {
                     server: "docs".into(),
                     uri: "file:///a.md".into(),
                     content: Some("SECRET BODY".into()),
+                    self_authored: false,
                 }],
                 suppressed: 2,
             },

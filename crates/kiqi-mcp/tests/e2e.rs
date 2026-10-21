@@ -914,6 +914,7 @@ async fn update_pushed_during_the_subscribe_handshake_is_accepted() {
             server: "docs".into(),
             uri: "mem://alpha".into(),
             content: None,
+            self_authored: false,
         }],
         "the racing first update was dropped — the mark must precede the RPC"
     );
@@ -1040,6 +1041,7 @@ async fn resubscribe_keeps_the_queued_notice() {
             server: "docs".into(),
             uri: "mem://alpha".into(),
             content: None,
+            self_authored: false,
         }],
         "a no-op re-subscribe must keep the pending notice"
     );

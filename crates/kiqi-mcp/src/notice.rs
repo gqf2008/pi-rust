@@ -37,6 +37,11 @@ pub struct McpNotice {
     /// content is already bounded at `MAX_RESOURCE_TEXT` with the usual
     /// truncation marker.
     pub content: Option<String>,
+    /// True when the notification's `_meta` says every changed entry was
+    /// authored by this session's own principal. Suppression is only sound
+    /// when agents have distinct principals (one worktree per agent); without
+    /// `_meta` provenance this stays false, so behavior is unchanged.
+    pub self_authored: bool,
 }
 
 /// What [`McpNoticeMailbox::take`] hands back: the coalesced notices plus how
@@ -80,16 +85,25 @@ impl McpNoticeMailbox {
     /// Record one update. Coalesces by (server, uri); counts as suppressed when
     /// it replaces a pending notice or the mailbox is at cap.
     pub(crate) fn push(&self, server: &str, uri: &str) {
+        self.push_with_provenance(server, uri, false);
+    }
+
+    /// Record one update with its provenance. A self-authored update still
+    /// coalesces/counts like any other; the flag is carried to the wake
+    /// decision so an echo of our own write can be recorded without a turn.
+    pub(crate) fn push_with_provenance(&self, server: &str, uri: &str, self_authored: bool) {
         {
             let mut inner = self.inner.lock().unwrap();
-            if inner
+            if let Some(entry) = inner
                 .entries
-                .iter()
-                .any(|entry| entry.server == server && entry.uri == uri)
+                .iter_mut()
+                .find(|entry| entry.server == server && entry.uri == uri)
             {
                 // A newer update for the same uri: the pending notice carries no
                 // content, so replacing it loses nothing — but the replaced event
-                // is one the model will never see individually.
+                // is one the model will never see individually. Carry the newer
+                // provenance too: the batch must reflect the latest write.
+                entry.self_authored = self_authored;
                 inner.suppressed += 1;
             } else if inner.entries.len() >= MAX_NOTICE_ENTRIES {
                 inner.suppressed += 1;
@@ -98,6 +112,7 @@ impl McpNoticeMailbox {
                     server: server.to_string(),
                     uri: uri.to_string(),
                     content: None,
+                    self_authored,
                 });
             }
         }
@@ -210,6 +225,20 @@ mod tests {
     use super::*;
 
     #[test]
+    #[test]
+    fn a_coalesced_update_carries_the_newer_provenance() {
+        let mailbox = McpNoticeMailbox::new();
+        mailbox.push_with_provenance("docs", "file:///a.md", false);
+        mailbox.push_with_provenance("docs", "file:///a.md", true);
+        let batch = mailbox.take();
+        assert_eq!(batch.notices.len(), 1);
+        assert!(
+            batch.notices[0].self_authored,
+            "the latest update's provenance must win"
+        );
+    }
+
+    #[test]
     fn updates_for_the_same_uri_coalesce_into_one_notice() {
         let mailbox = McpNoticeMailbox::new();
         mailbox.push("docs", "file:///a.md");
@@ -311,11 +340,13 @@ mod tests {
                     server: "docs".into(),
                     uri: "file:///a.md".into(),
                     content: None,
+                    self_authored: false,
                 },
                 McpNotice {
                     server: "code".into(),
                     uri: "mem://x".into(),
                     content: None,
+                    self_authored: false,
                 },
             ],
             suppressed: 2,
@@ -336,6 +367,7 @@ mod tests {
                 server: "docs".into(),
                 uri: "file:///a.md".into(),
                 content: None,
+                self_authored: false,
             }],
             suppressed: 0,
         };
@@ -351,11 +383,13 @@ mod tests {
                     server: "docs".into(),
                     uri: "file:///a.md".into(),
                     content: Some("line one\nline two".into()),
+                    self_authored: false,
                 },
                 McpNotice {
                     server: "docs".into(),
                     uri: "file:///b.md".into(),
                     content: None,
+                    self_authored: false,
                 },
             ],
             suppressed: 0,

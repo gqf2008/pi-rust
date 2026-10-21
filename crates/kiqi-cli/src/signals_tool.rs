@@ -259,11 +259,13 @@ mod tests {
                     server: "docs".into(),
                     uri: "file:///a.md".into(),
                     content: None,
+                    self_authored: false,
                 },
                 McpNotice {
                     server: "code".into(),
                     uri: "mem://x".into(),
                     content: None,
+                    self_authored: false,
                 },
             ],
             suppressed: 0,
