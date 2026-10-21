@@ -39,6 +39,7 @@ pub mod config;
 pub mod configure;
 pub mod dev_extension;
 pub mod docs_tool;
+pub(crate) mod env_lock;
 pub mod events;
 pub mod experimental;
 pub mod export;

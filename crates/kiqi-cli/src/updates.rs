@@ -2881,7 +2881,7 @@ mod tests {
 
     #[test]
     fn self_update_honors_env_and_early_dispatched_offline_flag() {
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let _restore = RestoreEnv::capture(crate::args::KI_OFFLINE_ENV);
 
         std::env::set_var(crate::args::KI_OFFLINE_ENV, "tRuE");
@@ -2897,7 +2897,7 @@ mod tests {
 
     #[tokio::test]
     async fn offline_skips_kiqi_startup_checks_before_cache_io() {
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let _restore_config = RestoreConfigDir(std::env::var_os(crate::config::CONFIG_DIR_ENV));
         let _restore_offline = RestoreEnv::capture(crate::args::KI_OFFLINE_ENV);
         let _restore_disabled = RestoreEnv::capture("KI_DISABLE_UPDATE_CHECK");

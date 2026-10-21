@@ -1216,16 +1216,14 @@ mod tests {
     }
 
     struct TempAgent {
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: crate::env_lock::EnvGuard,
         temp: tempfile::TempDir,
         previous: Option<std::ffi::OsString>,
     }
 
     impl TempAgent {
         fn new() -> Self {
-            let guard = crate::config::test_support::env_lock()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let guard = crate::config::test_support::env_lock().lock();
             let previous = std::env::var_os(crate::config::CONFIG_DIR_ENV);
             let temp = tempfile::tempdir().unwrap();
             std::env::set_var(crate::config::CONFIG_DIR_ENV, temp.path());

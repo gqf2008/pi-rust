@@ -1509,7 +1509,7 @@ mod tests {
     /// lifetime so parallel env-mutating tests across config/provider/auth all
     /// serialize on one mutex.
     struct TestEnv {
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: crate::env_lock::EnvGuard,
         prev_key: Option<std::ffi::OsString>,
         prev_tok: Option<std::ffi::OsString>,
         prev_base: Option<std::ffi::OsString>,
@@ -1519,7 +1519,7 @@ mod tests {
     }
     impl TestEnv {
         fn new() -> Self {
-            let guard = env_lock().lock().unwrap();
+            let guard = env_lock().lock();
             let prev_key = std::env::var_os(ANTHROPIC_API_KEY_ENV);
             let prev_tok = std::env::var_os(ANTHROPIC_AUTH_TOKEN_ENV);
             let prev_base = std::env::var_os(ANTHROPIC_BASE_URL_ENV);

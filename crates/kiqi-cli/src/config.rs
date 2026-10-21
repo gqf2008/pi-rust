@@ -1140,15 +1140,19 @@ impl<T> Pipe for T {}
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    /// A shared workspace lock for tests that touch process-global env vars
-    /// (`KI_CODING_AGENT_DIR`, `ANTHROPIC_*`). All env-mutating tests across
-    /// the crate (config / provider / auth) share this ONE mutex so they can't
-    /// race on the shared environment. Hold the returned guard for the whole
-    /// test (store it in a RAII struct).
-    use std::sync::{Mutex, OnceLock};
-    pub(crate) fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    /// The crate-wide lock for tests that touch process-global env vars
+    /// (`KI_CODING_AGENT_DIR`, `ANTHROPIC_*`, `KI_AGENT_ID`).
+    ///
+    /// It is the *same* lock the product code takes around its environment
+    /// writes ([`crate::env_lock::with_env_lock`]), not a test-only one. That is
+    /// what makes it work: a test holding it excludes
+    /// `set_active_session`/`publish_session_identity` running on another test's
+    /// thread, which a test-only mutex could never do. Hold the returned guard
+    /// for the whole test (store it in a RAII struct); it is re-entrant, so
+    /// calling locked product code from inside is safe, and it tolerates
+    /// poisoning, so one panicking test no longer fails the other 32.
+    pub(crate) fn env_lock() -> &'static crate::env_lock::EnvLock {
+        crate::env_lock::env_lock()
     }
 }
 
@@ -1161,13 +1165,13 @@ mod tests {
     /// test (cleaned up on drop). Holds the prior value of the env var to
     /// restore it. Hold the env lock for its whole lifetime.
     struct TempConfig {
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: crate::env_lock::EnvGuard,
         _tmp: tempfile::TempDir,
         prev: Option<std::ffi::OsString>,
     }
     impl TempConfig {
         fn new() -> Self {
-            let guard = env_lock().lock().unwrap();
+            let guard = env_lock().lock();
             let prev = std::env::var_os(CONFIG_DIR_ENV);
             let tmp = tempfile::TempDir::new().unwrap();
             std::env::set_var(CONFIG_DIR_ENV, tmp.path());
@@ -1446,7 +1450,7 @@ mod tests {
 
     #[test]
     fn custom_openai_provider_resolves_explicit_api_key_environment_reference() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock();
         let env_name = "KI_FAKE_PROVIDER_API_KEY";
         std::env::set_var(env_name, "env-secret");
         let cfg = ProviderConfig {
@@ -1482,7 +1486,7 @@ mod tests {
 
     #[test]
     fn openai_protocol_ids_do_not_inherit_the_official_env_key() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock();
         let prev_openai = std::env::var_os("OPENAI_API_KEY");
         let prev_completions = std::env::var_os("OPENAI_COMPLETIONS_API_KEY");
         let prev_responses = std::env::var_os("OPENAI_RESPONSES_API_KEY");
@@ -1588,7 +1592,7 @@ mod tests {
         // With no env override, agent_dir() must end in `.../.ki/agent`
         // (mirrors pi's `getAgentDir`). We can't assertion the home prefix
         // portably, but the leaf two segments are stable.
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock();
         let prev = std::env::var_os(CONFIG_DIR_ENV);
         std::env::remove_var(CONFIG_DIR_ENV);
         let dir = agent_dir().unwrap();
@@ -1684,7 +1688,7 @@ mod tests {
 
     #[test]
     fn resolve_config_value_env_var() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock();
         let prev = std::env::var_os("KI_TEST_CFG_KEY");
         let prev2 = std::env::var_os("KI_TEST_CFG_KEY2");
         std::env::set_var("KI_TEST_CFG_KEY", "secret-from-env");
@@ -1715,7 +1719,7 @@ mod tests {
 
     #[test]
     fn resolve_config_value_unset_env_is_none() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock();
         let prev = std::env::var_os("KI_TEST_CFG_ABSENT");
         std::env::remove_var("KI_TEST_CFG_ABSENT");
         // Any referenced unset var ⇒ the whole value is None (pi semantics).
@@ -1749,7 +1753,7 @@ mod tests {
 
     #[test]
     fn resolve_headers_drops_unresolvable() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock();
         let prev = std::env::var_os("KI_TEST_HDR_SET");
         std::env::set_var("KI_TEST_HDR_SET", "set-value");
         let mut h = BTreeMap::new();
@@ -1769,7 +1773,7 @@ mod tests {
 
     #[test]
     fn agent_dir_respects_env_override() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock();
         let prev = std::env::var_os(CONFIG_DIR_ENV);
         let tmp = tempfile::TempDir::new().unwrap();
         std::env::set_var(CONFIG_DIR_ENV, tmp.path());
@@ -1783,7 +1787,7 @@ mod tests {
     /// machine owner's global instructions without anyone asking for it.
     #[test]
     fn agents_dir_is_not_read_when_the_ki_dir_is_overridden() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock();
         let prev_agent = std::env::var_os(CONFIG_DIR_ENV);
         let prev_agents = std::env::var_os(AGENTS_DIR_ENV);
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1802,7 +1806,7 @@ mod tests {
     /// variable away.
     #[test]
     fn agents_dir_honours_its_own_override() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock();
         let prev_agent = std::env::var_os(CONFIG_DIR_ENV);
         let prev_agents = std::env::var_os(AGENTS_DIR_ENV);
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1818,7 +1822,7 @@ mod tests {
     /// it is ignored rather than loading an arbitrary directory as instructions.
     #[test]
     fn a_relative_agents_dir_override_is_ignored() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock();
         let prev = std::env::var_os(AGENTS_DIR_ENV);
         std::env::set_var(AGENTS_DIR_ENV, "relative/agents");
         let resolved = agents_dir();
@@ -1828,7 +1832,7 @@ mod tests {
 
     #[test]
     fn relative_override_is_rejected() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock();
         let prev = std::env::var_os(CONFIG_DIR_ENV);
         std::env::set_var(CONFIG_DIR_ENV, "relative/path");
         let err = agent_dir().unwrap_err();

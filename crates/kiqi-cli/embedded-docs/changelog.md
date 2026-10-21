@@ -91,6 +91,22 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **Tests that read a `KI_*` variable no longer race the code that writes it.**
+  The crate-wide env lock was test-only: 33 test sites took
+  `config::test_support::env_lock` while `set_active_session` and
+  `publish_session_identity` rewrote `KI_SESSION_ID`/`KI_AGENT_ID` from whatever
+  thread reached them, so a test that snapshotted the id could observe another
+  test's session. Measured on the previous commit: 15 of 40 runs of
+  `extensions_actions::tests` failed on 16 threads, 0 of 20 with one thread.
+  Worse, the failing assertion panicked *while holding* the lock, so its
+  `.lock().unwrap()` call sites turned the one real failure into 93
+  `PoisonError`s in unrelated tests. There is now a single
+  `crate::env_lock::EnvLock` that the tests and both production writers share;
+  it is re-entrant per thread (a test may call locked product code from inside)
+  and it recovers from poisoning instead of cascading. Removing the lock from
+  `set_active_session` reproduces the flake at 7/20; removing it from
+  `publish_session_identity` does not, which is why both are annotated with what
+  the mutation showed.
 - **Documented examples named plugin crates that no longer exist.** Eight files
   (the website, the user-facing authoring and debugging guides, and their
   embedded copies) showed `ki dev --package kiqi-todo`, `ki dev -P kiqi-webfetch`

@@ -1212,7 +1212,7 @@ mod tests {
 
     #[test]
     fn pi_offline_env_and_cli_flag_share_one_normalized_gate() {
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let _restore = RestoreOfflineEnv(std::env::var_os(KI_OFFLINE_ENV));
 
         std::env::set_var(KI_OFFLINE_ENV, "YeS");

@@ -2716,7 +2716,7 @@ mod tests {
     async fn tool_grant_creates_the_project_file_when_no_policy_exists() {
         // The global lookup is isolated so a developer's real
         // `~/.ki/agent/permissions.json` cannot receive this write.
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let previous = std::env::var_os("KI_AGENT_DIR");
         let global = temp_dir("global-empty");
         std::env::set_var("KI_AGENT_DIR", &global);
@@ -2761,7 +2761,7 @@ mod tests {
 
     #[test]
     fn untrusted_project_policy_is_not_enforced() {
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let global = temp_dir("trust-global");
         let project = temp_dir("trust-project");
         let (trusted, untrusted) = with_agent_dir(&global, || {
@@ -2779,7 +2779,7 @@ mod tests {
 
     #[test]
     fn project_precedence_holds_through_the_gate() {
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let global = temp_dir("precedence-global");
         let project = temp_dir("precedence-project");
         std::fs::write(
@@ -2811,7 +2811,7 @@ mod tests {
 
     #[test]
     fn revoke_edits_the_global_file_when_no_project_policy_exists() {
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let global = temp_dir("global-revoke");
         std::fs::write(
             global.join("permissions.json"),
@@ -2841,7 +2841,7 @@ mod tests {
 
     #[test]
     fn concurrent_grants_do_not_lose_rules() {
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let global = temp_dir("parallel-global");
         let project = temp_dir("parallel-project");
         with_agent_dir(&global, || {
@@ -2976,9 +2976,7 @@ mod tests {
         // and a reader that does not take the same lock sees whichever value
         // happens to be installed. Measured on this tree: this assertion failed
         // in 4 of 10 runs of `permissions::` before the lock was taken here.
-        let _global_env = crate::config::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _global_env = crate::config::test_support::env_lock().lock();
         assert!(
             bash("cd && rm -rf .ki/agent").is_some(),
             "must block: cd && rm -rf .ki/agent"

@@ -526,7 +526,7 @@ mod tests {
     /// for the duration of a test. Holds the shared env lock for its whole
     /// lifetime so it can't race with config/provider env-mutating tests.
     struct TempConfig {
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: crate::env_lock::EnvGuard,
         _tmp: tempfile::TempDir,
         prev_dir: Option<std::ffi::OsString>,
         prev_key: Option<std::ffi::OsString>,
@@ -535,7 +535,7 @@ mod tests {
     }
     impl TempConfig {
         fn new() -> Self {
-            let guard = env_lock().lock().unwrap();
+            let guard = env_lock().lock();
             let prev_dir = std::env::var_os(crate::config::CONFIG_DIR_ENV);
             let prev_key = std::env::var_os(crate::provider::ANTHROPIC_API_KEY_ENV);
             let prev_tok = std::env::var_os(crate::provider::ANTHROPIC_AUTH_TOKEN_ENV);

@@ -1980,18 +1980,18 @@ mod tests {
 
     /// `KI_HEARTBEAT_SECS` is process-global, so the two env-driven tests must
     /// not interleave. Restores the previous value on drop.
-    static HEARTBEAT_ENV_LOCK: Mutex<()> = Mutex::new(());
-
+    ///
+    /// It uses the crate-wide environment lock rather than a second private
+    /// mutex: the variable it guards is in the same process-global namespace, so
+    /// one lock for all of it is what actually prevents interleaving.
     struct HeartbeatEnvGuard {
         previous: Option<String>,
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: crate::env_lock::EnvGuard,
     }
 
     impl HeartbeatEnvGuard {
         fn set(value: Option<&str>) -> Self {
-            let _lock = HEARTBEAT_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _lock = crate::env_lock::env_lock().lock();
             let previous = std::env::var(HEARTBEAT_SECS_ENV).ok();
             match value {
                 Some(value) => std::env::set_var(HEARTBEAT_SECS_ENV, value),

@@ -283,7 +283,7 @@ mod tests {
     /// Run `body` against a throwaway `~/.ki/agent` (holds the shared env lock
     /// so parallel env-mutating tests serialise).
     fn with_isolated_config_dir<T>(body: impl FnOnce() -> T) -> T {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock();
         let prev = std::env::var_os(config::CONFIG_DIR_ENV);
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var(config::CONFIG_DIR_ENV, tmp.path());

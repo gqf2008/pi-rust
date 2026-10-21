@@ -716,13 +716,13 @@ mod tests {
 
     /// Point `KI_CODING_AGENT_DIR` at a fresh temp dir for this test.
     struct TempConfig {
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: crate::env_lock::EnvGuard,
         _tmp: tempfile::TempDir,
         prev: Option<std::ffi::OsString>,
     }
     impl TempConfig {
         fn new() -> Self {
-            let guard = env_lock().lock().unwrap();
+            let guard = env_lock().lock();
             let prev = std::env::var_os(config::CONFIG_DIR_ENV);
             let tmp = tempfile::TempDir::new().unwrap();
             std::env::set_var(config::CONFIG_DIR_ENV, tmp.path());
@@ -905,8 +905,8 @@ mod scoped_tests {
     use super::*;
     use crate::config::test_support::env_lock;
 
-    fn with_temp_env() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
-        let guard = env_lock().lock().unwrap();
+    fn with_temp_env() -> (tempfile::TempDir, crate::env_lock::EnvGuard) {
+        let guard = env_lock().lock();
         let tmp = tempfile::TempDir::new().unwrap();
         std::env::set_var(config::CONFIG_DIR_ENV, tmp.path());
         (tmp, guard)

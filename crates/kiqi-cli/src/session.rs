@@ -3097,10 +3097,17 @@ async fn open_session_by_id_in_dir(id: &str, cwd: &str, dir: &Path) -> Result<Se
 /// way to pin it before, because a session that does not match its own id is
 /// never what the caller wants.
 fn publish_session_identity(tool_context: &kiqi_extensions::ToolCallContext, id: &str) {
-    std::env::set_var(kiqi_plugin_sdk::SESSION_ID_ENV, id);
-    // Two audiences, two names: plugins read `KI_SESSION_ID`, while the shell a
-    // `bash`/`powershell` tool spawns can name the session through `KI_AGENT_ID`.
-    std::env::set_var(kiqi_plugin_sdk::AGENT_ID_ENV, id);
+    // Both names are published under one lock so no reader can observe a torn
+    // pair (`KI_SESSION_ID` already swapped, `KI_AGENT_ID` not yet). See
+    // `env_lock` for why this is a shared, re-entrant lock rather than a
+    // test-only mutex.
+    crate::env_lock::with_env_lock(|| {
+        std::env::set_var(kiqi_plugin_sdk::SESSION_ID_ENV, id);
+        // Two audiences, two names: plugins read `KI_SESSION_ID`, while the shell
+        // a `bash`/`powershell` tool spawns can name the session through
+        // `KI_AGENT_ID`.
+        std::env::set_var(kiqi_plugin_sdk::AGENT_ID_ENV, id);
+    });
     tool_context.set_session_id(id);
 }
 
@@ -3151,8 +3158,19 @@ pub(crate) async fn set_active_session(
     signal_host: &crate::signal_host::SignalHost,
 ) -> Result<(), String> {
     if let Ok(metadata) = session.get_metadata().await {
-        std::env::set_var(kiqi_plugin_sdk::SESSION_ID_ENV, &metadata.id);
-        std::env::set_var(kiqi_plugin_sdk::AGENT_ID_ENV, &metadata.id);
+        // Same lock as `publish_session_identity`: this is the other path that
+        // rewrites the id pair, and it runs from a background task while tests
+        // (and other tasks) may be reading it.
+        //
+        // This is the lock that actually fixes the race. Removing it reproduces
+        // the flake at 7/20 runs of `extensions_actions::tests` on a 16-thread
+        // machine; removing the one in `publish_session_identity` instead does
+        // not (0/20), because this path is what the failing test reaches through
+        // `HostImpl::new_session`. Keep both: they write the same pair.
+        crate::env_lock::with_env_lock(|| {
+            std::env::set_var(kiqi_plugin_sdk::SESSION_ID_ENV, &metadata.id);
+            std::env::set_var(kiqi_plugin_sdk::AGENT_ID_ENV, &metadata.id);
+        });
         if let Some(context) = tool_context {
             context.set_session_id(metadata.id);
         }
@@ -4043,7 +4061,7 @@ mod tests {
     async fn host_permission_gate_ignores_an_untrusted_project_policy() {
         // Isolate the global lookup so the developer's real policy cannot
         // affect or receive this test.
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let previous = std::env::var_os("KI_AGENT_DIR");
         let global = tempfile::TempDir::new().unwrap();
         std::env::set_var("KI_AGENT_DIR", global.path());
@@ -4419,7 +4437,7 @@ mod tests {
             }
         }
 
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let _restore = RestoreConfigDir(std::env::var_os(crate::config::CONFIG_DIR_ENV));
         let tmp = tempfile::tempdir().unwrap();
         let agent = tmp.path().join("agent");
@@ -4463,7 +4481,7 @@ mod tests {
             }
         }
 
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let _restore = RestoreConfigDir(std::env::var_os(crate::config::CONFIG_DIR_ENV));
         let tmp = tempfile::tempdir().unwrap();
         let agent = tmp.path().join("agent");
@@ -4560,7 +4578,7 @@ mod tests {
             }
         }
 
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let _restore = RestoreConfigDir(std::env::var_os(crate::config::CONFIG_DIR_ENV));
         let tmp = tempfile::tempdir().unwrap();
         let agent = tmp.path().join("agent");
@@ -4609,7 +4627,7 @@ mod tests {
             }
         }
 
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let _restore = RestoreConfigDir(std::env::var_os(crate::config::CONFIG_DIR_ENV));
         let tmp = tempfile::tempdir().unwrap();
         let agent = tmp.path().join("agent");
@@ -4783,7 +4801,7 @@ mod tests {
             }
         }
 
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let _restore = RestoreConfigDir(std::env::var_os(crate::config::CONFIG_DIR_ENV));
         let tmp = tempfile::tempdir().unwrap();
         let agent = tmp.path().join("agent");
@@ -4831,7 +4849,7 @@ mod tests {
             }
         }
 
-        let _guard = crate::config::test_support::env_lock().lock().unwrap();
+        let _guard = crate::config::test_support::env_lock().lock();
         let _restore = RestoreConfigDir(std::env::var_os(crate::config::CONFIG_DIR_ENV));
         let tmp = tempfile::tempdir().unwrap();
         let agent = tmp.path().join("agent");
@@ -5055,9 +5073,7 @@ mod tests {
             }
         }
 
-        let _guard = crate::config::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::config::test_support::env_lock().lock();
         let _restore = Restore {
             session: std::env::var_os(kiqi_plugin_sdk::SESSION_ID_ENV),
             agent: std::env::var_os(kiqi_plugin_sdk::AGENT_ID_ENV),

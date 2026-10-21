@@ -701,9 +701,7 @@ mod tests {
             }
         }
 
-        let _guard = crate::config::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::config::test_support::env_lock().lock();
         let _restore = Restore {
             session: std::env::var_os(kiqi_plugin_sdk::SESSION_ID_ENV),
             agent: std::env::var_os(kiqi_plugin_sdk::AGENT_ID_ENV),
