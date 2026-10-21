@@ -3104,6 +3104,40 @@ fn publish_session_identity(tool_context: &kiqi_extensions::ToolCallContext, id:
     tool_context.set_session_id(id);
 }
 
+/// The session id a `--no-session` run carries (see [`ephemeral_session`]).
+///
+/// Not unique across runs, so it never identifies a writer; `kiqi-plugin-sdk`'s
+/// `AGENT_ID_ENV` docs name the same literal as "no session". Declared here so
+/// the two places that care (the session itself and [`current_session_id`])
+/// cannot drift apart.
+const EPHEMERAL_SESSION_ID: &str = "ephemeral";
+
+/// The session id this process is serving, for attribution that must follow a
+/// switch/fork rather than a spawn-time snapshot.
+///
+/// Reads [`kiqi_plugin_sdk::AGENT_ID_ENV`], which [`publish_session_identity`]
+/// rewrites on every activation — the same value the `bash` tool and any spawned
+/// MCP server are given, so the three agree by construction.
+pub(crate) fn current_session_id() -> Option<String> {
+    session_id_from(std::env::var(kiqi_plugin_sdk::AGENT_ID_ENV).ok().as_deref())
+}
+
+/// The attribution [`current_session_id`] derives from a published value.
+///
+/// `None` when nothing published an id, and for [`EPHEMERAL_SESSION_ID`]: every
+/// `--no-session` run writes that same value, so treating it as an identity
+/// would let one ephemeral session silently swallow another's update as "its
+/// own echo". Split from the environment read so this rule is testable without
+/// a process-global write (`KI_AGENT_ID` is read by the whole process, and env
+/// tests that race have bitten this repo before).
+fn session_id_from(published: Option<&str>) -> Option<String> {
+    let id = published?.trim();
+    if id.is_empty() || id == EPHEMERAL_SESSION_ID {
+        return None;
+    }
+    Some(id.to_string())
+}
+
 /// Swap the session the harness serves, republishing the identity to plugins.
 ///
 /// The single funnel for an in-process session change. Prefer this over calling
@@ -3290,7 +3324,7 @@ async fn open_session(
 fn ephemeral_session() -> Session {
     let storage = Arc::new(InMemorySessionStorage::new(
         SessionMetadata {
-            id: "ephemeral".into(),
+            id: EPHEMERAL_SESSION_ID.into(),
             created_at: 0,
             parent_session_id: None,
         },
@@ -4919,6 +4953,29 @@ mod tests {
         let s = ephemeral_session();
         let leaf = s.get_leaf_id().await;
         assert!(leaf.is_ok());
+    }
+
+    /// Attribution must treat `--no-session` as no session at all.
+    ///
+    /// Every ephemeral run publishes the same literal, so accepting it would let
+    /// one ephemeral session dismiss another's collab write as its own echo —
+    /// the whole point of comparing ids. Pure input, so no process-global env
+    /// write and no ordering dependence on the crate's other env tests.
+    #[test]
+    fn an_ephemeral_session_id_is_not_an_identity() {
+        assert_eq!(session_id_from(Some(EPHEMERAL_SESSION_ID)), None);
+        // Nothing published (a plugin-only run) or a blank value: also no id.
+        assert_eq!(session_id_from(None), None);
+        assert_eq!(session_id_from(Some("   \n")), None);
+        // A real id survives, trimmed — the value a child process receives.
+        assert_eq!(
+            session_id_from(Some(" 0191f2c4-6a1b-7c3d-8e4f-5a6b7c8d9e0f\n")),
+            Some("0191f2c4-6a1b-7c3d-8e4f-5a6b7c8d9e0f".to_string())
+        );
+        // The literal is the one `ephemeral_session` writes: if these drift the
+        // rule silently stops applying, so pin the connection rather than the
+        // string in two places.
+        assert_eq!(EPHEMERAL_SESSION_ID, "ephemeral");
     }
 
     // NOTE: `build_tools`/`active_tool_names` integration is exercised by the

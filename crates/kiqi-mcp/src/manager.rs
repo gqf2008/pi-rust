@@ -296,7 +296,7 @@ impl ClientHandler for KiClientHandler {
         self.mailbox.push_with_provenance(
             &self.server,
             &params.uri,
-            self_authored_from_meta(&context.meta),
+            authored_sessions_from_meta(&context.meta),
         );
     }
 
@@ -2333,59 +2333,73 @@ mod tests {
     }
 }
 
-/// Whether a `resources/updated` notification says every changed entry was
-/// authored by this session's own principal. The walgit MCP server emits
-/// `_meta: {"actors": [...], "self": "<principal>"}`; without that metadata the
-/// answer is false, so behavior is unchanged for older servers.
-fn self_authored_from_meta(meta: &rmcp::model::Meta) -> bool {
-    // Session-scoped attribution: one identity may own many sessions, so the
-    // principal (`self`) alone cannot tell a session's own echo from a peer's
-    // write. The entry bodies carry `session`; the server reports the changed
-    // sessions and this server's own session. Old entries/servers have neither,
-    // so the answer stays false and the wake behavior is unchanged.
-    let Some(self_session) = meta
-        .0
-        .get("self_session")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return false;
-    };
-    let Some(sessions) = meta.0.get("sessions").and_then(serde_json::Value::as_array) else {
-        return false;
-    };
-    !sessions.is_empty()
-        && sessions
-            .iter()
-            .all(|session| session.as_str() == Some(self_session))
+/// The sessions a `resources/updated` notification says authored the changed
+/// entries, from `_meta.sessions` (`_meta: {"sessions": [...], "self_session":
+/// "<sid>"}`).
+///
+/// The *client* decides what counts as its own echo, comparing this list against
+/// the session it is serving at decision time — not against the server's
+/// `self_session`, which is a spawn-time snapshot. An empty list means "no
+/// provenance" (an older server, or entries written before sessions were
+/// recorded) and never counts as an echo.
+fn authored_sessions_from_meta(meta: &rmcp::model::Meta) -> Vec<String> {
+    meta.0
+        .get("sessions")
+        .and_then(serde_json::Value::as_array)
+        .map(|sessions| {
+            sessions
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod provenance_tests {
-    use super::self_authored_from_meta;
+    use super::authored_sessions_from_meta;
 
     fn meta(value: serde_json::Value) -> rmcp::model::Meta {
         rmcp::model::Meta(value.as_object().expect("object").clone())
     }
 
     #[test]
-    fn only_our_own_sessions_mark_a_notice_as_self_authored() {
-        assert!(self_authored_from_meta(&meta(serde_json::json!({
-            "sessions": ["s1"], "self_session": "s1"
-        }))));
-        assert!(!self_authored_from_meta(&meta(serde_json::json!({
-            "sessions": ["s1", "s2"], "self_session": "s1"
-        }))));
-        assert!(!self_authored_from_meta(&meta(serde_json::json!({
-            "sessions": [], "self_session": "s1"
-        }))));
-        assert!(
-            !self_authored_from_meta(&meta(serde_json::json!({
+    fn the_client_learns_the_raw_authored_sessions() {
+        assert_eq!(
+            authored_sessions_from_meta(&meta(serde_json::json!({
+                "sessions": ["s1"], "self_session": "s1"
+            }))),
+            vec!["s1".to_string()]
+        );
+        // The peer's session must survive into the notice: dropping it here
+        // would make a mixed batch look like a pure echo.
+        assert_eq!(
+            authored_sessions_from_meta(&meta(serde_json::json!({
+                "sessions": ["s1", "s2"], "self_session": "s1"
+            }))),
+            vec!["s1".to_string(), "s2".to_string()]
+        );
+        // `self_session` alone is a spawn-time snapshot and is not read here;
+        // the decision compares against the session ki serves at that moment.
+        assert_eq!(
+            authored_sessions_from_meta(&meta(serde_json::json!({
+                "self_session": "s1"
+            }))),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            authored_sessions_from_meta(&meta(serde_json::json!({}))),
+            Vec::<String>::new(),
+            "an older server without provenance must never look like an echo"
+        );
+        // Actor-only metadata is not session-scoped: the same principal can own
+        // many sessions, so it cannot distinguish our write from a peer's.
+        assert_eq!(
+            authored_sessions_from_meta(&meta(serde_json::json!({
                 "actors": ["me"], "self": "me"
             }))),
-            "actor-only metadata is not session-scoped"
+            Vec::<String>::new()
         );
-        assert!(!self_authored_from_meta(&meta(serde_json::json!({
-            "sessions": ["s1"]
-        }))));
     }
 }

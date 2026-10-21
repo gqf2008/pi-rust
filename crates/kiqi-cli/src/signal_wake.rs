@@ -122,6 +122,7 @@ impl SignalWakeState {
     pub(crate) fn decide<F>(
         &mut self,
         batch: &McpNoticeBatch,
+        current_session: Option<&str>,
         now: Instant,
         config: F,
     ) -> WakeDecision
@@ -136,9 +137,16 @@ impl SignalWakeState {
         }
         // A batch made only of our own writes is an echo: record it (the
         // caller persists the notice), but do not spend a turn re-reading it.
-        // This is sound only with per-agent principals; without provenance the
-        // flag is false and the decision is unchanged.
-        if !batch.notices.is_empty() && batch.notices.iter().all(|notice| notice.self_authored) {
+        // `current_session` is the session ki is serving *now*; comparing
+        // against it rather than the server's spawn-time snapshot is what keeps
+        // suppression working across a session switch or fork. Without
+        // provenance (or without a session of our own) nothing is an echo.
+        if !batch.notices.is_empty()
+            && batch
+                .notices
+                .iter()
+                .all(|notice| notice.is_own_echo(current_session))
+        {
             return WakeDecision::Skip("the update was authored by this session");
         }
         let mut eligible = Vec::new();
@@ -248,6 +256,10 @@ mod tests {
     use super::*;
     use kiqi_mcp::McpNotice;
 
+    /// The session these tests are not serving: no attribution, so nothing is
+    /// an echo unless a test says which session it serves.
+    const NO_SESSION: Option<&str> = None;
+
     fn batch(notices: &[(&str, &str)]) -> McpNoticeBatch {
         McpNoticeBatch {
             notices: notices
@@ -256,7 +268,7 @@ mod tests {
                     server: server.to_string(),
                     uri: uri.to_string(),
                     content: None,
-                    self_authored: false,
+                    authored_sessions: Vec::new(),
                 })
                 .collect(),
             suppressed: 0,
@@ -281,16 +293,55 @@ mod tests {
     #[test]
     fn a_batch_of_our_own_writes_does_not_wake() {
         let mut b = batch(&[("docs", "file:///a.md")]);
-        b.notices[0].self_authored = true;
+        b.notices[0].authored_sessions = vec!["s-me".to_string()];
         let mut state = SignalWakeState::default();
         let cfg = || configs(&[("docs", policy(WakeMode::Auto))]);
         assert_eq!(
-            state.decide(&b, Instant::now(), cfg()),
+            state.decide(&b, Some("s-me"), Instant::now(), cfg()),
             WakeDecision::Skip("the update was authored by this session")
         );
-        b.notices[0].self_authored = false;
+        b.notices[0].authored_sessions = Vec::new();
         assert!(matches!(
-            state.decide(&b, Instant::now(), cfg()),
+            state.decide(&b, Some("s-me"), Instant::now(), cfg()),
+            WakeDecision::Wake(_)
+        ));
+    }
+
+    /// The suppression must follow the session ki is serving *now*, not the id
+    /// the MCP server was spawned with.
+    ///
+    /// A server reports only the session it inherited at spawn; ki republishes
+    /// its id on every switch/fork. A previous version compared against the
+    /// server's own `self_session` snapshot, so after a swap the two disagreed
+    /// and every write by the new session woke it again — the exact shape of the
+    /// live echo this test pins.
+    #[test]
+    fn suppression_follows_a_session_switch_not_the_servers_snapshot() {
+        let mut b = batch(&[("docs", "file:///a.md")]);
+        // The server attributed the write to the session ki serves now.
+        b.notices[0].authored_sessions = vec!["s-new".to_string()];
+        let mut state = SignalWakeState::default();
+        let cfg = || configs(&[("docs", policy(WakeMode::Auto))]);
+        assert_eq!(
+            state.decide(&b, Some("s-new"), Instant::now(), cfg()),
+            WakeDecision::Skip("the update was authored by this session")
+        );
+        // Same batch seen by a session that is not the author (a peer, or a
+        // fork that has its own id): that is news, not an echo.
+        assert!(matches!(
+            state.decide(&b, Some("s-old"), Instant::now(), cfg()),
+            WakeDecision::Wake(_)
+        ));
+    }
+
+    #[test]
+    fn a_peer_write_inside_our_own_batch_still_wakes() {
+        let mut b = batch(&[("docs", "file:///a.md")]);
+        b.notices[0].authored_sessions = vec!["s-me".to_string(), "s-peer".to_string()];
+        let mut state = SignalWakeState::default();
+        let cfg = || configs(&[("docs", policy(WakeMode::Auto))]);
+        assert!(matches!(
+            state.decide(&b, Some("s-me"), Instant::now(), cfg()),
             WakeDecision::Wake(_)
         ));
     }
@@ -301,15 +352,30 @@ mod tests {
         let now = Instant::now();
         let b = batch(&[("docs", "file:///a.md")]);
         assert_eq!(
-            state.decide(&b, now, configs(&[("docs", policy(WakeMode::Off))])),
+            state.decide(
+                &b,
+                NO_SESSION,
+                now,
+                configs(&[("docs", policy(WakeMode::Off))])
+            ),
             WakeDecision::Skip("no auto server is within its budget")
         );
         assert_eq!(
-            state.decide(&b, now, configs(&[("docs", policy(WakeMode::Notify))])),
+            state.decide(
+                &b,
+                NO_SESSION,
+                now,
+                configs(&[("docs", policy(WakeMode::Notify))])
+            ),
             WakeDecision::Skip("no auto server is within its budget")
         );
         assert_eq!(
-            state.decide(&b, now, configs(&[("docs", policy(WakeMode::Auto))])),
+            state.decide(
+                &b,
+                NO_SESSION,
+                now,
+                configs(&[("docs", policy(WakeMode::Auto))])
+            ),
             WakeDecision::Wake(vec!["docs".to_string()])
         );
     }
@@ -322,11 +388,21 @@ mod tests {
         };
         let now = Instant::now();
         assert_eq!(
-            state.decide(&batch(&[("docs", "file:///model-only")]), now, cfg),
+            state.decide(
+                &batch(&[("docs", "file:///model-only")]),
+                NO_SESSION,
+                now,
+                cfg
+            ),
             WakeDecision::Skip("no auto server is within its budget")
         );
         assert!(matches!(
-            state.decide(&batch(&[("docs", "file:///configured")]), now, cfg),
+            state.decide(
+                &batch(&[("docs", "file:///configured")]),
+                NO_SESSION,
+                now,
+                cfg
+            ),
             WakeDecision::Wake(_)
         ));
     }
@@ -337,13 +413,16 @@ mod tests {
         let now = Instant::now();
         let cfg = configs(&[("docs", policy(WakeMode::Auto))]);
         let b = batch(&[("docs", "file:///a.md")]);
-        assert!(matches!(state.decide(&b, now, &cfg), WakeDecision::Wake(_)));
+        assert!(matches!(
+            state.decide(&b, NO_SESSION, now, &cfg),
+            WakeDecision::Wake(_)
+        ));
         assert_eq!(
-            state.decide(&b, now + Duration::from_secs(1), &cfg),
+            state.decide(&b, NO_SESSION, now + Duration::from_secs(1), &cfg),
             WakeDecision::Skip("no auto server is within its budget")
         );
         assert!(matches!(
-            state.decide(&b, now + Duration::from_secs(31), &cfg),
+            state.decide(&b, NO_SESSION, now + Duration::from_secs(31), &cfg),
             WakeDecision::Wake(_)
         ));
     }
@@ -355,18 +434,27 @@ mod tests {
         let b = batch(&[("docs", "file:///a.md")]);
         let mut now = Instant::now();
         // Default max_consecutive_runs = 2.
-        assert!(matches!(state.decide(&b, now, &cfg), WakeDecision::Wake(_)));
+        assert!(matches!(
+            state.decide(&b, NO_SESSION, now, &cfg),
+            WakeDecision::Wake(_)
+        ));
         now += Duration::from_secs(31);
-        assert!(matches!(state.decide(&b, now, &cfg), WakeDecision::Wake(_)));
+        assert!(matches!(
+            state.decide(&b, NO_SESSION, now, &cfg),
+            WakeDecision::Wake(_)
+        ));
         now += Duration::from_secs(31);
         assert_eq!(
-            state.decide(&b, now, &cfg),
+            state.decide(&b, NO_SESSION, now, &cfg),
             WakeDecision::Skip("no auto server is within its budget")
         );
         assert_eq!(state.consecutive("docs"), 2);
         state.record_user_input();
         assert_eq!(state.consecutive("docs"), 0);
-        assert!(matches!(state.decide(&b, now, &cfg), WakeDecision::Wake(_)));
+        assert!(matches!(
+            state.decide(&b, NO_SESSION, now, &cfg),
+            WakeDecision::Wake(_)
+        ));
     }
 
     #[test]
@@ -375,9 +463,12 @@ mod tests {
         let cfg = configs(&[("docs", policy(WakeMode::Auto))]);
         let b = batch(&[("docs", "file:///a.md")]);
         let now = Instant::now();
-        assert!(matches!(state.decide(&b, now, &cfg), WakeDecision::Wake(_)));
         assert!(matches!(
-            state.decide(&b, now + Duration::from_secs(31), &cfg),
+            state.decide(&b, NO_SESSION, now, &cfg),
+            WakeDecision::Wake(_)
+        ));
+        assert!(matches!(
+            state.decide(&b, NO_SESSION, now + Duration::from_secs(31), &cfg),
             WakeDecision::Wake(_)
         ));
         // Past the quiet window (measured from the LAST wake), the chain no
@@ -385,6 +476,7 @@ mod tests {
         assert!(matches!(
             state.decide(
                 &b,
+                NO_SESSION,
                 now + Duration::from_secs(31) + CONSECUTIVE_WINDOW + Duration::from_secs(1),
                 &cfg
             ),
@@ -422,11 +514,14 @@ mod tests {
         let now = Instant::now();
         state.record_abort();
         assert_eq!(
-            state.decide(&b, now, &cfg),
+            state.decide(&b, NO_SESSION, now, &cfg),
             WakeDecision::Skip("muted until the next user input")
         );
         state.record_user_input();
-        assert!(matches!(state.decide(&b, now, &cfg), WakeDecision::Wake(_)));
+        assert!(matches!(
+            state.decide(&b, NO_SESSION, now, &cfg),
+            WakeDecision::Wake(_)
+        ));
     }
 
     #[test]
@@ -439,11 +534,14 @@ mod tests {
         state.record_user_input();
         assert!(state.session_muted());
         assert_eq!(
-            state.decide(&b, now, &cfg),
+            state.decide(&b, NO_SESSION, now, &cfg),
             WakeDecision::Skip("muted for this session")
         );
         state.set_session_muted(false);
-        assert!(matches!(state.decide(&b, now, &cfg), WakeDecision::Wake(_)));
+        assert!(matches!(
+            state.decide(&b, NO_SESSION, now, &cfg),
+            WakeDecision::Wake(_)
+        ));
     }
 
     #[test]
@@ -455,7 +553,7 @@ mod tests {
         ]);
         let b = batch(&[("noisy", "mem://x"), ("docs", "file:///a.md")]);
         assert_eq!(
-            state.decide(&b, Instant::now(), &cfg),
+            state.decide(&b, NO_SESSION, Instant::now(), &cfg),
             WakeDecision::Wake(vec!["docs".to_string()])
         );
     }
@@ -474,13 +572,21 @@ mod tests {
         )]);
         let b = batch(&[("docs", "file:///a.md")]);
         let now = Instant::now();
-        assert!(matches!(state.decide(&b, now, &cfg), WakeDecision::Wake(_)));
+        assert!(matches!(
+            state.decide(&b, NO_SESSION, now, &cfg),
+            WakeDecision::Wake(_)
+        ));
         assert_eq!(
-            state.decide(&b, now + Duration::from_secs(2), &cfg),
+            state.decide(&b, NO_SESSION, now + Duration::from_secs(2), &cfg),
             WakeDecision::Skip("no auto server is within its budget")
         );
         assert!(matches!(
-            state.decide(&b, now + RUN_WINDOW + Duration::from_secs(2), &cfg),
+            state.decide(
+                &b,
+                NO_SESSION,
+                now + RUN_WINDOW + Duration::from_secs(2),
+                &cfg
+            ),
             WakeDecision::Wake(_)
         ));
     }
@@ -493,7 +599,7 @@ mod tests {
                     server: "docs".into(),
                     uri: "file:///a.md".into(),
                     content: Some("SECRET BODY".into()),
-                    self_authored: false,
+                    authored_sessions: Vec::new(),
                 }],
                 suppressed: 2,
             },

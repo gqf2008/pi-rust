@@ -157,7 +157,15 @@ impl SignalHost {
     where
         F: Fn(&str, &str) -> Option<SignalsConfig>,
     {
-        self.wake.lock().unwrap().decide(batch, now, config)
+        // Resolved here, per decision, so a session switch/fork is picked up: the
+        // MCP server can only report the id it was spawned with, while ki
+        // republishes its own on every activation. Held for the borrow of
+        // `decide` only.
+        let current = crate::session::current_session_id();
+        self.wake
+            .lock()
+            .unwrap()
+            .decide(batch, current.as_deref(), now, config)
     }
 
     pub(crate) fn set_session_muted(&self, muted: bool) {
@@ -336,7 +344,7 @@ mod tests {
                     server: server.to_string(),
                     uri: uri.to_string(),
                     content: None,
-                    self_authored: false,
+                    authored_sessions: Vec::new(),
                 })
                 .collect(),
             suppressed: 0,

@@ -37,11 +37,37 @@ pub struct McpNotice {
     /// content is already bounded at `MAX_RESOURCE_TEXT` with the usual
     /// truncation marker.
     pub content: Option<String>,
-    /// True when the notification's `_meta` says every changed entry was
-    /// authored by this session's own principal. Suppression is only sound
-    /// when agents have distinct principals (one worktree per agent); without
-    /// `_meta` provenance this stays false, so behavior is unchanged.
-    pub self_authored: bool,
+    /// Sessions the server says authored the changed entries (`_meta.sessions`).
+    /// Empty when the server reports none (an older server, or entries written
+    /// before sessions were recorded), and an empty list never counts as an
+    /// echo.
+    ///
+    /// Deliberately the *raw* session list, not a pre-computed "this is my own
+    /// write" flag: the comparison happens at decision time against the session
+    /// ki is serving *then*. A server can only report the session id it was
+    /// spawned with, so a flag computed from that snapshot goes stale the moment
+    /// the user switches or forks a session — and would then let every own write
+    /// wake the session again.
+    pub authored_sessions: Vec<String>,
+}
+
+impl McpNotice {
+    /// Whether this update is an echo of a write made by `current_session`.
+    ///
+    /// Sound only when the server attributes writes to a session at all:
+    /// without provenance (`authored_sessions` empty) the answer is false, so
+    /// behavior for older servers is unchanged. A batch mixing our writes with
+    /// a peer's is never an echo — the peer's entry is news.
+    pub fn is_own_echo(&self, current_session: Option<&str>) -> bool {
+        let Some(current) = current_session else {
+            return false;
+        };
+        !self.authored_sessions.is_empty()
+            && self
+                .authored_sessions
+                .iter()
+                .all(|session| session == current)
+    }
 }
 
 /// What [`McpNoticeMailbox::take`] hands back: the coalesced notices plus how
@@ -82,16 +108,28 @@ impl McpNoticeMailbox {
         Self::default()
     }
 
-    /// Record one update. Coalesces by (server, uri); counts as suppressed when
-    /// it replaces a pending notice or the mailbox is at cap.
+    /// Record one update with no provenance. Coalesces by (server, uri); counts
+    /// as suppressed when it replaces a pending notice or the mailbox is at cap.
+    ///
+    /// A test seam, not dead code: the real path always carries `_meta`, so every
+    /// production caller goes through [`Self::push_with_provenance`]. Kept out of
+    /// non-test builds so it cannot quietly become a second, provenance-dropping
+    /// entry point that the echo logic would then never see.
+    #[cfg(test)]
     pub(crate) fn push(&self, server: &str, uri: &str) {
-        self.push_with_provenance(server, uri, false);
+        self.push_with_provenance(server, uri, Vec::new());
     }
 
-    /// Record one update with its provenance. A self-authored update still
-    /// coalesces/counts like any other; the flag is carried to the wake
-    /// decision so an echo of our own write can be recorded without a turn.
-    pub(crate) fn push_with_provenance(&self, server: &str, uri: &str, self_authored: bool) {
+    /// Record one update with its provenance (the authored sessions the server
+    /// reported). A self-authored update still coalesces/counts like any other;
+    /// the list is carried to the wake decision so an echo of our own write can
+    /// be recorded without a turn.
+    pub(crate) fn push_with_provenance(
+        &self,
+        server: &str,
+        uri: &str,
+        authored_sessions: Vec<String>,
+    ) {
         {
             let mut inner = self.inner.lock().unwrap();
             if let Some(entry) = inner
@@ -103,7 +141,7 @@ impl McpNoticeMailbox {
                 // content, so replacing it loses nothing — but the replaced event
                 // is one the model will never see individually. Carry the newer
                 // provenance too: the batch must reflect the latest write.
-                entry.self_authored = self_authored;
+                entry.authored_sessions = authored_sessions;
                 inner.suppressed += 1;
             } else if inner.entries.len() >= MAX_NOTICE_ENTRIES {
                 inner.suppressed += 1;
@@ -112,7 +150,7 @@ impl McpNoticeMailbox {
                     server: server.to_string(),
                     uri: uri.to_string(),
                     content: None,
-                    self_authored,
+                    authored_sessions,
                 });
             }
         }
@@ -228,14 +266,40 @@ mod tests {
     #[test]
     fn a_coalesced_update_carries_the_newer_provenance() {
         let mailbox = McpNoticeMailbox::new();
-        mailbox.push_with_provenance("docs", "file:///a.md", false);
-        mailbox.push_with_provenance("docs", "file:///a.md", true);
+        mailbox.push_with_provenance("docs", "file:///a.md", Vec::new());
+        mailbox.push_with_provenance("docs", "file:///a.md", vec!["s1".to_string()]);
         let batch = mailbox.take();
         assert_eq!(batch.notices.len(), 1);
         assert!(
-            batch.notices[0].self_authored,
+            batch.notices[0].is_own_echo(Some("s1")),
             "the latest update's provenance must win"
         );
+    }
+
+    #[test]
+    fn an_echo_needs_a_current_session_and_a_full_match() {
+        let notice = McpNotice {
+            server: "collab".into(),
+            uri: "walgit://refs/o/r".into(),
+            content: None,
+            authored_sessions: vec!["me".into()],
+        };
+        assert!(notice.is_own_echo(Some("me")));
+        // No session of our own to compare against (ephemeral, or not yet
+        // published): claiming an echo would hide a peer's update.
+        assert!(!notice.is_own_echo(None));
+        // A peer's write rides the same batch, so the batch is news.
+        let mixed = McpNotice {
+            authored_sessions: vec!["me".into(), "peer".into()],
+            ..notice.clone()
+        };
+        assert!(!mixed.is_own_echo(Some("me")));
+        // Without provenance every update is news, as for an older server.
+        let unattributed = McpNotice {
+            authored_sessions: Vec::new(),
+            ..notice
+        };
+        assert!(!unattributed.is_own_echo(Some("me")));
     }
 
     #[test]
@@ -340,13 +404,13 @@ mod tests {
                     server: "docs".into(),
                     uri: "file:///a.md".into(),
                     content: None,
-                    self_authored: false,
+                    authored_sessions: Vec::new(),
                 },
                 McpNotice {
                     server: "code".into(),
                     uri: "mem://x".into(),
                     content: None,
-                    self_authored: false,
+                    authored_sessions: Vec::new(),
                 },
             ],
             suppressed: 2,
@@ -367,7 +431,7 @@ mod tests {
                 server: "docs".into(),
                 uri: "file:///a.md".into(),
                 content: None,
-                self_authored: false,
+                authored_sessions: Vec::new(),
             }],
             suppressed: 0,
         };
@@ -383,13 +447,13 @@ mod tests {
                     server: "docs".into(),
                     uri: "file:///a.md".into(),
                     content: Some("line one\nline two".into()),
-                    self_authored: false,
+                    authored_sessions: Vec::new(),
                 },
                 McpNotice {
                     server: "docs".into(),
                     uri: "file:///b.md".into(),
                     content: None,
-                    self_authored: false,
+                    authored_sessions: Vec::new(),
                 },
             ],
             suppressed: 0,

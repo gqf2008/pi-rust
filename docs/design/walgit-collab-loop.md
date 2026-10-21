@@ -154,8 +154,9 @@ scripts/collab-entry-retry.sh --kind status --id <thread> --actor ki-agent \
 
 `self_session` 由 **服务端**（`walgit mcp`）填，它读自己的 `KI_AGENT_ID`；而 stdio MCP 子进程
 是 ki 用 `env_clear()` + 白名单拉起来的。少了这一条转发，`_meta.self_session` 永远缺失，
-`self_authored_from_meta` 恒为 false——抑制逻辑在两端都写好了，却一次都不会触发，
-表现就是“自己写一条、自己醒一次”。
+当时的客户端判定函数（`self_authored_from_meta`，现已改为读 `_meta.sessions` 的
+`authored_sessions_from_meta` + `McpNotice::is_own_echo`）恒为 false——抑制逻辑在两端都写好了，
+却一次都不会触发，表现就是“自己写一条、自己醒一次”。
 
 现在 `spawn_stdio_client` 显式转发 `AGENT_ID_ENV`（经 SDK 常量，不写死名字），顺序上排在
 白名单之后、server 自己的 `env` 之前（配置仍可覆盖）；provider key 与 `KI_SESSION_ID` 照旧
@@ -164,6 +165,28 @@ scripts/collab-entry-retry.sh --kind status --id <thread> --actor ki-agent \
 
 判据：把转发删掉 → 该 e2e 报 `left: "<unset>"`；把 `ANTHROPIC_API_KEY` 塞进白名单 →
 同一条报 `left: "sk-should-never-leak"`。
+
+### 比对发生在 ki 侧，且用“此刻”的 session
+
+转发只解决一半。`self_session` 是**服务端进程**的快照：子进程拿到的是 spawn 时的
+`KI_AGENT_ID`，而 ki 在 `/session` 切换或 fork 之后会 republish 自己的 id
+（`publish_session_identity`）。拿批次去比服务端快照，切换一次之后两边就永久不一致，
+抑制再次静默失效——症状与没转发一模一样（“自己写一条、自己醒一次”）。
+
+因此在客户端定夺：`_meta.sessions` 原样带到 `McpNotice.authored_sessions`，由
+`McpNotice::is_own_echo(ki 当前 session)` 在决策时比对（`SignalHost` 每次决策调
+`session::current_session_id()`）。三条不可回退的规则：
+
+- **没有来源就不算回声。** 空 `authored_sessions`（老服务端、或写入早于 session 记录）
+  → 唤醒，与旧行为一致。
+- **混合批次不算回声。** 同伴的条目是新闻；只有全部来自本 session 才跳过。
+- **`ephemeral` 不是身份。** `--no-session` 每次写同一个字面量，当成身份会让一个临时
+  session 吞掉另一个的更新；`session_id_from` 把它和空白值都归为“无 session”。
+
+判据：`suppression_follows_a_session_switch_not_the_servers_snapshot` 用两个不同 id
+证明“同一批次对新 session 是回声、对旧 session 是新闻”；
+`an_ephemeral_session_id_is_not_an_identity` 钉住 `ephemeral`/空白/真实 id 三种输入
+（纯函数，不写进程级环境变量——本仓库有过 env 测试互相竞争的实例）。
 
 ## 7. 门禁（= CI 跑的东西，一轮结束前必须全绿）
 
