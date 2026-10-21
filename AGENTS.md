@@ -104,6 +104,35 @@ sh scripts/check-install-version-hints.sh
 wasm guest 只对 `wasm32-wasip2` 链接，**guest crate 里不写单测**，
 行为一律由 `crates/kiqi-plugin-host/tests/e2e.rs` 从宿主侧验证。
 
+### 在 worktree 里跑门禁要先隔离 target
+
+**嵌套在本仓库内的 worktree 与主仓共用 `target/`。** 本机 `.cargo/config.toml`（git 忽略，
+不在仓库里）设了 `build.target-dir = "target"`，而 cargo 把该相对路径按**`.cargo` 目录的
+父目录**解析——所以 `.claude/worktrees/wt-<批名>` 里的构建全部写进主仓 `target/`，
+并不是各 worktree 一份：
+
+```bash
+$ cd .claude/worktrees/wt-<批名> && cargo metadata --no-deps --format-version 1 \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['target_directory'])"
+/Volumes/DataExt/GitHub/pi-rust/target      # 主仓的，不是该 worktree 的
+```
+
+两个方向都会给出错结论，且都不像环境问题：
+
+- **worktree 里**复用主仓的陈旧 rlib，报出源码里根本不存在的错误（实例：编出
+  “`McpNotice` has no field `authored_sessions`”，而 `grep` 该字段就在源码里）；
+- **主仓里**可能跑到分支树的测试二进制：同一命令先报 `699 passed`、再报 `702 passed`
+  （702 是分支的条数）。拿任一次当基线都会得出相反的判断。
+
+对策：**worktree 里一律显式给出 target**，主仓基线用独立目录复跑一次：
+
+```bash
+CARGO_TARGET_DIR=$PWD/target cargo test --workspace --locked
+CARGO_TARGET_DIR=/tmp/ki-base-target cargo test -p kiqi-cli --lib --locked   # 主仓基线
+```
+
+判据就看上面那条 `cargo metadata` 打印的路径是否落回主仓。
+
 ## 插件通道（改动前先分清）
 
 一方插件**只走 wasm**：`plugins/wasm/kiqi-*-guest`，组件模型 + `plugins/kiqi-plugin.wit`
