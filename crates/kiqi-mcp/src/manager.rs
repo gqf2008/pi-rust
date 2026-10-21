@@ -2306,16 +2306,25 @@ mod tests {
 /// `_meta: {"actors": [...], "self": "<principal>"}`; without that metadata the
 /// answer is false, so behavior is unchanged for older servers.
 fn self_authored_from_meta(meta: &rmcp::model::Meta) -> bool {
-    let Some(self_actor) = meta.0.get("self").and_then(serde_json::Value::as_str) else {
+    // Session-scoped attribution: one identity may own many sessions, so the
+    // principal (`self`) alone cannot tell a session's own echo from a peer's
+    // write. The entry bodies carry `session`; the server reports the changed
+    // sessions and this server's own session. Old entries/servers have neither,
+    // so the answer stays false and the wake behavior is unchanged.
+    let Some(self_session) = meta
+        .0
+        .get("self_session")
+        .and_then(serde_json::Value::as_str)
+    else {
         return false;
     };
-    let Some(actors) = meta.0.get("actors").and_then(serde_json::Value::as_array) else {
+    let Some(sessions) = meta.0.get("sessions").and_then(serde_json::Value::as_array) else {
         return false;
     };
-    !actors.is_empty()
-        && actors
+    !sessions.is_empty()
+        && sessions
             .iter()
-            .all(|actor| actor.as_str() == Some(self_actor))
+            .all(|session| session.as_str() == Some(self_session))
 }
 
 #[cfg(test)]
@@ -2327,18 +2336,24 @@ mod provenance_tests {
     }
 
     #[test]
-    fn only_our_own_actors_mark_a_notice_as_self_authored() {
+    fn only_our_own_sessions_mark_a_notice_as_self_authored() {
         assert!(self_authored_from_meta(&meta(serde_json::json!({
-            "actors": ["me"], "self": "me"
+            "sessions": ["s1"], "self_session": "s1"
         }))));
         assert!(!self_authored_from_meta(&meta(serde_json::json!({
-            "actors": ["me", "peer"], "self": "me"
+            "sessions": ["s1", "s2"], "self_session": "s1"
         }))));
         assert!(!self_authored_from_meta(&meta(serde_json::json!({
-            "actors": [], "self": "me"
+            "sessions": [], "self_session": "s1"
         }))));
+        assert!(
+            !self_authored_from_meta(&meta(serde_json::json!({
+                "actors": ["me"], "self": "me"
+            }))),
+            "actor-only metadata is not session-scoped"
+        );
         assert!(!self_authored_from_meta(&meta(serde_json::json!({
-            "actors": ["me"]
+            "sessions": ["s1"]
         }))));
     }
 }

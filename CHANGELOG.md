@@ -22,15 +22,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
-- **MCP notices can suppress a session's own collab echoes.** A
-  `resources/updated` notification may now carry `_meta: {"actors": [...],
-  "self": "<principal>"}`; when every changed entry was authored by this
-  session's own principal, the notice is recorded without spending a turn.
-  Without that metadata the flag stays false and behavior is unchanged, so
-  the walgit side can land separately. Suppression is opt-in via
-  `KI_SUPPRESS_SELF_NOTICES=1` and is only sound with one principal per agent
-  (see `scripts/setup-collab-agents.sh`); with a shared principal the default
-  stays off, because every peer would look self-authored.
+- **MCP notices can suppress a session's own collab echoes.** Collab entries
+  now carry the writing session (from `KI_AGENT_ID`); a
+  `resources/updated` notification reports `_meta.sessions` and
+  `self_session`. When every changed entry came from this session, the notice
+  is recorded without spending a turn. One identity can own many sessions, so
+  no per-session key or worktree is needed; entries written before sessions
+  existed, or servers that do not report them, keep the old behavior.
 - **Per-agent collaboration setup.** `scripts/setup-collab-agents.sh [n]`
   creates one worktree per agent and joins it as its own walgit principal
   (`ki-agent-1..n`), so entries are attributable and claim state is isolated;
