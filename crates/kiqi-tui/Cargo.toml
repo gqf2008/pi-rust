@@ -34,7 +34,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
-image-support = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
