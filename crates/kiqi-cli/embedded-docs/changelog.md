@@ -31,18 +31,23 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 ### Changed
 
 - **MCP notices can suppress a session's own collab echoes.** Collab entries
-  now carry the writing session (from `KI_AGENT_ID`); a
-  `resources/updated` notification reports `_meta.sessions` and
-  `self_session`. When every changed entry came from this session, the notice
-  is recorded without spending a turn. The client keeps the *raw* session list
-  from `_meta.sessions` and compares it at decision time against the session
-  `ki` is serving *then* — `self_session` is only the spawn-time snapshot a
-  server inherited, so comparing against it stops suppressing as soon as you
-  switch or fork (the live echo this fix targets). A
-  `--no-session` run publishes the literal `ephemeral`, which is not unique and
-  never counts as an identity. One identity can own many sessions, so no
-  per-session key or worktree is needed; entries written before sessions
+  now carry the writing session (from `KI_AGENT_ID`), and the client keeps the
+  *raw* session list a notification reports (`_meta.sessions`) to compare it at
+  decision time against the session `ki` is serving *then* — a server's
+  `self_session` is only the spawn-time snapshot it inherited, so comparing
+  against that stops suppressing as soon as you switch or fork. When every
+  changed entry came from this session, the notice is recorded without spending
+  a turn. A `--no-session` run publishes the literal `ephemeral`, which is not
+  unique and never counts as an identity; entries written before sessions
   existed, or servers that do not report them, keep the old behavior.
+
+  **Not yet effective end to end (verified 2026-10-21):** the write side works
+  (every entry carries `session`), but `walgit mcp` does not yet put
+  `sessions` in the `_meta` of the resources it reports — measured as
+  `_meta: {"version": "…"}` for both `refs/` and `collab/board/`, so the
+  suppression never fires and a session still wakes on its own writes. The
+  consumer side is complete and pinned; the remaining change belongs to the
+  `walgit` repository. Revisit this entry when that side ships the field.
 - **Per-agent collaboration setup.** `scripts/setup-collab-agents.sh [n]`
   creates one worktree per agent and joins it as its own walgit principal
   (`ki-agent-1..n`), so entries are attributable and claim state is isolated;

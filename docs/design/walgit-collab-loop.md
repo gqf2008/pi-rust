@@ -146,9 +146,13 @@ scripts/collab-entry-retry.sh --kind status --id <thread> --actor ki-agent \
 脚本幂等、只创建不删除；`--dry-run` 只打印命令。
 
 身份是持久的 principal，session 是运行上下文：一个身份可以有多个 session。协作键是
-`(identity, session)`——每条 entry 自动带 `KI_AGENT_ID` 写入的 `session`，通知里的
+`(identity, session)`——每条 entry 自动带 `KI_AGENT_ID` 写入的 `session`，**设计上**通知里的
 `_meta.sessions/self_session` 让“全是本 session 写的”批次只记录不唤醒，同伴 session 的
 更新照常唤醒。不需要 per-session key，也不需要 worktree。
+
+> 注意：写入侧（条目带 `session`）实测成立；读出侧（`_meta.sessions`）服务端尚未发送，
+> 因此抑制目前端到端**不生效**。实核数据与恢复条件见下文
+> “已知未闭环：服务端不发 `_meta.sessions`”。
 
 ### session id 必须真的到得了服务端
 
@@ -187,6 +191,37 @@ scripts/collab-entry-retry.sh --kind status --id <thread> --actor ki-agent \
 证明“同一批次对新 session 是回声、对旧 session 是新闻”；
 `an_ephemeral_session_id_is_not_an_identity` 钉住 `ephemeral`/空白/真实 id 三种输入
 （纯函数，不写进程级环境变量——本仓库有过 env 测试互相竞争的实例）。
+
+### 已知未闭环：服务端不发 `_meta.sessions`，抑制端到端不生效
+
+上面三条规则都只在**拿到 `_meta.sessions` 时**才起作用，而截至 2026-10-21 实测，
+`walgit mcp` 对两类被订阅资源返回的 `_meta` **只有 `version`**：
+
+```
+订阅 refs  → logs/ki.log: signal wake: servers=["walgit"] notices=1 suppressed=0 inbox=1
+             该次 resources/read: {"_meta":{"version":"d387af06…"},"data":{"refs":[…]}}
+订阅 board → logs/ki.log: signal wake: servers=["walgit"] notices=1 suppressed=0 inbox=1
+             该次 resources/read: {"_meta":{"version":"7c04f7f9…"},"data":{"board":…}}
+```
+
+即 `authored_sessions_from_meta` 拿到空列表，`is_own_echo` 恒为 false，**自己写一条就醒
+一次**。这不是本仓库的 bug：消费端早已按 `_meta.sessions` 写好，缺的是生产端——
+`walgit`（`~/.local/bin/walgit`，另一个仓库）的 `mcp` 子命令还没发这个字段。
+
+留档两条方法论，都是本轮实际踩到的：
+
+- **`-p` 不能用来验唤醒。** 它是单次 lane，跑完即退，永远到不了“空闲边界”这个判定点。
+  可用的做法：pty 上起交互式 `ki`（`KI_CODING_AGENT_DIR` 隔离 + 单个 subscribe），让它
+  用 `walgit__collab_entry` 写一条，然后读 `<agent_dir>/logs/ki.log` 里的
+  `signal wake` / `signal recorded without wake` 行。
+- **别把“没被唤醒”当默认证据。** 同一 lane 里继续敲命令时唤醒不会判定，会把“测量不到”
+  误读成“抑制生效”。必须有对照组。
+
+恢复端到端生效的条件只有一个：`walgit mcp` 开始按下列形状发字段（消费端已固定）：
+
+```json
+"_meta": {"version": "…", "sessions": ["<sid>", …], "self_session": "<sid>"}
+```
 
 ## 7. 门禁（= CI 跑的东西，一轮结束前必须全绿）
 
