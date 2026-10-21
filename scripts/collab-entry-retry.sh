@@ -21,7 +21,7 @@ trap 'rm -rf "$work"' EXIT
 
 transient() {
     printf '%s' "$1" | grep -Eqi \
-        'HTTP[ /]?5[0-9][0-9]|status[^0-9]*5[0-9][0-9]|502|503|504|connection (reset|refused)|timed out|timeout|temporarily unavailable|network|EOF|failed to push|could not resolve'
+        'HTTP[ /]?5[0-9][0-9]|status[^0-9]*5[0-9][0-9]|502|503|504|connection (reset|refused)|timed out|timeout|temporarily unavailable|network|EOF|failed to push|could not resolve|cannot be resolved to branch'
 }
 
 validation() {

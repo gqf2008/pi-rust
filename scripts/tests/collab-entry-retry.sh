@@ -18,6 +18,15 @@ case "${WALGIT_MODE:-transient}" in
         echo '{"ok":true}'
         exit 0
         ;;
+    branch)
+        # A stale local ref during a push: the next attempt resolves it.
+        if [ "$n" -lt 2 ]; then
+            echo 'fatal: refs/collab/inbox/x/y cannot be resolved to branch' >&2
+            exit 1
+        fi
+        echo '{"ok":true}'
+        exit 0
+        ;;
     validation)
         echo 'schema error: validation failed' >&2
         exit 1
@@ -42,6 +51,11 @@ printf '%s' "$out" | grep -q '"ok":true'
 [ "$(cat "$tmp/counter")" -eq 3 ] || { echo "transient attempts != 3" >&2; exit 1; }
 
 rm -f "$tmp/counter"
+out=$(run branch)
+printf '%s' "$out" | grep -q '"ok":true'
+[ "$(cat "$tmp/counter")" -eq 2 ] || { echo "branch-resolution retry attempts != 2" >&2; exit 1; }
+
+rm -f "$tmp/counter"
 if run validation >/dev/null 2>&1; then echo "validation error was retried" >&2; exit 1; fi
 [ "$(cat "$tmp/counter")" -eq 1 ] || { echo "validation attempted more than once" >&2; exit 1; }
 
@@ -49,4 +63,4 @@ rm -f "$tmp/counter"
 if run always >/dev/null 2>&1; then echo "always-failing push succeeded" >&2; exit 1; fi
 [ "$(cat "$tmp/counter")" -eq 3 ] || { echo "bounded retry count != 3" >&2; exit 1; }
 
-echo "collab-entry-retry: transient retried, validation not, cap honoured"
+echo "collab-entry-retry: transient and branch-resolution retried, validation not, cap honoured"
