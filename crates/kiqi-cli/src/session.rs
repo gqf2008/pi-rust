@@ -5029,6 +5029,12 @@ mod tests {
             std::env::var(kiqi_plugin_sdk::AGENT_ID_ENV).ok().as_deref(),
             Some("01a0f60b-second")
         );
+        assert_eq!(
+            std::env::var(kiqi_plugin_sdk::SESSION_ID_ENV)
+                .ok()
+                .as_deref(),
+            Some("01a0f60b-second")
+        );
         assert_eq!(context.session_id().as_deref(), Some("01a0f60b-second"));
     }
 

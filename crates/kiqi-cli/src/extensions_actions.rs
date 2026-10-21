@@ -683,12 +683,20 @@ mod tests {
     /// even when no plugin context is available.
     #[tokio::test]
     async fn switching_the_active_session_republishes_the_agent_identity() {
-        struct Restore(Option<std::ffi::OsString>);
+        struct Restore {
+            session: Option<std::ffi::OsString>,
+            agent: Option<std::ffi::OsString>,
+        }
         impl Drop for Restore {
             fn drop(&mut self) {
-                match &self.0 {
-                    Some(value) => std::env::set_var(kiqi_plugin_sdk::AGENT_ID_ENV, value),
-                    None => std::env::remove_var(kiqi_plugin_sdk::AGENT_ID_ENV),
+                for (name, saved) in [
+                    (kiqi_plugin_sdk::SESSION_ID_ENV, &self.session),
+                    (kiqi_plugin_sdk::AGENT_ID_ENV, &self.agent),
+                ] {
+                    match saved {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
                 }
             }
         }
@@ -696,7 +704,10 @@ mod tests {
         let _guard = crate::config::test_support::env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _restore = Restore(std::env::var_os(kiqi_plugin_sdk::AGENT_ID_ENV));
+        let _restore = Restore {
+            session: std::env::var_os(kiqi_plugin_sdk::SESSION_ID_ENV),
+            agent: std::env::var_os(kiqi_plugin_sdk::AGENT_ID_ENV),
+        };
 
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
