@@ -101,6 +101,25 @@ else
         echo "      were never published (that is the failure this check exists to catch)" >&2
     else
         echo "FAIL: could not read the release list from GitHub" >&2
+        # Say *why* when it can be determined. The message above is the same for
+        # an offline machine, a wrong repository and an exhausted API quota, and
+        # the quota case is by far the most common locally: an unauthenticated
+        # request is 60/hour per IP, so a few gate runs and a couple of parallel
+        # sessions use it up. Diagnosing that used to take a manual curl.
+        #
+        # A rate-limited response does not consume quota, so probing costs nothing.
+        probe=$(curl -sS --max-time 10 \
+            "https://api.github.com/repos/gqf2008/pi-rust/releases?per_page=100" \
+            2>/dev/null || true)
+        case "$probe" in
+            *"rate limit exceeded"*|*"API rate limit"*)
+                {
+                    echo "      cause: the GitHub API rate limit is exhausted (unauthenticated:"
+                    echo "             60 requests/hour per IP). Export GITHUB_TOKEN to raise it, or wait"
+                    echo "             for the hourly reset. This says nothing about the repository."
+                } >&2
+                ;;
+        esac
         echo "      set KI_CHECK_RELEASES_ALLOW_TAG_FALLBACK=1 to fall back to local tags (weaker)" >&2
         exit 1
     fi
