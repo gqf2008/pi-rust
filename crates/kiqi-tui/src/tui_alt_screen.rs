@@ -639,7 +639,7 @@ impl TuiAltScreen {
             .get_layout_root()
             .unwrap_or_else(|| Arc::new(self.container.clone()));
         let raw_lines = root.render(width);
-        let cursor = raw_lines.iter().enumerate().rev().find_map(|(row, line)| {
+        let mut cursor = raw_lines.iter().enumerate().rev().find_map(|(row, line)| {
             line.find(CURSOR_MARKER)
                 .map(|idx| (row, visible_width(&line[..idx])))
         });
@@ -647,6 +647,27 @@ impl TuiAltScreen {
             .into_iter()
             .map(|line| line.replace(CURSOR_MARKER, ""))
             .collect();
+        // Main-screen mode hands whole frames to the terminal without going
+        // through `ScrollView`, so it never had the "no row may exceed the
+        // viewport" guard. One row wider than the terminal auto-wraps, every
+        // row after it moves down one, and the incremental diff below then
+        // patches the wrong rows/columns for the rest of the session (the
+        // fragments-at-odd-columns failure). Wrap here, before any state is
+        // recorded, and carry the editor cursor across the re-wrap.
+        let mut fitted: Vec<String> = Vec::with_capacity(lines.len());
+        for (index, line) in lines.into_iter().enumerate() {
+            let first_chunk = fitted.len();
+            let chunks = crate::scroll_view::fit_line_to_width(&line, width);
+            fitted.extend(chunks.iter().cloned());
+            if let Some((row, col)) = cursor {
+                if row == index {
+                    let step = width.max(1);
+                    let chunk = (col / step).min(chunks.len().saturating_sub(1));
+                    cursor = Some((first_chunk + chunk, col - chunk * step));
+                }
+            }
+        }
+        let lines = fitted;
         let previous = self
             .previous_screen
             .lock()
@@ -665,12 +686,20 @@ impl TuiAltScreen {
         if (previous_width != 0 && previous_width != width)
             || (previous_height != 0 && previous_height != height)
         {
-            terminal.write("\x1b[2J\x1b[H\x1b[3J");
+            // Repaint the visible window only. The old path cleared the
+            // terminal's scrollback (CSI 3 J) and rewrote the whole document;
+            // for a long session that write is megabytes, and if it does not
+            // land the transcript is gone for good while later frames only
+            // patch the diff (a blank screen with nothing but the dock). The
+            // scrollback keeps the previous width until the user scrolls past
+            // this window, which is how native-scrollback TUIs behave.
+            terminal.write("\x1b[2J\x1b[H");
+            let window_top = lines.len().saturating_sub(height);
             terminal.write("\x1b[?2026h");
-            terminal.write(&lines.join("\r\n"));
+            terminal.write(&lines[window_top..].join("\r\n"));
             terminal.write("\x1b[?2026l");
             *self.main_hardware_row.lock().unwrap() = lines.len().saturating_sub(1);
-            *self.main_viewport_top.lock().unwrap() = lines.len().saturating_sub(height);
+            *self.main_viewport_top.lock().unwrap() = window_top;
         } else if previous.is_empty() {
             terminal.write("\x1b[?2026h");
             terminal.write(&lines.join("\r\n"));
@@ -678,127 +707,137 @@ impl TuiAltScreen {
             *self.main_hardware_row.lock().unwrap() = lines.len().saturating_sub(1);
             *self.main_viewport_top.lock().unwrap() = lines.len().saturating_sub(height);
         } else {
-            let mut first_changed = None;
-            let mut last_changed = None;
-            let max = previous.len().max(lines.len());
-            for index in 0..max {
-                if previous.get(index) != lines.get(index) {
-                    first_changed.get_or_insert(index);
-                    last_changed = Some(index);
-                }
-            }
-            if first_changed.is_none() && cursor == previous_cursor {
-                return;
-            }
-            if let (Some(first), Some(last)) = (first_changed, last_changed) {
-                let mut hardware_row = *self.main_hardware_row.lock().unwrap();
-                let mut viewport_top = *self.main_viewport_top.lock().unwrap();
-                let viewport_bottom = viewport_top + height.saturating_sub(1);
-                let deleted_tail_only = first >= lines.len();
-                let append_start = first == previous.len() && first > 0;
-                let move_target = if deleted_tail_only {
-                    lines.len().saturating_sub(1)
-                } else if append_start {
-                    first - 1
-                } else {
-                    first
-                };
-                let mut output = String::from("\x1b[?2026h");
-                let mut force_tail_repaint = false;
-                if move_target < viewport_top {
-                    // The changed range starts above the visible viewport (e.g.
-                    // a long streamed message re-wrapping above the visible
-                    // tail). Scroll the viewport up so the write lands on the
-                    // correct document rows; without this the cursor clamps to
-                    // the top row and the transcript is painted over the dock,
-                    // while `advanced` under-counts the real scroll and corrupts
-                    // `main_viewport_top`/`main_hardware_row` for later frames.
-                    //
-                    // SD leaves the rows below the rewritten range blank, so
-                    // when the rewrite does NOT reach the document tail (an
-                    // in-place edit above the viewport) those rows must still be
-                    // repainted — force the write range through the last line.
-                    force_tail_repaint = true;
-                    let scroll = viewport_top - move_target;
-                    output.push_str("\x1b[H");
-                    output.push_str(&format!("\x1b[{scroll}T"));
-                    viewport_top = move_target;
-                    hardware_row = move_target;
-                } else if move_target > viewport_bottom {
-                    let current_screen = hardware_row
-                        .saturating_sub(viewport_top)
-                        .min(height.saturating_sub(1));
-                    let down = height.saturating_sub(1).saturating_sub(current_screen);
-                    if down > 0 {
-                        output.push_str(&format!("\x1b[{down}B"));
+            // A document that shrank above the window (compaction, a deleted
+            // message) moves the tail out from under the viewport. Rebase on
+            // the new tail and repaint the window; the index-based diff below
+            // cannot express that safely.
+            let viewport_top_now = *self.main_viewport_top.lock().unwrap();
+            let max_window_top = lines.len().saturating_sub(height);
+            if viewport_top_now > max_window_top && previous.len() > lines.len() {
+                terminal.write("\x1b[2J\x1b[H\x1b[?2026h");
+                terminal.write(&lines[max_window_top..].join("\r\n"));
+                terminal.write("\x1b[?2026l");
+                *self.main_hardware_row.lock().unwrap() = lines.len().saturating_sub(1);
+                *self.main_viewport_top.lock().unwrap() = max_window_top;
+            } else {
+                let mut first_changed = None;
+                let mut last_changed = None;
+                let max = previous.len().max(lines.len());
+                for index in 0..max {
+                    if previous.get(index) != lines.get(index) {
+                        first_changed.get_or_insert(index);
+                        last_changed = Some(index);
                     }
-                    let scroll = move_target - viewport_bottom;
-                    output.push_str(&"\r\n".repeat(scroll));
-                    viewport_top += scroll;
-                    hardware_row = move_target;
                 }
-                let current_screen = hardware_row.saturating_sub(viewport_top);
-                let target_screen = move_target.saturating_sub(viewport_top);
-                if target_screen > current_screen {
-                    output.push_str(&format!("\x1b[{}B", target_screen - current_screen));
-                } else if current_screen > target_screen {
-                    output.push_str(&format!("\x1b[{}A", current_screen - target_screen));
+                if first_changed.is_none() && cursor == previous_cursor {
+                    return;
                 }
-                output.push_str(if append_start { "\r\n" } else { "\r" });
-                let mut render_end = last.min(lines.len().saturating_sub(1));
-                if force_tail_repaint {
-                    render_end = lines.len().saturating_sub(1);
-                }
-                if !deleted_tail_only {
-                    for index in first..=render_end {
-                        if index > first {
-                            output.push_str("\r\n");
+                if let (Some(first), Some(last)) = (first_changed, last_changed) {
+                    let mut hardware_row = *self.main_hardware_row.lock().unwrap();
+                    let mut viewport_top = *self.main_viewport_top.lock().unwrap();
+                    let viewport_bottom = viewport_top + height.saturating_sub(1);
+                    let deleted_tail_only = first >= lines.len();
+                    let append_start = first == previous.len() && first > 0;
+                    let mut move_target = if deleted_tail_only {
+                        lines.len().saturating_sub(1)
+                    } else if append_start {
+                        first - 1
+                    } else {
+                        first
+                    };
+                    let mut output = String::from("\x1b[?2026h");
+                    let mut force_tail_repaint = false;
+                    if move_target < viewport_top {
+                        // Rows above the visible window live in the terminal's
+                        // scrollback. The main screen cannot address them: this
+                        // path used to send a screen-relative `CSI T`, which
+                        // rearranges whatever the user is looking at (native
+                        // scrollback browsing) and lets the diff paint the tail
+                        // into rows showing older content — the fragments at odd
+                        // columns. Repaint from the top of the visible window
+                        // instead; rows above it were painted when they were
+                        // visible.
+                        move_target = viewport_top;
+                        force_tail_repaint = true;
+                    } else if move_target > viewport_bottom {
+                        let current_screen = hardware_row
+                            .saturating_sub(viewport_top)
+                            .min(height.saturating_sub(1));
+                        let down = height.saturating_sub(1).saturating_sub(current_screen);
+                        if down > 0 {
+                            output.push_str(&format!("\x1b[{down}B"));
                         }
-                        if let Some((column, text)) = previous
-                            .get(index)
-                            .and_then(|old| crate::line_diff::patch(old, &lines[index]))
-                        {
-                            if column > 0 {
-                                output.push_str(&format!("\x1b[{column}C"));
+                        let scroll = move_target - viewport_bottom;
+                        output.push_str(&"\r\n".repeat(scroll));
+                        viewport_top += scroll;
+                        hardware_row = move_target;
+                    }
+                    let current_screen = hardware_row.saturating_sub(viewport_top);
+                    let target_screen = move_target.saturating_sub(viewport_top);
+                    if target_screen > current_screen {
+                        output.push_str(&format!("\x1b[{}B", target_screen - current_screen));
+                    } else if current_screen > target_screen {
+                        output.push_str(&format!("\x1b[{}A", current_screen - target_screen));
+                    }
+                    output.push_str(if append_start { "\r\n" } else { "\r" });
+                    let mut render_end = last.min(lines.len().saturating_sub(1));
+                    if force_tail_repaint {
+                        render_end = lines.len().saturating_sub(1);
+                    }
+                    let write_start = first.max(viewport_top);
+                    if !deleted_tail_only {
+                        for index in write_start..=render_end {
+                            if index > write_start {
+                                output.push_str("\r\n");
                             }
-                            output.push_str(&text);
-                        } else {
-                            output.push_str(&lines[index]);
-                            if index < previous.len()
-                                && visible_width(&lines[index]) < visible_width(&previous[index])
+                            if let Some((column, text)) = previous
+                                .get(index)
+                                .and_then(|old| crate::line_diff::patch(old, &lines[index]))
                             {
-                                output.push_str("\x1b[K");
+                                if column > 0 {
+                                    output.push_str(&format!("\x1b[{column}C"));
+                                }
+                                output.push_str(&text);
+                            } else {
+                                output.push_str(&lines[index]);
+                                if index < previous.len()
+                                    && visible_width(&lines[index])
+                                        < visible_width(&previous[index])
+                                {
+                                    output.push_str("\x1b[K");
+                                }
                             }
                         }
                     }
-                }
-                let mut final_row = render_end;
-                if previous.len() > lines.len() {
-                    let extra_lines = previous.len() - lines.len();
-                    let clear_start_offset = usize::from(!lines.is_empty());
-                    if clear_start_offset > 0 {
-                        output.push_str("\x1b[1B");
-                    }
-                    for index in 0..extra_lines {
-                        output.push_str("\r\x1b[2K");
-                        if index + 1 < extra_lines {
+                    let mut final_row = render_end;
+                    if previous.len() > lines.len() {
+                        let extra_lines = previous.len() - lines.len();
+                        let clear_start_offset = usize::from(!lines.is_empty());
+                        if clear_start_offset > 0 {
                             output.push_str("\x1b[1B");
                         }
+                        for index in 0..extra_lines {
+                            output.push_str("\r\x1b[2K");
+                            if index + 1 < extra_lines {
+                                output.push_str("\x1b[1B");
+                            }
+                        }
+                        let move_back = extra_lines.saturating_sub(1) + clear_start_offset;
+                        if move_back > 0 {
+                            output.push_str(&format!("\x1b[{move_back}A"));
+                        }
+                        if extra_lines > 0 {
+                            final_row = lines.len().saturating_sub(1);
+                        }
                     }
-                    let move_back = extra_lines.saturating_sub(1) + clear_start_offset;
-                    if move_back > 0 {
-                        output.push_str(&format!("\x1b[{move_back}A"));
-                    }
-                    if extra_lines > 0 {
-                        final_row = lines.len().saturating_sub(1);
-                    }
+                    output.push_str("\x1b[?2026l");
+                    terminal.write(&output);
+                    let advanced =
+                        final_row.saturating_sub(viewport_top + height.saturating_sub(1));
+                    viewport_top += advanced;
+                    *self.main_hardware_row.lock().unwrap() = final_row;
+                    *self.main_viewport_top.lock().unwrap() = viewport_top;
                 }
-                output.push_str("\x1b[?2026l");
-                terminal.write(&output);
-                let advanced = final_row.saturating_sub(viewport_top + height.saturating_sub(1));
-                viewport_top += advanced;
-                *self.main_hardware_row.lock().unwrap() = final_row;
-                *self.main_viewport_top.lock().unwrap() = viewport_top;
             }
         }
 

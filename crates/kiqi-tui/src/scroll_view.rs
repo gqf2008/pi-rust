@@ -471,32 +471,39 @@ impl ScrollView {
 /// and every row after it — including the docked editor and footer — lands one
 /// line lower. Wrapping here, at the one place that hands lines to the screen,
 /// keeps the layout stable for every child component.
-fn fit_lines_to_width(lines: Vec<String>, width: usize) -> Vec<String> {
+pub(crate) fn fit_lines_to_width(lines: Vec<String>, width: usize) -> Vec<String> {
     if width == 0 {
         return lines;
     }
     let mut out = Vec::with_capacity(lines.len());
     for line in lines {
-        // Image protocols paint outside the cell grid; slicing them would
-        // corrupt the payload rather than wrap it.
-        if line.contains("\x1b_G") || line.contains("\x1b]1337;File=") {
-            out.push(line);
-            continue;
+        out.extend(fit_line_to_width(&line, width));
+    }
+    out
+}
+
+/// Wrap one rendered row to the viewport width. Exposes the same guard to the
+/// main-screen renderer, which hands whole frames to the terminal without
+/// going through a [`ScrollView`].
+pub(crate) fn fit_line_to_width(line: &str, width: usize) -> Vec<String> {
+    // Image protocols paint outside the cell grid; slicing them would corrupt
+    // the payload rather than wrap it.
+    if width == 0 || line.contains("\x1b_G") || line.contains("\x1b]1337;File=") {
+        return vec![line.to_string()];
+    }
+    let total = visible_width(line);
+    if total <= width {
+        return vec![line.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut col = 0;
+    while col < total {
+        let chunk = slice_by_column(line, col, width, true);
+        if chunk.is_empty() {
+            break;
         }
-        let total = visible_width(&line);
-        if total <= width {
-            out.push(line);
-            continue;
-        }
-        let mut col = 0;
-        while col < total {
-            let chunk = slice_by_column(&line, col, width, true);
-            if chunk.is_empty() {
-                break;
-            }
-            out.push(chunk);
-            col += width;
-        }
+        out.push(chunk);
+        col += width;
     }
     out
 }

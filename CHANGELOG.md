@@ -91,6 +91,24 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **The main-screen TUI no longer corrupts itself after a resize or while the
+  terminal's scrollback is being browsed.** Main-screen mode (the macOS
+  default) hands whole frames to the terminal, and its incremental diff used a
+  screen-relative scroll (`CSI T` after `CSI H`) to rewrite rows that had
+  already moved above the viewport. In a real terminal those rows live in the
+  scrollback and cannot be addressed: the scroll rearranges whatever the user
+  is looking at, so the patched tail landed in older rows at arbitrary columns
+  (the recurring fragments-at-odd-columns screen). A row wider than the
+  terminal — this path had no width guard — shifted every row below it and
+  desynchronised the diff for the rest of the session. A resize cleared the
+  scrollback (`CSI 3 J`) before rewriting the whole document, so a write that
+  did not land left a blank screen with nothing but the dock. The renderer now
+  wraps every row to the width before recording it, clamps in-place updates to
+  the visible window (scrollback is left alone; it was painted when it was
+  visible), and on resize repaints only the visible window without clearing
+  scrollback. Two regression tests pin the over-wide row and the
+  window-after-streamed-rewrite contract; verified in otty 1.6.2 at 145×50 and
+  57×50 with the window, dock and scrollback intact.
 - **The signal skip line now says whether the server attributed the change.**
   The self-echo decision compares a notice's `_meta.sessions` against the session
   `ki` is serving, and both ways it can decline to suppress ended at the same

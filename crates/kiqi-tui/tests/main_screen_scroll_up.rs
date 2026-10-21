@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use kiqi_tui::{Container, Focusable, Text, TuiAltScreen, TUI};
+use kiqi_tui::{Component, Container, Focusable, Text, TuiAltScreen, TUI};
 
 /// Shared virtual-terminal state so the test can keep a handle to the same
 /// screen the `TuiAltScreen` writes into.
@@ -78,6 +78,12 @@ impl VirtualTerminal {
             .get(index)
             .map(|row| row.iter().collect())
             .unwrap_or_default()
+    }
+
+    /// The whole document (scrollback), top to bottom.
+    fn document_rows(&self) -> Vec<String> {
+        let st = self.state.lock().unwrap();
+        st.document.iter().map(|row| row.iter().collect()).collect()
     }
 
     fn put_char(&self, ch: char) {
@@ -213,6 +219,21 @@ impl VirtualTerminal {
                                 }
                             }
                         }
+                        b']' => {
+                            // OSC (hyperlinks, titles): consume through BEL or ST.
+                            i += 1;
+                            while i < bytes.len() {
+                                if bytes[i] == 0x07 {
+                                    i += 1;
+                                    break;
+                                }
+                                if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\') {
+                                    i += 2;
+                                    break;
+                                }
+                                i += 1;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -340,11 +361,16 @@ fn long_transcript_stream_rewrite_keeps_dock_visible() {
         visible.iter().any(|row| row.contains('─')),
         "the editor border (input area) must remain visible after the rewrite: {visible:?}"
     );
+    // Rows above the visible window live in terminal scrollback. The main
+    // screen cannot address them (a screen-relative scroll rearranges what the
+    // user is looking at), so the renderer must leave them untouched and keep
+    // the window coherent instead.
     assert!(
-        term.document_row(50).contains("REWRAPPED"),
-        "the rewrite must land on document row 50, not be painted at the wrong row: {:?}",
+        term.document_row(50).contains("line 050") && !term.document_row(50).contains("REWRAPPED"),
+        "scrollback above the window must not be rewritten: {:?}",
         term.document_row(50)
     );
+    assert_window_matches_tail(&root, &term, 40);
 
     // A second streamed update must also keep the dock pinned; a corrupted
     // viewport bookkeeping drifts further on each frame and eventually hides it.
@@ -365,5 +391,69 @@ fn long_transcript_stream_rewrite_keeps_dock_visible() {
     assert!(
         visible.last().unwrap().contains("FOOTER-STATUS"),
         "the dock must remain pinned across repeated streamed rewrites: {visible:?}"
+    );
+    assert_window_matches_tail(&root, &term, 40);
+}
+
+/// The visible window must equal the document tail the renderer just built.
+/// A drifted cursor/viewport bookkeeping shows up as rows belonging to older
+/// content (the fragments-at-odd-columns failure).
+fn assert_window_matches_tail<C: Component + ?Sized>(
+    root: &Arc<C>,
+    term: &VirtualTerminal,
+    width: usize,
+) {
+    let rows = term.rows();
+    let doc: Vec<String> = root
+        .render(width)
+        .iter()
+        .map(|line| kiqi_tui::ansi::strip_ansi(line).trim_end().to_string())
+        .collect();
+    let tail: Vec<&String> = doc[doc.len().saturating_sub(rows)..].iter().collect();
+    let visible = term.visible();
+    for (index, row) in visible.iter().enumerate() {
+        assert_eq!(
+            row.trim_end(),
+            tail.get(index).map(|s| s.as_str()).unwrap_or(""),
+            "visible window row {index} drifted from the document tail: {visible:?}"
+        );
+    }
+}
+
+/// Even a component that ignores the width it is given must not be able to
+/// desynchronise the main-screen renderer by returning an over-wide row: a
+/// row wider than the terminal auto-wraps, shifting every row below it.
+#[test]
+fn an_over_wide_row_is_wrapped_before_it_reaches_the_terminal() {
+    struct OverWide;
+    impl Component for OverWide {
+        fn render(&self, _width: usize) -> Vec<String> {
+            vec!["x".repeat(100)]
+        }
+        fn invalidate(&self) {}
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    let term = VirtualTerminal::new(40, 8);
+    let tui = Arc::new(TuiAltScreen::new(Box::new(term.clone()), true, None));
+    tui.set_main_screen_mode(true);
+    let root = Arc::new(Container::new());
+    root.add_child(Arc::new(OverWide));
+    root.add_child(Arc::new(Text::new("FOOTER-STATUS", 0, 0)));
+    tui.set_layout_root(Some(root));
+    tui.start_readerless();
+
+    for row in term.document_rows() {
+        assert!(
+            kiqi_tui::ansi::visible_width(row.trim_end()) <= 40,
+            "row wider than the terminal would auto-wrap and shift the frame: {row:?}"
+        );
+    }
+    let visible = term.visible();
+    assert!(
+        visible.iter().any(|row| row.contains("FOOTER-STATUS")),
+        "the dock must stay visible after the over-wide row: {visible:?}"
     );
 }
