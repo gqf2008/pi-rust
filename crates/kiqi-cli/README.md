@@ -84,14 +84,18 @@ endpoint overrides also honour `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`.
 ## Plugins
 
 ```bash
-ki install kiqi-extension-example              # from crates.io
-ki install kiqi-extension-example --version 0.1.0
-ki install my-extension --path ../my-extension --force   # local
-ki dev                                        # build + watch a local extension
+ki insmod --build plugins/wasm/kiqi-todo-guest           # first-party: a wasm capability
+ki install my-extension --path ../my-extension --force   # local, for development
+ki dev                                                   # build + watch a local extension
 ```
 
-`ki install` builds the crate in release mode with Cargo and copies the
-resulting `.dll` / `.so` / `.dylib` into `~/.ki/agent/extensions`.
+No crate in this repository is published to crates.io, so `ki install <name>`
+without `--path` has nothing to resolve — install third-party extensions from
+their source path (see `docs/extensions/authoring.md`). `ki install` builds the
+crate in release mode with Cargo and copies the resulting `.dll` / `.so` /
+`.dylib` into `~/.ki/agent/extensions`. The capabilities that ship with this
+repository are wasm components instead: `ki insmod --build` compiles a guest for
+`wasm32-wasip2` and installs it.
 
 ## Remote mode
 

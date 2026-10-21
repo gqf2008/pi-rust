@@ -79,6 +79,35 @@ do
             status=1
         }
     fi
+
+    # `ki install <name>` resolves the crate through crates.io (install.rs's header
+    # describes the temporary workspace it builds), so without `--path` it can only
+    # work for a published crate. A first-party plugin name there is doubly wrong:
+    # those crates were never published and were deleted with the compile-time
+    # channel on 2026-10-21. The wasm guest is the supported spelling now.
+    if grep -n 'ki install kiqi-' "$doc" | grep -v -- '--path' >/dev/null; then
+        echo "FAIL: $rel tells users to 'ki install kiqi-<name>' from crates.io," >&2
+        echo "      which resolves nothing; first-party plugins are wasm (ki insmod --build)" >&2
+        grep -n 'ki install kiqi-' "$doc" | grep -v -- '--path' | head -5 | sed 's/^/      /' >&2
+        status=1
+    fi
+done
+
+# --- The plugin channel must be described as it exists -----------------------
+# First-party plugins are wasm components (plugins/wasm/kiqi-*-guest, contract in
+# plugins/kiqi-plugin.wit); the compile-time `plugins/kiqi-*` crates, their
+# `plugin-kiqi-*` features and their cdylib build were retired. The README kept the
+# old description anyway: its only install example was `ki install kiqi-todo`
+# (`build from crates.io`), a crate that was unpublished and then deleted, and the
+# word `insmod` did not appear anywhere in the file. Following it gives
+# "package not found" and leaves the reader unaware that anything runs at all.
+for doc in "$ROOT/README.md" "$ROOT/docs/kiqi-tool/README.md"; do
+    [ -f "$doc" ] || continue
+    rel=${doc#"$ROOT"/}
+    grep -q 'ki insmod --build plugins/wasm/kiqi-' "$doc" || {
+        echo "FAIL: $rel does not show the wasm install path ('ki insmod --build ...')" >&2
+        status=1
+    }
 done
 
 # --- User-facing docs must describe THIS repository --------------------------

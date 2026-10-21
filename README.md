@@ -274,20 +274,36 @@ throughput, long sessions, TUI frame cost) are in
 
 ## Plugins
 
-Plugins are Rust `cdylib` libraries behind a stable `#[repr(C)]` ABI. A plugin
-can register tools, providers, slash commands, event handlers, markdown
-renderers and discovered resources.
+Extensions arrive through two channels.
+
+**The capabilities that ship with this repository are wasm components.** Each is
+a WebAssembly component (`plugins/kiqi-plugin.wit` is the contract) running in a
+wasmtime sandbox, granted only the capabilities its install approves:
 
 ```bash
-ki install kiqi-todo                    # build from crates.io and install
+rustup target add wasm32-wasip2                   # once, to build guests
+ki insmod --build plugins/wasm/kiqi-todo-guest    # build that guest, then install it
+ki insmod path/to/component.wasm --yes            # install an already-built component
+```
+
+[`website/data/packages.json`](website/data/packages.json) lists which
+capabilities are available this way, with the exact command for each.
+
+**Third-party extensions are Rust `cdylib` libraries** behind a stable
+`#[repr(C)]` ABI. An extension can register tools, providers, slash commands,
+event handlers, markdown renderers and discovered resources.
+
+```bash
 ki install my-ext --path ../my-ext     # local, for development
 ki dev                                 # build + watch + live reload
 ```
 
-The host loads project `.ki/extensions`, then global
-`~/.ki/agent/extensions`, then any `--extensions-dir`.
+No crate in this repository is published to crates.io, so `ki install <name>`
+without `--path` has nothing to resolve — build from source. The host loads
+project `.ki/extensions`, then global `~/.ki/agent/extensions`, then any
+`--extensions-dir`.
 
-Ready-to-install extensions live in the companion
+Ready-to-install third-party extensions live in the companion
 [`pi-rust/rpi-package`](https://github.com/pi-rust/rpi-package) repository, with
 an [online catalog](https://ki.laofu.online/packages.html).
 

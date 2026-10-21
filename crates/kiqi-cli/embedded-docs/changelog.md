@@ -80,6 +80,19 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **The README described a plugin channel that no longer exists.** Its Plugins
+  section still read "Plugins are Rust `cdylib` libraries" and its only install
+  example was `ki install kiqi-todo  # build from crates.io and install` — a
+  crate that was never published and was deleted with the compile-time channel,
+  so the first command a reader copies fails before they learn that anything
+  runs. The section now leads with the wasm channel
+  (`ki insmod --build plugins/wasm/kiqi-<name>-guest`, pointing at
+  `website/data/packages.json` for what is available) and keeps the cdylib
+  channel for third-party extensions with a `--path` install; the same crates.io
+  example was dropped from the user guides and the crate README.
+  `scripts/tests/docs-install-path.sh` now rejects `ki install kiqi-<name>`
+  without `--path` in the install docs and requires the READMEs to show the
+  wasm install command.
 - **Runtime diagnostics no longer paint over the TUI.** MCP notifications
   arriving while a session was muted logged `[ki mcp] signal recorded without
   wake` with `eprintln!`; each raw stderr line landed at the renderer's cursor

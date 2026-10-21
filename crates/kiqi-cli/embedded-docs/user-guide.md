@@ -339,13 +339,7 @@ cargo build -p plugin-stub
 ki --extensions-dir target/debug -p 'echo "hi"'
 ```
 
-从 crates.io 安装：
-
-```bash
-ki install kiqi-extension-example
-ki install kiqi-extension-example --version 0.1.0
-ki install kiqi-extension-example --force
-```
+本仓库的 crate 全部 `publish = false`，crates.io 上没有可解析的同名包：`ki install <name>`（不带 `--path`）必然失败，第三方扩展要从源码路径安装。一方能力不走 cdylib 通道——它们是 wasm 组件，用 `ki insmod --build plugins/wasm/kiqi-<name>-guest` 安装，可用清单见 `website/data/packages.json`。
 
 本地开发：
 
