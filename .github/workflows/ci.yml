@@ -117,6 +117,9 @@ jobs:
       - name: Test the README's install instructions against the manifests
         run: sh scripts/tests/docs-install-path.sh
 
+      - name: Verify the per-agent collab setup script
+        run: sh scripts/tests/setup-collab-agents.sh
+
       - name: Run workspace tests
         run: cargo test --workspace --locked
 

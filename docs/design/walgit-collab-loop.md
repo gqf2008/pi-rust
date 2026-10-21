@@ -137,6 +137,14 @@ scripts/collab-entry-retry.sh --kind status --id <thread> --actor ki-agent \
 
 上限/超时/额度这类常量上调，**单独一个 commit** 并写明新旧值与理由（`RULE_阈值变更.md`）。
 
+## 6b. 一个 agent 一个 worktree/principal
+
+同一 checkout 里开多个 agent 会让所有条目共用 `ki-agent` 这个 principal：claim 的 session
+作用域能收敛，但 board 上的 owner/审计无法区分，通知里的 actor 也无法用于自回声抑制。
+`scripts/setup-collab-agents.sh [n]` 会为每个 agent 建一个 worktree 并执行
+`walgit collab join --principal ki-agent-<n> --push walgit`；各自 `cd` 进去启动 `ki -a`。
+脚本幂等、只创建不删除；`--dry-run` 只打印命令。
+
 ## 7. 门禁（= CI 跑的东西，一轮结束前必须全绿）
 
 ```bash

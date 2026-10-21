@@ -22,6 +22,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **Per-agent collaboration setup.** `scripts/setup-collab-agents.sh [n]`
+  creates one worktree per agent and joins it as its own walgit principal
+  (`ki-agent-1..n`), so entries are attributable and claim state is isolated;
+  `--dry-run` prints the plan. The one-worktree-per-agent layout is also the
+  prerequisite for suppressing a session's own notification echoes.
 - **Goals can be finished by a host-run command (`doneWhenCmd`), and headless
   modes can auto-continue them.** `doneWhenCmd` is evaluated at the AgentEnd
   boundary with a short timeout under the same shell sandbox as the bash tool;

@@ -75,6 +75,8 @@ sh scripts/tests/install-sh.sh
 sh scripts/tests/release-sh.sh
 # `walgit collab entry` 偶发网络/5xx 失败；包装器只重试瞬态，不重试 schema/验证
 sh scripts/tests/collab-entry-retry.sh
+# 协作身份：一个 agent 一个 worktree + 一个 walgit principal（dry-run 可测）
+sh scripts/tests/setup-collab-agents.sh
 # README 的安装指令必须与清单一致（全仓 crate 都是 publish = false）
 # 网站 Packages 目录（website/data/packages.json）同样算安装指令：未发布时
 # 不许出现 crates.io 链接、裸 `cargo install <crate>`／`cargo add`、非零下载量
