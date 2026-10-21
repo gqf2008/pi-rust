@@ -42,6 +42,10 @@ pub(crate) struct SignalWakeState {
     /// Session-level mute (`/signals off`). Unlike the interrupt mute, only an
     /// explicit unmute clears it; user input does not.
     session_muted: bool,
+    /// Opt-in self-echo suppression (`KI_SUPPRESS_SELF_NOTICES=1`). Sound only
+    /// when every agent has its own principal; with a shared principal all
+    /// peers look self-authored, so the default is off.
+    suppress_self_notices: bool,
     /// Consecutive host-started goal continuations for the current goal.
     /// Bounded only for an unbounded goal; a goal with its own turn/time budget
     /// is bounded by the plugin.
@@ -62,7 +66,10 @@ pub(crate) enum WakeDecision {
 
 impl SignalWakeState {
     pub(crate) fn new() -> Self {
-        Self::default()
+        let mut state = Self::default();
+        state.suppress_self_notices =
+            std::env::var("KI_SUPPRESS_SELF_NOTICES").ok().as_deref() == Some("1");
+        state
     }
 
     /// A real user prompt arrived: clear the interrupt mute and every chain
@@ -138,7 +145,10 @@ impl SignalWakeState {
         // caller persists the notice), but do not spend a turn re-reading it.
         // This is sound only with per-agent principals; without provenance the
         // flag is false and the decision is unchanged.
-        if !batch.notices.is_empty() && batch.notices.iter().all(|notice| notice.self_authored) {
+        if self.suppress_self_notices
+            && !batch.notices.is_empty()
+            && batch.notices.iter().all(|notice| notice.self_authored)
+        {
             return WakeDecision::Skip("the update was authored by this session");
         }
         let mut eligible = Vec::new();
@@ -282,7 +292,8 @@ mod tests {
     fn a_batch_of_our_own_writes_does_not_wake() {
         let mut b = batch(&[("docs", "file:///a.md")]);
         b.notices[0].self_authored = true;
-        let mut state = SignalWakeState::new();
+        let mut state = SignalWakeState::default();
+        state.suppress_self_notices = true;
         let cfg = || configs(&[("docs", policy(WakeMode::Auto))]);
         assert_eq!(
             state.decide(&b, Instant::now(), cfg()),
@@ -293,6 +304,21 @@ mod tests {
             state.decide(&b, Instant::now(), cfg()),
             WakeDecision::Wake(_)
         ));
+    }
+
+    #[test]
+    fn self_echo_suppression_is_opt_in() {
+        let mut b = batch(&[("docs", "file:///a.md")]);
+        b.notices[0].self_authored = true;
+        let mut state = SignalWakeState::default();
+        let cfg = || configs(&[("docs", policy(WakeMode::Auto))]);
+        assert!(
+            matches!(
+                state.decide(&b, Instant::now(), cfg()),
+                WakeDecision::Wake(_)
+            ),
+            "with a shared principal, suppression would hide peer updates"
+        );
     }
 
     #[test]

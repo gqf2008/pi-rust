@@ -145,6 +145,10 @@ scripts/collab-entry-retry.sh --kind status --id <thread> --actor ki-agent \
 `walgit collab join --principal ki-agent-<n> --push walgit`；各自 `cd` 进去启动 `ki -a`。
 脚本幂等、只创建不删除；`--dry-run` 只打印命令。
 
+有了独立 principal 后，用 `KI_SUPPRESS_SELF_NOTICES=1` 启动 `ki`，通知里的
+`_meta.actors/self` 才会让“全是自己写”的批次只记录不唤醒；不设这个变量时保持默认行为
+（共享 principal 下抑制会连同伴的更新一起吞掉）。
+
 ## 7. 门禁（= CI 跑的东西，一轮结束前必须全绿）
 
 ```bash

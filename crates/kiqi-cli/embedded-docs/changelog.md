@@ -27,8 +27,10 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   "self": "<principal>"}`; when every changed entry was authored by this
   session's own principal, the notice is recorded without spending a turn.
   Without that metadata the flag stays false and behavior is unchanged, so
-  the walgit side can land separately. The suppression is only sound with
-  one principal per agent (see `scripts/setup-collab-agents.sh`).
+  the walgit side can land separately. Suppression is opt-in via
+  `KI_SUPPRESS_SELF_NOTICES=1` and is only sound with one principal per agent
+  (see `scripts/setup-collab-agents.sh`); with a shared principal the default
+  stays off, because every peer would look self-authored.
 - **Per-agent collaboration setup.** `scripts/setup-collab-agents.sh [n]`
   creates one worktree per agent and joins it as its own walgit principal
   (`ki-agent-1..n`), so entries are attributable and claim state is isolated;
