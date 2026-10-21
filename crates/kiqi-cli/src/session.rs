@@ -480,6 +480,18 @@ pub async fn build_with_selection(
         &|name| tool_name_allowed(name, args),
     );
 
+    // ---- Session storage ----
+    // Built before MCP so the identity can be published before any MCP child is
+    // spawned: `walgit mcp` inherits KI_AGENT_ID and reports it as
+    // `self_session`, which the collab echo suppression compares against.
+    let session = build_session(&selection, &cwd_str).await?;
+    // Plugin tools now know which session they serve: `todo` and friends key
+    // their per-session state off it. A session without an id (ephemeral) leaves
+    // the field unset and a plugin is expected to fall back to project scope.
+    if let Ok(metadata) = session.get_metadata().await {
+        publish_session_identity(&tool_context, &metadata.id);
+    }
+
     // ---- MCP tools (host-level capability) ----
     // Injected LAST, so an MCP tool can never silently shadow a built-in,
     // extension or plugin tool: a name collision is skipped with a warning.
@@ -506,8 +518,6 @@ pub async fn build_with_selection(
 
     let active = filter_active_tool_names(active_tool_names(&tools, args), args);
 
-    // ---- Session storage ----
-    let session = build_session(&selection, &cwd_str).await?;
     // The signal tool and the TUI boundary share this host; the durable mute is
     // a session value, so restore it before the first run can decide.
     if let Err(error) = signal_host
@@ -515,12 +525,6 @@ pub async fn build_with_selection(
         .await
     {
         eprintln!("warning: mcp: could not restore the signal mute: {error}");
-    }
-    // Plugin tools now know which session they serve: `todo` and friends key
-    // their per-session state off it. A session without an id (ephemeral) leaves
-    // the field unset and a plugin is expected to fall back to project scope.
-    if let Ok(metadata) = session.get_metadata().await {
-        publish_session_identity(&tool_context, &metadata.id);
     }
     // `--name`/`-n` sets the session display name durably (a `name` fact in the
     // log). It applies to whichever session this launch works in — a fresh one
