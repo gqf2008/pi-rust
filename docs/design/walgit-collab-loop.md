@@ -35,6 +35,20 @@ walgit collab board              # 卡片投影：open / merged / closed / other
 walgit collab report --remote walgit   # 摘要 + `unpushed: N`（本地有、远端没有的 collab ref）
 ```
 
+> **数本地 collab ref 时不要写 `refs/collab/*`。** git 的 ref 模式匹配里
+> 单个 `*` **不跨 `/`**，所以
+>
+> ```bash
+> git for-each-ref 'refs/collab/*'    → 0 条
+> git for-each-ref 'refs/collab/'     → 425 条   ← 正确写法（也可用 `**`）
+> ```
+>
+> 空结果看起来就像“这个 checkout 没有任何协作记录”，于是容易得出“board 不读本地”
+> 这类相反结论。我实际就撞过：先用 `refs/collab/*` 量到 0，据此怀疑 board 走的是服务端，
+> 实际本 checkout 有 424 个 `refs/collab/inbox` 与 1 个 `refs/collab/meta`，board 确实是
+> 本地聚合。同理 `git fetch walgit 'refs/collab/*:refs/collab/*'` 什么都不会取。
+> 上面表格里那条 `git for-each-ref refs/collab/inbox/ki-agent` 不加通配符，是对的。
+
 > 远端一致性只认 `unpushed: 0`。`report --remote` 用 `git ls-remote` 比对，远端不可达是**报错**
 > 而不是静默的 0。读到非 0 说明有本 checkout 新写、没推到 `walgit` 的条目（多半是写条目时
 > 漏了 `--push`）：补齐推送后再谈闭环，别把「本机 board 好看」当成账实相符。
