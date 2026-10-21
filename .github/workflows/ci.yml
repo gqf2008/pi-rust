@@ -137,10 +137,18 @@ jobs:
       # kiqi-ai` alone compiles 49 tests instead of 208 (the whole anthropic provider
       # is `cfg(feature = "providers")`), so running only that package silently skips
       # the provider suite; the workspace run covers it by feature unification, but
-      # these two crates are where the gaps live.
+      # these crates are where the gaps live.
+      #
+      # `kiqi-plugin-sdk` belongs here for the same reason and was missing: its
+      # `process`/`stdio` features gate two tests (partial-UTF-8 line assembly and
+      # pipe poll reaching EOF without a reader thread) that the workspace run never
+      # compiles, because nothing enables those features by default. The
+      # `--all-features` step above only *checks* the workspace, so a feature-gated
+      # test that fails to compile or fails at runtime stays invisible.
       - name: Test the crates whose tests need non-default features
         run: >
-          cargo test -p kiqi-ai -p kiqi-tools --lib --locked --all-features
+          cargo test -p kiqi-ai -p kiqi-tools -p kiqi-plugin-sdk --lib --locked
+          --all-features
 
   # Compile the workspace on Windows. Nothing else did: the release matrix is
   # the only place that built for Windows, so a Windows-only compile error

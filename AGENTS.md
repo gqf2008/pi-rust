@@ -62,9 +62,12 @@ cargo check --workspace --all-targets --locked
 # 全部 feature 也要能编：否则一个坏掉的公开 feature 会一直无人发现
 # （实例：`kiqi-tools` 的 `webp` 调用了 image 0.25 没有的 API，`--features webp` 直接编译失败）
 cargo check --workspace --all-targets --all-features --locked
-# 测试被非默认 feature 挡住的 crate：`cargo test -p kiqi-ai` 只编译 49 条而不是 208 条
-# （整个 anthropic provider 在 `cfg(feature = "providers")` 下），单跑该包会静默跳过
-cargo test  -p kiqi-ai -p kiqi-tools --lib --locked --all-features
+# 测试被非默认 feature 挡住的 crate：`cargo test -p kiqi-ai` 只编译 47 条而不是 206 条
+# （整个 anthropic provider 在 `cfg(feature = "providers")` 下），单跑该包会静默跳过。
+# `kiqi-plugin-sdk` 同理：`process`/`stdio` 挡住 2 条（partial-UTF-8 行拼装、无 reader 线程
+# 的 pipe poll 到 EOF），32 → 34，而默认集从不启用这两个 feature；上面的
+# `--all-features` 那一步只 `check` 整仓，编译不过或跑挂的feature 门测试在那一步是隐形的。
+cargo test  -p kiqi-ai -p kiqi-tools -p kiqi-plugin-sdk --lib --locked --all-features
 cargo test  --workspace --locked
 # Cargo.lock 必须覆盖全部 feature 的依赖（离线可解析）；CI 在线跑，
 # 缺项的后果只会是「CI 卡下载 / 本地离线报错」，两边都不像根因
