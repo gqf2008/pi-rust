@@ -2210,6 +2210,7 @@ dependencies = [
  "http",
  "kiqi-agent",
  "kiqi-ai",
+ "kiqi-plugin-sdk",
  "nix 0.31.3",
  "process-wrap",
  "reqwest",

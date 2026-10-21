@@ -13,6 +13,14 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
+- **Spawned MCP servers are told the session id.** A stdio server used to be
+  started with a scrubbed environment, so it could never answer "whose write was
+  this?" — `walgit mcp` reads its own `KI_AGENT_ID` to publish
+  `_meta.self_session`, and without it every `resources/updated` notification
+  looked like a peer's. The id is now forwarded explicitly (through the SDK's
+  `AGENT_ID_ENV` constant, not the ambient allowlist); provider keys and
+  `KI_SESSION_ID` stay out. An HTTP MCP server has no environment, so it must
+  carry the id in its configured `headers`.
 - **`KI_AGENT_ID` is published to shell commands.** Commands run by the
   `bash`/`powershell` tool now see `KI_AGENT_ID`, the same value as
   `KI_SESSION_ID`, so they can name the session they belong to — e.g.

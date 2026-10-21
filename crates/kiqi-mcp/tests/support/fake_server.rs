@@ -29,6 +29,11 @@
 //!                       and every `resources/*` request to <path>
 //!   --notify-uri <uri>  emit notifications/resources/updated for <uri> from a
 //!                       background thread every 150ms (for update races)
+//!   --env-tool          add a `env` tool returning the child's own value for
+//!                       the variable named by its `name` argument (or
+//!                       `<unset>`). This is how the tests assert what the host
+//!                       forwards to a spawned server: `--env-tool` is opt-in so
+//!                       the baseline tool count stays six.
 
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
@@ -74,6 +79,7 @@ fn main() {
     let repeat_cursor = flag("--repeat-cursor");
     let record_path: Option<String> = opt("--record");
     let resources_mode = flag("--resources");
+    let env_tool = flag("--env-tool");
     let supports_subscribe = !flag("--no-resource-subscribe");
     let subscribe_notify = flag("--subscribe-notify");
     let reject_duplicate_subscribe = flag("--reject-duplicate-subscribe");
@@ -121,7 +127,13 @@ fn main() {
                     .map(str::to_string);
                 reply(
                     id,
-                    tools_list(pages, repeat_cursor, cursor.as_deref(), resources_mode),
+                    tools_list(
+                        pages,
+                        repeat_cursor,
+                        cursor.as_deref(),
+                        resources_mode,
+                        env_tool,
+                    ),
                 );
             }
             "tools/call" => {
@@ -262,7 +274,7 @@ fn initialize_result(resources_mode: bool, supports_subscribe: bool) -> Value {
     })
 }
 
-fn all_tools(resources_mode: bool) -> Vec<Value> {
+fn all_tools(resources_mode: bool, env_tool: bool) -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "echo",
@@ -314,6 +326,19 @@ fn all_tools(resources_mode: bool) -> Vec<Value> {
             }
         }));
     }
+    if env_tool {
+        // What the host forwarded into this process. Opt-in: it is a probe, not
+        // part of the baseline protocol surface the other tests count.
+        tools.push(json!({
+            "name": "env",
+            "description": "Return this process's value for the env var `name`",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"]
+            }
+        }));
+    }
     tools
 }
 
@@ -322,11 +347,12 @@ fn tools_list(
     repeat_cursor: bool,
     cursor: Option<&str>,
     resources_mode: bool,
+    env_tool: bool,
 ) -> Value {
     if repeat_cursor {
-        return json!({ "tools": [all_tools(resources_mode)[0].clone()], "nextCursor": "same" });
+        return json!({ "tools": [all_tools(resources_mode, env_tool)[0].clone()], "nextCursor": "same" });
     }
-    let tools = all_tools(resources_mode);
+    let tools = all_tools(resources_mode, env_tool);
     if pages <= 1 {
         return json!({ "tools": tools });
     }
@@ -410,6 +436,14 @@ fn call_tool(name: &str, arguments: &Value) -> Value {
             json!({ "content": [{ "type": "text", "text": text }] })
         }
         "poke" => json!({ "content": [{ "type": "text", "text": "poked" }] }),
+        "env" => {
+            let name = arguments
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("KI_AGENT_ID");
+            let value = std::env::var(name).unwrap_or_else(|_| "<unset>".to_string());
+            json!({ "content": [{ "type": "text", "text": value }] })
+        }
         "fail" => json!({
             "content": [{ "type": "text", "text": "tool exploded on purpose" }],
             "isError": true

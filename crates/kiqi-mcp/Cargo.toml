@@ -17,6 +17,10 @@ categories = ["api-bindings", "development-tools"]
 [dependencies]
 kiqi-ai = { workspace = true, features = ["providers"] }
 kiqi-agent = { workspace = true }
+# For `AGENT_ID_ENV` only (zero-dependency, std-only): the session id forwarded
+# to spawned servers. Named through the constant so a rename is a compile error
+# rather than a silently forwarded nothing.
+kiqi-plugin-sdk = { workspace = true }
 # Pinned to the rmcp 1.x line (same as ABB). `default-features = false` keeps the
 # server side, macros and every transport except the stdio child-process one out
 # of the build. Bumping the minor here is a deliberate act: rmcp's typed model

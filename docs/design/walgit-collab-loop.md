@@ -150,6 +150,21 @@ scripts/collab-entry-retry.sh --kind status --id <thread> --actor ki-agent \
 `_meta.sessions/self_session` 让“全是本 session 写的”批次只记录不唤醒，同伴 session 的
 更新照常唤醒。不需要 per-session key，也不需要 worktree。
 
+### session id 必须真的到得了服务端
+
+`self_session` 由 **服务端**（`walgit mcp`）填，它读自己的 `KI_AGENT_ID`；而 stdio MCP 子进程
+是 ki 用 `env_clear()` + 白名单拉起来的。少了这一条转发，`_meta.self_session` 永远缺失，
+`self_authored_from_meta` 恒为 false——抑制逻辑在两端都写好了，却一次都不会触发，
+表现就是“自己写一条、自己醒一次”。
+
+现在 `spawn_stdio_client` 显式转发 `AGENT_ID_ENV`（经 SDK 常量，不写死名字），顺序上排在
+白名单之后、server 自己的 `env` 之前（配置仍可覆盖）；provider key 与 `KI_SESSION_ID` 照旧
+不外泄，`crates/kiqi-mcp/tests/e2e.rs` 的那条断言同时钉住这两半。HTTP transport 没有环境变量
+这回事，HTTP 版协作服务端需要在自己配置的 `headers` 里带上 session。
+
+判据：把转发删掉 → 该 e2e 报 `left: "<unset>"`；把 `ANTHROPIC_API_KEY` 塞进白名单 →
+同一条报 `left: "sk-should-never-leak"`。
+
 ## 7. 门禁（= CI 跑的东西，一轮结束前必须全绿）
 
 ```bash

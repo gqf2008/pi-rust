@@ -125,12 +125,37 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// server never sees the provider API keys ki itself runs with. Values are
 /// re-read from ki's own environment; the server's configured `env` is applied
 /// afterwards and wins.
+///
+/// The session id is forwarded separately ([`session_env`]) rather than being
+/// added here: it is a deliberate grant, not ambient inheritance.
 const PASSTHROUGH_ENV: &[&str] = &[
     "PATH", "HOME", "TMPDIR", "TERM", "USER", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
 ];
 
 fn passthrough_env(key: &str) -> bool {
     PASSTHROUGH_ENV.contains(&key) || key.starts_with("LC_")
+}
+
+/// The extra variable every spawned server gets: this session's id.
+///
+/// A server that publishes resource updates needs to tell *this session's* own
+/// writes from a peer's, and it can only do that if it is told which session it
+/// is speaking to. `AGENT_ID_ENV` exists precisely so a child process can name
+/// its session (its doc says so, and it is also what a `bash` tool call sees),
+/// so forwarding it is the documented use — the value is a session uuid, not a
+/// secret. `SESSION_ID_ENV` is deliberately *not* forwarded: a nested `ki`
+/// adopts it and would report its ancestor's session forever.
+///
+/// Named through the SDK constant, never restated: a restated name is how the
+/// sibling `HOST_PRIVATE_ENV` channel silently re-leaked after a rename (see
+/// `kiqi_tools::os_env`).
+///
+/// Only stdio servers can be told this way — an HTTP server has no environment,
+/// so an HTTP collab server must carry the id in its configured `headers`
+/// (`HttpTransport::headers`) instead.
+fn session_env() -> Option<(&'static str, std::ffi::OsString)> {
+    std::env::var_os(kiqi_plugin_sdk::AGENT_ID_ENV)
+        .map(|value| (kiqi_plugin_sdk::AGENT_ID_ENV, value))
 }
 
 /// The native tool name separator. Part of the public surface (`{server}__{tool}`).
@@ -1683,6 +1708,13 @@ async fn spawn_stdio_client(
                 command.env(key, value);
             }
         }
+    }
+    // The session id, granted explicitly: a collab server cannot attribute an
+    // update to "mine" vs "a peer's" without it, so a scrubbed environment made
+    // every own write look like someone else's. Lowest priority — a configured
+    // `env` below still wins.
+    if let Some((key, value)) = session_env() {
+        command.env(key, value);
     }
     for (key, value) in &stdio.env {
         command.env(key, value);

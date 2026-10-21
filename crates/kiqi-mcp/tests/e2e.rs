@@ -210,6 +210,61 @@ async fn discovers_namespaced_tools_and_maps_results() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_spawned_server_is_told_the_session_but_no_secrets() {
+    // The server side of session-scoped self-echo suppression reads the session
+    // id from its own environment (`AGENT_ID_ENV`). ki spawns stdio servers with
+    // a scrubbed environment, so unless the id is forwarded the server can never
+    // say whose write an update was, and every session wakes on its own writes.
+    // The same scrub must keep the provider keys and the host-private session
+    // variable out — that is the half that must not regress while fixing this.
+    let tmp = tempfile::tempdir().unwrap();
+    let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+        ["KI_AGENT_ID", "KI_SESSION_ID", "ANTHROPIC_API_KEY"]
+            .into_iter()
+            .map(|name| (name, std::env::var_os(name)))
+            .collect();
+    // The child copies ki's environment at spawn time, which is what this test
+    // is about. Restored before the first assertion can fail noisily.
+    std::env::set_var("KI_AGENT_ID", "01a0f60b-test-session");
+    std::env::set_var("KI_SESSION_ID", "01a0f60b-test-session");
+    std::env::set_var("ANTHROPIC_API_KEY", "sk-should-never-leak");
+
+    let (manager, issues) = McpManager::start(
+        &[stdio_server("fake", vec!["--env-tool".into()], 10, true)],
+        tmp.path(),
+    )
+    .await;
+    for (name, value) in saved {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+
+    let adapters = manager.tool_adapters();
+    let env = find(&adapters, "fake__env");
+    let saw = |name: &'static str| {
+        let tool = Arc::clone(env);
+        async move {
+            let result = call(&tool, json!({ "name": name })).await.unwrap();
+            text_of(&result)
+        }
+    };
+
+    assert_eq!(
+        saw("KI_AGENT_ID").await,
+        "01a0f60b-test-session",
+        "a spawned server must learn this session's id, or it cannot attribute updates"
+    );
+    // The isolation this forwarding must not weaken.
+    assert_eq!(saw("ANTHROPIC_API_KEY").await, "<unset>");
+    assert_eq!(saw("KI_SESSION_ID").await, "<unset>");
+
+    manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn paginated_tool_listing_collects_every_page() {
     let tmp = tempfile::tempdir().unwrap();
     let (manager, issues) = McpManager::start(
