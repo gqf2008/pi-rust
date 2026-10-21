@@ -3108,29 +3108,22 @@ fn publish_session_identity(tool_context: &kiqi_extensions::ToolCallContext, id:
 ///
 /// Not unique across runs, so it never identifies a writer; `kiqi-plugin-sdk`'s
 /// `AGENT_ID_ENV` docs name the same literal as "no session". Declared here so
-/// the two places that care (the session itself and [`current_session_id`])
-/// cannot drift apart.
+/// the two places that care (the session itself and [`session_id_from`]) cannot
+/// drift apart.
 const EPHEMERAL_SESSION_ID: &str = "ephemeral";
 
-/// The session id this process is serving, for attribution that must follow a
-/// switch/fork rather than a spawn-time snapshot.
+/// The attribution to derive from a session id the host is serving.
 ///
-/// Reads [`kiqi_plugin_sdk::AGENT_ID_ENV`], which [`publish_session_identity`]
-/// rewrites on every activation — the same value the `bash` tool and any spawned
-/// MCP server are given, so the three agree by construction.
-pub(crate) fn current_session_id() -> Option<String> {
-    session_id_from(std::env::var(kiqi_plugin_sdk::AGENT_ID_ENV).ok().as_deref())
-}
-
-/// The attribution [`current_session_id`] derives from a published value.
-///
-/// `None` when nothing published an id, and for [`EPHEMERAL_SESSION_ID`]: every
-/// `--no-session` run writes that same value, so treating it as an identity
+/// `None` when there is no id at all, and for [`EPHEMERAL_SESSION_ID`]: every
+/// `--no-session` run carries that same value, so treating it as an identity
 /// would let one ephemeral session silently swallow another's update as "its
-/// own echo". Split from the environment read so this rule is testable without
-/// a process-global write (`KI_AGENT_ID` is read by the whole process, and env
-/// tests that race have bitten this repo before).
-fn session_id_from(published: Option<&str>) -> Option<String> {
+/// own echo".
+///
+/// Called with the id of the session the caller is *attached to* — not with
+/// [`kiqi_plugin_sdk::AGENT_ID_ENV`], which `publish_session_identity` rewrites
+/// on every activation and which is therefore a spawn-time value for any child
+/// process and a process-global cell in-process.
+pub(crate) fn session_id_from(published: Option<&str>) -> Option<String> {
     let id = published?.trim();
     if id.is_empty() || id == EPHEMERAL_SESSION_ID {
         return None;

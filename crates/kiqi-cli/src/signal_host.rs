@@ -148,6 +148,25 @@ impl SignalHost {
             .allow_goal_continuation(key, unbounded)
     }
 
+    /// The id of the session this host is attached to, when it identifies one.
+    ///
+    /// Taken from the attached [`Session`] rather than from
+    /// [`kiqi_plugin_sdk::AGENT_ID_ENV`]: that variable is a process-global cell
+    /// rewritten by whichever code path activates a session, so reading it here
+    /// would make a per-session decision depend on global mutation order (and
+    /// made the attribution tests race each other). `set_active_session`
+    /// re-attaches on every switch/fork, which is what keeps this current.
+    ///
+    /// Sync by construction — `Session::storage()` and
+    /// `SessionStorage::metadata()` are both sync — so [`Self::decide`] needs no
+    /// await. `None` before `attach_session` (tools are built before the
+    /// session exists) and for the shared `ephemeral` literal.
+    fn current_session_id(&self) -> Option<String> {
+        let session = self.session.lock().unwrap().clone()?;
+        let id = session.storage().metadata().id;
+        crate::session::session_id_from(Some(&id))
+    }
+
     pub(crate) fn decide<F>(
         &self,
         batch: &McpNoticeBatch,
@@ -157,11 +176,10 @@ impl SignalHost {
     where
         F: Fn(&str, &str) -> Option<SignalsConfig>,
     {
-        // Resolved here, per decision, so a session switch/fork is picked up: the
-        // MCP server can only report the id it was spawned with, while ki
-        // republishes its own on every activation. Held for the borrow of
-        // `decide` only.
-        let current = crate::session::current_session_id();
+        // Resolved per decision, from the session this host is serving now: the
+        // MCP server can only report the id it was spawned with, so comparing
+        // against that snapshot stops suppressing as soon as you switch or fork.
+        let current = self.current_session_id();
         self.wake
             .lock()
             .unwrap()
@@ -317,8 +335,12 @@ mod tests {
     use std::sync::Arc;
 
     fn session() -> Session {
+        session_with_id("s-signals")
+    }
+
+    fn session_with_id(id: &str) -> Session {
         let metadata = SessionMetadata {
-            id: "s-signals".to_string(),
+            id: id.to_string(),
             created_at: 0,
             parent_session_id: None,
         };
@@ -336,6 +358,12 @@ mod tests {
         host
     }
 
+    fn host_serving(id: &str) -> SignalHost {
+        let host = SignalHost::new();
+        host.attach_session(session_with_id(id));
+        host
+    }
+
     fn batch(notices: &[(&str, &str)]) -> McpNoticeBatch {
         McpNoticeBatch {
             notices: notices
@@ -349,6 +377,62 @@ mod tests {
                 .collect(),
             suppressed: 0,
         }
+    }
+
+    /// The host must resolve the session it is serving and hand it to the wake
+    /// policy — through the real channel, not a stub.
+    ///
+    /// `signal_wake`'s own tests pass `current_session` explicitly, so they all
+    /// stay green if this call site drops it. Verified: replacing
+    /// `current_session_id()` with `None` here left every `signal_wake` test
+    /// passing. The whole fix would then be dead — a server reports the sessions
+    /// that authored the entries, nothing compares them, and every own write wakes
+    /// the session again, which is the bug this branch exists to close. This test
+    /// is the only one that would notice.
+    ///
+    /// The id comes from the attached session, matching production: this is
+    /// deliberately *not* driven through `KI_AGENT_ID`, because that would make
+    /// the assertion depend on a process-global cell that unrelated tests also
+    /// write (one such sibling poisoned the env lock and took 92 tests with it).
+    #[tokio::test]
+    async fn decide_reads_the_session_this_process_is_serving() {
+        // `decide` wants the per-request config lookup, not a resolved value.
+        let cfg = |_server: &str, _uri: &str| {
+            Some(SignalsConfig {
+                wake: kiqi_mcp::WakeMode::Auto,
+                ..SignalsConfig::default()
+            })
+        };
+        let mut own = batch(&[("collab", "walgit://refs/o/r")]);
+        own.notices[0].authored_sessions = vec!["s-serving".to_string()];
+
+        // A fresh host per case: a wake spends the arousal budget, and a later
+        // `Skip("no auto server is within its budget")` would be indistinguishable
+        // from the echo skip this test is about.
+        assert_eq!(
+            host_serving("s-serving").decide(&own, std::time::Instant::now(), cfg),
+            WakeDecision::Skip("the update was authored by this session"),
+            "the host must compare against the session it is serving"
+        );
+
+        // A different attached session means a different author: news, not an echo.
+        assert!(matches!(
+            host_serving("s-other").decide(&own, std::time::Instant::now(), cfg),
+            WakeDecision::Wake(_)
+        ));
+
+        // `--no-session` carries the shared literal, which is not an identity.
+        assert!(matches!(
+            host_serving("ephemeral").decide(&own, std::time::Instant::now(), cfg),
+            WakeDecision::Wake(_)
+        ));
+
+        // Nothing attached yet (tools are built before the session): no id, and
+        // nothing may be suppressed in the meantime.
+        assert!(matches!(
+            SignalHost::new().decide(&own, std::time::Instant::now(), cfg),
+            WakeDecision::Wake(_)
+        ));
     }
 
     #[tokio::test]

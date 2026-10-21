@@ -34,10 +34,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   now carry the writing session (from `KI_AGENT_ID`); a
   `resources/updated` notification reports `_meta.sessions` and
   `self_session`. When every changed entry came from this session, the notice
-  is recorded without spending a turn. The comparison happens at decision time
-  against the session `ki` is serving *then*, not against the server's
-  spawn-time `self_session` — a server can only report the id it inherited, so a
-  snapshot comparison stops suppressing as soon as you switch or fork. A
+  is recorded without spending a turn. The client keeps the *raw* session list
+  from `_meta.sessions` and compares it at decision time against the session
+  `ki` is serving *then* — `self_session` is only the spawn-time snapshot a
+  server inherited, so comparing against it stops suppressing as soon as you
+  switch or fork (the live echo this fix targets). A
   `--no-session` run publishes the literal `ephemeral`, which is not unique and
   never counts as an identity. One identity can own many sessions, so no
   per-session key or worktree is needed; entries written before sessions
