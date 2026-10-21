@@ -186,14 +186,14 @@ fan-out 到所有已注册 handler，合并返回的 <code>{skillPaths, promptPa
 <code>Cargo.toml</code> 和 <code>Cargo.lock</code>。源文件变化后会自动编译并走现有 reload 流程；编译失败
 会保留当前已加载版本。</p>
 <p>多扩展 workspace 必须明确选择 package：</p>
-<pre><code class="language-bash">ki dev --package kiqi-todo
-ki dev -P kiqi-webfetch
+<pre><code class="language-bash">ki dev --package my-ext-a     # 占位名：换成你的 workspace 成员名
+ki dev -P my-ext-b            # `-P` 是 `--package` 的缩写
 </code></pre>
 <p>其他模式：</p>
 <pre><code class="language-bash">ki dev --release
 ki dev --no-watch
 ki dev-local
-ki dev --package kiqi-todo -- --model gateway/model
+ki dev --package my-ext-a -- --model gateway/model
 </code></pre>
 <p>调试单个扩展时使用 <code>ki dev-local</code>（等价于 <code>ki dev --local-only</code>）。它只加载当前
 编译的扩展、当前项目目录的 skill/prompt，以及该扩展发现的 skill/prompt；不会扫描

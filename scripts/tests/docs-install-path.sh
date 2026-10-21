@@ -244,6 +244,44 @@ if [ -f "$ROOT/website/packages.html" ]; then
     }
 fi
 
+# --- Only name packages that exist --------------------------------------------
+# `ki dev --package <name>` / `-P <name>` resolves the name through Cargo, so a
+# name that is not a workspace member fails with "package not found". The docs and
+# the website used `ki dev --package kiqi-todo`, `ki dev -P kiqi-webfetch` and
+# `ki dev --package kiqi-todo -- --model gateway/model` in eight files - all names
+# of compile-time plugin crates deleted with the retired channel (d7297b0), none of
+# them in `Cargo.toml`'s member list. The examples now use `my-ext-a`/`my-ext-b`
+# and say they are placeholders.
+#
+# The rule is blunt on purpose: no workspace member is a `kiqi-*` cdylib any more,
+# so any `ki dev --package kiqi-...` is stale by construction.
+cd "$ROOT" || exit 1
+for rel in $(git ls-files 'website/*.md' 'website/content/*.html' 'docs/*.md' \
+    'docs/*/*.md' 'crates/*/src/*.rs' 'crates/*/*.md' 2>/dev/null); do
+    is_exempt_file "$rel" && continue
+    [ -f "$rel" ] || continue
+    dead_dev='ki dev \(--package\|-P\) kiqi-'
+    grep -n "$dead_dev" "$rel" >/dev/null && {
+        echo "FAIL: $rel shows 'ki dev --package kiqi-<name>'; no such package exists" >&2
+        grep -n "$dead_dev" "$rel" | head -3 | sed 's/^/      /' >&2
+        status=1
+    }
+done
+
+# Source comments citing a deleted plugin file send the next reader to a path that
+# cannot be opened. `crates/kiqi-cli/src/plugins.rs` cited
+# `plugins/kiqi-goal/src/lib.rs:134-138` for the goal's `current_dir()` write.
+# `docs/design/*` keeps such paths as historical record (each file carries the
+# 2026-10-21 retirement note) and is exempt above.
+for rel in $(git ls-files 'crates/*/src/*.rs' 'crates/*/src/*/*.rs' 2>/dev/null); do
+    [ -f "$rel" ] || continue
+    grep -n 'plugins/kiqi-[a-z-]*/src' "$rel" >/dev/null && {
+        echo "FAIL: $rel cites a deleted plugin source path (plugins/kiqi-*/src)" >&2
+        grep -n 'plugins/kiqi-[a-z-]*/src' "$rel" | head -3 | sed 's/^/      /' >&2
+        status=1
+    }
+done
+
 if [ "$status" -eq 0 ]; then
     echo "docs: install instructions match the manifests ($unpublished crates, publish = false)"
 fi

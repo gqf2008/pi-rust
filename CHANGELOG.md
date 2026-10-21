@@ -80,6 +80,20 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **Documented examples named plugin crates that no longer exist.** Eight files
+  (the website, the user-facing authoring and debugging guides, and their
+  embedded copies) showed `ki dev --package kiqi-todo`, `ki dev -P kiqi-webfetch`
+  and `ki dev --package kiqi-todo -- --model gateway/model`; those crates were
+  deleted with the compile-time channel, so the command answers "package not
+  found". They now use `my-ext-a` / `my-ext-b` and say the names are
+  placeholders. `crates/kiqi-cli/src/plugins.rs` cited
+  `plugins/kiqi-goal/src/lib.rs:134-138` for the goal's `current_dir()` write and
+  now names the wasm guest that actually implements it;
+  `docs/design/plugin-abi-handover.md` still called the first-party channel
+  "compile-time" and claimed the retired crates, features and cdylib builds were
+  "all kept". `scripts/tests/docs-install-path.sh` now rejects a
+  `ki dev --package kiqi-<name>` example and any source comment citing
+  `plugins/kiqi-<name>/src` (design docs keep theirs as historical record).
 - **The Packages page recommended commands that cannot run.** Its hero showed
   `cargo add kiqi-tools` and `ki install kiqi-ask-user` — the first cannot
   resolve (`publish = false`), the second names a plugin crate that was deleted

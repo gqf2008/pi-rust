@@ -177,8 +177,8 @@ ki 会通过 Cargo metadata 识别当前 `cdylib`，首次编译后把版本化�
 多扩展 workspace 必须明确选择 package：
 
 ```bash
-ki dev --package kiqi-todo
-ki dev -P kiqi-webfetch
+ki dev --package my-ext-a     # 占位名：换成你的 workspace 成员名
+ki dev -P my-ext-b            # `-P` 是 `--package` 的缩写
 ```
 
 其他模式：
@@ -187,7 +187,7 @@ ki dev -P kiqi-webfetch
 ki dev --release
 ki dev --no-watch
 ki dev-local
-ki dev --package kiqi-todo -- --model gateway/model
+ki dev --package my-ext-a -- --model gateway/model
 ```
 
 调试单个扩展时使用 `ki dev-local`（等价于 `ki dev --local-only`）。它只加载当前

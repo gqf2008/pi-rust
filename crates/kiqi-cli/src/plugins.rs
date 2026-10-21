@@ -1995,12 +1995,19 @@ mod tests {
     /// InjectApi rather than only being loadable. The assertion is on the host
     /// side - what it was handed.
     ///
-    /// It also persists the goal through `current_dir()`
-    /// (`plugins/kiqi-goal/src/lib.rs:134-138`), and under `cargo test` the cwd is
-    /// `crates/kiqi-cli` - the source tree, whose `.ki/goals.json` used to be
-    /// tracked and got dirtied by this very test. So the goal path runs in a
-    /// child process pinned to a tempdir: the parent only spawns it, and the
-    /// child asserts both halves (state written to its cwd, source tree clean).
+    /// It also persists the goal through `current_dir()` (`.ki/goals.json`), and
+    /// under `cargo test` the cwd is `crates/kiqi-cli` - the source tree, whose
+    /// `.ki/goals.json` used to be tracked and got dirtied by this very test. So the
+    /// goal path runs in a child process pinned to a tempdir: the parent only
+    /// spawns it, and the child asserts both halves (state written to its cwd,
+    /// source tree clean).
+    ///
+    /// Historical note: this block is `#[cfg(feature = "plugin-kiqi-goal")]`, and
+    /// that feature no longer exists - the compiled-in channel was retired on
+    /// 2026-10-21. The block is kept as a record of what the compiled plugin
+    /// asserted; the live goal implementation is the wasm guest
+    /// `plugins/wasm/kiqi-goal-guest` (its `write_goals` writes the same
+    /// `.ki/goals.json`), and the isolation it guards is enforced there too.
     #[cfg(feature = "plugin-kiqi-goal")]
     #[test]
     fn goal_tool_writes_state_into_the_project_cwd() {

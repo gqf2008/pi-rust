@@ -121,8 +121,8 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 | Windows 不回收后台孙进程 | 用了 unix 进程组；Windows 需 job object，成本高，代码里已注明 |
 | `flags` 声明只有 `ki plugin show` 在读 | 取值路径是 `SessionRead::cli_flag`（通用 `--foo=bar`），声明本身是诊断用 |
 | `probe`/`shortcuts`/`before_agent_start` 无生产用户 | 会话已接线并有测试，但只有 conformance fixture 在用；移植 plan-mode/webfetch 也没用到它们 |
-| 第一方插件仍是编译期 | 设计；wasm 层面向第三方 |
-| **默认只编入无 wasm 版的插件** | 仅 `kiqi-permissions`（orchestrator 已随 §6.34 迁走，opt-in）；有 guest 的那些（todo/lens/webfetch/websearch/subagents/goal/plan-mode/ask-user/langfuse）改为 `--features plugin-kiqi-<name>` 或 `ki insmod --build`。crate/feature/cdylib 面/测试全保留，CI 跑 opt-in 配置防腐烂。注意耦合：orchestrator 的 goal 联动读 `.ki/goals.json`。**两种 goal 都会写**它——编译期 `kiqi-goal` 直接写文件，wasm guest 在 `fs` 授权 scope 为 project 时同样`fs::write(.ki/goals.json)`（`plugins/wasm/kiqi-goal-guest/src/lib.rs` 的 `write_goals`，模块文档明说这是为了让本 guest 启动的 goal 能打开编译期编排指引）。只有在 `fs` 仍是 data 监禁时 guest 才写不了；而 §6.35 之后默认就是 project。 |
+| ~~第一方插件仍是编译期~~ | ❌ 已不成立（2026-10-21 退役）：一方插件只走 wasm，见 `plugins/wasm/kiqi-*-guest`；`kiqi_plugin::Plugin` trait 与 `ki dev` 的 cdylib 热载仅服务第三方扩展。 |
+| ~~默认只编入无 wasm 版的插件~~ | ❌ 已不成立（2026-10-21 退役）：`plugins/kiqi-*` crate、`plugin-kiqi-*` feature、opt-in feature CI 与独立 cdylib 构建全部删除，编译期通道不再编入任何一方插件；一方插件一律 `ki insmod --build plugins/wasm/kiqi-<name>-guest`。权限策略归宿主 `crates/kiqi-cli/src/permissions.rs`。仍然成立的耦合：两种 goal 都写 `.ki/goals.json` —— wasm guest 在 `fs` 授权 scope 为 project 时直接 `fs::write`（`plugins/wasm/kiqi-goal-guest/src/lib.rs` 的 `write_goals`），§6.35 之后默认就是 project。 |
 | `wasmtime` 常驻 `ki` | 由 `plugin-wasm`（默认开）控制；要瘦身需单独门控 |
 | `.wasm` 无签名/摘要校验 | 见 `plugin-abi.md` §7 待定项 |
 | 装完需重启 | `compiled_plugin_hosts()` 是进程级 `OnceLock` |
