@@ -280,7 +280,8 @@ pub(super) async fn handle_signal_boundary(
                 // `off`, every notification would otherwise log, which is noise.
                 let servers: Vec<&str> = batch.notices.iter().map(|n| n.server.as_str()).collect();
                 super::diagnostic_log(&format!(
-                    "[ki mcp] signal recorded without wake: {reason} (servers={servers:?})"
+                    "[ki mcp] signal recorded without wake: {reason} (servers={servers:?} {})",
+                    provenance_summary(&batch)
                 ));
             }
             false
@@ -801,9 +802,61 @@ pub(super) fn tool_result_requests_markdown(details: Option<&serde_json::Value>)
         .unwrap_or(false)
 }
 
+/// What the server said about who wrote the changed entries, for the skip line.
+///
+/// The echo decision is `authored_sessions` vs the session ki serves, and the two
+/// ways it can decline to suppress look identical in a log that only prints the
+/// reason string: a server that reports no provenance at all (`_meta.sessions`
+/// absent) and a server whose reported sessions differ from ours both end at
+/// "recorded without wake". Distinguishing them took an external probe the first
+/// time it mattered, so the batch now records which it was.
+///
+/// Counts and a boolean, not the ids: the ids of a peer's sessions are not this
+/// session's business, and a long batch would bloat the log.
+fn provenance_summary(batch: &kiqi_mcp::McpNoticeBatch) -> String {
+    let attributed = batch
+        .notices
+        .iter()
+        .filter(|notice| !notice.authored_sessions.is_empty())
+        .count();
+    format!("attributed={attributed}/{}", batch.notices.len())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::done_when_cmd_satisfied;
+    use super::{done_when_cmd_satisfied, provenance_summary};
+
+    /// The summary must tell "the server sent no `_meta.sessions`" apart from
+    /// "it sent sessions that are not ours" — both skip with the same reason.
+    #[test]
+    fn the_skip_line_records_whether_the_server_attributed_anything() {
+        let notice = |authored: Vec<&str>| kiqi_mcp::McpNotice {
+            server: "walgit".into(),
+            uri: "walgit://refs/o/r".into(),
+            content: None,
+            authored_sessions: authored.into_iter().map(str::to_string).collect(),
+        };
+        let batch = |notices: Vec<kiqi_mcp::McpNotice>| kiqi_mcp::McpNoticeBatch {
+            notices,
+            suppressed: 0,
+        };
+
+        // The state a server without `_meta.sessions` produces.
+        assert_eq!(
+            provenance_summary(&batch(vec![notice(Vec::new())])),
+            "attributed=0/1"
+        );
+        // Attributed, so the comparison (not the absence) decided.
+        assert_eq!(
+            provenance_summary(&batch(vec![notice(vec!["peer"])])),
+            "attributed=1/1"
+        );
+        // A mixed batch reports the fraction, not a single verdict.
+        assert_eq!(
+            provenance_summary(&batch(vec![notice(vec!["peer"]), notice(Vec::new())])),
+            "attributed=1/2"
+        );
+    }
 
     #[tokio::test]
     async fn a_zero_exit_done_command_is_done_a_nonzero_exit_is_not() {

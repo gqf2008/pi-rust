@@ -91,6 +91,15 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **The signal skip line now says whether the server attributed the change.**
+  The self-echo decision compares a notice's `_meta.sessions` against the session
+  `ki` is serving, and both ways it can decline to suppress ended at the same
+  text (`signal recorded without wake: …`): a server that reports no provenance
+  at all, and one whose reported sessions are a peer's. Telling those apart took
+  an external MCP probe the first time it mattered, because from inside the log
+  the two are identical. The line now carries `attributed=<n>/<total>`, and a
+  test pins the three cases (none, all, mixed) so it cannot silently become a
+  constant.
 - **Tests that read a `KI_*` variable no longer race the code that writes it.**
   The crate-wide env lock was test-only: 33 test sites took
   `config::test_support::env_lock` while `set_active_session` and
