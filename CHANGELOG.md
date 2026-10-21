@@ -80,6 +80,21 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **The Packages page recommended commands that cannot run.** Its hero showed
+  `cargo add kiqi-tools` and `ki install kiqi-ask-user` — the first cannot
+  resolve (`publish = false`), the second names a plugin crate that was deleted
+  with the compile-time channel — next to the claim that everything is
+  published on crates.io and a count of "9 core crates and 20 installable
+  extensions" for a 28-entry catalog. `website/user-guide.md`,
+  `website/content/user-guide.html` and the authoring guide carried the same
+  `ki install kiqi-extension-example` example. The hero now shows
+  `cargo install --path crates/kiqi-cli` and
+  `ki insmod --build plugins/wasm/kiqi-ask-user-guest`, the counts are gone
+  (the card list already computes them), and every page says plainly that
+  nothing is published. `scripts/tests/docs-install-path.sh` now covers
+  `website/packages.html`, `website/data/locales.json` and the two user-guide
+  copies in addition to `packages.json`, and requires the Packages page to show
+  at least one command that runs.
 - **The README described a plugin channel that no longer exists.** Its Plugins
   section still read "Plugins are Rust `cdylib` libraries" and its only install
   example was `ki install kiqi-todo  # build from crates.io and install` — a

@@ -9,7 +9,7 @@
 
 | 项目 | Rust 原生扩展 |
 | --- | --- |
-| 安装 | `ki install crate-name`（crates.io 或 `--path`） |
+| 安装 | `ki install crate-name --path ../crate-name`（本仓库未发布，crates.io 上没有可解析的包） |
 | 入口 | `kiqi_plugin_register` C ABI 符号 |
 | 开发反馈 | `ki dev` watch + 热重载；`ki dev-local` 隔离调试 |
 | 静态资源 | `resources_discover` 或随项目放入 `.ki` |

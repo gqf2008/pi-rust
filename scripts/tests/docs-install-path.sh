@@ -202,6 +202,48 @@ if [ -f "$catalog" ]; then
     fi
 fi
 
+# --- The site's own copy-paste surfaces ---------------------------------------
+# `packages.json` was guarded but the page that displays it was not, so the
+# Packages hero kept showing `cargo add kiqi-tools` and `ki install
+# kiqi-ask-user` — neither can run (publish = false, and the plugin crate was
+# deleted) — while claiming "every package in this catalog is published on
+# crates.io" and, in the same breath, "9 core crates and 20 installable
+# extensions" against a 28-entry catalog. A copy button makes these worse than
+# prose: one click puts the dead command on the clipboard.
+#
+# Only executable claims are guarded here. Prose that says *nothing* is published
+# necessarily contains the words "published on crates.io"; grep cannot tell it
+# from the claim, so the commands and links — what a reader actually runs or
+# follows — are the checkable part.
+for rel in website/packages.html website/data/locales.json website/user-guide.md \
+    website/content/user-guide.html; do
+    [ -f "$ROOT/$rel" ] || continue
+    if [ "$published" -eq 0 ]; then
+        grep -nE 'cargo add kiqi-|crates\.io/crates/kiqi-' "$ROOT/$rel" >/dev/null && {
+            echo "FAIL: $rel tells users to add or open a crate that is not published" >&2
+            grep -nE 'cargo add kiqi-|crates\.io/crates/kiqi-' "$ROOT/$rel" | head -5 | sed 's/^/      /' >&2
+            status=1
+        }
+    fi
+    if grep -n 'ki install kiqi-' "$ROOT/$rel" | grep -v -- '--path' >/dev/null; then
+        echo "FAIL: $rel tells users to 'ki install kiqi-<name>' from crates.io" >&2
+        grep -n 'ki install kiqi-' "$ROOT/$rel" | grep -v -- '--path' | head -5 | sed 's/^/      /' >&2
+        status=1
+    fi
+done
+
+# The Packages page must offer at least one command that resolves today: from a
+# checkout (`cargo install --path`) or by building a guest (`ki insmod --build`).
+# A page whose install block is entirely unexecutable is the failure being
+# guarded, so absence of both is a failure too.
+if [ -f "$ROOT/website/packages.html" ]; then
+    grep -qE 'cargo install --path crates/kiqi-cli|ki insmod --build plugins/wasm/kiqi-' \
+        "$ROOT/website/packages.html" || {
+        echo "FAIL: website/packages.html shows no install command that can run" >&2
+        status=1
+    }
+fi
+
 if [ "$status" -eq 0 ]; then
     echo "docs: install instructions match the manifests ($unpublished crates, publish = false)"
 fi
