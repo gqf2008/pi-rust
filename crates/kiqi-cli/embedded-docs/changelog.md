@@ -11,6 +11,15 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Added
+
+- **`KI_AGENT_ID` is published to shell commands.** Commands run by the
+  `bash`/`powershell` tool now see `KI_AGENT_ID`, the same value as
+  `KI_SESSION_ID`, so they can name the session they belong to — e.g.
+  `walgit collab claim --session "$KI_AGENT_ID"`. `KI_SESSION_ID` itself remains
+  host-private and is still stripped from spawned shells (a nested `ki` would
+  otherwise adopt an ancestor's session).
+
 ### Changed
 
 - **The compiled-in plugin channel is retired (2026-10-21).** The 12

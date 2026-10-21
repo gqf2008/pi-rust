@@ -638,6 +638,24 @@ pub const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `std::env::set_var` sound.
 pub const SESSION_ID_ENV: &str = "KI_SESSION_ID";
 
+/// Environment variable carrying the same session id to **commands a shell runs**.
+///
+/// Same value as [`SESSION_ID_ENV`], rewritten at the same moments (startup and
+/// every in-process swap), but a separate name addressed to a different
+/// audience: a command under `bash`/`powershell` can name its session, e.g.
+/// `walgit collab claim --id <card> --session "$KI_AGENT_ID"`. [`SESSION_ID_ENV`]
+/// must *not* reach a spawned shell (a nested `ki` would adopt it), while this
+/// one exists precisely so a child command can say which session it belongs to.
+///
+/// The host only ever writes it and nothing in `ki` reads it, so a pre-set value
+/// is harmless — the next activation overwrites it. It must **not** be added to
+/// `kiqi_tools::HOST_PRIVATE_ENV`: that list is stripped from spawned shells and
+/// would silently defeat the variable (a test pins this).
+///
+/// Under `--no-session` the value is the literal `ephemeral`, which is not
+/// unique across runs; treat it as "no session" when passing it to a claim.
+pub const AGENT_ID_ENV: &str = "KI_AGENT_ID";
+
 /// Environment variable a tracing extension publishes to name the trace a
 /// *nested* `ki` should attach to, and reads back to decide it is a subagent.
 ///

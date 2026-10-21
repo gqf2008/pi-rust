@@ -725,6 +725,7 @@ pub fn print_help() {
   KI_OFFLINE                     Disable startup network operations when set to 1/true/yes
   KI_CODING_AGENT_DIR           Override the ~/.ki config directory (auth.json + models.json)
   KI_SESSION_ID                 Session id served by a plugin (set by the host; also honored as an override)
+  KI_AGENT_ID                   Session id handed to commands run by the bash tool (set by the host)
   KI_NO_EMOJI                   Render the brand lockup without the crab (1/true/yes)
 
 {u}Notes:{r}

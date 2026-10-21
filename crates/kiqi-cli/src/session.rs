@@ -3068,13 +3068,18 @@ async fn open_session_by_id_in_dir(id: &str, cwd: &str, dir: &Path) -> Result<Se
 /// Called on **every** activation of a session — the startup build AND every
 /// in-process swap (`switch_to_session`, `fork_session`, and the plugin
 /// `NewSession`/`Fork`/`SwitchSession` runtime actions all route through
-/// [`set_active_session`]). Two things must stay in step:
+/// [`set_active_session`]). Three things must stay in step:
 ///
 /// - `ToolCallContext` — read per plugin **tool** call, which is why a stale
 ///   value there made a plugin's `todo`-style state follow the wrong session.
 /// - `KI_SESSION_ID` — read per **turn** by the provider hooks, which is the
 ///   only channel an observer gets for a pure-chat run. Process-global, which is
 ///   exactly the scope of "the session this process is serving".
+/// - `KI_AGENT_ID` — the same id, addressed to commands a spawned shell runs
+///   (`walgit collab claim --session "$KI_AGENT_ID"`). Deliberately NOT
+///   host-private: it is the one channel that must reach a shell. The
+///   unconditional overwrite below is what keeps a nested `ki` from reporting
+///   an ancestor's id on that channel too.
 ///
 /// The write overwrites unconditionally, deliberately. An inherited value is not
 /// an override: `ki` spawning `ki` would otherwise hand the child the parent's
@@ -3089,6 +3094,9 @@ async fn open_session_by_id_in_dir(id: &str, cwd: &str, dir: &Path) -> Result<Se
 /// never what the caller wants.
 fn publish_session_identity(tool_context: &kiqi_extensions::ToolCallContext, id: &str) {
     std::env::set_var(kiqi_plugin_sdk::SESSION_ID_ENV, id);
+    // Two audiences, two names: plugins read `KI_SESSION_ID`, while the shell a
+    // `bash`/`powershell` tool spawns can name the session through `KI_AGENT_ID`.
+    std::env::set_var(kiqi_plugin_sdk::AGENT_ID_ENV, id);
     tool_context.set_session_id(id);
 }
 
@@ -3113,6 +3121,7 @@ pub(crate) async fn set_active_session(
 ) -> Result<(), String> {
     if let Ok(metadata) = session.get_metadata().await {
         std::env::set_var(kiqi_plugin_sdk::SESSION_ID_ENV, &metadata.id);
+        std::env::set_var(kiqi_plugin_sdk::AGENT_ID_ENV, &metadata.id);
         if let Some(context) = tool_context {
             context.set_session_id(metadata.id);
         }
@@ -4929,6 +4938,7 @@ mod tests {
     fn host_private_env_matches_the_declared_contract() {
         // 1. The wire values. Pinned literally on purpose: see the doc comment.
         assert_eq!(kiqi_plugin_sdk::SESSION_ID_ENV, "KI_SESSION_ID");
+        assert_eq!(kiqi_plugin_sdk::AGENT_ID_ENV, "KI_AGENT_ID");
         assert_eq!(
             kiqi_plugin_sdk::SUBAGENT_PARENT_ENV,
             [
@@ -4959,6 +4969,7 @@ mod tests {
         for visible in [
             crate::args::KI_OFFLINE_ENV,
             crate::config::CONFIG_DIR_ENV,
+            kiqi_plugin_sdk::AGENT_ID_ENV,
             "PATH",
         ] {
             assert!(
@@ -4967,6 +4978,60 @@ mod tests {
             );
         }
     }
+    /// `KI_AGENT_ID` is the shell-facing twin of `KI_SESSION_ID`: same value,
+    /// written at the same moments and overwritten on every activation — never
+    /// "set once", or a child command would name a session that is gone.
+    #[test]
+    fn publishing_session_identity_writes_the_agent_channel_too() {
+        struct Restore {
+            session: Option<std::ffi::OsString>,
+            agent: Option<std::ffi::OsString>,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (name, saved) in [
+                    (kiqi_plugin_sdk::SESSION_ID_ENV, &self.session),
+                    (kiqi_plugin_sdk::AGENT_ID_ENV, &self.agent),
+                ] {
+                    match saved {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+
+        let _guard = crate::config::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _restore = Restore {
+            session: std::env::var_os(kiqi_plugin_sdk::SESSION_ID_ENV),
+            agent: std::env::var_os(kiqi_plugin_sdk::AGENT_ID_ENV),
+        };
+
+        let context = kiqi_extensions::ToolCallContext::new("/tmp");
+        publish_session_identity(&context, "01a0f60b-first");
+        assert_eq!(
+            std::env::var(kiqi_plugin_sdk::SESSION_ID_ENV)
+                .ok()
+                .as_deref(),
+            Some("01a0f60b-first")
+        );
+        assert_eq!(
+            std::env::var(kiqi_plugin_sdk::AGENT_ID_ENV).ok().as_deref(),
+            Some("01a0f60b-first")
+        );
+        assert_eq!(context.session_id().as_deref(), Some("01a0f60b-first"));
+
+        // A second activation must overwrite, not keep the first value.
+        publish_session_identity(&context, "01a0f60b-second");
+        assert_eq!(
+            std::env::var(kiqi_plugin_sdk::AGENT_ID_ENV).ok().as_deref(),
+            Some("01a0f60b-second")
+        );
+        assert_eq!(context.session_id().as_deref(), Some("01a0f60b-second"));
+    }
+
     #[tokio::test]
     async fn reload_shutdown_joins_all_handlers_even_after_veto() {
         use kiqi_plugin_sdk::{EventTag, StablePluginEvent};

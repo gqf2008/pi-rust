@@ -673,4 +673,60 @@ mod tests {
             "the fork's mute must be written into the fork's file"
         );
     }
+
+    /// Every in-process swap funnels through `set_active_session`, which must
+    /// republish the **shell-facing** channel too. Startup-only coverage would
+    /// stay green while a fork or switch left `KI_AGENT_ID` naming the previous
+    /// session — the exact staleness the shell-visible twin exists to avoid.
+    ///
+    /// `None` for the tool context is deliberate: the env channel is published
+    /// even when no plugin context is available.
+    #[tokio::test]
+    async fn switching_the_active_session_republishes_the_agent_identity() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var(kiqi_plugin_sdk::AGENT_ID_ENV, value),
+                    None => std::env::remove_var(kiqi_plugin_sdk::AGENT_ID_ENV),
+                }
+            }
+        }
+
+        let _guard = crate::config::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _restore = Restore(std::env::var_os(kiqi_plugin_sdk::AGENT_ID_ENV));
+
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let cwd_str = cwd.to_string_lossy().to_string();
+        let sessions = crate::session::default_session_dir(cwd);
+        std::fs::create_dir_all(&sessions).unwrap();
+        let initial = crate::session::create_jsonl_session(&sessions, &cwd_str)
+            .await
+            .unwrap();
+        let harness = AgentHarness::create(harness_options(initial))
+            .await
+            .unwrap();
+        let target = crate::session::create_jsonl_session(&sessions, &cwd_str)
+            .await
+            .unwrap();
+        let target_id = target.get_metadata().await.unwrap().id;
+
+        crate::session::set_active_session(
+            &harness,
+            target,
+            None,
+            &crate::signal_host::SignalHost::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::env::var(kiqi_plugin_sdk::AGENT_ID_ENV).ok().as_deref(),
+            Some(target_id.as_str()),
+            "a session swap must republish KI_AGENT_ID, not leave the startup value"
+        );
+    }
 }

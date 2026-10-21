@@ -13,6 +13,12 @@
 //!   plain shell they are a false positive: a nested `ki` adopts its
 //!   ancestor's trace instead of opening its own.
 //!
+//! `KI_AGENT_ID` is the one name that is deliberately **visible**: it carries
+//! the same value as `KI_SESSION_ID` to a different audience, the commands the
+//! shell runs, so a child can name the session it belongs to
+//! (`walgit collab claim --session "$KI_AGENT_ID"`). A nested `ki` still cannot
+//! adopt it, because nothing in `ki` reads it.
+//!
 //! These run against a real shell, because the property under test is about the
 //! process environment of a real child — an in-memory fake spawns nothing and
 //! could not observe it.
@@ -60,6 +66,7 @@ async fn a_host_private_variable_does_not_reach_the_shell() {
 
     let _env = lock_session_env();
     std::env::set_var("KI_SESSION_ID", "01a0f60b-parent-session");
+    std::env::set_var(kiqi_plugin_sdk::AGENT_ID_ENV, "01a0f60b-parent-session");
 
     // A variable the host does NOT mark private still inherits, so this is a
     // targeted exclusion rather than "the shell sees no environment".
@@ -67,7 +74,7 @@ async fn a_host_private_variable_does_not_reach_the_shell() {
 
     let out = env
         .exec(
-            r#"printf 'session=[%s] probe=[%s]\n' "$KI_SESSION_ID" "$KI_TOOLS_INHERIT_PROBE""#,
+            r#"printf 'session=[%s] agent=[%s] probe=[%s]\n' "${KI_SESSION_ID-unset}" "$KI_AGENT_ID" "$KI_TOOLS_INHERIT_PROBE""#,
             ShellExecOptions::default(),
         )
         .await
@@ -75,11 +82,13 @@ async fn a_host_private_variable_does_not_reach_the_shell() {
 
     assert_eq!(
         out.stdout.trim(),
-        "session=[] probe=[visible]",
-        "the host-private variable must not inherit while ordinary ones do"
+        "session=[unset] agent=[01a0f60b-parent-session] probe=[visible]",
+        "the host-private variable must not inherit (not even as an empty value), \
+         the agent channel must reach the shell, and ordinary ones must inherit"
     );
 
     std::env::remove_var("KI_TOOLS_INHERIT_PROBE");
+    std::env::remove_var(kiqi_plugin_sdk::AGENT_ID_ENV);
     std::env::remove_var("KI_SESSION_ID");
 }
 
@@ -128,6 +137,14 @@ fn the_private_list_covers_what_the_contract_declares() {
             "`{name}` tells a nested ki about its ancestor; it must not inherit"
         );
     }
+
+    // The shell-facing twin is the deliberate exception: stripping it would
+    // silently defeat `walgit collab claim --session "$KI_AGENT_ID"`, so the
+    // tempting symmetry fix (append it to HOST_PRIVATE_ENV) must fail here.
+    assert!(
+        !is_host_private_env(kiqi_plugin_sdk::AGENT_ID_ENV),
+        "KI_AGENT_ID must reach the shell; only KI_SESSION_ID is stripped"
+    );
 
     // Narrow: the user's own configuration must still reach the shell.
     assert!(!is_host_private_env("KI_OFFLINE"));

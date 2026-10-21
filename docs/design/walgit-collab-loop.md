@@ -70,6 +70,15 @@ walgit collab entry --kind patch --id <thread-id> --actor ki-agent --parent <sta
 
 每条 entry 都会打印出新的 entry oid，下一条的 `--parent` 用它。
 
+认领卡片（D1 §8.4，规则不在这里重述）：退出 0 才继续；2 是别人持有卡片、必须停手
+（认 `stand-down:` 行，不要只比对裸数字——2 也是 clap 的用法错误码）；1 是错误或卡片不可认领
+（只有 `open` / `in-progress` 可认领）。walgit 的环境变量拼写是 `WALGIT_CLAIM_SESSION`，ki 有意
+不设置它，因此总是显式传 `--session`。
+
+```bash
+walgit collab claim --id <thread-id> --session "$KI_AGENT_ID" --push walgit
+```
+
 ### 3.1 瞬态推送失败
 
 `walgit collab entry` 偶发网络/5xx 失败（本会话至少 5 次，重试即过，不是 schema 错误）。
