@@ -56,7 +56,7 @@ const MAX_NOTES_CHARS: usize = 20_000;
 const TURN_END_KIND: &str = "TurnEnd";
 
 const DESCRIPTION: &str = "Codex-style goal mode: record one persistent, context-injected objective per project and let the agent advance it across turns. Actions: start, update, pause, resume, complete, limit, show, list.";
-const SCHEMA: &str = r#"{"type":"object","properties":{"action":{"type":"string","enum":["start","update","pause","resume","complete","limit","show","list"]},"title":{"type":"string","description":"Goal title (required for start)"},"notes":{"type":"string","description":"Goal notes or progress update (start/update)"},"status":{"type":"string","enum":["active","paused"],"description":"Explicit status change (update)"},"maxTurns":{"type":"integer","minimum":1,"description":"Optional turn budget (start/limit)"},"maxMinutes":{"type":"integer","minimum":1,"description":"Optional wall-clock budget in minutes (start/limit)"},"doneWhen":{"type":"string","description":"Definition of done: the condition that must hold before the agent marks the goal complete; the host currently evaluates the literal \"board-open-0\" at AgentEnd"}},"required":["action"]}"#;
+const SCHEMA: &str = r#"{"type":"object","properties":{"action":{"type":"string","enum":["start","update","pause","resume","complete","limit","show","list"]},"title":{"type":"string","description":"Goal title (required for start)"},"notes":{"type":"string","description":"Goal notes or progress update (start/update)"},"status":{"type":"string","enum":["active","paused"],"description":"Explicit status change (update)"},"maxTurns":{"type":"integer","minimum":1,"description":"Optional turn budget (start/limit)"},"maxMinutes":{"type":"integer","minimum":1,"description":"Optional wall-clock budget in minutes (start/limit)"},"doneWhen":{"type":"string","description":"Definition of done: the condition that must hold before the agent marks the goal complete; the host currently evaluates the literal \"board-open-0\" at AgentEnd"},"doneWhenCmd":{"type":"string","description":"Optional host-run command evaluated at AgentEnd with a short timeout; exit 0 marks the goal done (runs under the same shell sandbox as bash tools)"}},"required":["action"]}"#;
 const COMMAND: &str = "goal";
 
 /// Last injected goal-state fingerprint (title + status + notes). Prevents
@@ -117,6 +117,10 @@ struct Goal {
     /// host cannot evaluate arbitrary conditions; the agent must check it
     /// before calling `complete`.
     done_when: Option<String>,
+    /// Optional host-run command evaluated at AgentEnd with a short timeout;
+    /// exit 0 marks the goal done. Runs under the same shell sandbox as the
+    /// bash tool, so it cannot rewrite the permission policy.
+    done_when_cmd: Option<String>,
 }
 
 impl Goal {
@@ -131,6 +135,7 @@ impl Goal {
             "max_turns": self.max_turns,
             "deadline_ms": self.deadline_ms,
             "done_when": self.done_when,
+            "done_when_cmd": self.done_when_cmd,
         })
     }
 
@@ -160,6 +165,10 @@ impl Goal {
             deadline_ms: value.get("deadline_ms").and_then(Value::as_i64),
             done_when: value
                 .get("done_when")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            done_when_cmd: value
+                .get("done_when_cmd")
                 .and_then(Value::as_str)
                 .map(str::to_string),
         })
@@ -298,11 +307,12 @@ fn now_ms() -> i64 {
 /// live counters (`turns_used`) so a running budget does not re-inject each turn.
 fn fingerprint(goal: &Goal) -> String {
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         goal.title,
         goal.status,
         goal.notes,
-        goal.done_when.as_deref().unwrap_or("")
+        goal.done_when.as_deref().unwrap_or(""),
+        goal.done_when_cmd.as_deref().unwrap_or("")
     )
 }
 
@@ -400,6 +410,7 @@ fn append_custom_message(host: &dyn GoalHost, goal: &Goal, text: String) -> Resu
                 "maxTurns": goal.max_turns,
                 "deadlineMs": goal.deadline_ms,
                 "doneWhen": goal.done_when,
+                "doneWhenCmd": goal.done_when_cmd,
                 "startedAt": goal.started_at,
                 "updatedAt": goal.updated_at,
             }
@@ -444,6 +455,11 @@ fn append_goal_custom_message(host: &dyn GoalHost, goal: &Goal) -> Result<(), St
     let mut text = text;
     if let Some(done_when) = goal.done_when.as_deref() {
         text.push_str(&format!("\nDefinition of done: {done_when}"));
+    }
+    if let Some(done_when_cmd) = goal.done_when_cmd.as_deref() {
+        text.push_str(&format!(
+            "\nDefinition of done (host-run, exit 0 = done): {done_when_cmd}"
+        ));
     }
     let nudge = if hint_allowed {
         orchestration_hint()
@@ -500,6 +516,21 @@ fn validate_done_when(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
+/// A host-run done command. Kept short and empty-free; the host runs it
+/// through the same shell sandbox as the bash tool with a short timeout, so
+/// it can evaluate `walgit collab board` or a test suite but cannot rewrite
+/// the permission policy.
+fn validate_done_when_cmd(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    if value.chars().count() > 1000 {
+        return Err("doneWhenCmd must not exceed 1000 characters".into());
+    }
+    Ok(value.to_string())
+}
+
 fn validate_notes(notes: &str) -> Result<String, String> {
     let notes = notes.trim();
     if notes.chars().count() > MAX_NOTES_CHARS {
@@ -527,11 +558,16 @@ fn op_start(
     max_turns: Option<u32>,
     deadline_ms: Option<i64>,
     done_when: Option<&str>,
+    done_when_cmd: Option<&str>,
 ) -> Result<Goal, String> {
     let title = validate_title(title)?;
     let notes = validate_notes(notes)?;
     let done_when = done_when
         .map(validate_done_when)
+        .transpose()?
+        .filter(|value| !value.is_empty());
+    let done_when_cmd = done_when_cmd
+        .map(validate_done_when_cmd)
         .transpose()?
         .filter(|value| !value.is_empty());
     let now = now_ms();
@@ -545,6 +581,7 @@ fn op_start(
         max_turns,
         deadline_ms,
         done_when,
+        done_when_cmd,
     };
     let mut goals = read_goals();
     if let Some(old) = goals.active.take() {
@@ -784,7 +821,16 @@ fn start_goal(host: &dyn GoalHost, params: &Value) -> Result<String, String> {
         .filter(|value| *value > 0)
         .map(|minutes| now_ms().saturating_add((minutes as i64) * 60_000));
     let done_when = params.get("doneWhen").and_then(Value::as_str);
-    let goal = op_start(host, title, notes, max_turns, deadline_ms, done_when)?;
+    let done_when_cmd = params.get("doneWhenCmd").and_then(Value::as_str);
+    let goal = op_start(
+        host,
+        title,
+        notes,
+        max_turns,
+        deadline_ms,
+        done_when,
+        done_when_cmd,
+    )?;
     let text = format!(
         "## 🎯 Goal started\n\n**{}**\n\n{}\n\n_{}_",
         goal.title,
@@ -1000,7 +1046,7 @@ fn run_command(host: &dyn GoalHost, args: &str) -> String {
         "help" => Ok(COMMAND_HELP.to_string()),
         "start" => {
             let (title, notes) = split_title_notes(rest);
-            op_start(host, &title, notes.as_deref().unwrap_or(""), None, None, None).map(|goal| {
+            op_start(host, &title, notes.as_deref().unwrap_or(""), None, None, None, None).map(|goal| {
                 format!(
                     "🎯 Goal started: {}\n{}",
                     goal.title,
@@ -1058,7 +1104,7 @@ fn run_command(host: &dyn GoalHost, args: &str) -> String {
         // Unknown verb → treat the whole input as a title (shorthand start).
         _ => {
             let (title, notes) = split_title_notes(args);
-            op_start(host, &title, notes.as_deref().unwrap_or(""), None, None, None)
+            op_start(host, &title, notes.as_deref().unwrap_or(""), None, None, None, None)
                 .map(|goal| format!("🎯 Goal started: {}", goal.title))
         }
     };

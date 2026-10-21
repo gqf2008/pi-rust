@@ -207,12 +207,12 @@ pub async fn print(
 
         // The initial prompt (and its `@file` attachments) go in one user message;
         // extra positionals are separate prompts (mirrors the TS loop).
-        let mut prompts: Vec<String> = Vec::new();
+        let mut prompts: std::collections::VecDeque<String> = std::collections::VecDeque::new();
         if let Some(init) = initial {
-            prompts.push(init);
+            prompts.push_back(init);
         }
         for m in extra_messages {
-            prompts.push(m.clone());
+            prompts.push_back(m.clone());
         }
 
         if prompts.is_empty() {
@@ -221,7 +221,9 @@ pub async fn print(
         }
 
         let mut images = initial_images;
-        for prompt in prompts {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut goal_runs = 0u32;
+        while let Some(prompt) = prompts.pop_front() {
             // Between runs is a safe boundary: drain MCP resource notices into
             // the transcript so the NEXT prompt's context build includes them.
             crate::session::drain_mcp_boundary(&harness, &reload_context.mcp).await;
@@ -258,7 +260,18 @@ pub async fn print(
                     return 1;
                 }
             }
+            if prompts.is_empty() {
+                // Headless goal continuation: with an active goal, keep running
+                // until its done condition or a budget stops it.
+                if let Some(next) =
+                    crate::goal_drive::next_headless_continuation(&cwd, &lane, goal_runs).await
+                {
+                    goal_runs += 1;
+                    prompts.push_back(next);
+                }
+            }
         }
+
         // Tail boundary: whatever arrived during the last run lands in the
         // transcript (a resumed session sees it); the shutdown advisory below
         // flushes anything later to stderr.
@@ -711,11 +724,31 @@ where
                 let id_task = id.clone();
                 let flush_events = event_flush.clone();
                 run_task = Some(tokio::spawn(async move {
-                    let result = match content {
-                        Some(content) => {
-                            rpc_prompt_cancellable(&lane_task, &content, cancel_task).await
+                    let mut content = content;
+                    let mut goal_runs = 0u32;
+                    let result = loop {
+                        let result = match &content {
+                            Some(content) => {
+                                rpc_prompt_cancellable(&lane_task, content, cancel_task.clone())
+                                    .await
+                            }
+                            None => Err("prompt requires a string `content`".to_string()),
+                        };
+                        if result.is_err() {
+                            break result;
                         }
-                        None => Err("prompt requires a string `content`".to_string()),
+                        // Headless goal continuation: with an active goal, keep
+                        // running until its done condition or a budget stops it.
+                        let cwd = std::env::current_dir().unwrap_or_default();
+                        let Some(next) = crate::goal_drive::next_headless_continuation(
+                            &cwd, &lane_task, goal_runs,
+                        )
+                        .await
+                        else {
+                            break result;
+                        };
+                        goal_runs += 1;
+                        content = Some(next);
                     };
                     let response = match result {
                         Ok(value) => RemoteResponse::ok(id_task, value),

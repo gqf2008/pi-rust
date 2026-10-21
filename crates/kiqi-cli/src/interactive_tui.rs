@@ -39,7 +39,7 @@ mod sessions;
 use sessions::*;
 mod run;
 use run::*;
-mod events;
+pub(crate) mod events;
 use events::*;
 mod selectors;
 use selectors::*;

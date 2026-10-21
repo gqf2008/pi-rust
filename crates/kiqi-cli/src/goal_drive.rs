@@ -33,6 +33,11 @@ pub(crate) struct ActiveGoal {
     /// and skips auto-continue when the board has no open cards. Unknown
     /// conditions are documented to the model but not evaluated by the host.
     pub done_when: Option<String>,
+    /// A host-run command evaluated at AgentEnd with a short timeout; exit 0
+    /// marks the goal done and stops auto-continue. It runs under the same
+    /// shell sandbox as the bash tool, so it cannot rewrite the permission
+    /// policy.
+    pub done_when_cmd: Option<String>,
 }
 
 impl ActiveGoal {
@@ -98,7 +103,63 @@ pub(crate) fn active_goal(cwd: &Path) -> Option<ActiveGoal> {
             .get("done_when")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        done_when_cmd: active
+            .get("done_when_cmd")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     })
+}
+
+/// The next prompt that keeps an active goal moving in a headless run
+/// (`--server`/RPC/`-p`/`--mode json`), or `None` when the goal is done,
+/// paused, out of budget, or user input is queued. Mirrors the interactive
+/// `maybe_continue_goal`'s checks but returns the prompt so headless modes can
+/// drive the run themselves.
+pub(crate) async fn next_headless_continuation(
+    cwd: &Path,
+    lane: &std::sync::Arc<dyn kiqi_harness::agent_harness::AgentLane>,
+    runs: u32,
+) -> Option<String> {
+    let user_waiting = lane
+        .queued_messages()
+        .await
+        .map(|queued| !queued.steering.is_empty() || !queued.follow_up.is_empty())
+        .unwrap_or(false);
+    if user_waiting {
+        return None;
+    }
+    let goal = active_goal(cwd)?;
+    if goal.done_when.as_deref() == Some("board-open-0")
+        && crate::interactive_tui::events::board_open_zero(cwd).await
+    {
+        crate::interactive_tui::diagnostic_log(
+            "[ki goal] doneWhen 'board-open-0' satisfied; not auto-continuing",
+        );
+        return None;
+    }
+    if let Some(cmd) = goal.done_when_cmd.as_deref() {
+        if crate::interactive_tui::events::done_when_cmd_satisfied(cwd, cmd).await {
+            crate::interactive_tui::diagnostic_log(&format!(
+                "[ki goal] doneWhenCmd satisfied; not auto-continuing: {cmd}"
+            ));
+            return None;
+        }
+    }
+    if !goal.can_continue(unix_millis()) {
+        return None;
+    }
+    let unbounded = goal.max_turns.is_none() && goal.deadline_ms.is_none();
+    if unbounded && runs >= MAX_GOAL_AUTO_RUNS {
+        crate::interactive_tui::diagnostic_log(&format!(
+            "[ki goal] auto-continue stopped: unbounded goal reached {MAX_GOAL_AUTO_RUNS} host runs"
+        ));
+        return None;
+    }
+    crate::interactive_tui::diagnostic_log(&format!(
+        "[ki goal] auto-continue: {} (turns {})",
+        goal.title, goal.turns_used
+    ));
+    Some(goal.continuation_prompt())
 }
 
 /// Whether a `walgit collab board` rendering says there are no open cards.
@@ -173,6 +234,7 @@ mod tests {
             max_turns: Some(5),
             deadline_ms: Some(1_000),
             done_when: None,
+            done_when_cmd: None,
         };
         assert!(!goal.can_continue(0));
         let goal = ActiveGoal {
@@ -182,6 +244,7 @@ mod tests {
             max_turns: None,
             deadline_ms: Some(1_000),
             done_when: None,
+            done_when_cmd: None,
         };
         assert!(goal.can_continue(999));
         assert!(!goal.can_continue(1_000));
@@ -206,6 +269,27 @@ mod tests {
     }
 
     #[test]
+    fn active_goal_reads_the_host_run_done_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_goal(
+            tmp.path(),
+            serde_json::json!({
+                "active": {
+                    "title": "ship it",
+                    "status": "active",
+                    "started_at": 10,
+                    "done_when_cmd": "walgit collab board | grep -q '== open (0) =='"
+                }
+            }),
+        );
+        let goal = active_goal(tmp.path()).expect("active goal");
+        assert_eq!(
+            goal.done_when_cmd.as_deref(),
+            Some("walgit collab board | grep -q '== open (0) =='")
+        );
+    }
+
+    #[test]
     fn board_open_zero_marker_is_matched_exactly() {
         assert!(board_has_no_open_cards("== open (0) ==\n"));
         assert!(!board_has_no_open_cards("== open (1) ==\n"));
@@ -221,6 +305,7 @@ mod tests {
             max_turns: None,
             deadline_ms: None,
             done_when: None,
+            done_when_cmd: None,
         };
         let prompt = goal.continuation_prompt();
         assert!(prompt.contains("finish the board"));

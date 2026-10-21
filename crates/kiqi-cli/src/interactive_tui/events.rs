@@ -291,7 +291,7 @@ pub(super) async fn handle_signal_boundary(
 /// Whether the walgit board has no open cards, with a bounded wait so a hung
 /// `walgit` cannot stall the AgentEnd boundary. Any failure is "not done":
 /// auto-continue resumes normally rather than claiming a false completion.
-async fn board_open_zero(cwd: &std::path::Path) -> bool {
+pub(crate) async fn board_open_zero(cwd: &std::path::Path) -> bool {
     let mut command = tokio::process::Command::new("walgit");
     command
         .args(["collab", "board"])
@@ -301,6 +301,49 @@ async fn board_open_zero(cwd: &std::path::Path) -> bool {
         Ok(Ok(output)) if output.status.success() => {
             crate::goal_drive::board_has_no_open_cards(&String::from_utf8_lossy(&output.stdout))
         }
+        _ => false,
+    }
+}
+
+/// Evaluate a goal's `doneWhenCmd` at AgentEnd: run the command in the
+/// session cwd with a short timeout, under the same shell sandbox as the bash
+/// tool (so it can run `walgit collab board` or tests but cannot rewrite the
+/// permission policy). Exit 0 = done; timeout, spawn failure or a non-zero
+/// exit = not done, so auto-continue resumes normally.
+pub(crate) async fn done_when_cmd_satisfied(cwd: &std::path::Path, cmd: &str) -> bool {
+    use std::time::Duration;
+
+    let sandbox =
+        kiqi_tools::sandbox::ShellSandbox::macos_for(crate::permissions::shell_sandbox_paths(cwd));
+    let (program, args) = match sandbox.as_ref().and_then(|s| s.shell_override()) {
+        Some(ov) => (ov.program, ov.args),
+        None => {
+            let shell = if std::path::Path::new("/bin/bash").exists() {
+                "/bin/bash"
+            } else {
+                "/bin/sh"
+            };
+            (std::path::PathBuf::from(shell), vec!["-c".to_string()])
+        }
+    };
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(&args)
+        .arg(cmd)
+        .current_dir(cwd)
+        .kill_on_drop(true)
+        .env_clear();
+    // Only the lookup basics; the sandbox profile still confines writes, and
+    // a goal definition must not smuggle host-private plumbing into a child.
+    command.env(
+        "PATH",
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+    );
+    if let Ok(home) = std::env::var("HOME") {
+        command.env("HOME", home);
+    }
+    match tokio::time::timeout(Duration::from_secs(10), command.output()).await {
+        Ok(Ok(output)) => output.status.success(),
         _ => false,
     }
 }
@@ -337,6 +380,14 @@ pub(super) async fn maybe_continue_goal(
              (run /goal stop to archive the goal)",
         );
         return;
+    }
+    if let Some(done_when_cmd) = goal.done_when_cmd.as_deref() {
+        if done_when_cmd_satisfied(&cwd, done_when_cmd).await {
+            super::diagnostic_log(&format!(
+                "[ki goal] doneWhenCmd satisfied; not auto-continuing: {done_when_cmd}"
+            ));
+            return;
+        }
     }
     if !goal.can_continue(crate::goal_drive::unix_millis()) {
         return;
@@ -748,4 +799,25 @@ pub(super) fn tool_result_requests_markdown(details: Option<&serde_json::Value>)
         .and_then(|details| details.get("markdown"))
         .and_then(|value| value.as_bool())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::done_when_cmd_satisfied;
+
+    #[tokio::test]
+    async fn a_zero_exit_done_command_is_done_a_nonzero_exit_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(done_when_cmd_satisfied(dir.path(), "true").await);
+        assert!(!done_when_cmd_satisfied(dir.path(), "false").await);
+        assert!(!done_when_cmd_satisfied(dir.path(), "exit 3").await);
+    }
+
+    #[tokio::test]
+    async fn the_done_command_runs_in_the_session_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("marker"), "x").unwrap();
+        assert!(done_when_cmd_satisfied(dir.path(), "test -f marker").await);
+        assert!(!done_when_cmd_satisfied(dir.path(), "test -f missing").await);
+    }
 }

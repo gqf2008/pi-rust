@@ -22,6 +22,15 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **Goals can be finished by a host-run command (`doneWhenCmd`), and headless
+  modes can auto-continue them.** `doneWhenCmd` is evaluated at the AgentEnd
+  boundary with a short timeout under the same shell sandbox as the bash tool;
+  exit 0 stops auto-continue (timeout, spawn failure or a non-zero exit does
+  not). The goal JSON gains `done_when_cmd` and `goal start` accepts
+  `doneWhenCmd`. With an active goal, `--server`/RPC, `-p` and `--mode json`
+  now keep running until the done condition or a budget stops them instead of
+  exiting after one prompt (unbounded goals are still capped at
+  `MAX_GOAL_AUTO_RUNS` host runs).
 - **The compiled-in plugin channel is retired (2026-10-21).** The 12
   `plugins/kiqi-*` crates, their `plugin-kiqi-*` features, the opt-in-feature
   and standalone-cdylib CI steps, and `scripts/check-feature-parity.sh` are
