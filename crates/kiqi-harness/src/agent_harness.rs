@@ -590,13 +590,26 @@ impl MessageQueue {
         self.pending.len() != before
     }
 
-    /// The queued message texts for `lane`, in queue order, without touching
-    /// the queue. Used by the pending-messages display.
+    /// The queued **user** message texts for `lane`, in queue order, without
+    /// touching the queue. Used by the pending-messages display and by the
+    /// TUI's "is the user already driving the next turn?" check.
+    ///
+    /// Custom/system entries (notably `mcp-resource-notice`) also live in the
+    /// steering queue while a run is active, but they are not user turns:
+    /// `queued_message_text` renders them as an empty string. Counting them as
+    /// waiting input starves auto-wake forever — the wake is skipped because
+    /// "user messages are queued", and no run ever starts to consume them
+    /// (observed as an overnight loop of `MCP signal recorded; skipped
+    /// auto-wake because user messages are queued`). They stay in the queue
+    /// for the next run; they are just not reported as user input here.
     fn peek_for_lane(&self, lane: &str) -> Vec<String> {
         self.pending
             .iter()
             .filter(|item| item.lane == lane)
-            .map(|item| queued_message_text(&item.message))
+            .filter_map(|item| {
+                let text = queued_message_text(&item.message);
+                (!text.is_empty()).then_some(text)
+            })
             .collect()
     }
 }
@@ -4519,7 +4532,12 @@ impl AgentLane for AgentHarness {
                         );
                     }
                 }
-                out.push(queued_message_text(&item.message));
+                // Only user text belongs in the restore payload; a custom
+                // notice has no text and would otherwise become a blank line.
+                let text = queued_message_text(&item.message);
+                if !text.is_empty() {
+                    out.push(text);
+                }
                 if let AgentMessage::User(user) = &item.message {
                     if let UserContent::Blocks(blocks) = &user.content {
                         images.extend(blocks.iter().filter_map(|block| {
@@ -5134,6 +5152,47 @@ mod queue_tests {
 
     fn user(text: &str) -> AgentMessage {
         AgentMessage::User(UserMessage::new(text, 0))
+    }
+
+    /// The shape `kiqi_mcp::notice_message` queues while a run is active: a
+    /// custom message, and therefore not a user turn.
+    fn notice() -> AgentMessage {
+        AgentMessage::Custom(kiqi_agent::message::CustomMessage::new(
+            "custom",
+            vec![kiqi_ai::types::Content::text(
+                "MCP resources updated:\n- walgit: walgit://collab/board/gqf2008/abb",
+            )],
+            serde_json::json!({ "customType": "mcp-resource-notice", "display": true }),
+            0,
+        ))
+    }
+
+    /// A queued MCP notice is not a user turn. Reporting it as one makes the
+    /// TUI skip every auto-wake ("user messages are queued") while no run
+    /// exists to consume the notice — the overnight notice loop.
+    #[test]
+    fn queued_messages_report_user_turns_only() {
+        let mut queue = MessageQueue::new(QueueMode::All);
+        queue.pending.push_back(QueuedMessage {
+            entry_id: "notice".into(),
+            lane: "main".into(),
+            message: notice(),
+        });
+        assert!(
+            queue.peek_for_lane("main").is_empty(),
+            "a notice-only queue must look empty to the wake policy"
+        );
+        queue.pending.push_back(QueuedMessage {
+            entry_id: "user".into(),
+            lane: "main".into(),
+            message: user("hello"),
+        });
+        assert_eq!(queue.peek_for_lane("main"), vec!["hello".to_string()]);
+        assert_eq!(
+            queue.pending.len(),
+            2,
+            "custom entries stay queued for the next run"
+        );
     }
 
     #[test]

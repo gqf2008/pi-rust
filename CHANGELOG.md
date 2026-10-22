@@ -91,6 +91,17 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **A queued MCP notice no longer starves auto-wake.** While a run was active,
+  an MCP resource notice was queued as a steering message; if the run ended
+  before the loop consumed it, the notice stayed in the queue.
+  `queued_messages()` reported every queued entry as a user message (a custom
+  notice renders as empty text), so the wake policy read "user messages are
+  queued" and skipped every auto-wake — and no run was left to consume the
+  queue. One overnight session accumulated 68 such entries and printed the
+  skip line for every new signal. Queue snapshots now report only actual user
+  turns (custom entries stay queued for the next run), so an empty user queue
+  wakes normally; `clear_queue` likewise returns only user text. A unit test
+  pins the notice-only queue.
 - **The main-screen TUI no longer corrupts itself after a resize or while the
   terminal's scrollback is being browsed.** Main-screen mode (the macOS
   default) hands whole frames to the terminal, and its incremental diff used a
