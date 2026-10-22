@@ -11,8 +11,19 @@ use std::time::Duration;
 
 use crate::app::{EXIT_RUNTIME, EXIT_USAGE};
 
+/// `--help`/`-h` anywhere in `ki events …` means usage. Checking only the
+/// first argument left `ki events tail --help` running an endless tail — the
+/// subcommand dispatched before the flag was ever looked at.
+fn wants_help(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--help" || a == "-h")
+}
+
 /// Dispatch `ki events <subcommand>`.
 pub async fn run(args: &[String]) -> i32 {
+    if wants_help(args) {
+        print_help();
+        return 0;
+    }
     match args.first().map(String::as_str) {
         Some("tail") => tail().await,
         Some("path") => match kiqi_extensions::event_log_path() {
@@ -88,6 +99,14 @@ mod tests {
         assert_eq!(run(&[]).await, 0);
         assert_eq!(run(&["--help".to_string()]).await, 0);
         assert_eq!(run(&["bogus".to_string()]).await, EXIT_USAGE);
+    }
+
+    #[test]
+    fn help_is_recognized_after_the_subcommand() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        assert!(wants_help(&v(&["tail", "--help"])));
+        assert!(wants_help(&v(&["path", "-h"])));
+        assert!(!wants_help(&v(&["tail"])));
     }
 
     #[tokio::test]
