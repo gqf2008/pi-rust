@@ -36,7 +36,7 @@ pub async fn run(args: &[String]) -> i32 {
                 EXIT_RUNTIME
             }
         },
-        Some("--help" | "-h") | None => {
+        None => {
             print_help();
             0
         }
@@ -99,6 +99,12 @@ mod tests {
         assert_eq!(run(&[]).await, 0);
         assert_eq!(run(&["--help".to_string()]).await, 0);
         assert_eq!(run(&["bogus".to_string()]).await, EXIT_USAGE);
+        // The regression this module guards: the flag arrives after the
+        // subcommand, so `run` must check for it before dispatching (`tail`
+        // would otherwise follow forever). Goes through `run`, not
+        // `wants_help`, so a reordered or dropped early return fails here.
+        assert_eq!(run(&["tail".to_string(), "--help".to_string()]).await, 0);
+        assert_eq!(run(&["path".to_string(), "-h".to_string()]).await, 0);
     }
 
     #[test]
