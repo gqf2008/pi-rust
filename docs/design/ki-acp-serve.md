@@ -339,5 +339,7 @@ session/new / EOF 全通，应答见 §7 表）。Zed 真机手测仍待人工�
 - **文档销账（本仓库，本提交）**：README 增 Editor integration (ACP) 小节；`plugin-abi.md`
   「明确不迁」名单 `acp` 销账（「不迁 wasm」裁定不变，落地形态即宿主功能）；
   `plugin-abi-handover.md` §7 行销账；本文档头部状态行更新为已落地。
-- **仍未闭环（人工）**：Zed 真机一轮手测（批次 2 起挂账）；abb 生产发行包继续走随包
-  abb-agent，`ki acp serve` 回落路径仅在开发/自签构建触达。
+- **Zed 真机手测：关闭（2026-10-22，业主裁定）**。实测到一半：`ki acp install-zed` 注册 +
+  Zed 真机拉起 `ki acp serve` 并保持连接（spawn/注册面通过，进程与 initialize 实证）；
+  完整回合由业主终止——Zed 弃用并卸载。abb 生产发行包继续走随包 abb-agent，`ki acp serve`
+  回落路径仅在开发/自签构建触达。
