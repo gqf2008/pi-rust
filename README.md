@@ -335,6 +335,18 @@ The client holds no provider, tools, extensions or session files — all agent
 work happens on the server, so a thin terminal anywhere can drive a beefy
 machine. See [`docs/remote/user-guide.md`](docs/remote/user-guide.md).
 
+## Editor integration (ACP)
+
+```bash
+ki acp serve                        # Agent Client Protocol server over stdio
+ki acp install-zed                  # register ki in Zed's settings.json
+```
+
+Any ACP client can drive `ki` as an external coding agent: `session/new` /
+`prompt` / `cancel` / `session/load`, streamed `session/update` deltas, and
+permission requests bridged to the client. See
+[`docs/design/ki-acp-serve.md`](docs/design/ki-acp-serve.md).
+
 ## Project status
 
 | | |

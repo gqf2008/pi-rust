@@ -176,9 +176,11 @@ pub trait Plugin: Send + Sync {
 过同一套一致性测试。
 
 **明确不迁**（选它们是在验证 host 的 exec/会话驱动，不是验证 ABI）：`im-message`、`voice`、
-`mcp-adapter`、`acp`（2026-10-16 实核确认：它要独占宿主进程 stdin/stdout 并在
+`mcp-adapter`、~~`acp`~~（2026-10-16 实核确认：它要独占宿主进程 stdin/stdout 并在
 SessionStart→Shutdown 间维持服务线程——见 `rpi-package/packages/kiqi-acp/src/lib.rs:4-8,67-70`。
-正确形态是**宿主级功能**：让 `ki` 本体当 ACP server，而不是插件。）、`server`、`run-stats`、
+正确形态是**宿主级功能**：让 `ki` 本体当 ACP server，而不是插件。
+✅ 2026-10-22 销账：`ki acp serve` 已落地（批次 1/2 完成，批次 3 为 abb 对接与本文档销账），
+见 `ki-acp-serve.md`；「不迁 wasm」的裁定不变，落地形态就是宿主功能。）、`server`、`run-stats`、
 `subagents`、`codegraph`、~~`lens`~~
 （起子进程 / 长连 / 后台线程）。
 

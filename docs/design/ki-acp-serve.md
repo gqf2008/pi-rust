@@ -1,6 +1,6 @@
 # 方案：`ki acp serve` — 宿主级 ACP server
 
-> 状态：**已立项，方案待评审**。目标：让 Zed（及任何 ACP 客户端）把 `ki` 当外部 coding
+> 状态：**已落地**（批次 1/2 于 2026-10-16，批次 3 于 2026-10-22）。目标：让 Zed（及任何 ACP 客户端）把 `ki` 当外部 coding
 > agent 用——客户端拉起 `ki acp serve`，在 stdin/stdout 上走 Agent Client Protocol 的 JSON-RPC。
 > 关联：`plugin-abi.md` §6.2（acp 不迁 wasm 的裁定，2026-10-16）；`plugin-process-capability.md`
 > （同套格式的上一个立项）；前身实现 `rpi-package/packages/kiqi-acp`（ACP↔RPC 桥）；
@@ -308,3 +308,36 @@ macOS settings 路径按 Zed 文档修正为 `~/.config/zed/`（kiqi-acp 的 App
 **批次 2 至此完成**。批次 3 剩余：ABB 侧部署接线（其命令解析硬接线随包 agent，换解析
 目标即可）+ 一轮真实会话实测记录；ki 侧实测**零代码改动**（探针已证 initialize /
 session/new / EOF 全通，应答见 §7 表）。Zed 真机手测仍待人工。
+
+## 14. 批次 3 状态（2026-10-22，完成）
+
+**ki 侧零代码改动**（如实：本仓库本批只有文档销账与对接记录）。abb 侧部署接线与验收轮：
+
+- **ABB 回落接线**（abb 线程 `abb-ki-acp-serve-fallback-20261022`，walgit collab 全流程
+  issue→claim→patch→review(approve)→merge_result→closed，合并提交 abb `c8a19813` 已推
+  origin/main）：abb `src/service.rs` 执行层解析引入 `AgentCmd { program, args }`——随包
+  `abb-agent`（主执行层）逐字节不变；无随包（开发/自签构建）回落从 PATH `pi-acp`
+  （rpi-package 的 ACP↔RPC 桥，前身实现）换成 **`<ki> acp serve`**（PATH 全路径 + 子命令
+  参数；无 ki 保留裸名、spawn 失败如实可见，#246④ 口径）；`AgentConfig.args` 在聊天句柄与
+  oneshot 两路径透传；syschat「执行层不可用」文案同步指向 ki。
+- **验收轮（§7 对表逐条实证）**：abb `probe_real_ki_acp_serve_lifecycle`（`#[ignore]` +
+  `KI_ACP_E2E_BIN` 门控，`src/runtime/acp.rs`）——ABB 客户端真 spawn `<ki> acp serve`
+  （pi-rust main 构建，provider deepseek/deepseek-flash）：initialize（v2 握手，ki 应答 1、
+  不声明 steering ⇒ ABB 能力探测 false，§7 第一行成立）→ session/new（tempdir cwd）→
+  工具轮（真实 LLM，bash 工具落盘 `hello-ki-e2e`，EndTurn）→ 取消轮（`sleep 30` 工具挂住，
+  3s idle 超时后 `cancel_with_cleanup` 打断，Cancelled——对应批次 1 钉死的取消贯穿语义）→
+  同会话续轮（EndTurn）。作者轮 12.77s / 评审轮 9.30s 各复绿一次；协议流纯净（ki 插件日志
+  全在 stderr）。`session/load` 不在 ABB 客户端面上（其重连不回放），如实不在本轮范围。
+- **abb 门禁**：fmt/clippy 干净；全量 bin 单测 1346 passed / 2 failed——两条
+  `ui::headless_render` 失败在 base `74600f3` 对照实证**同红**（无显示环境先在）；
+  `tools/check_test_isolation.sh` 红——泄漏对照实锤为 `mediaplay::poster_is_extracted_and_cached`
+  在 base 即向 `<HOME>/.agent-bridge/syschat/media-cache/` 写海报缓存（`3317aca` 引入，
+  先在红）。两者均为基线问题，与本批无关。评审：abb-reviewer-145 在钉定提交独立复核
+  （fmt/clippy/11 条触面测试/探针复跑 9.30s），approve（blocking=0 non-blocking=2：
+  harness 启动日志缺子命令形状、探针 tempdir 泄漏）。walgit CI 分支任务无 runner 认领，
+  验证由本地门禁 + 评审独立复跑承担（已记录在 merge_result note）。
+- **文档销账（本仓库，本提交）**：README 增 Editor integration (ACP) 小节；`plugin-abi.md`
+  「明确不迁」名单 `acp` 销账（「不迁 wasm」裁定不变，落地形态即宿主功能）；
+  `plugin-abi-handover.md` §7 行销账；本文档头部状态行更新为已落地。
+- **仍未闭环（人工）**：Zed 真机一轮手测（批次 2 起挂账）；abb 生产发行包继续走随包
+  abb-agent，`ki acp serve` 回落路径仅在开发/自签构建触达。
