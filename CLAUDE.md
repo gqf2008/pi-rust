@@ -7,9 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 仓库协作约定（远端角色、`ki`/`kiqi` 命名与遗留 `rpi` 的处置、worktree 批次流程、
 硬规矩）以根目录 **AGENTS.md** 为准，本文不重复其细节。最容易踩的三条：
 
-- 远端 `origin`（`bigfish1913/pi-rust`）是**无关分叉**：不推、不拉、不合并、不当变更来源。
-  日常推送主远端 `walgit`（`gqf2008/pi-rust` 的本地镜像），`fork` 只作镜像。本项目没有上游，
-  引用历史出处用 commit SHA。
+- 远端 `origin`（`bigfish1913/pi-rust`）是**无关分叉**（unrelated fork）：不推、不拉、不合并、不当变更来源。
+  日常推送主远端 `walgit`（`gqf2008/pi-rust` 的本地镜像），`fork` 作 GitHub 镜像与
+  发布目标。本项目没有上游，引用历史出处用 commit SHA。
 - 命名是 `ki`（命令）/ `kiqi`（crate 前缀）。`git grep -i rpi` 的命中大多是**有意保留**
   （外部项目名 `pi-rust/rpi-package`、legacy 数据/配置读取回退、历史记录），
   三类清单见 AGENTS.md，不要「顺手清干净」。
@@ -20,8 +20,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 常用命令
 
-本地门禁 = CI 跑的东西；cargo 命令一律带 `--locked`（可加 `--offline`，Cargo.lock
-覆盖全部 feature）：
+本地门禁 = CI 跑的东西（个别本地-only 已注明）；cargo build/check/test 一律带 `--locked`（可加 `--offline`，
+Cargo.lock 覆盖全部 feature；`cargo fmt` 不接受 `--locked`）：
 
 ```bash
 cargo fmt --all -- --check
@@ -33,12 +33,16 @@ cargo test  --workspace --locked
 
 # 脚本门禁（改到对应文件后必须重跑）：
 sh scripts/check-offline-lock.sh          # Cargo.lock 覆盖全部 feature
+sh scripts/check-ci-locked.sh             # CI 每条 cargo build/check/test 都带 --locked
 sh scripts/tests/install-sh.sh            # install.sh（离线可测）
 sh scripts/tests/release-sh.sh            # release.sh 与工作流一致
 sh scripts/check-release-targets.sh       # 发布矩阵三处消费清单一致
 sh scripts/sync-embedded-docs.sh          # 改了 CHANGELOG.md / README.md 后必须跑
 sh scripts/check-abi-sections.sh          # 改了 docs/design/plugin-abi.md 后必须跑
 sh scripts/tests/docs-install-path.sh     # 文档安装指令与清单一致（禁 crates.io 指令）
+sh scripts/tests/collab-entry-retry.sh    # walgit collab entry 只重试瞬态（本地-only，CI 不跑）
+sh scripts/tests/setup-collab-agents.sh   # 协作身份：一个 agent 一个 worktree + principal
+sh scripts/check-install-version-hints.sh # 示例版本号必须真的发布过（需联网）
 ```
 
 跑单个测试：`cargo test -p <crate> --locked <test_name>`（加 `-- --nocapture` 看输出）。
@@ -73,13 +77,13 @@ kiqi-telemetry            # 遥测接口与 span/event 合约（零内部依赖�
       └─ kiqi-tools       # 内置工具 + ExecutionEnv 抽象（真实/离线环境）
          └─ kiqi-harness  # 会话树、JSONL 持久化、压缩、崩溃恢复、skills
 kiqi-tui                  # 终端组件、编辑器、渲染（零内部依赖）
-kiqi-plugin               # trait Plugin 定义（零依赖）
-├─ kiqi-plugin-sdk        # 第三方 cdylib 的 C ABI 类型（零依赖）
-│  └─ kiqi-extensions     # 宿主侧扩展加载与桥接
-└─ kiqi-plugin-host       # wasmtime 宿主，跑 wasm 组件
+kiqi-plugin               # trait Plugin 定义（零内部依赖；外部仅 serde/serde_json）
+├─ kiqi-plugin-host       # wasmtime 宿主，跑 wasm 组件
+kiqi-plugin-sdk           # 第三方 cdylib 的 C ABI 类型（零内部依赖；默认 feature 带 serde_json）
+└─ kiqi-extensions         # 宿主侧扩展加载与桥接（另依赖 agent+ai）
 kiqi-mcp                  # MCP 客户端集成（依赖 ai+agent+plugin-sdk）
-kiqi-plan-mode-core       # 计划模式核心逻辑（零内部依赖）
-kiqi-cli                  # 组合以上全部：配置、认证、CLI/TUI、acp/mcp 服务
+kiqi-plan-mode-core       # 计划模式核心逻辑（零内部依赖；只被 plugins/wasm/kiqi-plan-mode-guest 链接）
+kiqi-cli                  # 组合以上（plan-mode-core 除外）：配置、认证、CLI/TUI、acp 服务（MCP 只作客户端集成）
 ```
 
 feature 门：`kiqi-ai` 的真实 HTTP provider 在 `cfg(feature = "providers")` 后，默认关
@@ -88,7 +92,8 @@ feature 门：`kiqi-ai` 的真实 HTTP provider 在 `cfg(feature = "providers")`
 ### 一次请求的路径
 
 TUI Enter → `interactive_tui/run.rs::run_prompt_streaming` →
-`LaneHandle::prompt_text` → `AgentHarness::prompt_text` → `run_agent_loop`
+`AgentHarness::prompt_text`（`Arc<dyn AgentLane>` 分发；lane 由
+`harness.lane("main")` 取得）→ `run_agent_loop`
 （Provider 流式 → 工具执行 → 下一轮）→ `AgentEvent` 广播 → TUI 事件循环渲染。
 运行中提交经 `lane.steer` 入队，由 loop 在检查点消费。完整分支见
 `docs/agent/loop-walkthrough.md`。

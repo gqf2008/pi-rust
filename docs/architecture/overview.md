@@ -1,6 +1,6 @@
 # 架构概览
 
-ki 是 Rust 原生 Agent SDK 与终端应用。当前 workspace 包含九个产品 crate；CLI 组合底层能力，嵌入式应用可按需使用 SDK。
+ki 是 Rust 原生 Agent SDK 与终端应用。当前 workspace 包含十三个 crate（产品层 + 插件 ABI/宿主 + MCP 客户端 + plan-mode 支撑）；CLI 组合底层能力，嵌入式应用可按需使用 SDK。
 
 ## 功能分层
 
@@ -12,9 +12,13 @@ ki 是 Rust 原生 Agent SDK 与终端应用。当前 workspace 包含九个产�
 | `kiqi-tools` | 内置工具与 ExecutionEnv 执行环境抽象 |
 | `kiqi-harness` | 会话树、JSONL 持久化、上下文压缩、恢复、skills 与模板 |
 | `kiqi-tui` | 终端组件、编辑器、布局、Markdown 与 transcript 渲染 |
+| `kiqi-plugin` | `trait Plugin` 定义（第三方编译期扩展面） |
+| `kiqi-plugin-host` | wasm 组件宿主（wasmtime 沙箱、能力授权） |
 | `kiqi-plugin-sdk` | 动态库扩展使用的 C ABI 类型与注册接口 |
 | `kiqi-extensions` | 宿主扩展加载与跨 ABI 调用桥接 |
-| `kiqi-cli` | 配置、认证、资源发现、CLI/TUI、远程服务端与客户端 |
+| `kiqi-mcp` | MCP 客户端集成（宿主侧客户端，非服务端） |
+| `kiqi-plan-mode-core` | 计划模式核心逻辑（只被 wasm guest 链接，CLI 不依赖） |
+| `kiqi-cli` | 配置、认证、资源发现、CLI/TUI、ACP 服务端、远程服务端与客户端 |
 
 具体依赖以各 crate 的 `Cargo.toml` 为准。`kiqi-agent` 可独立运行；需要会话持久化和压缩时再使用 Harness。插件通过 ABI 加载，不要求与宿主使用相同 Rust 编译器版本。
 
@@ -24,7 +28,7 @@ ki 是 Rust 原生 Agent SDK 与终端应用。当前 workspace 包含九个产�
 TUI Enter → Editor::submit → editor.on_submit 回调
   → TuiMessage::UserInput → TUI 主循环
   → interactive_tui/run.rs::run_prompt_streaming
-  → LaneHandle::prompt_text → AgentHarness::prompt_text
+  → AgentHarness::prompt_text（Arc<dyn AgentLane>；lane 由 harness.lane("main") 取得）
   → run_core → run_core_with_entry（持久化用户消息、构造上下文）
   → run_agent_loop → run_loop
       → stream_assistant_response → StreamFn → Provider → HTTP/SSE
