@@ -1338,7 +1338,8 @@ pub async fn interactive_tui(
 
     // 会话内定时任务：仅当 `.ki/cron.json` 存在时启动。句柄在这里持有，
     // 主循环结束时 stop()（下方 Shutdown 段），`/reload` 时先停后重建。
-    let mut session_cron = start_session_cron(&cwd, &lane, &state, &tx, &tui);
+    let mut session_cron =
+        start_session_cron(&cwd, project_trusted, args, &lane, &state, &tx, &tui);
 
     let _compaction_watcher = harness.watch({
         let state = Arc::clone(&state);
@@ -3422,7 +3423,11 @@ pub async fn interactive_tui(
                 } else {
                     add_note_message(&chat_container, &outcome.summary);
                 }
-                session_cron = start_session_cron(&cwd, &lane, &state, &tx, &tui);
+                // 信任可能在会话中由 `/trust` 或外部修改；重建前必须重新判定，
+                // 不能沿用启动时的 `project_trusted` 快照。
+                let cron_project_trusted = crate::session::resolve_project_trust(args, &cwd);
+                session_cron =
+                    start_session_cron(&cwd, cron_project_trusted, args, &lane, &state, &tx, &tui);
                 tui.request_render(false);
             }
             None => break,

@@ -366,6 +366,11 @@ KI_AGENTS_DIR=/work/shared-agents ki
 ### 5.3 定时任务（`.ki/cron.json`）
 
 会话工作目录下的 `.ki/cron.json` 可以让 ki 在**会话打开期间**按时间表把任务交给 agent。
+它是项目资源，**只有当前项目受信任时才会读取和调度**；`--no-approve` 会同时禁用 cron 与其他
+项目资源。`prompt` 和 `command` 都是项目内容，使用同一个信任判定，并非只限制会执行命令的一支。
+会话中执行 `/trust no` 撤销信任后，调度器会停止后续触发；`/reload` 也会先重新判定信任，再决定
+是否重建调度器。
+
 一个任务要么是 `prompt`（原文注入为一条用户消息），要么是 `command`（在会话工作目录执行，
 把合并后的 stdout+stderr 交给 agent），二者恰有其一：
 

@@ -2,8 +2,8 @@
 //!
 //! 调度核心在 `crate::cron`，这里只负责两件事：
 //!
-//! 1. 交互式会话启动时，如果工作目录里有 `.ki/cron.json`，就启动调度线程；
-//!    会话结束或 `/reload` 时停止（`/reload` 后重新启动）。
+//! 1. 交互式会话启动时，只有项目受信任且工作目录里有 `.ki/cron.json` 才启动
+//!    调度线程；会话结束或 `/reload` 时停止（reload 重新判定信任后再启动）。
 //! 2. 把注入文本交给 agent，**复用普通用户消息的两条既有路径**：
 //!    - 回合在跑：`lane.steer` 入队，与用户此时敲下消息完全相同；
 //!    - 回合空闲：走 TUI 主循环（`TuiMessage::CronInject`），和编辑器提交一样
@@ -29,15 +29,18 @@ impl SessionCron {
     }
 }
 
-/// 为交互式会话启动调度器；没有 `.ki/cron.json` 时返回 `None`，什么都不启动。
+/// 为交互式会话启动调度器；项目不受信任或没有 `.ki/cron.json` 时返回 `None`。
+/// prompt 与 command 都是项目内容，不能只拦截其中有副作用的一支。
 pub(super) fn start_session_cron(
     cwd: &std::path::Path,
+    project_trusted: bool,
+    args: &Args,
     lane: &Arc<dyn AgentLane>,
     state: &Arc<TuiState>,
     tx: &mpsc::UnboundedSender<TuiMessage>,
     tui: &Arc<TuiAltScreen>,
 ) -> Option<SessionCron> {
-    if !crate::cron::config_path(cwd).is_file() {
+    if !project_trusted || !crate::cron::config_path(cwd).is_file() {
         return None;
     }
     let runtime = tokio::runtime::Handle::try_current().ok()?;
@@ -51,7 +54,12 @@ pub(super) fn start_session_cron(
         shutting_down: Arc::clone(&shutting_down),
     });
     let log: crate::cron::CronLog = Arc::new(|message: &str| diagnostic_log(message));
-    let handle = crate::cron::start_if_configured(cwd, inject, log, Arc::clone(&shutting_down))?;
+    let trust_args = args.clone();
+    let trust_cwd = cwd.to_path_buf();
+    let trust: crate::cron::CronTrust =
+        Arc::new(move || crate::session::resolve_project_trust(&trust_args, &trust_cwd));
+    let handle =
+        crate::cron::start_if_configured(cwd, inject, log, Arc::clone(&shutting_down), trust)?;
     Some(SessionCron {
         handle,
         shutting_down,

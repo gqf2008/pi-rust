@@ -18,6 +18,8 @@
 //! - 配置文件按 mtime 变化重载；一次重载只发一条诊断，合法任务继续跑。
 //! - 一个任务要么是 `prompt`（原文作为 user 消息注入），要么是 `command`
 //!   （在会话工作目录执行，stdout+stderr 合并后交给 agent），二者恰有其一。
+//! - `.ki/cron.json` 是项目资源：项目不受信任时不读取、不调度，prompt 与
+//!   command 使用同一个信任判定；运行中撤销信任会停止调度线程。
 //!
 //! 日期语义沿用 Vixie cron：日（day-of-month）与星期（day-of-week）都受限
 //! 时取“或”，否则取“与”。星期 0 与 7 都表示周日。
@@ -762,11 +764,25 @@ impl CronHandle {
         sink: Arc<dyn CronSink>,
         clock: Arc<dyn CronClock>,
     ) -> Self {
+        Self::start_with_clock_and_trust(cwd, sink, clock, Arc::new(|| true))
+    }
+
+    fn start_with_clock_and_trust(
+        cwd: impl AsRef<Path>,
+        sink: Arc<dyn CronSink>,
+        clock: Arc<dyn CronClock>,
+        trust: CronTrust,
+    ) -> Self {
         let config_path = config_path(cwd.as_ref());
         let (stop, stop_rx) = mpsc::channel();
         let thread = thread::spawn(move || {
             let mut core = CronCore::new(config_path);
             loop {
+                // 信任检查必须先于配置读取。运行中撤销信任时，这个线程在下一次
+                // 轮询退出；不再读取项目配置，也不再触发任何项目任务。
+                if !trust() {
+                    break;
+                }
                 let now = clock.now();
                 if let Some(errors) = core.reload_if_changed() {
                     if !errors.is_empty() {
@@ -779,6 +795,10 @@ impl CronHandle {
                     }
                 }
                 for job in core.tick(now) {
+                    // 配置读取与触发之间也可能发生撤销，在副作用前再检查一次。
+                    if !trust() {
+                        return;
+                    }
                     sink.fire(&job);
                 }
                 match stop_rx.recv_timeout(core.time_until_next_tick(now)) {
@@ -1013,6 +1033,10 @@ pub trait CronInject: Send + Sync + 'static {
 /// 诊断日志出口。TUI 下写 `<agent_dir>/logs/ki.log`；测试里收集到内存。
 pub type CronLog = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// 当前项目是否仍受信任。调度线程在读取配置和触发任务前重新求值，
+/// 因而 `/trust no` 或外部修改信任存储都能停止后续触发。
+pub type CronTrust = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// 宿主侧 [`CronSink`]：拼接注入文本、执行命令、处理并发与关闭竞态。
 pub struct SessionCronSink {
     /// 会话工作目录：命令的 cwd，也是 `.ki/cron.json` 的根。
@@ -1135,17 +1159,37 @@ impl CronSink for SessionCronSink {
     }
 }
 
-/// 配置文件存在时启动调度线程；`None` 表示这个会话没有定时任务，什么都不启动。
+/// 项目受信任且配置文件存在时启动调度线程；否则返回 `None`，什么都不启动。
 ///
 /// 只在交互式会话里调用（见模块文档）。启动后配置文件的增删改由线程按 mtime
-/// 自行重载，不需要调用方再介入。
+/// 自行重载；信任状态也会重新求值，撤销后线程退出，不需要调用方再介入。
 pub fn start_if_configured(
     cwd: &Path,
     inject: Arc<dyn CronInject>,
     log: CronLog,
     shutting_down: Arc<AtomicBool>,
+    trust: CronTrust,
 ) -> Option<CronHandle> {
-    if !config_path(cwd).is_file() {
+    start_if_configured_with_clock(
+        cwd,
+        inject,
+        log,
+        shutting_down,
+        Arc::new(SystemClock),
+        trust,
+    )
+}
+
+fn start_if_configured_with_clock(
+    cwd: &Path,
+    inject: Arc<dyn CronInject>,
+    log: CronLog,
+    shutting_down: Arc<AtomicBool>,
+    clock: Arc<dyn CronClock>,
+    trust: CronTrust,
+) -> Option<CronHandle> {
+    // 不做“先检查文件、稍后再检查信任”：不受信任时连元数据都不读取。
+    if !trust() || !config_path(cwd).is_file() {
         return None;
     }
     let sink = Arc::new(SessionCronSink::new(
@@ -1154,7 +1198,9 @@ pub fn start_if_configured(
         log,
         shutting_down,
     ));
-    Some(CronHandle::start(cwd, sink))
+    Some(CronHandle::start_with_clock_and_trust(
+        cwd, sink, clock, trust,
+    ))
 }
 
 #[cfg(test)]
@@ -1801,12 +1847,145 @@ mod tests {
         assert_eq!(std::fs::canonicalize(output.text.trim()).unwrap(), expected);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn untrusted_project_never_starts_or_executes_cron() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("untrusted-command-ran");
+        write_config(
+            dir.path(),
+            &format!(
+                r#"[{{"name":"denied","schedule":"* * * * *","command":"printf ran > '{}'"}}]"#,
+                marker.display()
+            ),
+        );
+        let mock = MockInject::new();
+        let (log, lines) = recording_log();
+        let clock = Arc::new(MockClock {
+            current: Mutex::new(local(2026, 10, 24, 9, 5)),
+        });
+
+        let started = start_if_configured_with_clock(
+            dir.path(),
+            mock.clone(),
+            log,
+            Arc::new(AtomicBool::new(false)),
+            clock,
+            Arc::new(|| false),
+        );
+
+        assert!(
+            started.is_none(),
+            "不受信任的项目不得启动调度线程，即使配置存在"
+        );
+        assert!(!marker.exists(), "配置中的命令绝不能执行");
+        assert!(mock.texts().is_empty());
+        assert!(
+            lines.lock().unwrap().is_empty(),
+            "不受信任时不读取配置，也不应产生配置诊断"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_project_starts_cron_and_executes_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            r#"[{"name":"allowed","schedule":"* * * * *","command":"printf trusted"}]"#,
+        );
+        let mock = MockInject::new();
+        let (log, _lines) = recording_log();
+        let clock = Arc::new(MockClock {
+            current: Mutex::new(local(2026, 10, 24, 9, 5)),
+        });
+
+        let handle = start_if_configured_with_clock(
+            dir.path(),
+            mock.clone(),
+            log,
+            Arc::new(AtomicBool::new(false)),
+            clock,
+            Arc::new(|| true),
+        )
+        .expect("受信任且配置存在时必须启动调度器");
+
+        let texts = wait_for_injections(&mock, 1);
+        assert_eq!(
+            texts,
+            vec!["⏰ cron:allowed 命令输出（退出码 0）
+
+trusted"
+                .to_string()]
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn revoking_project_trust_stops_scheduler_and_future_fires() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            r#"[{"name":"tick","schedule":"* * * * *","prompt":"ping"}]"#,
+        );
+        let mock = MockInject::new();
+        let (log, _lines) = recording_log();
+        let clock = Arc::new(MockClock {
+            current: Mutex::new(local(2026, 10, 24, 9, 5)),
+        });
+        let trusted = Arc::new(AtomicBool::new(true));
+        let trust = {
+            let trusted = Arc::clone(&trusted);
+            Arc::new(move || trusted.load(Ordering::SeqCst))
+        };
+        let handle = start_if_configured_with_clock(
+            dir.path(),
+            mock.clone(),
+            log,
+            Arc::new(AtomicBool::new(false)),
+            clock.clone(),
+            trust,
+        )
+        .expect("撤销前项目受信任，调度器应启动");
+        assert_eq!(wait_for_injections(&mock, 1).len(), 1);
+
+        trusted.store(false, Ordering::SeqCst);
+        *clock.current.lock().unwrap() = local(2026, 10, 24, 9, 6);
+
+        let mut stopped = false;
+        for _ in 0..250 {
+            if handle
+                .thread
+                .as_ref()
+                .is_some_and(std::thread::JoinHandle::is_finished)
+            {
+                stopped = true;
+                break;
+            }
+            std::thread::sleep(StdDuration::from_millis(20));
+        }
+        assert!(stopped, "撤销信任后调度线程必须自行退出");
+        handle.stop();
+        assert_eq!(
+            mock.texts().len(),
+            1,
+            "撤销后的下一分钟不得再次触发: {:?}",
+            mock.texts()
+        );
+    }
+
     #[test]
     fn start_if_configured_starts_nothing_without_a_file() {
         let dir = tempfile::tempdir().unwrap();
         let mock = MockInject::new();
         let (log, _lines) = recording_log();
-        let started = start_if_configured(dir.path(), mock, log, Arc::new(AtomicBool::new(false)));
+        let started = start_if_configured(
+            dir.path(),
+            mock,
+            log,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(|| true),
+        );
         assert!(started.is_none(), "没有 .ki/cron.json 就不该启动调度线程");
     }
 
