@@ -101,6 +101,174 @@ fn todo_wasm() -> PathBuf {
     build_guest("kiqi-todo-guest", "kiqi_todo_guest.wasm")
 }
 
+/// A conformance component with one no-argument core function turned into an
+/// infinite loop and installed as the module's start function. The rest of the
+/// component is unchanged, so `World::instantiate` really reaches guest start
+/// code instead of failing early on missing exports.
+fn spinning_start_wasm(dir: &Path) -> PathBuf {
+    let component = std::fs::read(fixture_wasm()).expect("read conformance component");
+    let mut output = component[..8].to_vec();
+    let mut injected = false;
+    for (id, range) in binary_sections(&component) {
+        let mut body = component[range.clone()].to_vec();
+        if id == 1 && !injected {
+            if let Some(module) = module_with_spinning_start(&body) {
+                body = module;
+                injected = true;
+            }
+        }
+        output.push(id);
+        encode_u32(body.len() as u32, &mut output);
+        output.extend_from_slice(&body);
+    }
+    assert!(injected, "a core module needs a no-argument function");
+    let path = dir.join("spinning-start.wasm");
+    std::fs::write(&path, output).expect("write spinning-start component");
+    path
+}
+
+/// Yield `(section id, contents range)` for a binary module or component.
+fn binary_sections(bytes: &[u8]) -> Vec<(u8, std::ops::Range<usize>)> {
+    let mut sections = Vec::new();
+    let mut cursor = 8;
+    while cursor < bytes.len() {
+        let id = bytes[cursor];
+        cursor += 1;
+        let (size, used) = decode_u32(&bytes[cursor..]);
+        cursor += used;
+        let end = cursor + size as usize;
+        sections.push((id, cursor..end));
+        cursor = end;
+    }
+    sections
+}
+
+fn decode_u32(bytes: &[u8]) -> (u32, usize) {
+    let mut value = 0u32;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        value |= u32::from(byte & 0x7f) << (index * 7);
+        if byte & 0x80 == 0 {
+            return (value, index + 1);
+        }
+    }
+    panic!("unterminated LEB128");
+}
+
+fn encode_u32(mut value: u32, output: &mut Vec<u8>) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        output.push(byte);
+        if value == 0 {
+            return;
+        }
+    }
+}
+
+fn module_with_spinning_start(bytes: &[u8]) -> Option<Vec<u8>> {
+    use wasmparser::{CompositeInnerType, Imports, Payload, TypeRef};
+
+    let mut no_argument_types = Vec::new();
+    let mut imported_functions = 0u32;
+    let mut candidates = Vec::new();
+    let mut code_ordinal = 0u32;
+    let mut spin_function = None;
+    let mut body_position = None;
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        match payload.expect("parse core module") {
+            Payload::TypeSection(reader) => {
+                for group in reader {
+                    for ty in group.expect("type group").into_types() {
+                        no_argument_types.push(match ty.composite_type.inner {
+                            CompositeInnerType::Func(function) => {
+                                function.params().is_empty() && function.results().is_empty()
+                            }
+                            _ => false,
+                        });
+                    }
+                }
+            }
+            Payload::ImportSection(reader) => {
+                for group in reader {
+                    match group.expect("import group") {
+                        Imports::Single(_, import) => {
+                            imported_functions += u32::from(matches!(import.ty, TypeRef::Func(_)));
+                        }
+                        Imports::Compact1 { items, .. } => {
+                            for item in items {
+                                imported_functions += u32::from(matches!(
+                                    item.expect("compact import").ty,
+                                    TypeRef::Func(_)
+                                ));
+                            }
+                        }
+                        Imports::Compact2 { ty, names, .. } => {
+                            if matches!(ty, TypeRef::Func(_)) {
+                                imported_functions += names.count();
+                            }
+                        }
+                    }
+                }
+            }
+            Payload::FunctionSection(reader) => {
+                for (ordinal, ty) in reader.into_iter().enumerate() {
+                    let type_index = ty.expect("function type");
+                    if no_argument_types
+                        .get(type_index as usize)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        candidates.push(ordinal as u32);
+                    }
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                if body_position.is_none() && candidates.contains(&code_ordinal) {
+                    let operators = body.get_binary_reader_for_operators().expect("operators");
+                    let position = operators.original_position() as usize;
+                    if position + 5 <= body.range().end as usize {
+                        spin_function = Some(imported_functions + code_ordinal);
+                        body_position = Some(position);
+                    }
+                }
+                code_ordinal += 1;
+            }
+            _ => {}
+        }
+    }
+    let function_index = spin_function?;
+    let body_position = body_position?;
+    let mut module = bytes.to_vec();
+    // `loop { br 0 }`, followed by the original (now unreachable) body.
+    module[body_position..body_position + 5].copy_from_slice(&[0x03, 0x40, 0x0c, 0x00, 0x0b]);
+
+    let mut start = Vec::new();
+    encode_u32(function_index, &mut start);
+    let mut section = vec![8];
+    encode_u32(start.len() as u32, &mut section);
+    section.extend_from_slice(&start);
+    let mut cursor = 8;
+    let insertion = loop {
+        if cursor == module.len() {
+            break cursor;
+        }
+        let section_start = cursor;
+        let id = module[cursor];
+        cursor += 1;
+        let (size, used) = decode_u32(&module[cursor..]);
+        cursor += used;
+        if id > 8 {
+            break section_start;
+        }
+        cursor += size as usize;
+    };
+    module.splice(insertion..insertion, section);
+    Some(module)
+}
+
 /// A `SessionRead` with a fixed branch, so the todo guest has something to
 /// restore from.
 struct FixedSession {
@@ -4023,6 +4191,23 @@ fn render_host_is_not_created_without_a_markdown_grant() {
     );
 }
 
+#[test]
+fn render_instantiation_bounds_a_spinning_start_function() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wasm = spinning_start_wasm(dir.path());
+    let started = std::time::Instant::now();
+    let error = match RenderHost::new("spinning-start", &wasm, &render_grant(4096)) {
+        Ok(_) => panic!("a spinning start function must not produce a renderer"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "instantiation must return within its wall-clock bound: {:?}",
+        started.elapsed()
+    );
+    assert!(error.contains("instantiate"), "{error}");
+}
+
 // ---------------------------------------------------------------------------
 // P3(b): typed command flows and declaration-scoped cli-flag
 // ---------------------------------------------------------------------------
@@ -4764,6 +4949,24 @@ fn a_spinning_provider_guest_is_interrupted_by_the_deadline() {
         error.contains("trapped") || error.contains("deadline"),
         "{error}"
     );
+}
+
+#[test]
+fn provider_instantiation_bounds_a_spinning_start_function() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wasm = spinning_start_wasm(dir.path());
+    let grants = provider_grants(30, vec![provider_model("conformance-model")]);
+    let started = std::time::Instant::now();
+    let error = match ProviderHost::load("conformance", &wasm, &grants) {
+        Ok(_) => panic!("a spinning start function must not produce a provider"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "instantiation must return within its wall-clock bound: {:?}",
+        started.elapsed()
+    );
+    assert!(error.contains("instantiate"), "{error}");
 }
 
 #[test]

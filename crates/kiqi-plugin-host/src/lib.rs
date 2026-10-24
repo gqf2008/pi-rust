@@ -3752,6 +3752,51 @@ pub(crate) fn epoch_ticks(deadline: std::time::Duration) -> u64 {
     deadline.as_millis().div_ceil(RENDER_TICK_MS as u128).max(1) as u64
 }
 
+/// Instantiate a full plugin world without letting component start code run
+/// unbounded. Compilation happens before this worker starts; fuel, the epoch
+/// deadline and the outer wall clock cover only untrusted instantiation.
+fn instantiate_bounded(
+    id: &str,
+    kind: &str,
+    mut store: Store<HostState>,
+    component: Component,
+    linker: Linker<HostState>,
+) -> Result<(Store<HostState>, World), PluginError> {
+    store.set_fuel(DISCOVERY_FUEL).map_err(|error| {
+        PluginError::Failed(format!("instantiate {id} for {kind}: set fuel: {error}"))
+    })?;
+    store.set_epoch_deadline(epoch_ticks(DISCOVERY_DEADLINE));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::Builder::new()
+        .name("kiqi-plugin-instantiate".to_string())
+        .spawn(move || {
+            let outcome =
+                World::instantiate(&mut store, &component, &linker).map(|guest| (store, guest));
+            let _ = tx.send(outcome);
+        });
+    match worker {
+        Ok(handle) => drop(handle),
+        Err(error) => {
+            return Err(PluginError::Failed(format!(
+                "instantiate {id} for {kind}: cannot start worker: {error}"
+            )))
+        }
+    }
+    match rx.recv_timeout(DISCOVERY_WAIT) {
+        Ok(Ok(pair)) => Ok(pair),
+        Ok(Err(error)) => Err(PluginError::Failed(format!(
+            "instantiate {id} for {kind}: {error}"
+        ))),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(PluginError::Failed(format!(
+            "instantiate {id} for {kind}: exceeded the {}s instantiation deadline",
+            DISCOVERY_WAIT.as_secs()
+        ))),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(PluginError::Failed(format!(
+            "instantiate {id} for {kind}: worker ended without a result"
+        ))),
+    }
+}
+
 /// Advance every live render engine's epoch once per [`RENDER_TICK_MS`].
 ///
 /// Epoch interruption is an **Engine** setting, so one shared ticker thread
@@ -3907,7 +3952,10 @@ impl RenderHost {
             PluginError::Failed(format!("{id}: render epoch ticker is unavailable"))
         })?;
 
-        let mut config = wasmtime_config(&Options::default());
+        let mut config = wasmtime_config(&Options {
+            fuel: Some(DISCOVERY_FUEL),
+            ..Options::default()
+        });
         config.epoch_interruption(true);
         let engine = std::sync::Arc::new(
             Engine::new(&config)
@@ -3948,14 +3996,7 @@ impl RenderHost {
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|state| &mut state.limits);
-        // The ticker starts as soon as the engine is registered, and an
-        // epoch-enabled store starts with deadline 0 — without this, the first
-        // tick interrupts instantiation itself. Each call installs its real
-        // deadline before entering the guest.
-        store.set_epoch_deadline(EPOCH_DEADLINE_UNBOUNDED);
-        let guest = World::instantiate(&mut store, &component, &linker).map_err(|error| {
-            PluginError::Failed(format!("instantiate {id} for render: {error}"))
-        })?;
+        let (store, guest) = instantiate_bounded(&id, "render", store, component.clone(), linker)?;
 
         Ok(Self {
             id,
@@ -3990,9 +4031,13 @@ impl RenderHost {
             .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let Some(inner) = guard.take() else {
+        let Some(mut inner) = guard.take() else {
             return Err(format!("{}: render instance is gone", self.id));
         };
+        if let Err(error) = inner.store.set_fuel(u64::MAX) {
+            *guard = Some(inner);
+            return Err(format!("{}: reset render fuel: {error}", self.id));
+        }
 
         let ticks = epoch_ticks(self.timeout);
         let deadline = self.timeout;

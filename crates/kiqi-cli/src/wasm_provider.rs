@@ -368,17 +368,27 @@ fn ensure_host(slot: &ProviderSlot) -> Result<Arc<kiqi_plugin_host::ProviderHost
         .host
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(host) = guard.as_ref() {
-        if !host.is_disabled() {
-            return Ok(Arc::clone(host));
-        }
-    }
-    // Re-read the grant on every (re)build: a revoked grant must stop the very
-    // next request, and the adapter may outlive a `/model` reload.
+    // Re-read and validate the grant before *every* cache decision: a revoked
+    // or narrowed profile must stop the very next request, even though the
+    // adapter and its credential outlive a `/model` reload.
     let grants = match &slot.agent_root {
         Some(root) => kiqi_plugin::grants::Grants::load_for_at(root, &slot.id),
         None => kiqi_plugin::grants::Grants::load_for(&slot.id),
     };
+    let current_profile = grants
+        .provider
+        .as_ref()
+        .and_then(|grant| grant.providers.iter().find(|profile| profile.id == slot.id));
+    if let Some(host) = guard.as_ref() {
+        if !host.is_disabled()
+            && current_profile.is_some_and(|profile| host.has_exact_profile(profile))
+        {
+            return Ok(Arc::clone(host));
+        }
+    }
+    // Never leave a stale instance eligible for a later request. A failed
+    // rebuild fails closed and is retried from the current grant next time.
+    *guard = None;
     let host = ProviderHost::load_with_options(
         slot.id.clone(),
         &slot.wasm,
@@ -1044,5 +1054,110 @@ mod tests {
             other => panic!("expected the fail-closed error, got {other:?}"),
         }
         assert!(!provider.host_loaded());
+    }
+
+    #[tokio::test]
+    async fn revoking_a_cached_provider_grant_stops_the_next_request() {
+        let _lock = HOST_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let wasm = install_conformance_provider(root.path(), &["conformance-stream"]);
+
+        // Leave a valid, resolvable credential in place: revocation, rather
+        // than credential loss, must be what stops the second request.
+        std::fs::write(
+            root.path().join("auth.json"),
+            r#"{"anthropic":{"type":"api_key","key":"sk-revocation-secret"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("plugins/conformance/credentials.json"),
+            serde_json::json!({
+                "pc-revocation": {
+                    "source": "auth-json:anthropic",
+                    "provider": "anthropic",
+                    "display": "Anthropic",
+                    "fingerprint": kiqi_plugin_host::fingerprint_credential(
+                        "sk-revocation-secret"
+                    ),
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut grants = Grants::load_for_at(root.path(), "conformance");
+        grants.provider.as_mut().unwrap().providers[0].credential =
+            Some("pc-revocation".to_string());
+        Grants::save_for_at(root.path(), "conformance", &grants).unwrap();
+
+        let provider = WasmProvider::new(
+            "conformance",
+            vec![conformance_model("conformance-stream")],
+            wasm,
+            Some(root.path().to_path_buf()),
+        );
+        let model = conformance_model("conformance-stream");
+        let mut first = provider
+            .stream_simple(&model, &Context::default(), &SimpleStreamOptions::default())
+            .await;
+        let first = drain(&mut first).await;
+        assert!(matches!(
+            first.last(),
+            Some(AssistantMessageEvent::Done { .. })
+        ));
+        assert!(provider.host_loaded());
+
+        grants.provider = None;
+        Grants::save_for_at(root.path(), "conformance", &grants).unwrap();
+        let mut second = provider
+            .stream_simple(&model, &Context::default(), &SimpleStreamOptions::default())
+            .await;
+        let second = drain(&mut second).await;
+        assert!(
+            !second
+                .iter()
+                .any(|event| matches!(event, AssistantMessageEvent::Done { .. })),
+            "the revoked guest must not execute: {second:?}"
+        );
+        match second.last() {
+            Some(AssistantMessageEvent::Error { error, .. }) => assert!(
+                error
+                    .error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("no `provider` grant"),
+                "{error:?}"
+            ),
+            other => panic!("revocation must fail closed: {other:?}"),
+        }
+        assert!(root.path().join("auth.json").is_file());
+    }
+
+    #[test]
+    fn a_narrowed_cached_provider_profile_is_rebuilt() {
+        let _lock = HOST_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let wasm = install_conformance_provider(root.path(), &["conformance-stream"]);
+        let slot = ProviderSlot {
+            id: "conformance".to_string(),
+            wasm,
+            agent_root: Some(root.path().to_path_buf()),
+            host: std::sync::Mutex::new(None),
+        };
+        reset_hosts_built();
+        let original = ensure_host(&slot).expect("initial host");
+        let cached = ensure_host(&slot).expect("unchanged grant reuses the host");
+        assert!(Arc::ptr_eq(&original, &cached));
+        assert_eq!(hosts_built(), 1);
+
+        let mut grants = Grants::load_for_at(root.path(), "conformance");
+        grants.provider.as_mut().unwrap().providers[0].max_handles = 1;
+        Grants::save_for_at(root.path(), "conformance", &grants).unwrap();
+        let narrowed = ensure_host(&slot).expect("narrowed grant builds a fresh host");
+        assert!(!Arc::ptr_eq(&original, &narrowed));
+        assert_eq!(hosts_built(), 2);
     }
 }

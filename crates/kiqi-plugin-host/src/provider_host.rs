@@ -268,6 +268,9 @@ pub struct ProviderHost {
     transport: Arc<dyn ProviderHttpTransport>,
     /// One request's wall clock. A call that exceeds it is aborted.
     timeout: std::time::Duration,
+    /// Fuel installed before each guest call. Instantiation always uses the
+    /// discovery budget; this preserves the optional per-call test budget.
+    fuel: u64,
     inner: Mutex<Option<ProviderInner>>,
     /// Set after a trap or a wall-clock deadline. A trapped store may be
     /// mid-import, so the instance is not reused.
@@ -318,7 +321,7 @@ impl ProviderHost {
         })?;
 
         let mut config = crate::wasmtime_config(&crate::Options {
-            fuel: options.fuel,
+            fuel: Some(options.fuel.unwrap_or(crate::DISCOVERY_FUEL)),
             max_memory_bytes: options.max_memory_bytes,
             ..crate::Options::default()
         });
@@ -366,12 +369,8 @@ impl ProviderHost {
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|state| &mut state.limits);
-        // A registered epoch engine starts at deadline 0; each call installs
-        // its real deadline, so instantiation itself must not be interrupted.
-        store.set_epoch_deadline(1_000_000_000);
-        let guest = World::instantiate(&mut store, &component, &linker).map_err(|error| {
-            PluginError::Failed(format!("instantiate {id} for provider: {error}"))
-        })?;
+        let (store, guest) =
+            crate::instantiate_bounded(&id, "provider", store, component.clone(), linker)?;
 
         Ok(Some(Self {
             id,
@@ -382,6 +381,7 @@ impl ProviderHost {
                     .timeout_seconds
                     .clamp(1, kiqi_plugin::grants::PROVIDER_TIMEOUT_MAX_SECONDS),
             ),
+            fuel: options.fuel.unwrap_or(u64::MAX),
             profile,
             plugin_dir: wasm
                 .parent()
@@ -405,6 +405,11 @@ impl ProviderHost {
         &self.profile.models
     }
 
+    /// Whether the on-disk profile still exactly matches this cached host.
+    pub fn has_exact_profile(&self, profile: &ProviderProfile) -> bool {
+        &self.profile == profile
+    }
+
     /// The grant-narrowed catalog: the guest may only remove models, never add
     /// one. Runs on its own thread with the discovery wall clock.
     pub fn list_specs(&self) -> Result<Vec<ProviderModel>, String> {
@@ -415,6 +420,10 @@ impl ProviderHost {
         let Some(mut inner) = guard.take() else {
             return Err(format!("{}: provider instance is gone", self.id));
         };
+        if let Err(error) = inner.store.set_fuel(self.fuel) {
+            *guard = Some(inner);
+            return Err(format!("{}: reset provider fuel: {error}", self.id));
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let probe = std::thread::Builder::new()
             .name("kiqi-provider-metadata".to_string())
@@ -558,6 +567,10 @@ impl ProviderHost {
         let Some(mut inner) = guard.take() else {
             return Err(format!("{}: provider instance is gone", self.id));
         };
+        if let Err(error) = inner.store.set_fuel(self.fuel) {
+            *guard = Some(inner);
+            return Err(format!("{}: reset provider fuel: {error}", self.id));
+        }
 
         let call = ProviderCallState {
             profile: self.profile.clone(),
