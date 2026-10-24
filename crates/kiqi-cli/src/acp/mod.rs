@@ -1283,7 +1283,11 @@ mod tests {
         for _ in 0..responses {
             script = script.with_text(text);
         }
-        let provider = FauxProvider::new(script.with_tokens_per_second(tokens_per_second));
+        faux_deps_with_script(script.with_tokens_per_second(tokens_per_second)).await
+    }
+
+    async fn faux_deps_with_script(script: FauxScript) -> sessions::SessionDeps {
+        let provider = FauxProvider::new(script);
         let (broadcast, event_rx) = BroadcastEmitter::new(256);
         let session = kiqi_harness::session::session::Session::new(
             Arc::new(kiqi_harness::session::memory::InMemorySessionStorage::new(
@@ -1634,6 +1638,29 @@ mod tests {
         text
     }
 
+    /// 按 sessionId 汇集已经送达的消息块，避免一个会话的消费掩盖另一个会话的串流。
+    async fn collect_texts_by_session(updates: &mut Updates) -> HashMap<SessionId, String> {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut texts = HashMap::new();
+        while let Ok(notification) = updates.try_recv() {
+            if let SessionUpdate::AgentMessageChunk(chunk) = notification.update {
+                if let ContentBlock::Text(received) = chunk.content {
+                    texts
+                        .entry(notification.session_id)
+                        .or_insert_with(String::new)
+                        .push_str(&received.text);
+                }
+            }
+        }
+        texts
+    }
+
+    fn assert_unknown_session(error: Error, session_id: &SessionId) {
+        assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
+        assert_eq!(error.message, format!("unknown session {session_id}"));
+        assert_eq!(error.data, None);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn happy_path_streams_chunks_and_answers_end_turn() {
         const SCRIPT: &str = "hello from faux";
@@ -1893,23 +1920,57 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn multiple_live_sessions_route_by_id_and_close_releases_them() {
+    async fn abb_multi_chat_sessions_run_close_and_reopen() {
         let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let factory: SessionFactory = Arc::new(
+            |cwd: &std::path::Path,
+             _params: sessions::SessionParams,
+             _request: sessions::SessionRequest| {
+                let label = cwd
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("unknown")
+                    .to_owned();
+                Box::pin(async move {
+                    // B 在 A 关闭后还要再跑一轮，因此给它两段相同的 faux 响应。
+                    let responses = if label == "b" { 2 } else { 1 };
+                    let text = format!("reply-{label}");
+                    Ok(faux_deps_with_responses(&text, 1000.0, responses).await)
+                })
+                    as futures::future::BoxFuture<'static, Result<sessions::SessionDeps, String>>
+            },
+        );
         let result = run_client(
-            faux_factory_with_responses("ok", 1000.0, 2),
+            factory,
             updates_tx,
             None,
             async move |cx: ConnectionTo<Agent>| {
-                let first = init_and_new(&cx).await?;
-                // 另一个会话仍活跃时，第二次 session/new 必须成功。
-                let second = cx
-                    .send_request(NewSessionRequest::new(std::env::temp_dir()))
+                init_only(&cx).await?;
+                let ghost = SessionId::from("ki-ghost");
+                let error = cx
+                    .send_request(PromptRequest::new(
+                        ghost.clone(),
+                        vec![ContentBlock::from("hi")],
+                    ))
+                    .block_task()
+                    .await
+                    .expect_err("unknown session prompt must fail");
+                assert_unknown_session(error, &ghost);
+
+                let root = std::env::temp_dir().join("ki-acp-abb-multi-chat");
+                let a = cx
+                    .send_request(NewSessionRequest::new(root.join("a")))
                     .block_task()
                     .await?
                     .session_id;
-                assert_ne!(first, second);
-
-                for sid in [&first, &second] {
+                // A 仍活跃时创建 B；两个 id 必须都能独立路由。
+                let b = cx
+                    .send_request(NewSessionRequest::new(root.join("b")))
+                    .block_task()
+                    .await?
+                    .session_id;
+                assert_ne!(a, b);
+                for sid in [&a, &b] {
                     let response = cx
                         .send_request(PromptRequest::new(
                             sid.clone(),
@@ -1919,47 +1980,149 @@ mod tests {
                         .await?;
                     assert_eq!(response.stop_reason, StopReason::EndTurn);
                 }
-                let updates = drain_updates(&mut updates_rx, 2).await;
-                assert_eq!(updates[0].session_id, first);
-                assert_eq!(updates[1].session_id, second);
+                let texts = collect_texts_by_session(&mut updates_rx).await;
+                assert_eq!(texts.len(), 2);
+                assert_eq!(texts.get(&a).map(String::as_str), Some("reply-a"));
+                assert_eq!(texts.get(&b).map(String::as_str), Some("reply-b"));
 
-                cx.send_request(CloseSessionRequest::new(first.clone()))
+                // ABB 的关键路径：关闭 A 后创建 C，B 始终不必重建。
+                cx.send_request(CloseSessionRequest::new(a.clone()))
                     .block_task()
                     .await?;
-                // 已关闭 id 不再路由到剩下的会话，重复 close 也是同一错误形状。
-                for attempt in 0..2 {
-                    let error = if attempt == 0 {
-                        cx.send_request(PromptRequest::new(
-                            first.clone(),
-                            vec![ContentBlock::from("closed")],
-                        ))
-                        .block_task()
-                        .await
-                        .expect_err("closed session prompt must fail")
-                    } else {
-                        cx.send_request(CloseSessionRequest::new(first.clone()))
-                            .block_task()
-                            .await
-                            .expect_err("closing an unknown id must fail")
-                    };
-                    assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
-                    assert!(error.message.contains("unknown session"));
-                }
-
-                // close 只释放目标会话，另一个会话及后续新建都不受影响。
-                let response = cx
+                let error = cx
                     .send_request(PromptRequest::new(
-                        second,
-                        vec![ContentBlock::from("still live")],
+                        a.clone(),
+                        vec![ContentBlock::from("closed")],
                     ))
                     .block_task()
-                    .await?;
-                assert_eq!(response.stop_reason, StopReason::EndTurn);
-                let third = cx
-                    .send_request(NewSessionRequest::new(std::env::temp_dir()))
+                    .await
+                    .expect_err("closed session prompt must fail");
+                assert_unknown_session(error, &a);
+                let error = cx
+                    .send_request(CloseSessionRequest::new(a.clone()))
                     .block_task()
-                    .await?;
-                assert_ne!(third.session_id, first);
+                    .await
+                    .expect_err("closing an unknown id must fail");
+                assert_unknown_session(error, &a);
+
+                let c = cx
+                    .send_request(NewSessionRequest::new(root.join("c")))
+                    .block_task()
+                    .await?
+                    .session_id;
+                assert_ne!(c, a);
+                assert_ne!(c, b);
+                for sid in [&b, &c] {
+                    let response = cx
+                        .send_request(PromptRequest::new(
+                            sid.clone(),
+                            vec![ContentBlock::from("still live")],
+                        ))
+                        .block_task()
+                        .await?;
+                    assert_eq!(response.stop_reason, StopReason::EndTurn);
+                }
+                let texts = collect_texts_by_session(&mut updates_rx).await;
+                assert_eq!(texts.len(), 2);
+                assert_eq!(texts.get(&b).map(String::as_str), Some("reply-b"));
+                assert_eq!(texts.get(&c).map(String::as_str), Some("reply-c"));
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn session_cwd_system_prompt_and_context_do_not_leak() {
+        let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let factory: SessionFactory = Arc::new(
+            |cwd: &std::path::Path,
+             params: sessions::SessionParams,
+             _request: sessions::SessionRequest| {
+                let cwd = cwd.to_path_buf();
+                let system_prompt = params.system_prompt_append.unwrap_or_default();
+                Box::pin(async move {
+                    let response_cwd = cwd.display().to_string();
+                    let response_prompt = system_prompt.clone();
+                    let script = FauxScript::new();
+                    script.set_responses(vec![kiqi_ai::providers::faux::FauxStep::factory(
+                        move |context| {
+                            let users = context
+                                .messages
+                                .iter()
+                                .filter_map(|message| match message {
+                                    kiqi_ai::types::Message::User(user) => user.content.as_text(),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            kiqi_ai::providers::faux::faux_assistant_message(
+                                format!(
+                                    "cwd={response_cwd}|system={response_prompt}|users={users}"
+                                ),
+                                kiqi_ai::types::StopReason::Stop,
+                            )
+                        },
+                    )]);
+                    let deps = faux_deps_with_script(script.with_tokens_per_second(1000.0)).await;
+                    deps.harness
+                        .set_system_prompt(Some(system_prompt))
+                        .await
+                        .expect("set per-session system prompt");
+                    Ok(deps)
+                })
+                    as futures::future::BoxFuture<'static, Result<sessions::SessionDeps, String>>
+            },
+        );
+        let result = run_client(
+            factory,
+            updates_tx,
+            None,
+            async move |cx: ConnectionTo<Agent>| {
+                init_only(&cx).await?;
+                let root = std::env::temp_dir().join("ki-acp-session-state");
+                let mut meta_a = agent_client_protocol::schema::v1::Meta::new();
+                meta_a.insert(
+                    "systemPrompt".into(),
+                    serde_json::json!({"append": "system-a"}),
+                );
+                let mut meta_b = agent_client_protocol::schema::v1::Meta::new();
+                meta_b.insert(
+                    "systemPrompt".into(),
+                    serde_json::json!({"append": "system-b"}),
+                );
+                let a = cx
+                    .send_request(NewSessionRequest::new(root.join("a")).meta(meta_a))
+                    .block_task()
+                    .await?
+                    .session_id;
+                let b = cx
+                    .send_request(NewSessionRequest::new(root.join("b")).meta(meta_b))
+                    .block_task()
+                    .await?
+                    .session_id;
+                for (sid, prompt) in [(&a, "question-a"), (&b, "question-b")] {
+                    let response = cx
+                        .send_request(PromptRequest::new(
+                            sid.clone(),
+                            vec![ContentBlock::from(prompt)],
+                        ))
+                        .block_task()
+                        .await?;
+                    assert_eq!(response.stop_reason, StopReason::EndTurn);
+                }
+                let texts = collect_texts_by_session(&mut updates_rx).await;
+                let expected_a = format!(
+                    "cwd={}|system=system-a|users=question-a",
+                    root.join("a").display()
+                );
+                let expected_b = format!(
+                    "cwd={}|system=system-b|users=question-b",
+                    root.join("b").display()
+                );
+                assert_eq!(texts.get(&a), Some(&expected_a));
+                assert_eq!(texts.get(&b), Some(&expected_b));
                 Ok(())
             },
         )
@@ -1969,9 +2132,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn turns_and_cancellation_are_independent_between_sessions() {
-        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        const SCRIPT: &str = "both sessions can stream independently";
+        let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
         let result = run_client(
-            faux_factory("both sessions can stream independently", 20.0),
+            faux_factory(SCRIPT, 20.0),
             updates_tx,
             None,
             async move |cx: ConnectionTo<Agent>| {
@@ -1990,17 +2154,43 @@ mod tests {
                             Ok(())
                         })?;
                 }
-                cx.send_notification(CancelNotification::new(first))?;
-                let first = first_rx
+
+                // 等 B 真正开始串流再取消 A，避免测试只覆盖两个 turn 的启动竞态。
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                let mut second_text = String::new();
+                while second_text.is_empty() {
+                    let notification = tokio::time::timeout_at(deadline, updates_rx.recv())
+                        .await
+                        .expect("second session never streamed")
+                        .expect("updates channel closed");
+                    if notification.session_id == second {
+                        if let SessionUpdate::AgentMessageChunk(chunk) = notification.update {
+                            if let ContentBlock::Text(received) = chunk.content {
+                                second_text.push_str(&received.text);
+                            }
+                        }
+                    }
+                }
+                cx.send_notification(CancelNotification::new(first.clone()))?;
+                let first_response = first_rx
                     .await
                     .expect("first prompt response channel")
                     .expect("first prompt failed");
-                let second = second_rx
+                let second_response = second_rx
                     .await
                     .expect("second prompt response channel")
                     .expect("second prompt failed");
-                assert_eq!(first.stop_reason, StopReason::Cancelled);
-                assert_eq!(second.stop_reason, StopReason::EndTurn);
+                assert_eq!(first_response.stop_reason, StopReason::Cancelled);
+                assert_eq!(second_response.stop_reason, StopReason::EndTurn);
+
+                let mut texts = collect_texts_by_session(&mut updates_rx).await;
+                second_text.push_str(texts.remove(&second).as_deref().unwrap_or_default());
+                assert_eq!(second_text, SCRIPT, "cancel on A must not truncate B");
+                let first_text = texts.remove(&first).unwrap_or_default();
+                assert!(
+                    first_text.len() < SCRIPT.len(),
+                    "cancel on A must truncate A: {first_text:?}"
+                );
                 Ok(())
             },
         )
