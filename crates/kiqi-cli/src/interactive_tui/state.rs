@@ -39,6 +39,48 @@ pub(super) enum SelectorKind {
     Extension,
 }
 
+/// What kind of user interaction a plugin command asked for.
+///
+/// Mirrors the `command-result-body` variant that started the flow. The slot
+/// records it so a reply cannot be delivered as a different interaction (an
+/// editor answer to a selector, say) and so the cancellation path knows what
+/// it is tearing down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CommandFlowKind {
+    Selector,
+    Editor,
+    Prompt,
+}
+
+/// The single pending plugin command flow.
+///
+/// Exactly one flow may be pending at a time. A second invocation replaces the
+/// slot (and thereby invalidates the earlier flow: its reply will fail the id
+/// match); Esc takes it and sends `Cancelled`.
+pub(super) struct PendingCommandFlow {
+    pub(super) host: Arc<crate::plugins::PluginHost>,
+    pub(super) name: String,
+    pub(super) flow_id: String,
+    pub(super) kind: CommandFlowKind,
+}
+
+impl PendingCommandFlow {
+    /// Whether a reply identifies THIS flow. A stale or unknown id (or a reply
+    /// of the wrong interaction kind) never reaches the guest.
+    pub(super) fn matches(
+        &self,
+        host_id: &str,
+        name: &str,
+        flow_id: &str,
+        kind: CommandFlowKind,
+    ) -> bool {
+        self.host.id() == host_id
+            && self.name == name
+            && self.flow_id == flow_id
+            && self.kind == kind
+    }
+}
+
 /// The component receiving keys while a selector is open.
 ///
 /// Plain selectors route straight to the [`SelectList`]; searchable ones route
@@ -205,6 +247,9 @@ pub(super) struct TuiState {
     pub(super) active_extension_input: std::sync::Mutex<Option<Arc<Input>>>,
     /// Callback used to resolve an extension dialog with a cancellation action.
     pub(super) active_extension_cancel: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// The one pending plugin command flow (selector/editor/prompt), if any.
+    /// A second command invocation replaces it; Esc cancels it.
+    pub(super) pending_command_flow: std::sync::Mutex<Option<PendingCommandFlow>>,
     /// The autocomplete manager (slash + @file providers) consulted on every
     /// editor keystroke.
     pub(super) autocomplete: AutocompleteManager,
@@ -1292,6 +1337,36 @@ impl TuiState {
 
     pub(super) fn extension_dialog_open(&self) -> bool {
         self.extension_editor_open() || self.extension_input_open()
+    }
+
+    /// Install a pending plugin command flow, returning the one it replaced.
+    ///
+    /// Replacing is deliberate: a command invoked again while its earlier flow
+    /// is still up takes over the slot, and the stale flow's reply is then
+    /// rejected by [`Self::take_command_flow`].
+    pub(super) fn set_command_flow(&self, flow: PendingCommandFlow) -> Option<PendingCommandFlow> {
+        self.pending_command_flow.lock().unwrap().replace(flow)
+    }
+
+    /// Take the pending flow only when `(host, name, flow_id)` identifies it.
+    /// A stale/unknown id is rejected and leaves the slot untouched.
+    pub(super) fn take_command_flow(
+        &self,
+        host_id: &str,
+        name: &str,
+        flow_id: &str,
+        kind: CommandFlowKind,
+    ) -> Option<PendingCommandFlow> {
+        let mut slot = self.pending_command_flow.lock().unwrap();
+        match slot.as_ref() {
+            Some(flow) if flow.matches(host_id, name, flow_id, kind) => slot.take(),
+            _ => None,
+        }
+    }
+
+    /// Esc: take whatever flow is pending (the cancellation path).
+    pub(super) fn cancel_command_flow(&self) -> Option<PendingCommandFlow> {
+        self.pending_command_flow.lock().unwrap().take()
     }
 
     pub(super) fn set_hide_thinking(&self, hide: bool) {

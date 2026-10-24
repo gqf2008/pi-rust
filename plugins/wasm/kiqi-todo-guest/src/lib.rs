@@ -277,9 +277,22 @@ impl Guest for TodoPlugin {
         }]
     }
 
-    fn run_command(name: String, _arguments: String) -> Result<types::CommandResult, types::PluginError> {
+    fn run_command(name: String, arguments: String) -> Result<types::CommandResult, types::PluginError> {
         if name != COMMAND {
             return Err(types::PluginError::UnknownTool(name));
+        }
+        // `flag:<name>` exists so the host test can prove declaration-scoped
+        // `cli-flag`: this guest declares `todo-flag` and nothing else.
+        if let Some(flag) = arguments.strip_prefix("flag:") {
+            let value = match session_read::cli_flag(flag) {
+                None => "none".to_string(),
+                Some(types::FlagValue::Bare) => "bare".to_string(),
+                Some(types::FlagValue::Text(text)) => format!("text:{text}"),
+            };
+            return Ok(types::CommandResult {
+                flow_id: String::new(),
+                body: types::CommandResultBody::Message(format!("flag={value}")),
+            });
         }
         Ok(types::CommandResult {
             flow_id: String::new(),
@@ -291,7 +304,10 @@ impl Guest for TodoPlugin {
     }
 
     fn list_flags() -> Vec<types::FlagSpec> {
-        Vec::new()
+        vec![types::FlagSpec {
+            name: "todo-flag".to_string(),
+            description: "Todo flag".to_string(),
+        }]
     }
 
     fn list_shortcuts() -> Vec<types::ShortcutSpec> {

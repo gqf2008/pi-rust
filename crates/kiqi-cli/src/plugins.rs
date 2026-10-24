@@ -964,6 +964,22 @@ impl PluginHost {
         self.guard_result("command", || self.plugin.run_command(name, arguments, caps))
     }
 
+    /// Answer a selector/editor/prompt flow the plugin started.
+    ///
+    /// The caller owns the flow-id validation (the pending slot lives in the
+    /// TUI); the panic guard is the same one every in-process plugin call gets.
+    pub fn continue_command(
+        &self,
+        name: &str,
+        flow_id: &str,
+        reply: kiqi_plugin::CommandReply,
+        caps: &HostCaps<'_>,
+    ) -> Result<kiqi_plugin::CommandResult, kiqi_plugin::PluginError> {
+        self.guard_result("command", || {
+            self.plugin.continue_command(name, flow_id, reply, caps)
+        })
+    }
+
     /// A gate point's verdict. A panicking plugin has no opinion rather than
     /// blocking the action it could not judge.
     pub fn probe(

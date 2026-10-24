@@ -3886,3 +3886,212 @@ fn render_host_is_not_created_without_a_markdown_grant() {
             .is_none()
     );
 }
+
+// ---------------------------------------------------------------------------
+// P3(b): typed command flows and declaration-scoped cli-flag
+// ---------------------------------------------------------------------------
+
+/// A `SessionRead` that answers two different flags, so one can prove the
+/// host scopes each read to the *calling* plugin's declarations.
+struct FlagSession {
+    conformance: Option<kiqi_plugin::FlagValue>,
+    todo: Option<kiqi_plugin::FlagValue>,
+}
+
+impl kiqi_plugin::SessionRead for FlagSession {
+    fn active_tools(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn system_prompt(&self) -> String {
+        String::new()
+    }
+    fn thinking_level(&self) -> String {
+        String::new()
+    }
+    fn cli_flag(&self, name: &str) -> Option<kiqi_plugin::FlagValue> {
+        match name {
+            "conformance-flag" => self.conformance.clone(),
+            "todo-flag" => self.todo.clone(),
+            _ => None,
+        }
+    }
+    fn session_branch(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+}
+
+fn text_of_message(result: &kiqi_plugin::CommandResult) -> &str {
+    match &result.body {
+        kiqi_plugin::CommandResultBody::Message(text) => text,
+        other => panic!("expected a message body, got {other:?}"),
+    }
+}
+
+#[test]
+fn command_flows_round_trip_and_carry_flow_ids() {
+    let wasm = fixture_wasm();
+    let plugin =
+        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+
+    // run-command returns a typed selector carrying a flow id.
+    let selector = plugin.run_command("conformance", "flow:", &caps).unwrap();
+    assert_eq!(selector.flow_id, "flow-1");
+    match selector.body {
+        kiqi_plugin::CommandResultBody::Selector(spec) => {
+            assert_eq!(spec.title, "Pick one");
+            assert_eq!(spec.items, vec!["alpha".to_string(), "beta".to_string()]);
+        }
+        other => panic!("expected selector, got {other:?}"),
+    }
+
+    // continue-command delivers the reply to the same flow.
+    let picked = plugin
+        .continue_command(
+            "conformance",
+            "flow-1",
+            kiqi_plugin::CommandReply::Selected("alpha".to_string()),
+            &caps,
+        )
+        .unwrap();
+    assert_eq!(text_of_message(&picked), "selected:alpha");
+
+    // Cancellation is a first-class reply.
+    let cancelled = plugin
+        .continue_command(
+            "conformance",
+            "flow-ed",
+            kiqi_plugin::CommandReply::Cancelled,
+            &caps,
+        )
+        .unwrap();
+    assert_eq!(text_of_message(&cancelled), "cancelled:flow-ed");
+
+    // Editor and prompt bodies are typed the same way.
+    let editor = plugin.run_command("conformance", "editor:", &caps).unwrap();
+    assert_eq!(editor.flow_id, "flow-ed");
+    assert!(matches!(
+        editor.body,
+        kiqi_plugin::CommandResultBody::Editor(_)
+    ));
+    let prompt = plugin.run_command("conformance", "prompt:", &caps).unwrap();
+    assert_eq!(prompt.flow_id, "flow-pr");
+    assert!(matches!(
+        prompt.body,
+        kiqi_plugin::CommandResultBody::Prompt(_)
+    ));
+
+    // An unknown flow id is refused by the guest.
+    let stale = plugin.continue_command(
+        "conformance",
+        "gone",
+        kiqi_plugin::CommandReply::Selected("x".to_string()),
+        &caps,
+    );
+    assert!(stale.is_err(), "unknown flow id must be refused: {stale:?}");
+}
+
+#[test]
+fn command_results_are_sanitized_before_render() {
+    let wasm = fixture_wasm();
+    let plugin =
+        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+
+    // ANSI escapes are stripped from selector strings.
+    let ansi = plugin.run_command("conformance", "ansi:", &caps).unwrap();
+    match ansi.body {
+        kiqi_plugin::CommandResultBody::Selector(spec) => {
+            assert_eq!(spec.title, "Red");
+            assert!(!spec.title.contains('\u{1b}'));
+        }
+        other => panic!("expected selector, got {other:?}"),
+    }
+
+    // A surviving C0 control character rejects the whole result.
+    let control = plugin.run_command("conformance", "ctl:", &caps);
+    assert!(
+        control.is_err(),
+        "a control character must be rejected: {control:?}"
+    );
+}
+
+#[test]
+fn cli_flag_is_scoped_to_the_calling_plugins_declarations() {
+    let conformance_wasm = fixture_wasm();
+    let todo_wasm = todo_wasm();
+    let conformance =
+        WasmPlugin::load_with_grants("conformance", &conformance_wasm, Grants::default())
+            .expect("load conformance");
+    let todo =
+        WasmPlugin::load_with_grants("todo", &todo_wasm, Grants::default()).expect("load todo");
+
+    let session = FlagSession {
+        conformance: Some(kiqi_plugin::FlagValue::Bare),
+        todo: Some(kiqi_plugin::FlagValue::Text("loud".to_string())),
+    };
+    let log = NullLog;
+    let caps = HostCaps {
+        session: Some(&session),
+        control: None,
+        inject: None,
+        ui: None,
+        log: &log,
+        cancel: None,
+    };
+
+    // Each plugin reads its OWN flag, including the bare form that used to be
+    // dropped by the JSON reader.
+    let own_bare = conformance
+        .run_command("conformance", "flag:conformance-flag", &caps)
+        .unwrap();
+    assert_eq!(text_of_message(&own_bare), "flag=bare");
+    let own_text = todo.run_command("todos", "flag:todo-flag", &caps).unwrap();
+    assert_eq!(text_of_message(&own_text), "flag=text:loud");
+
+    // …but neither can read the other's declaration.
+    let cross = conformance
+        .run_command("conformance", "flag:todo-flag", &caps)
+        .unwrap();
+    assert_eq!(text_of_message(&cross), "flag=none");
+    let cross = todo
+        .run_command("todos", "flag:conformance-flag", &caps)
+        .unwrap();
+    assert_eq!(text_of_message(&cross), "flag=none");
+}
+
+#[test]
+fn typed_input_events_reach_the_guest_and_can_be_claimed() {
+    let wasm = fixture_wasm();
+    let plugin =
+        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+
+    // The declared `f8` shortcut arrives typed (`Input(event)`), not as an
+    // opaque `other` record with a Debug-formatted kind.
+    let claimed = plugin.on_event(
+        &Event::new(
+            EventTag::Input,
+            serde_json::json!({
+                "key": "f8",
+                "kind": "press",
+                "ctrl": false,
+                "alt": false,
+                "shift": true,
+            }),
+        ),
+        &caps,
+    );
+    assert_eq!(claimed, EventAction::Claimed);
+
+    // An un-declared key still reaches the guest (the host only fans out to
+    // plugins that declared a shortcut) and the guest declines it.
+    let declined = plugin.on_event(
+        &Event::new(EventTag::Input, serde_json::json!({ "key": "f9" })),
+        &caps,
+    );
+    assert_eq!(declined, EventAction::Continue);
+}

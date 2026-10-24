@@ -456,6 +456,7 @@ fn test_tui_state() -> Arc<TuiState> {
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
+        pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
         autocomplete_container: Arc::new(Container::new()),
         autocomplete_max_visible: 5,
@@ -1549,6 +1550,7 @@ fn test_agent_event_mapping_creates_assistant_and_tool() {
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
+        pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
         autocomplete_container: Arc::new(Container::new()),
         autocomplete_max_visible: 5,
@@ -2027,6 +2029,7 @@ fn test_autocomplete_slash_suggestions_render() {
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
+        pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
         autocomplete_container: Arc::new(Container::new()),
         autocomplete_max_visible: 5,
@@ -2115,6 +2118,7 @@ fn test_select_list_swap_restores_editor() {
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
+        pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
         autocomplete_container: Arc::new(Container::new()),
         autocomplete_max_visible: 5,
@@ -2206,6 +2210,7 @@ fn test_message_history_browse_restores_draft() {
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
+        pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
         autocomplete_container: Arc::new(Container::new()),
         autocomplete_max_visible: 5,
@@ -2300,6 +2305,7 @@ fn test_accept_top_suggestion_replaces_prefix() {
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
+        pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
         autocomplete_container: Arc::new(Container::new()),
         autocomplete_max_visible: 5,
@@ -2380,6 +2386,7 @@ fn autocomplete_test_state(max_visible: usize) -> Arc<TuiState> {
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
+        pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
         autocomplete_container: Arc::new(Container::new()),
         autocomplete_max_visible: max_visible,
@@ -2979,4 +2986,95 @@ fn the_tui_runtime_never_writes_diagnostics_to_stderr() {
             "{name} must use diagnostic_log, not eprintln"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// P3(b): plugin command flow state machine
+// ---------------------------------------------------------------------------
+
+struct FlowTestPlugin;
+
+impl kiqi_plugin::Plugin for FlowTestPlugin {
+    fn id(&self) -> &str {
+        "flow-host"
+    }
+}
+
+fn flow(
+    host: &Arc<crate::plugins::PluginHost>,
+    flow_id: &str,
+    kind: CommandFlowKind,
+) -> PendingCommandFlow {
+    PendingCommandFlow {
+        host: host.clone(),
+        name: "cmd".to_string(),
+        flow_id: flow_id.to_string(),
+        kind,
+    }
+}
+
+#[test]
+fn pending_command_flow_rejects_stale_and_wrong_kind_ids() {
+    let state = test_tui_state();
+    let host = Arc::new(crate::plugins::PluginHost::new(
+        "flow-host",
+        Box::new(FlowTestPlugin),
+    ));
+
+    // A matching reply takes the slot exactly once.
+    state.set_command_flow(flow(&host, "a", CommandFlowKind::Selector));
+    assert!(state
+        .take_command_flow("flow-host", "cmd", "a", CommandFlowKind::Selector)
+        .is_some());
+    assert!(state
+        .take_command_flow("flow-host", "cmd", "a", CommandFlowKind::Selector)
+        .is_none());
+
+    // A stale/unknown id is rejected and leaves the live slot untouched.
+    state.set_command_flow(flow(&host, "live", CommandFlowKind::Selector));
+    assert!(state
+        .take_command_flow("flow-host", "cmd", "stale", CommandFlowKind::Selector)
+        .is_none());
+    // The wrong interaction kind is rejected the same way.
+    assert!(state
+        .take_command_flow("flow-host", "cmd", "live", CommandFlowKind::Editor)
+        .is_none());
+    // …which means the genuine reply still lands.
+    assert!(state
+        .take_command_flow("flow-host", "cmd", "live", CommandFlowKind::Selector)
+        .is_some());
+}
+
+#[test]
+fn a_second_command_replaces_the_pending_flow() {
+    let state = test_tui_state();
+    let host = Arc::new(crate::plugins::PluginHost::new(
+        "flow-host",
+        Box::new(FlowTestPlugin),
+    ));
+    state.set_command_flow(flow(&host, "first", CommandFlowKind::Selector));
+    state.set_command_flow(flow(&host, "second", CommandFlowKind::Prompt));
+    assert!(state
+        .take_command_flow("flow-host", "cmd", "first", CommandFlowKind::Selector)
+        .is_none());
+    assert!(state
+        .take_command_flow("flow-host", "cmd", "second", CommandFlowKind::Prompt)
+        .is_some());
+}
+
+#[test]
+fn esc_cancels_the_pending_flow() {
+    let state = test_tui_state();
+    let host = Arc::new(crate::plugins::PluginHost::new(
+        "flow-host",
+        Box::new(FlowTestPlugin),
+    ));
+    state.set_command_flow(flow(&host, "esc", CommandFlowKind::Editor));
+    let cancelled = state.cancel_command_flow().expect("a flow was pending");
+    assert_eq!(cancelled.flow_id, "esc");
+    // The slot is gone, so a late reply is rejected.
+    assert!(state
+        .take_command_flow("flow-host", "cmd", "esc", CommandFlowKind::Editor)
+        .is_none());
+    assert!(state.cancel_command_flow().is_none());
 }

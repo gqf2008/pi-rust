@@ -539,6 +539,18 @@ struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
     grants: Grants,
+    /// The install id this instance was loaded under. Kept so host-side
+    /// features that must name the plugin (diagnostics, declaration scope,
+    /// credential namespacing) can do so without re-reading the file path.
+    /// P4 wires the credential sink; until then nothing reads it here.
+    #[allow(dead_code)]
+    plugin_id: Option<String>,
+    /// The flag names THIS plugin declared in `list-flags`, captured once at
+    /// instantiation. `session-read.cli-flag` is declaration-scoped: a name
+    /// that is not in this set returns `None` even when another plugin (or the
+    /// CLI) knows the flag. That stops one installed component from reading
+    /// another's configuration through a shared flag namespace.
+    declared_flags: std::sync::Arc<std::collections::BTreeSet<String>>,
     /// The plugin's own data directory (`plugins/<id>/data/`). The `fs`
     /// capability is jailed here, and `exec`'s working directory is resolved
     /// inside it, so the jail *is* the policy and both grants stay simple.
@@ -609,6 +621,12 @@ impl crate::kiqi::plugin::session_read::Host for HostState {
     }
     fn cli_flag(&mut self, name: String) -> Option<crate::kiqi::plugin::types::FlagValue> {
         use crate::kiqi::plugin::types::FlagValue as Wit;
+        // Declaration-scoped: the calling plugin may only read a flag it
+        // declared itself. This is the default (no grant), so an install-tree
+        // plugin cannot probe the flags of its neighbours.
+        if !self.declared_flags.contains(&name) {
+            return None;
+        }
         with_session(|session| session.cli_flag(&name))
             .flatten()
             .map(|value| match value {
@@ -1837,6 +1855,21 @@ struct Inner {
     guest: World,
 }
 
+/// The declarative surfaces a plugin publishes, captured once per instance.
+///
+/// `shortcut_hosts` runs on every key event and `probe_tool_call` on every
+/// tool call, so asking the guest each time would put a mutex and a wasm call
+/// on those hot paths. The cache makes the *first* call populate it; every
+/// later lookup is a clone out of memory. A trapping guest caches an empty
+/// list (fail closed) rather than retrying on every keystroke.
+#[derive(Debug, Default, Clone)]
+struct DeclaredSurfaces {
+    commands: Option<Vec<kiqi_plugin::CommandSpec>>,
+    flags: Option<Vec<kiqi_plugin::FlagSpec>>,
+    shortcuts: Option<Vec<kiqi_plugin::ShortcutSpec>>,
+    probe_points: Option<Vec<String>>,
+}
+
 /// Load-time knobs.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
@@ -1893,6 +1926,8 @@ pub struct WasmPlugin {
     /// Kept so `/reload` can re-instantiate from the already-compiled component.
     #[allow(dead_code)]
     component: Component,
+    /// Declared surfaces, captured lazily on first use (see [`DeclaredSurfaces`]).
+    declared: Mutex<DeclaredSurfaces>,
     inner: Mutex<Option<Inner>>,
 }
 
@@ -1957,6 +1992,8 @@ impl WasmPlugin {
                 grants,
                 fs_root,
                 project_dir: options.project_dir.clone(),
+                plugin_id: Some(id.clone()),
+                declared_flags: std::sync::Arc::new(std::collections::BTreeSet::new()),
                 sockets: std::collections::HashMap::new(),
                 next_socket: 1,
                 procs: std::collections::HashMap::new(),
@@ -1984,11 +2021,41 @@ impl WasmPlugin {
                 );
             }
         }
+        // Capture the declared flags ONCE, right after instantiation, so
+        // `session-read.cli-flag` can be declaration-scoped without touching
+        // the guest on every read. A trap here is a broken guest: report it and
+        // scope to the empty set (fail closed — no flag is readable).
+        let (declared_flags, declared_flag_specs) =
+            match guest.kiqi_plugin_plugin_api().call_list_flags(&mut store) {
+                Ok(specs) => {
+                    // One call serves both consumers: the declaration scope on
+                    // `HostState` and the cached `flags()` surface.
+                    let names = specs.iter().map(|spec| spec.name.clone()).collect();
+                    let flags = specs
+                        .into_iter()
+                        .map(|spec| kiqi_plugin::FlagSpec {
+                            name: spec.name,
+                            description: spec.description,
+                        })
+                        .collect();
+                    (names, flags)
+                }
+                Err(error) => {
+                    tracing::warn!(plugin = %id, op = "list-flags", %error, "guest call failed");
+                    (std::collections::BTreeSet::new(), Vec::new())
+                }
+            };
+        store.data_mut().reap_procs();
+        store.data_mut().declared_flags = std::sync::Arc::new(declared_flags);
 
         Ok(Self {
             id,
             engine,
             component,
+            declared: Mutex::new(DeclaredSurfaces {
+                flags: Some(declared_flag_specs),
+                ..DeclaredSurfaces::default()
+            }),
             inner: Mutex::new(Some(Inner { store, guest })),
         })
     }
@@ -2066,6 +2133,163 @@ impl WasmPlugin {
     }
 }
 
+impl WasmPlugin {
+    /// `list-commands`, captured on first use.
+    fn cached_commands(&self) -> Vec<kiqi_plugin::CommandSpec> {
+        if let Some(cached) = self
+            .declared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .commands
+            .clone()
+        {
+            return cached;
+        }
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.as_mut() else {
+            return Vec::new();
+        };
+        let result = inner
+            .guest
+            .kiqi_plugin_plugin_api()
+            .call_list_commands(&mut inner.store);
+        inner.store.data_mut().reap_procs();
+        let commands = match result {
+            Ok(specs) => specs
+                .into_iter()
+                .map(|spec| kiqi_plugin::CommandSpec {
+                    name: spec.name,
+                    description: spec.description,
+                })
+                .collect(),
+            Err(error) => {
+                self.report_guest_error("list-commands", &error);
+                Vec::new()
+            }
+        };
+        self.declared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .commands = Some(commands.clone());
+        commands
+    }
+
+    /// `list-flags`, captured on first use.
+    fn cached_flags(&self) -> Vec<kiqi_plugin::FlagSpec> {
+        if let Some(cached) = self
+            .declared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .flags
+            .clone()
+        {
+            return cached;
+        }
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.as_mut() else {
+            return Vec::new();
+        };
+        let result = inner
+            .guest
+            .kiqi_plugin_plugin_api()
+            .call_list_flags(&mut inner.store);
+        inner.store.data_mut().reap_procs();
+        let flags: Vec<kiqi_plugin::FlagSpec> = match result {
+            Ok(specs) => specs
+                .into_iter()
+                .map(|spec| kiqi_plugin::FlagSpec {
+                    name: spec.name,
+                    description: spec.description,
+                })
+                .collect(),
+            Err(error) => {
+                self.report_guest_error("list-flags", &error);
+                Vec::new()
+            }
+        };
+        self.declared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .flags = Some(flags.clone());
+        flags
+    }
+
+    /// `list-shortcuts`, captured on first use. This is the hot path the cache
+    /// exists for: shortcut lookup runs on every key event.
+    fn cached_shortcuts(&self) -> Vec<kiqi_plugin::ShortcutSpec> {
+        if let Some(cached) = self
+            .declared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .shortcuts
+            .clone()
+        {
+            return cached;
+        }
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.as_mut() else {
+            return Vec::new();
+        };
+        let result = inner
+            .guest
+            .kiqi_plugin_plugin_api()
+            .call_list_shortcuts(&mut inner.store);
+        inner.store.data_mut().reap_procs();
+        let shortcuts: Vec<kiqi_plugin::ShortcutSpec> = match result {
+            Ok(specs) => specs
+                .into_iter()
+                .map(|spec| kiqi_plugin::ShortcutSpec {
+                    key: spec.key,
+                    description: spec.description,
+                })
+                .collect(),
+            Err(error) => {
+                self.report_guest_error("list-shortcuts", &error);
+                Vec::new()
+            }
+        };
+        self.declared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .shortcuts = Some(shortcuts.clone());
+        shortcuts
+    }
+
+    /// `list-probe-points`, captured on first use.
+    fn cached_probe_points(&self) -> Vec<String> {
+        if let Some(cached) = self
+            .declared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .probe_points
+            .clone()
+        {
+            return cached;
+        }
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.as_mut() else {
+            return Vec::new();
+        };
+        let result = inner
+            .guest
+            .kiqi_plugin_plugin_api()
+            .call_list_probe_points(&mut inner.store);
+        inner.store.data_mut().reap_procs();
+        let points = match result {
+            Ok(points) => points,
+            Err(error) => {
+                self.report_guest_error("list-probe-points", &error);
+                Vec::new()
+            }
+        };
+        self.declared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .probe_points = Some(points.clone());
+        points
+    }
+}
+
 impl Drop for WasmPlugin {
     fn drop(&mut self) {
         self.unload();
@@ -2104,27 +2328,7 @@ impl PluginTrait for WasmPlugin {
     }
 
     fn commands(&self) -> Vec<CommandSpec> {
-        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(inner) = guard.as_mut() else {
-            return Vec::new();
-        };
-        let guest = inner.guest.kiqi_plugin_plugin_api();
-        let result = guest.call_list_commands(&mut inner.store);
-        // Spawning in a metadata call is legal; nothing survives it either.
-        inner.store.data_mut().reap_procs();
-        match result {
-            Ok(specs) => specs
-                .into_iter()
-                .map(|spec| CommandSpec {
-                    name: spec.name,
-                    description: spec.description,
-                })
-                .collect(),
-            Err(e) => {
-                self.report_guest_error("list-commands", &e);
-                Vec::new()
-            }
-        }
+        self.cached_commands()
     }
 
     fn run_command(
@@ -2147,61 +2351,74 @@ impl PluginTrait for WasmPlugin {
         // A `proc` handle lives for this call and nothing beyond it.
         inner.store.data_mut().reap_procs();
         match result {
-            Ok(Ok(result)) => Ok(to_command_result(result)),
+            Ok(Ok(result)) => match sanitize_command_result(to_command_result(result)) {
+                Ok(result) => Ok(result),
+                Err(diagnostic) => {
+                    self.report_guest_error("run-command", &diagnostic);
+                    Err(PluginError::Failed(diagnostic))
+                }
+            },
             Ok(Err(error)) => Err(map_plugin_error(error)),
-            Err(trap) => Err(PluginError::Failed(format!(
-                "{}: command `{name}` trapped: {trap}",
-                self.id
-            ))),
+            Err(trap) => {
+                self.report_guest_error("run-command", &trap);
+                Err(PluginError::Failed(format!(
+                    "{}: command `{name}` trapped: {trap}",
+                    self.id
+                )))
+            }
+        }
+    }
+
+    /// Answer a selector/editor/prompt flow started by [`Plugin::run_command`].
+    ///
+    /// The CLI owns the pending slot and validates the id before this is
+    /// called; the host still sanitizes and types the returned body so a guest
+    /// cannot smuggle a second unsanitized flow through the continuation.
+    fn continue_command(
+        &self,
+        name: &str,
+        flow_id: &str,
+        reply: kiqi_plugin::CommandReply,
+        caps: &HostCaps<'_>,
+    ) -> Result<kiqi_plugin::CommandResult, PluginError> {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.as_mut() else {
+            return Err(PluginError::Failed(format!("{} is unloaded", self.id)));
+        };
+        let _context = install_context(None, caps);
+        let result = inner.guest.kiqi_plugin_plugin_api().call_continue_command(
+            &mut inner.store,
+            name,
+            flow_id,
+            &to_wit_reply(reply),
+        );
+        clear_context();
+        inner.store.data_mut().reap_procs();
+        match result {
+            Ok(Ok(result)) => match sanitize_command_result(to_command_result(result)) {
+                Ok(result) => Ok(result),
+                Err(diagnostic) => {
+                    self.report_guest_error("continue-command", &diagnostic);
+                    Err(PluginError::Failed(diagnostic))
+                }
+            },
+            Ok(Err(error)) => Err(map_plugin_error(error)),
+            Err(trap) => {
+                self.report_guest_error("continue-command", &trap);
+                Err(PluginError::Failed(format!(
+                    "{}: command `{name}` continuation trapped: {trap}",
+                    self.id
+                )))
+            }
         }
     }
 
     fn flags(&self) -> Vec<FlagSpec> {
-        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(inner) = guard.as_mut() else {
-            return Vec::new();
-        };
-        let guest = inner.guest.kiqi_plugin_plugin_api();
-        let result = guest.call_list_flags(&mut inner.store);
-        // Spawning in a metadata call is legal; nothing survives it either.
-        inner.store.data_mut().reap_procs();
-        match result {
-            Ok(specs) => specs
-                .into_iter()
-                .map(|spec| FlagSpec {
-                    name: spec.name,
-                    description: spec.description,
-                })
-                .collect(),
-            Err(e) => {
-                self.report_guest_error("list-flags", &e);
-                Vec::new()
-            }
-        }
+        self.cached_flags()
     }
 
     fn shortcuts(&self) -> Vec<ShortcutSpec> {
-        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(inner) = guard.as_mut() else {
-            return Vec::new();
-        };
-        let guest = inner.guest.kiqi_plugin_plugin_api();
-        let result = guest.call_list_shortcuts(&mut inner.store);
-        // Spawning in a metadata call is legal; nothing survives it either.
-        inner.store.data_mut().reap_procs();
-        match result {
-            Ok(specs) => specs
-                .into_iter()
-                .map(|spec| ShortcutSpec {
-                    key: spec.key,
-                    description: spec.description,
-                })
-                .collect(),
-            Err(e) => {
-                self.report_guest_error("list-shortcuts", &e);
-                Vec::new()
-            }
-        }
+        self.cached_shortcuts()
     }
 
     fn before_agent_start(
@@ -2229,21 +2446,7 @@ impl PluginTrait for WasmPlugin {
     }
 
     fn probe_points(&self) -> Vec<String> {
-        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(inner) = guard.as_mut() else {
-            return Vec::new();
-        };
-        let guest = inner.guest.kiqi_plugin_plugin_api();
-        let points = guest.call_list_probe_points(&mut inner.store);
-        // Spawning in a metadata call is legal; nothing survives it either.
-        inner.store.data_mut().reap_procs();
-        match points {
-            Ok(points) => points,
-            Err(e) => {
-                self.report_guest_error("list-probe-points", &e);
-                Vec::new()
-            }
-        }
+        self.cached_probe_points()
     }
 
     fn probe(&self, point: &str, payload: &serde_json::Value, caps: &HostCaps<'_>) -> Verdict {
@@ -2367,6 +2570,108 @@ fn to_command_result(
         flow_id: result.flow_id,
         body,
     }
+}
+
+/// Convert a reply crossing back into the guest.
+fn to_wit_reply(reply: kiqi_plugin::CommandReply) -> crate::kiqi::plugin::types::CommandReply {
+    use crate::kiqi::plugin::types::CommandReply as Wit;
+    match reply {
+        kiqi_plugin::CommandReply::Selected(value) => Wit::Selected(value),
+        kiqi_plugin::CommandReply::Submitted(value) => Wit::Submitted(value),
+        kiqi_plugin::CommandReply::Cancelled => Wit::Cancelled,
+    }
+}
+
+/// Maximum selector items a command may return.
+pub const COMMAND_FLOW_MAX_ITEMS: usize = 64;
+/// Maximum bytes in one selector item (or one title/placeholder/flow id).
+pub const COMMAND_FLOW_MAX_ITEM_BYTES: usize = 1024;
+/// Maximum bytes across all selector items.
+pub const COMMAND_FLOW_MAX_TOTAL_BYTES: usize = 64 * 1024;
+/// Maximum bytes an editor may pre-fill.
+pub const COMMAND_FLOW_MAX_EDITOR_BYTES: usize = 256 * 1024;
+
+/// Sanitize a guest-returned command result before the TUI renders it or
+/// writes it into the editor buffer.
+///
+/// Every string is ANSI-stripped and then rejected if a C0/C1 control
+/// character (other than newline/tab) survives. Selector item count, per-item
+/// bytes and total bytes are capped; editor pre-fill has its own larger cap.
+/// A selector/editor/prompt body must carry a non-empty `flow_id`, otherwise
+/// the continuation could never be addressed and the slot would leak.
+pub fn sanitize_command_result(
+    result: kiqi_plugin::CommandResult,
+) -> Result<kiqi_plugin::CommandResult, String> {
+    use kiqi_plugin::{CommandResult, CommandResultBody};
+    let flow_id = sanitize_command_text(&result.flow_id, "flow id", COMMAND_FLOW_MAX_ITEM_BYTES)?;
+    let body = match result.body {
+        CommandResultBody::Message(text) => CommandResultBody::Message(sanitize_command_text(
+            &text,
+            "command message",
+            COMMAND_FLOW_MAX_EDITOR_BYTES,
+        )?),
+        CommandResultBody::Selector(spec) => {
+            require_flow_id(&flow_id, "selector")?;
+            let title =
+                sanitize_command_text(&spec.title, "selector title", COMMAND_FLOW_MAX_ITEM_BYTES)?;
+            let mut items = Vec::new();
+            let mut total = 0usize;
+            for item in spec.items.into_iter().take(COMMAND_FLOW_MAX_ITEMS) {
+                let item =
+                    sanitize_command_text(&item, "selector item", COMMAND_FLOW_MAX_ITEM_BYTES)?;
+                total += item.len();
+                if total > COMMAND_FLOW_MAX_TOTAL_BYTES {
+                    break;
+                }
+                items.push(item);
+            }
+            CommandResultBody::Selector(kiqi_plugin::SelectorSpec { title, items })
+        }
+        CommandResultBody::Editor(spec) => {
+            require_flow_id(&flow_id, "editor")?;
+            let initial_text = sanitize_command_text(
+                &spec.initial_text,
+                "editor initial text",
+                COMMAND_FLOW_MAX_EDITOR_BYTES,
+            )?;
+            CommandResultBody::Editor(kiqi_plugin::EditorSpec { initial_text })
+        }
+        CommandResultBody::Prompt(spec) => {
+            require_flow_id(&flow_id, "prompt")?;
+            let title =
+                sanitize_command_text(&spec.title, "prompt title", COMMAND_FLOW_MAX_ITEM_BYTES)?;
+            let placeholder = sanitize_command_text(
+                &spec.placeholder,
+                "prompt placeholder",
+                COMMAND_FLOW_MAX_ITEM_BYTES,
+            )?;
+            CommandResultBody::Prompt(kiqi_plugin::PromptSpec { title, placeholder })
+        }
+    };
+    Ok(CommandResult { flow_id, body })
+}
+
+fn require_flow_id(flow_id: &str, kind: &str) -> Result<(), String> {
+    if flow_id.is_empty() {
+        return Err(format!(
+            "{kind} command-result has an empty flow id; a continuation could not be addressed"
+        ));
+    }
+    Ok(())
+}
+
+fn sanitize_command_text(raw: &str, what: &str, max_bytes: usize) -> Result<String, String> {
+    let stripped = strip_ansi_codes(raw);
+    if let Some((offset, character)) = stripped
+        .char_indices()
+        .find(|(_, character)| is_forbidden_control(*character))
+    {
+        return Err(format!(
+            "{what} contains control character U+{:04X} at byte {offset}",
+            character as u32
+        ));
+    }
+    Ok(truncate_utf8(&stripped, max_bytes))
 }
 
 fn to_tool_outcome(tool_result: ToolResult) -> ToolOutcome {
@@ -2709,6 +3014,8 @@ impl RenderHost {
             grants: Grants::default(),
             fs_root: None,
             project_dir: None,
+            plugin_id: None,
+            declared_flags: std::sync::Arc::new(std::collections::BTreeSet::new()),
             sockets: std::collections::HashMap::new(),
             next_socket: 1,
             procs: std::collections::HashMap::new(),
@@ -2952,6 +3259,8 @@ mod tests {
             },
             fs_root: Some(root.to_path_buf()),
             project_dir: None,
+            plugin_id: Some("test".to_string()),
+            declared_flags: std::sync::Arc::new(std::collections::BTreeSet::new()),
             sockets: std::collections::HashMap::new(),
             next_socket: 1,
             procs: std::collections::HashMap::new(),

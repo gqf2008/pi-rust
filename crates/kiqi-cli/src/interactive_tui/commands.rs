@@ -882,20 +882,17 @@ impl SlashCommand for CompiledCommand {
     }
 
     fn execute(&self, ctx: &CommandContext, args: &str) {
-        let caps = crate::plugins::compiled_caps();
-        let name = self.name.trim_start_matches('/');
-        match self.host.run_command(name, args, &caps.caps()) {
-            Ok(result) => match result.body {
-                kiqi_plugin::CommandResultBody::Message(text) if !text.trim().is_empty() => {
-                    add_note_message(&ctx.chat, &text)
-                }
-                // Selector/editor/prompt flows have no host handling yet; a
-                // command that only wants to say something uses `Message`.
-                _ => {}
-            },
-            Err(error) => add_error_message(&ctx.chat, &format!("/{name} failed: {error}")),
-        }
-        ctx.tui.request_render(false);
+        // The key/compose thread must never block on a guest: run the command
+        // on a plain thread and post the typed result back to the main loop.
+        // Any previously pending flow is replaced (its reply will then fail the
+        // stale-id check).
+        let _ = ctx.state.cancel_command_flow();
+        spawn_plugin_command(
+            ctx,
+            self.host.clone(),
+            self.name.trim_start_matches('/').to_string(),
+            args.to_string(),
+        );
     }
 }
 

@@ -33,6 +33,8 @@ use extensions::*;
 pub(crate) use extensions::{ask_user_frame, parse_ask_user_prompt, AskUserPrompt};
 mod commands;
 use commands::*;
+mod plugin_commands;
+use plugin_commands::*;
 mod settings;
 use settings::*;
 mod sessions;
@@ -746,6 +748,9 @@ enum TuiMessage {
     /// a run. The batch's detailed notice entry is already in the transcript;
     /// this is the short external-signal trigger built by `signal_wake`.
     SignalWake(String),
+    /// A plugin `run_command`/`continue_command` finished on its worker thread.
+    /// Handled on the async loop, which owns selector/editor installation.
+    PluginCommandDone(PluginCommandOutcome),
 }
 
 /// Terminal result of a user-initiated `!command` shell run.
@@ -1324,6 +1329,7 @@ pub async fn interactive_tui(
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
+        pending_command_flow: std::sync::Mutex::new(None),
         autocomplete,
         autocomplete_container: autocomplete_container.clone(),
         autocomplete_max_visible,
@@ -3404,6 +3410,9 @@ pub async fn interactive_tui(
                     add_note_message(&chat_container, &outcome.summary);
                 }
                 tui.request_render(false);
+            }
+            Some(TuiMessage::PluginCommandDone(outcome)) => {
+                handle_command_outcome(&ctx, outcome);
             }
             None => break,
         }

@@ -162,17 +162,46 @@ fn dialog(arguments: &str) -> Result<types::ToolResult, types::PluginError> {
     })
 }
 
+/// Render `cli_flag`'s typed answer for the host tests.
+///
+/// This is the only way a guest can observe the declaration scope: the host
+/// returns `None` for a flag the *calling* plugin did not declare.
+fn flag_value(name: &str) -> String {
+    match session_read::cli_flag(name) {
+        None => "none".to_string(),
+        Some(types::FlagValue::Bare) => "bare".to_string(),
+        Some(types::FlagValue::Text(text)) => format!("text:{text}"),
+    }
+}
+
 impl Guest for Conformance {
-    /// No selector/editor/prompt flow exists in this plugin yet; a reply is
-    /// refused rather than silently dropped.
+    /// Answer the selector/editor/prompt flows `run_command` starts with the
+    /// `flow:`/`editor:`/`prompt:` argument prefixes. An unknown id is refused,
+    /// so the host test can prove a continuation really reaches the guest with
+    /// the id it returned.
     fn continue_command(
-        _name: String,
-        _flow_id: String,
-        _reply: types::CommandReply,
+        name: String,
+        flow_id: String,
+        reply: types::CommandReply,
     ) -> Result<types::CommandResult, types::PluginError> {
-        Err(types::PluginError::Failed(
-            "this plugin declares no command continuations".to_string(),
-        ))
+        if name != COMMAND {
+            return Err(types::PluginError::UnknownTool(name));
+        }
+        let body = match (flow_id.as_str(), reply) {
+            ("flow-1", types::CommandReply::Selected(value)) => format!("selected:{value}"),
+            ("flow-ed", types::CommandReply::Submitted(value)) => format!("submitted:{value}"),
+            ("flow-pr", types::CommandReply::Submitted(value)) => format!("prompted:{value}"),
+            (id, types::CommandReply::Cancelled) => format!("cancelled:{id}"),
+            (id, _) => {
+                return Err(types::PluginError::Failed(format!(
+                    "unknown flow id `{id}`"
+                )))
+            }
+        };
+        Ok(types::CommandResult {
+            flow_id: String::new(),
+            body: types::CommandResultBody::Message(body),
+        })
     }
 
     fn id() -> String {
@@ -418,10 +447,63 @@ impl Guest for Conformance {
 
     fn run_command(
         name: String,
-        _arguments: String,
+        arguments: String,
     ) -> Result<types::CommandResult, types::PluginError> {
         if name != COMMAND {
             return Err(types::PluginError::UnknownTool(name));
+        }
+        // `flag:<name>` probes the declaration-scoped `cli-flag` read.
+        if let Some(flag) = arguments.strip_prefix("flag:") {
+            return Ok(types::CommandResult {
+                flow_id: String::new(),
+                body: types::CommandResultBody::Message(format!("flag={}", flag_value(flag))),
+            });
+        }
+        // `flow:` starts a selector; `editor:` / `prompt:` the other kinds.
+        if arguments.starts_with("flow:") {
+            return Ok(types::CommandResult {
+                flow_id: "flow-1".to_string(),
+                body: types::CommandResultBody::Selector(types::SelectorSpec {
+                    title: "Pick one".to_string(),
+                    items: vec!["alpha".to_string(), "beta".to_string()],
+                }),
+            });
+        }
+        if arguments.starts_with("editor:") {
+            return Ok(types::CommandResult {
+                flow_id: "flow-ed".to_string(),
+                body: types::CommandResultBody::Editor(types::EditorSpec {
+                    initial_text: "hello".to_string(),
+                }),
+            });
+        }
+        if arguments.starts_with("prompt:") {
+            return Ok(types::CommandResult {
+                flow_id: "flow-pr".to_string(),
+                body: types::CommandResultBody::Prompt(types::PromptSpec {
+                    title: "Ask".to_string(),
+                    placeholder: "type".to_string(),
+                }),
+            });
+        }
+        // Sanitization fixtures: the host must strip ANSI and reject controls.
+        if arguments.starts_with("ansi:") {
+            return Ok(types::CommandResult {
+                flow_id: "flow-ansi".to_string(),
+                body: types::CommandResultBody::Selector(types::SelectorSpec {
+                    title: "\u{1b}[31mRed\u{1b}[0m".to_string(),
+                    items: vec!["plain".to_string()],
+                }),
+            });
+        }
+        if arguments.starts_with("ctl:") {
+            return Ok(types::CommandResult {
+                flow_id: "flow-ctl".to_string(),
+                body: types::CommandResultBody::Selector(types::SelectorSpec {
+                    title: "bad\u{1}title".to_string(),
+                    items: vec!["plain".to_string()],
+                }),
+            });
         }
         Ok(types::CommandResult {
             flow_id: String::new(),
@@ -444,9 +526,12 @@ impl Guest for Conformance {
     }
 
     fn on_event(event: types::Event) -> types::EventAction {
-        // Claim one event so the host test can assert the action channel.
+        // Claim one lifecycle event so the host test can assert the action
+        // channel, and claim the declared `f8` shortcut so the typed `Input`
+        // event path (key/kind/modifiers) is exercised end to end.
         match event {
             types::Event::BeforeAgentStart(_) => types::EventAction::Claimed,
+            types::Event::Input(input) if input.key == "f8" => types::EventAction::Claimed,
             _ => types::EventAction::Continue,
         }
     }
