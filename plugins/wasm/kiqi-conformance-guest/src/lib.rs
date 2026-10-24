@@ -546,12 +546,26 @@ impl Guest for Conformance {
                     return types::EventAction::Continue;
                 };
                 if value
+                    .get("gateSpinForever")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    // A busy loop, unlike the WASI `gateSpin` sleep below:
+                    // epoch interruption must trap this at the host's deadline
+                    // so the abandoned worker releases the instance.
+                    loop {
+                        std::hint::black_box(0u64);
+                    }
+                }
+                if value
                     .get("gateSpin")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
                 {
                     // Long enough that the host's deadline fires first; the
-                    // late result must be discarded, not applied.
+                    // late result must be discarded, not applied. A WASI
+                    // sleep is invisible to epoch interruption, so this also
+                    // pins the host's wall-clock fallback.
                     std::thread::sleep(std::time::Duration::from_millis(400));
                 }
                 match value.get("gatePatch") {
@@ -920,6 +934,12 @@ impl RenderGuest for Conformance {
             return Err(types::PluginError::Failed(
                 "conformance render failed".to_string(),
             ));
+        }
+        if let Some(rest) = markdown.strip_prefix("sleep:") {
+            // Parked inside a WASI host call, which epoch interruption cannot
+            // see: the host's wall clock must give up on it.
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            return Ok(format!("slept:{rest}"));
         }
         if markdown.starts_with("spin:") {
             // The host's epoch deadline must interrupt this; a renderer that

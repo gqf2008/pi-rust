@@ -4145,6 +4145,78 @@ mod tests {
         );
     }
 
+    /// A gate guest that spins (not sleeps) is interrupted at the grant's
+    /// deadline, so the worker releases the instance mutex: a later call on the
+    /// same plugin must answer promptly instead of queueing behind it forever.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn provider_gate_timeout_releases_the_instance_for_later_calls() {
+        let wasm = build_guest("kiqi-conformance-guest");
+        let grants = kiqi_plugin::grants::Grants {
+            provider_request: Some(kiqi_plugin::grants::ProviderRequestGrant {
+                observe: kiqi_plugin::grants::ObserveMode::Requests,
+                patch: true,
+                patch_timeout_ms: 100,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants("conformance", &wasm, grants)
+            .expect("load the conformance guest");
+        let host = std::sync::Arc::new(PluginHost::new("conformance", Box::new(plugin)));
+        let caps = OwnedCaps {
+            session: None,
+            control: None,
+            inject: None,
+            ui: None,
+            log: std::sync::Arc::new(Silent),
+        };
+
+        let started = std::time::Instant::now();
+        let patch = dispatch_provider_gate(
+            &[host.clone()],
+            &caps,
+            kiqi_plugin::EventTag::BeforeProviderRequest,
+            serde_json::json!({
+                "model": "m",
+                "gatePatch": { "maxTokens": 8 },
+                "gateSpinForever": true,
+            }),
+        );
+        assert!(patch.is_none(), "an interrupted gate must not patch");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the epoch deadline must bound a spinning guest: {:?}",
+            started.elapsed()
+        );
+
+        // Do the follow-up call off the test thread so the old behaviour (the
+        // abandoned worker keeps the mutex) fails the assertion, not the run.
+        let probe_host = host.clone();
+        let probe_caps = caps.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let verdict = probe_tool_call_with(
+                &[probe_host],
+                &probe_caps,
+                "c1",
+                "bash",
+                &serde_json::json!({ "block": true }),
+            );
+            let _ = tx.send(verdict);
+        });
+        let verdict = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the timed-out gate must not leave the instance mutex held");
+        assert_eq!(
+            verdict,
+            Some(kiqi_plugin::Verdict::Block {
+                reason: "conformance blocks this".into()
+            }),
+            "the plugin must still answer after a timed-out gate"
+        );
+    }
+
     /// The same wiring, driven through a real wasm component: the conformance
     /// guest declares every non-tool surface, so this proves the session-level
     /// paths reach a sandboxed plugin, not just a compiled one.

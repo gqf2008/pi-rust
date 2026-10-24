@@ -2358,6 +2358,26 @@ struct Inner {
     guest: World,
 }
 
+/// Everything needed to build a fresh instance from the retained engine and
+/// component.
+///
+/// A call with a wall-clock budget (`oauth`) that overruns it hands its store
+/// to the abandoned worker, which still owns it. The plugin re-instantiates
+/// from this recipe instead of staying "unloaded" for the rest of the process.
+struct InstanceRecipe {
+    grants: Grants,
+    fs_root: Option<std::path::PathBuf>,
+    project_dir: Option<std::path::PathBuf>,
+    fuel: Option<u64>,
+    max_memory_bytes: usize,
+    oauth_transport: Option<std::sync::Arc<dyn OAuthTransport>>,
+    credential_sink: Option<std::sync::Arc<dyn PluginCredentialSink>>,
+    /// The engine is epoch-instrumented (a `patch` grant exists), so a fresh
+    /// store must start with a disarmed epoch deadline.
+    gate_epoch: bool,
+    declared_flags: std::sync::Arc<std::collections::BTreeSet<String>>,
+}
+
 /// The declarative surfaces a plugin publishes, captured once per instance.
 ///
 /// `shortcut_hosts` runs on every key event and `probe_tool_call` on every
@@ -2431,11 +2451,10 @@ fn wasmtime_config(options: &Options) -> wasmtime::Config {
 /// A plugin loaded from a wasm component.
 pub struct WasmPlugin {
     id: String,
-    /// Kept so a reload can re-instantiate without recompiling the wasm.
-    #[allow(dead_code)]
-    engine: Engine,
+    /// Kept so a reload can re-instantiate without recompiling the wasm, and
+    /// so an instance abandoned by a timed-out call can be replaced.
+    engine: std::sync::Arc<Engine>,
     /// Kept so `/reload` can re-instantiate from the already-compiled component.
-    #[allow(dead_code)]
     component: Component,
     /// Declared surfaces, captured lazily on first use (see [`DeclaredSurfaces`]).
     declared: Mutex<DeclaredSurfaces>,
@@ -2455,6 +2474,9 @@ pub struct WasmPlugin {
     /// not run (fail open to the grant, the sole catalog authority);
     /// `Some(set)` narrows the grant's list to what the guest actually drives.
     oauth_crosscheck: Option<std::collections::BTreeSet<String>>,
+    /// How to build a fresh store when the current one is abandoned by a
+    /// timed-out call (the worker owns it and will not give it back).
+    recipe: InstanceRecipe,
     inner: Mutex<Option<Inner>>,
 }
 
@@ -2496,66 +2518,48 @@ impl WasmPlugin {
         options: Options,
     ) -> Result<Self, PluginError> {
         let id = id.into();
-        let engine = Engine::new(&wasmtime_config(&options))
-            .map_err(|error| PluginError::Failed(format!("wasmtime engine: {error}")))?;
+        // Resolve the provider-request policy before the grants move into the
+        // store: the fan-out needs it without locking the guest. A `patch`
+        // grant also decides whether the engine is epoch-instrumented: only
+        // the gate has a deadline, so only a patch-capable plugin pays for
+        // interruption (and needs the ticker that makes a deadline fire).
+        let provider_request = resolve_provider_request_policy(&grants);
+        let gate_epoch = provider_request.as_ref().is_some_and(|policy| policy.patch);
+        let mut config = wasmtime_config(&options);
+        if gate_epoch {
+            config.epoch_interruption(true);
+        }
+        let engine = std::sync::Arc::new(
+            Engine::new(&config)
+                .map_err(|error| PluginError::Failed(format!("wasmtime engine: {error}")))?,
+        );
+        if gate_epoch {
+            let ticker = render_ticker().ok_or_else(|| {
+                PluginError::Failed(format!(
+                    "{id}: epoch ticker is unavailable; a provider gate could never time out"
+                ))
+            })?;
+            ticker.register(&engine);
+        }
         let component = Component::from_file(&engine, wasm)
             .map_err(|error| PluginError::Failed(format!("load {}: {error}", wasm.display())))?;
 
-        let mut linker = Linker::new(&engine);
-        World::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state)
-            .map_err(|error| PluginError::Failed(format!("link plugin interfaces: {error}")))?;
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-            .map_err(|error| PluginError::Failed(format!("link wasi: {error}")))?;
-
-        // Resolve the provider-request policy before the grants move into the
-        // store: the fan-out needs it without locking the guest.
-        let provider_request = resolve_provider_request_policy(&grants);
         // Hoist the OAuth grant before it moves into the store: `oauth_providers`
         // is read by `ki auth` and must not lock the guest. `None` is the
         // deny-by-default state and means the guest is never called.
         let oauth_grant = grants.oauth.clone();
-        let oauth = OAuthState {
-            budget: grants
-                .oauth
-                .as_ref()
-                .map(OAuthRequestBudget::for_grant)
-                .unwrap_or_default(),
-            transport: options.oauth_transport.clone(),
-            sink: options.credential_sink.clone(),
+        let mut recipe = InstanceRecipe {
+            grants,
+            fs_root: wasm.parent().map(|dir| dir.join("data")),
+            project_dir: options.project_dir.clone(),
+            fuel: options.fuel,
+            max_memory_bytes: options.max_memory_bytes.unwrap_or(DEFAULT_MAX_MEMORY_BYTES),
+            oauth_transport: options.oauth_transport.clone(),
+            credential_sink: options.credential_sink.clone(),
+            gate_epoch,
+            declared_flags: std::sync::Arc::new(std::collections::BTreeSet::new()),
         };
-        let fs_root = wasm.parent().map(|dir| dir.join("data"));
-        let limits = wasmtime::StoreLimitsBuilder::new()
-            .memory_size(options.max_memory_bytes.unwrap_or(DEFAULT_MAX_MEMORY_BYTES))
-            .build();
-        let mut store = Store::new(
-            &engine,
-            HostState {
-                wasi: WasiCtxBuilder::new().build(),
-                table: ResourceTable::new(),
-                grants,
-                fs_root,
-                project_dir: options.project_dir.clone(),
-                plugin_id: Some(id.clone()),
-                declared_flags: std::sync::Arc::new(std::collections::BTreeSet::new()),
-                sockets: std::collections::HashMap::new(),
-                next_socket: 1,
-                procs: std::collections::HashMap::new(),
-                next_proc: 1,
-                limits,
-                oauth,
-                provider_http: provider_http::ProviderHttpTable::default(),
-                provider_call: None,
-            },
-        );
-        // The cap only matters if the store consults it.
-        store.limiter(|state| &mut state.limits);
-        if let Some(fuel) = options.fuel {
-            store.set_fuel(fuel).map_err(|error| {
-                PluginError::Failed(format!("set fuel budget for {id}: {error}"))
-            })?;
-        }
-        let guest = World::instantiate(&mut store, &component, &linker)
-            .map_err(|error| PluginError::Failed(format!("instantiate {id}: {error}")))?;
+        let Inner { mut store, guest } = Self::instantiate(&id, &engine, &component, &recipe)?;
         // The plugin declares its own identity. The install directory stays the
         // authorization key (grants live beside the file and were read by it), so
         // a mismatch is reported rather than silently trusted.
@@ -2571,7 +2575,7 @@ impl WasmPlugin {
         // `session-read.cli-flag` can be declaration-scoped without touching
         // the guest on every read. A trap here is a broken guest: report it and
         // scope to the empty set (fail closed — no flag is readable).
-        let (declared_flags, declared_flag_specs) =
+        let (declared_flag_names, declared_flag_specs) =
             match guest.kiqi_plugin_plugin_api().call_list_flags(&mut store) {
                 Ok(specs) => {
                     // One call serves both consumers: the declaration scope on
@@ -2592,7 +2596,9 @@ impl WasmPlugin {
                 }
             };
         store.data_mut().reap_call_scoped();
-        store.data_mut().declared_flags = std::sync::Arc::new(declared_flags);
+        let declared_flag_names = std::sync::Arc::new(declared_flag_names);
+        store.data_mut().declared_flags = std::sync::Arc::clone(&declared_flag_names);
+        recipe.declared_flags = declared_flag_names;
 
         // A granted OAuth guest declares the providers it drives. The check is
         // bounded (the install-time discovery budget) and advisory: the GRANT
@@ -2621,8 +2627,77 @@ impl WasmPlugin {
             provider_request,
             oauth_grant,
             oauth_crosscheck,
+            recipe,
             inner: Mutex::new(Some(Inner { store, guest })),
         })
+    }
+
+    /// Build one store + guest from the retained engine and component.
+    ///
+    /// Called at load, and again after an `oauth` call times out: the worker
+    /// that overran its deadline still owns the old store, so re-instantiating
+    /// is the only way to put the plugin back in service without waiting for
+    /// it (and, in the worst case, without ever waiting for it at all).
+    fn instantiate(
+        id: &str,
+        engine: &Engine,
+        component: &Component,
+        recipe: &InstanceRecipe,
+    ) -> Result<Inner, PluginError> {
+        let mut linker = Linker::new(engine);
+        World::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state)
+            .map_err(|error| PluginError::Failed(format!("link plugin interfaces: {error}")))?;
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+            .map_err(|error| PluginError::Failed(format!("link wasi: {error}")))?;
+        let oauth = OAuthState {
+            budget: recipe
+                .grants
+                .oauth
+                .as_ref()
+                .map(OAuthRequestBudget::for_grant)
+                .unwrap_or_default(),
+            transport: recipe.oauth_transport.clone(),
+            sink: recipe.credential_sink.clone(),
+        };
+        let limits = wasmtime::StoreLimitsBuilder::new()
+            .memory_size(recipe.max_memory_bytes)
+            .build();
+        let mut store = Store::new(
+            engine,
+            HostState {
+                wasi: WasiCtxBuilder::new().build(),
+                table: ResourceTable::new(),
+                grants: recipe.grants.clone(),
+                fs_root: recipe.fs_root.clone(),
+                project_dir: recipe.project_dir.clone(),
+                plugin_id: Some(id.to_string()),
+                declared_flags: std::sync::Arc::clone(&recipe.declared_flags),
+                sockets: std::collections::HashMap::new(),
+                next_socket: 1,
+                procs: std::collections::HashMap::new(),
+                next_proc: 1,
+                limits,
+                oauth,
+                provider_http: provider_http::ProviderHttpTable::default(),
+                provider_call: None,
+            },
+        );
+        // The cap only matters if the store consults it.
+        store.limiter(|state| &mut state.limits);
+        // An epoch-instrumented engine traps on the default deadline of 0.
+        // Instantiation and every non-gate call run unbounded; `provider_gate`
+        // installs the real deadline around its guest call.
+        if recipe.gate_epoch {
+            store.set_epoch_deadline(EPOCH_DEADLINE_UNBOUNDED);
+        }
+        if let Some(fuel) = recipe.fuel {
+            store.set_fuel(fuel).map_err(|error| {
+                PluginError::Failed(format!("set fuel budget for {id}: {error}"))
+            })?;
+        }
+        let guest = World::instantiate(&mut store, component, &linker)
+            .map_err(|error| PluginError::Failed(format!("instantiate {id}: {error}")))?;
+        Ok(Inner { store, guest })
     }
 
     /// Call the guest `shutdown` and release the instance.
@@ -2728,6 +2803,14 @@ impl WasmPlugin {
         let Some(wit) = graded_provider_request(event, &inner.store.data().grants, true) else {
             return Ok(None);
         };
+        // The gate is the one plugin call with a wall-clock budget. Give the
+        // guest an epoch deadline so a spinning guest traps and the worker
+        // releases the instance mutex; the caller's `recv_timeout` alone would
+        // leave the abandoned worker holding that mutex forever, wedging every
+        // later call on this plugin.
+        inner
+            .store
+            .set_epoch_deadline(epoch_ticks(policy.patch_timeout));
         let _context = install_context_kind(None, caps, CallKind::Event, None);
         let result = inner
             .guest
@@ -2736,6 +2819,8 @@ impl WasmPlugin {
         clear_context();
         // A `proc` handle lives for this call and nothing beyond it.
         inner.store.data_mut().reap_call_scoped();
+        // Disarm: only the gate runs against a deadline.
+        inner.store.set_epoch_deadline(EPOCH_DEADLINE_UNBOUNDED);
         let (grant, provider_budget_ms) = {
             let grants = &inner.store.data().grants;
             let budget = grants
@@ -2744,6 +2829,24 @@ impl WasmPlugin {
                 .map(|grant| grant.effective_timeout_seconds().saturating_mul(1000));
             (grants.provider_request.clone(), budget)
         };
+        // An epoch trap poisons the component instance: wasmtime then refuses
+        // to enter it again ("cannot enter component instance"), which would
+        // take the plugin's tools, probes and commands down with the timed-out
+        // gate. Rebuild from the retained engine/component so only this one
+        // call is lost.
+        if result.is_err() {
+            match Self::instantiate(&self.id, &self.engine, &self.component, &self.recipe) {
+                Ok(fresh) => *guard = Some(fresh),
+                Err(error) => {
+                    *guard = None;
+                    tracing::warn!(
+                        plugin = %self.id,
+                        %error,
+                        "cannot re-instantiate after a provider-gate trap; plugin unloaded"
+                    );
+                }
+            }
+        }
         match result {
             Ok(WitEventAction::Patch(patch)) => {
                 let Some(grant) = grant else {
@@ -3275,11 +3378,26 @@ impl PluginTrait for WasmPlugin {
                     }
                 }
             }
-            Err(_) => Err(PluginError::Failed(format!(
-                "{}: oauth action timed out after {}s",
-                self.id,
-                timeout.as_secs()
-            ))),
+            Err(_) => {
+                // The worker that overran the deadline still owns the store,
+                // so the plugin must not stay "unloaded" for good: build a
+                // fresh instance from the retained engine and component. The
+                // abandoned store drops on its own thread when (if) the guest
+                // finally returns.
+                match Self::instantiate(&self.id, &self.engine, &self.component, &self.recipe) {
+                    Ok(fresh) => *guard = Some(fresh),
+                    Err(error) => tracing::warn!(
+                        plugin = %self.id,
+                        %error,
+                        "cannot re-instantiate after an oauth timeout; plugin stays unloaded"
+                    ),
+                }
+                Err(PluginError::Failed(format!(
+                    "{}: oauth action timed out after {}s",
+                    self.id,
+                    timeout.as_secs()
+                )))
+            }
         }
     }
 
@@ -3601,6 +3719,18 @@ fn to_wit_event(event: &Event) -> WitEvent {
 /// rounded up to whole ticks.
 pub const RENDER_TICK_MS: u64 = 10;
 
+/// A far-future epoch deadline (about 115 days at [`RENDER_TICK_MS`]).
+///
+/// An epoch-instrumented store traps on the default deadline of 0, so every
+/// instance built on a ticked engine starts disarmed here; only a call with a
+/// budget installs a real deadline.
+pub(crate) const EPOCH_DEADLINE_UNBOUNDED: u64 = 1_000_000_000;
+
+/// Round a wall-clock budget up to whole epoch ticks, the deadline granularity.
+pub(crate) fn epoch_ticks(deadline: std::time::Duration) -> u64 {
+    deadline.as_millis().div_ceil(RENDER_TICK_MS as u128).max(1) as u64
+}
+
 /// Advance every live render engine's epoch once per [`RENDER_TICK_MS`].
 ///
 /// Epoch interruption is an **Engine** setting, so one shared ticker thread
@@ -3801,7 +3931,7 @@ impl RenderHost {
         // epoch-enabled store starts with deadline 0 — without this, the first
         // tick interrupts instantiation itself. Each call installs its real
         // deadline before entering the guest.
-        store.set_epoch_deadline(1_000_000_000); // ~115 days of ticks
+        store.set_epoch_deadline(EPOCH_DEADLINE_UNBOUNDED);
         let guest = World::instantiate(&mut store, &component, &linker).map_err(|error| {
             PluginError::Failed(format!("instantiate {id} for render: {error}"))
         })?;
@@ -3843,14 +3973,11 @@ impl RenderHost {
             return Err(format!("{}: render instance is gone", self.id));
         };
 
-        // Round up to whole ticks; at least one tick.
-        let ticks = self
-            .timeout
-            .as_millis()
-            .div_ceil(RENDER_TICK_MS as u128)
-            .max(1) as u64;
+        let ticks = epoch_ticks(self.timeout);
+        let deadline = self.timeout;
         let max_output_bytes = self.max_output_bytes;
         let input = text.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::Builder::new()
             .name("kiqi-plugin-render".to_string())
             .spawn(move || {
@@ -3867,10 +3994,14 @@ impl RenderHost {
                     .guest
                     .kiqi_plugin_render_api()
                     .call_transform_markdown(&mut inner.store, &input);
-                (outcome, inner)
+                // The receiver is gone on a deadline; the failed send drops the
+                // abandoned store on this thread, which is exactly what we want.
+                let _ = tx.send((outcome, inner));
             });
-        let handle = match worker {
-            Ok(handle) => handle,
+        match worker {
+            // Detach the worker: a call that hits the deadline below must not
+            // wait for the guest (that is the whole point of the wall clock).
+            Ok(handle) => drop(handle),
             Err(error) => {
                 // The instance was moved into the (failed) spawn; it is gone.
                 self.disabled
@@ -3880,10 +4011,24 @@ impl RenderHost {
                     self.id
                 ));
             }
-        };
-        let (outcome, inner) = match handle.join() {
+        }
+        // A hard wall-clock deadline, not just the epoch: wasmtime checks the
+        // epoch only at guest instruction boundaries, so a guest parked inside
+        // a WASI host call (`clock`/`io` sleep) would otherwise pin this thread
+        // — and the TUI event loop that awaits it — forever. On expiry the
+        // instance stays with the abandoned worker, is marked disabled and is
+        // never reused; the caller keeps the original markdown.
+        let (outcome, inner) = match rx.recv_timeout(deadline) {
             Ok(pair) => pair,
-            Err(_) => {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.disabled.store(true, Ordering::Release);
+                return Err(format!(
+                    "{}: transform-markdown exceeded {}ms; renderer disabled",
+                    self.id,
+                    deadline.as_millis()
+                ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 self.disabled.store(true, Ordering::Release);
                 return Err(format!("{}: render thread panicked", self.id));
             }

@@ -3986,6 +3986,33 @@ fn render_host_enforces_the_guest_deadline() {
     assert!(host.transform_markdown("hello").is_err());
 }
 
+/// A guest parked inside a WASI host call is invisible to epoch interruption;
+/// the host's wall-clock deadline must still return the original markdown
+/// promptly instead of freezing the caller (the TUI event loop) forever.
+#[test]
+fn render_host_wall_clock_bounds_a_guest_blocked_in_wasi() {
+    let wasm = fixture_wasm();
+    let grant = RenderGrant {
+        kinds: vec![RENDER_KIND_MARKDOWN.to_string()],
+        timeout_ms: 50,
+        max_output_bytes: 4096,
+    };
+    let host = RenderHost::new("conformance", &wasm, &grant).expect("render host");
+    let started = std::time::Instant::now();
+    let output = host.transform_markdown_or_original("sleep:blocked");
+    assert_eq!(
+        output, "sleep:blocked",
+        "a deadline keeps the original markdown"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "a WASI sleep must not pin the transform (the guest sleeps 1500 ms): {:?}",
+        started.elapsed()
+    );
+    // The abandoned instance is never reused.
+    assert!(host.transform_markdown("hello").is_err());
+}
+
 #[test]
 fn render_host_is_not_created_without_a_markdown_grant() {
     let wasm = fixture_wasm();
@@ -4334,7 +4361,10 @@ fn oauth_action_times_out_on_a_spinning_guest() {
     let mut grants = Grants::default();
     grants
         .grant_oauth(kiqi_plugin::grants::OAuthGrant {
-            providers: vec![oauth_profile("conformance-spin")],
+            providers: vec![
+                oauth_profile("conformance-spin"),
+                oauth_profile("conformance-oauth"),
+            ],
             timeout_seconds: 1,
             max_requests: 2,
         })
@@ -4357,6 +4387,16 @@ fn oauth_action_times_out_on_a_spinning_guest() {
     assert!(
         elapsed < std::time::Duration::from_secs(4),
         "the deadline must bound the call: {elapsed:?}"
+    );
+
+    // A timeout must not leave the plugin permanently "unloaded": the host
+    // rebuilds the instance from the retained engine and component.
+    let next = plugin
+        .oauth_action("conformance-oauth", kiqi_plugin::OAuthAction::Poll)
+        .expect("a second action after a timeout must still work");
+    assert!(
+        matches!(next, kiqi_plugin::OAuthResponse::AuthorizationPending),
+        "got {next:?}"
     );
 }
 
