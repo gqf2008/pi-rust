@@ -40,6 +40,31 @@ pub struct Grants {
     /// carries its policy, so "granted" and "to what" are one decision).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net_sockets: Option<NetSocketsGrant>,
+    /// Host-attributed OAuth: exact IdP profiles, a flow budget and a request
+    /// budget. Token material never crosses the ABI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuthGrant>,
+    /// Provider catalog plus the request filter for `provider-http`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderGrant>,
+    /// Markdown transform (`render-api`). Bare `true` = markdown + defaults,
+    /// the same compatibility `fs` keeps.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "render_grant_from_bool_or_value"
+    )]
+    pub render: Option<RenderGrant>,
+    /// Package-resident skills/prompts. Bare `true` = both kinds + defaults.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "resources_grant_from_bool_or_value"
+    )]
+    pub resources: Option<ResourcesGrant>,
+    /// Redacted provider-request observation and the bounded patch channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_request: Option<ProviderRequestGrant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -230,6 +255,40 @@ impl FsGrant {
     }
 }
 
+/// The bare-`true` compatibility rule shared by `render` and `resources`:
+/// `true` means "grant with the defaults", `false`/`null` means absent, and an
+/// object is read as the policy. `fs` keeps its own wrapper because its bare
+/// form also names a historical default.
+fn bool_or_default_grant<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    use serde::Deserialize;
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(Value::Bool(false)) | Some(Value::Null) => None,
+        Some(Value::Bool(true)) => Some(T::default()),
+        Some(other) => Some(serde_json::from_value::<T>(other).map_err(serde::de::Error::custom)?),
+    })
+}
+
+fn render_grant_from_bool_or_value<'de, D>(deserializer: D) -> Result<Option<RenderGrant>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bool_or_default_grant(deserializer)
+}
+
+fn resources_grant_from_bool_or_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<ResourcesGrant>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bool_or_default_grant(deserializer)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ProcGrant {
@@ -282,12 +341,828 @@ pub struct NetSocketsGrant {
     pub hosts: Vec<String>,
 }
 
-/// Options a grant may carry beyond its value list. Only `exec` has any; a
-/// caller setting them for another capability gets an error, not a silently
-/// dropped flag.
+// ---------------------------------------------------------------------------
+// 0.8.0 capabilities
+//
+// Each key below carries its own policy, so "granted" and "to what" stay one
+// decision (the rule `net-http` established). None of them accept the
+// `exec`/`proc` options; `grant()` rejects those rather than dropping them.
+// ---------------------------------------------------------------------------
+
+/// The default wall-clock budget for one OAuth flow (polling included).
+pub const OAUTH_TIMEOUT_DEFAULT_SECONDS: u64 = 600;
+
+/// The largest OAuth budget a grant can ask for. The host clamps and the CLI
+/// rejects larger values, so a hand-edited file cannot buy an unbounded flow.
+pub const OAUTH_TIMEOUT_MAX_SECONDS: u64 = 900;
+
+/// How many `oauth-http` calls one flow may make by default.
+pub const OAUTH_MAX_REQUESTS_DEFAULT: u32 = 16;
+
+/// The hard ceiling on `max-requests` — every call reaches the IdP.
+pub const OAUTH_MAX_REQUESTS_MAX: u32 = 64;
+
+fn default_oauth_timeout() -> u64 {
+    OAUTH_TIMEOUT_DEFAULT_SECONDS
+}
+
+fn is_default_oauth_timeout(value: &u64) -> bool {
+    *value == OAUTH_TIMEOUT_DEFAULT_SECONDS
+}
+
+fn default_oauth_max_requests() -> u32 {
+    OAUTH_MAX_REQUESTS_DEFAULT
+}
+
+fn is_default_oauth_max_requests(value: &u32) -> bool {
+    *value == OAUTH_MAX_REQUESTS_DEFAULT
+}
+
+/// One OAuth flow a provider profile enables. The set is closed: an unknown
+/// flow string fails deserialization, so the file loads as "nothing granted".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OAuthFlow {
+    AuthorizationCode,
+    DeviceCode,
+}
+
+/// One IdP profile the guest may drive through host-attributed `oauth-http`.
+/// Every endpoint is an exact `https://host/…` URL — there is no wildcard form,
+/// because the grant is what binds a flow to its IdP.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct OAuthProviderProfile {
+    /// The profile id the guest names in `oauth-api`/`oauth-http`.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// At least one; an empty list is invalid.
+    #[serde(default)]
+    pub flows: Vec<OAuthFlow>,
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation_endpoint: Option<String>,
+    pub client_id: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub supports_pkce: bool,
+}
+
+/// The `oauth` policy: the profiles a plugin may drive, plus the flow budget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct OAuthGrant {
+    #[serde(default)]
+    pub providers: Vec<OAuthProviderProfile>,
+    /// Wall-clock budget for one flow; absent = the default, capped at
+    /// [`OAUTH_TIMEOUT_MAX_SECONDS`].
+    #[serde(
+        default = "default_oauth_timeout",
+        skip_serializing_if = "is_default_oauth_timeout"
+    )]
+    pub timeout_seconds: u64,
+    /// How many `oauth-http` calls one flow may make; absent = the default,
+    /// capped at [`OAUTH_MAX_REQUESTS_MAX`].
+    #[serde(
+        default = "default_oauth_max_requests",
+        skip_serializing_if = "is_default_oauth_max_requests"
+    )]
+    pub max_requests: u32,
+}
+
+impl OAuthGrant {
+    /// Validate a hand-built or deserialized policy. `grant_oauth` and
+    /// [`Grants::validate`] both run this, so the CLI and a hand-edited file
+    /// cannot disagree about what a valid profile is.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.providers.is_empty() {
+            return Err("oauth needs at least one provider profile".to_string());
+        }
+        if self.timeout_seconds == 0 || self.timeout_seconds > OAUTH_TIMEOUT_MAX_SECONDS {
+            return Err(format!(
+                "oauth `timeout-seconds` must be 1..={OAUTH_TIMEOUT_MAX_SECONDS}, got {}",
+                self.timeout_seconds
+            ));
+        }
+        if self.max_requests == 0 || self.max_requests > OAUTH_MAX_REQUESTS_MAX {
+            return Err(format!(
+                "oauth `max-requests` must be 1..={OAUTH_MAX_REQUESTS_MAX}, got {}",
+                self.max_requests
+            ));
+        }
+        for profile in &self.providers {
+            if profile.id.trim().is_empty() {
+                return Err("oauth provider `id` must not be empty".to_string());
+            }
+            if self
+                .providers
+                .iter()
+                .filter(|other| other.id == profile.id)
+                .count()
+                > 1
+            {
+                return Err(format!("oauth provider id `{}` is not unique", profile.id));
+            }
+            if profile.flows.is_empty() {
+                return Err(format!(
+                    "oauth provider `{}` needs at least one flow",
+                    profile.id
+                ));
+            }
+            if profile.client_id.trim().is_empty() {
+                return Err(format!(
+                    "oauth provider `{}` needs a `client-id`",
+                    profile.id
+                ));
+            }
+            for (field, endpoint) in [
+                ("authorization-endpoint", &profile.authorization_endpoint),
+                ("token-endpoint", &profile.token_endpoint),
+            ] {
+                validate_https_endpoint(
+                    &format!("oauth provider `{}` {field}", profile.id),
+                    endpoint,
+                )?;
+            }
+            if let Some(endpoint) = &profile.revocation_endpoint {
+                validate_https_endpoint(
+                    &format!("oauth provider `{}` revocation-endpoint", profile.id),
+                    endpoint,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The default budget for one provider request; also the fallback when a
+/// `provider-request` patch must be bounded without a provider grant.
+pub const PROVIDER_TIMEOUT_DEFAULT_SECONDS: u64 = 600;
+
+/// The largest provider budget a grant can ask for.
+pub const PROVIDER_TIMEOUT_MAX_SECONDS: u64 = 900;
+
+fn default_provider_timeout() -> u64 {
+    PROVIDER_TIMEOUT_DEFAULT_SECONDS
+}
+
+fn is_default_provider_timeout(value: &u64) -> bool {
+    *value == PROVIDER_TIMEOUT_DEFAULT_SECONDS
+}
+
+fn default_provider_methods() -> Vec<String> {
+    vec!["POST".to_string()]
+}
+
+fn is_default_provider_methods(value: &Vec<String>) -> bool {
+    value.len() == 1 && value[0] == "POST"
+}
+
+fn default_https_scheme() -> String {
+    "https".to_string()
+}
+
+fn is_default_https_scheme(value: &String) -> bool {
+    value == "https"
+}
+
+/// The typed wire APIs a provider grant may name.
+///
+/// This mirrors `kiqi_ai::Api`'s typed variants exactly. The contract crate
+/// deliberately keeps zero internal dependencies, so the list is spelled here
+/// instead of importing the type; `faux` and any unknown spelling are rejected
+/// the same way `Api::Faux`/`Api::Other(_)` would be — a grant must name a real
+/// wire API a plugin can speak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderApi {
+    OpenaiCompletions,
+    MistralConversations,
+    OpenaiResponses,
+    AzureOpenaiResponses,
+    OpenaiCodexResponses,
+    AnthropicMessages,
+    BedrockConverseStream,
+    GoogleGenerativeAi,
+    GoogleVertex,
+    PiMessages,
+}
+
+impl ProviderApi {
+    /// Parse a grant's `api` string into the typed allow-list.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        Ok(match value {
+            "openai-completions" => Self::OpenaiCompletions,
+            "mistral-conversations" => Self::MistralConversations,
+            "openai-responses" => Self::OpenaiResponses,
+            "azure-openai-responses" => Self::AzureOpenaiResponses,
+            "openai-codex-responses" => Self::OpenaiCodexResponses,
+            "anthropic-messages" => Self::AnthropicMessages,
+            "bedrock-converse-stream" => Self::BedrockConverseStream,
+            "google-generative-ai" => Self::GoogleGenerativeAi,
+            "google-vertex" => Self::GoogleVertex,
+            "pi-messages" => Self::PiMessages,
+            "faux" => {
+                return Err("`faux` is a test provider, not a wire API".to_string());
+            }
+            other => {
+                return Err(format!("`{other}` is not a typed wire API"));
+            }
+        })
+    }
+
+    /// The wire spelling, as it appears in grants.json.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenaiCompletions => "openai-completions",
+            Self::MistralConversations => "mistral-conversations",
+            Self::OpenaiResponses => "openai-responses",
+            Self::AzureOpenaiResponses => "azure-openai-responses",
+            Self::OpenaiCodexResponses => "openai-codex-responses",
+            Self::AnthropicMessages => "anthropic-messages",
+            Self::BedrockConverseStream => "bedrock-converse-stream",
+            Self::GoogleGenerativeAi => "google-generative-ai",
+            Self::GoogleVertex => "google-vertex",
+            Self::PiMessages => "pi-messages",
+        }
+    }
+}
+
+/// One model the provider grant owns. The grant is the catalog authority: a
+/// guest cannot surface a model it did not get here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ProviderModel {
+    pub id: String,
+    /// A wire API spelling from [`ProviderApi`].
+    pub api: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_url: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reasoning: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input: Vec<String>,
+}
+
+/// The request filter for `provider-http`: a request is refused unless its
+/// scheme, host, path prefix and method all match.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ProviderEndpoint {
+    #[serde(
+        default = "default_https_scheme",
+        skip_serializing_if = "is_default_https_scheme"
+    )]
+    pub scheme: String,
+    /// An exact host — no wildcard.
+    pub host: String,
+    /// Must start with `/`; the host serves nothing outside it.
+    pub path_prefix: String,
+    #[serde(
+        default = "default_provider_methods",
+        skip_serializing_if = "is_default_provider_methods"
+    )]
+    pub methods: Vec<String>,
+}
+
+/// One provider profile: its catalog, its one endpoint filter, the opaque
+/// host-side credential handle, and its budget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ProviderProfile {
+    /// The provider id (= the plugin's install-dir id, checked by the host).
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub display_name: String,
+    #[serde(default)]
+    pub models: Vec<ProviderModel>,
+    pub endpoint: ProviderEndpoint,
+    /// An opaque host-minted handle (`pc-…`); the value never lives in this
+    /// file. Empty is rejected when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+    /// Wall-clock budget for one request; absent = the default, capped at
+    /// [`PROVIDER_TIMEOUT_MAX_SECONDS`].
+    #[serde(
+        default = "default_provider_timeout",
+        skip_serializing_if = "is_default_provider_timeout"
+    )]
+    pub timeout_seconds: u64,
+}
+
+/// The `provider` policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ProviderGrant {
+    #[serde(default)]
+    pub providers: Vec<ProviderProfile>,
+}
+
+impl ProviderGrant {
+    /// The tightest per-profile budget. A `provider-request` patch deadline is
+    /// bounded by it: a patch must not outlive the request it belongs to.
+    pub fn effective_timeout_seconds(&self) -> u64 {
+        self.providers
+            .iter()
+            .map(|profile| profile.timeout_seconds)
+            .min()
+            .unwrap_or(PROVIDER_TIMEOUT_DEFAULT_SECONDS)
+    }
+
+    /// Validate the catalog, the endpoint filter and the credential handle.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.providers.is_empty() {
+            return Err("provider needs at least one provider profile".to_string());
+        }
+        for profile in &self.providers {
+            if profile.id.trim().is_empty() {
+                return Err("provider `id` must not be empty".to_string());
+            }
+            if self
+                .providers
+                .iter()
+                .filter(|other| other.id == profile.id)
+                .count()
+                > 1
+            {
+                return Err(format!("provider id `{}` is not unique", profile.id));
+            }
+            if profile.models.is_empty() {
+                return Err(format!(
+                    "provider `{}` needs at least one model",
+                    profile.id
+                ));
+            }
+            for model in &profile.models {
+                if model.id.trim().is_empty() {
+                    return Err(format!(
+                        "provider `{}` has a model with an empty id",
+                        profile.id
+                    ));
+                }
+                if profile
+                    .models
+                    .iter()
+                    .filter(|other| other.id == model.id)
+                    .count()
+                    > 1
+                {
+                    return Err(format!(
+                        "provider `{}` model id `{}` is not unique",
+                        profile.id, model.id
+                    ));
+                }
+                if let Err(error) = ProviderApi::parse(&model.api) {
+                    return Err(format!(
+                        "provider `{}` model `{}`: {error}",
+                        profile.id, model.id
+                    ));
+                }
+            }
+            let endpoint = &profile.endpoint;
+            if endpoint.scheme != "https" {
+                return Err(format!(
+                    "provider `{}` endpoint scheme must be `https`, got `{}`",
+                    profile.id, endpoint.scheme
+                ));
+            }
+            validate_exact_host(
+                &format!("provider `{}` endpoint host", profile.id),
+                &endpoint.host,
+            )?;
+            if !endpoint.path_prefix.starts_with('/') {
+                return Err(format!(
+                    "provider `{}` endpoint `path-prefix` must start with `/`, got `{}`",
+                    profile.id, endpoint.path_prefix
+                ));
+            }
+            if endpoint.methods.is_empty() {
+                return Err(format!(
+                    "provider `{}` endpoint needs at least one method",
+                    profile.id
+                ));
+            }
+            for method in &endpoint.methods {
+                if method != "GET" && method != "POST" {
+                    return Err(format!(
+                        "provider `{}` endpoint method `{method}` is not allowed (GET/POST only)",
+                        profile.id
+                    ));
+                }
+            }
+            if let Some(credential) = &profile.credential {
+                if credential.trim().is_empty() {
+                    return Err(format!(
+                        "provider `{}` `credential` must not be empty when present",
+                        profile.id
+                    ));
+                }
+            }
+            if profile.timeout_seconds == 0
+                || profile.timeout_seconds > PROVIDER_TIMEOUT_MAX_SECONDS
+            {
+                return Err(format!(
+                    "provider `{}` `timeout-seconds` must be 1..={PROVIDER_TIMEOUT_MAX_SECONDS}, got {}",
+                    profile.id, profile.timeout_seconds
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The only render kind 0.8.0 accepts.
+pub const RENDER_KIND_MARKDOWN: &str = "markdown";
+
+/// Default deadline for one markdown transform.
+pub const RENDER_TIMEOUT_MS_DEFAULT: u64 = 2_000;
+
+/// The largest transform deadline a grant can ask for.
+pub const RENDER_TIMEOUT_MS_MAX: u64 = 10_000;
+
+/// Default cap on the transformed text.
+pub const RENDER_MAX_OUTPUT_BYTES_DEFAULT: u64 = 1024 * 1024;
+
+/// The largest output cap a grant can ask for.
+pub const RENDER_MAX_OUTPUT_BYTES_MAX: u64 = 8 * 1024 * 1024;
+
+fn default_render_kinds() -> Vec<String> {
+    vec![RENDER_KIND_MARKDOWN.to_string()]
+}
+
+fn is_default_render_kinds(value: &Vec<String>) -> bool {
+    value.len() == 1 && value[0] == RENDER_KIND_MARKDOWN
+}
+
+fn default_render_timeout() -> u64 {
+    RENDER_TIMEOUT_MS_DEFAULT
+}
+
+fn is_default_render_timeout(value: &u64) -> bool {
+    *value == RENDER_TIMEOUT_MS_DEFAULT
+}
+
+fn default_render_max_output_bytes() -> u64 {
+    RENDER_MAX_OUTPUT_BYTES_DEFAULT
+}
+
+fn is_default_render_max_output_bytes(value: &u64) -> bool {
+    *value == RENDER_MAX_OUTPUT_BYTES_DEFAULT
+}
+
+/// The `render` policy: which transform kinds and the budget for one call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct RenderGrant {
+    /// Only `markdown` is accepted; absent = `["markdown"]`.
+    #[serde(
+        default = "default_render_kinds",
+        skip_serializing_if = "is_default_render_kinds"
+    )]
+    pub kinds: Vec<String>,
+    #[serde(
+        default = "default_render_timeout",
+        skip_serializing_if = "is_default_render_timeout"
+    )]
+    pub timeout_ms: u64,
+    #[serde(
+        default = "default_render_max_output_bytes",
+        skip_serializing_if = "is_default_render_max_output_bytes"
+    )]
+    pub max_output_bytes: u64,
+}
+
+impl Default for RenderGrant {
+    fn default() -> Self {
+        Self {
+            kinds: default_render_kinds(),
+            timeout_ms: RENDER_TIMEOUT_MS_DEFAULT,
+            max_output_bytes: RENDER_MAX_OUTPUT_BYTES_DEFAULT,
+        }
+    }
+}
+
+impl RenderGrant {
+    /// Validate the kinds and the two bounds.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.kinds.is_empty() {
+            return Err("render needs at least one kind".to_string());
+        }
+        for kind in &self.kinds {
+            if kind != RENDER_KIND_MARKDOWN {
+                return Err(format!(
+                    "render kind `{kind}` is not supported (only `{RENDER_KIND_MARKDOWN}`)"
+                ));
+            }
+        }
+        if self.timeout_ms == 0 || self.timeout_ms > RENDER_TIMEOUT_MS_MAX {
+            return Err(format!(
+                "render `timeout-ms` must be 1..={RENDER_TIMEOUT_MS_MAX}, got {}",
+                self.timeout_ms
+            ));
+        }
+        if self.max_output_bytes == 0 || self.max_output_bytes > RENDER_MAX_OUTPUT_BYTES_MAX {
+            return Err(format!(
+                "render `max-output-bytes` must be 1..={RENDER_MAX_OUTPUT_BYTES_MAX}, got {}",
+                self.max_output_bytes
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The resource kinds a `resources` grant may enable.
+pub const RESOURCES_KIND_SKILLS: &str = "skills";
+/// See [`RESOURCES_KIND_SKILLS`].
+pub const RESOURCES_KIND_PROMPTS: &str = "prompts";
+
+/// Default number of resources one plugin may contribute.
+pub const RESOURCES_MAX_ITEMS_DEFAULT: u32 = 64;
+/// The hard ceiling on `max-items`.
+pub const RESOURCES_MAX_ITEMS_MAX: u32 = 256;
+/// Default total bytes of resources one plugin may contribute.
+pub const RESOURCES_MAX_BYTES_DEFAULT: u64 = 1024 * 1024;
+/// The hard ceiling on `max-bytes`.
+pub const RESOURCES_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024;
+
+fn default_resources_kinds() -> Vec<String> {
+    vec![
+        RESOURCES_KIND_SKILLS.to_string(),
+        RESOURCES_KIND_PROMPTS.to_string(),
+    ]
+}
+
+fn is_default_resources_kinds(value: &Vec<String>) -> bool {
+    value.len() == 2 && value[0] == RESOURCES_KIND_SKILLS && value[1] == RESOURCES_KIND_PROMPTS
+}
+
+fn default_resources_max_items() -> u32 {
+    RESOURCES_MAX_ITEMS_DEFAULT
+}
+
+fn is_default_resources_max_items(value: &u32) -> bool {
+    *value == RESOURCES_MAX_ITEMS_DEFAULT
+}
+
+fn default_resources_max_bytes() -> u64 {
+    RESOURCES_MAX_BYTES_DEFAULT
+}
+
+fn is_default_resources_max_bytes(value: &u64) -> bool {
+    *value == RESOURCES_MAX_BYTES_DEFAULT
+}
+
+/// The `resources` policy: package-resident skills/prompts, with item and byte
+/// caps. Bare `true` grants both kinds with the defaults, like `fs`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ResourcesGrant {
+    #[serde(
+        default = "default_resources_kinds",
+        skip_serializing_if = "is_default_resources_kinds"
+    )]
+    pub kinds: Vec<String>,
+    #[serde(
+        default = "default_resources_max_items",
+        skip_serializing_if = "is_default_resources_max_items"
+    )]
+    pub max_items: u32,
+    #[serde(
+        default = "default_resources_max_bytes",
+        skip_serializing_if = "is_default_resources_max_bytes"
+    )]
+    pub max_bytes: u64,
+}
+
+impl Default for ResourcesGrant {
+    fn default() -> Self {
+        Self {
+            kinds: default_resources_kinds(),
+            max_items: RESOURCES_MAX_ITEMS_DEFAULT,
+            max_bytes: RESOURCES_MAX_BYTES_DEFAULT,
+        }
+    }
+}
+
+impl ResourcesGrant {
+    /// Validate the kinds and the two caps.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.kinds.is_empty() {
+            return Err("resources needs at least one kind".to_string());
+        }
+        for kind in &self.kinds {
+            if kind != RESOURCES_KIND_SKILLS && kind != RESOURCES_KIND_PROMPTS {
+                return Err(format!(
+                    "resources kind `{kind}` is not supported (skills/prompts only)"
+                ));
+            }
+        }
+        if self.max_items == 0 || self.max_items > RESOURCES_MAX_ITEMS_MAX {
+            return Err(format!(
+                "resources `max-items` must be 1..={RESOURCES_MAX_ITEMS_MAX}, got {}",
+                self.max_items
+            ));
+        }
+        if self.max_bytes == 0 || self.max_bytes > RESOURCES_MAX_BYTES_MAX {
+            return Err(format!(
+                "resources `max-bytes` must be 1..={RESOURCES_MAX_BYTES_MAX}, got {}",
+                self.max_bytes
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Whether `provider-request` delivers the before-request event at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObserveMode {
+    /// Nothing is delivered (the default).
+    #[default]
+    None,
+    /// Delivered, redacted, once per provider request.
+    Requests,
+}
+
+fn is_default_observe(value: &ObserveMode) -> bool {
+    *value == ObserveMode::None
+}
+
+/// Whether header values cross the ABI, or only their names.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HeadersMode {
+    /// Names only; values are replaced by `<redacted>` (the default).
+    #[default]
+    Names,
+    /// Values too, minus a case-insensitive deny-list.
+    Values,
+}
+
+fn is_default_headers(value: &HeadersMode) -> bool {
+    *value == HeadersMode::Names
+}
+
+/// Whether the conversation crosses the ABI with the observe event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MessagesMode {
+    /// No messages (the default).
+    #[default]
+    None,
+    /// The full conversation, an explicit opt-in.
+    Full,
+}
+
+fn is_default_messages(value: &MessagesMode) -> bool {
+    *value == MessagesMode::None
+}
+
+/// Default deadline for one patch decision.
+pub const PROVIDER_REQUEST_PATCH_TIMEOUT_MS_DEFAULT: u64 = 2_000;
+
+/// The fixed ceiling on `patch-timeout-ms`; the effective maximum is this or
+/// the provider grant's tightest budget, whichever is smaller.
+pub const PROVIDER_REQUEST_PATCH_TIMEOUT_MS_MAX: u64 = 10_000;
+
+fn default_provider_request_patch_timeout() -> u64 {
+    PROVIDER_REQUEST_PATCH_TIMEOUT_MS_DEFAULT
+}
+
+fn is_default_provider_request_patch_timeout(value: &u64) -> bool {
+    *value == PROVIDER_REQUEST_PATCH_TIMEOUT_MS_DEFAULT
+}
+
+/// The `provider-request` policy: the redacted observe event plus the bounded
+/// patch channel. Absent = the event is not delivered and no patch is accepted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ProviderRequestGrant {
+    #[serde(default, skip_serializing_if = "is_default_observe")]
+    pub observe: ObserveMode,
+    #[serde(default, skip_serializing_if = "is_default_headers")]
+    pub headers: HeadersMode,
+    #[serde(default, skip_serializing_if = "is_default_messages")]
+    pub messages: MessagesMode,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub patch: bool,
+    /// Deadline for one patch decision; capped by the provider budget too.
+    #[serde(
+        default = "default_provider_request_patch_timeout",
+        skip_serializing_if = "is_default_provider_request_patch_timeout"
+    )]
+    pub patch_timeout_ms: u64,
+}
+
+impl Default for ProviderRequestGrant {
+    fn default() -> Self {
+        Self {
+            observe: ObserveMode::None,
+            headers: HeadersMode::Names,
+            messages: MessagesMode::None,
+            patch: false,
+            patch_timeout_ms: PROVIDER_REQUEST_PATCH_TIMEOUT_MS_DEFAULT,
+        }
+    }
+}
+
+impl ProviderRequestGrant {
+    /// Validate the patch deadline against the provider grant's tightest
+    /// budget. `None` means no provider grant is present, so only the fixed
+    /// ceiling applies.
+    pub fn validate(&self, provider_timeout_seconds: Option<u64>) -> Result<(), String> {
+        let max = provider_patch_timeout_max_ms(provider_timeout_seconds);
+        if self.patch_timeout_ms == 0 || self.patch_timeout_ms > max {
+            return Err(format!(
+                "provider-request `patch-timeout-ms` must be 1..={max}, got {}",
+                self.patch_timeout_ms
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn provider_patch_timeout_max_ms(provider_timeout_seconds: Option<u64>) -> u64 {
+    provider_timeout_seconds
+        .map(|seconds| seconds.saturating_mul(1000))
+        .unwrap_or(u64::MAX)
+        .min(PROVIDER_REQUEST_PATCH_TIMEOUT_MS_MAX)
+}
+
+/// An OAuth endpoint must be an exact `https://host/…` URL: TLS only, a real
+/// host (no wildcard, no userinfo) and no fragment. A query string is allowed;
+/// a wildcard anywhere is not.
+fn validate_https_endpoint(field: &str, value: &str) -> Result<(), String> {
+    let Some(rest) = value.strip_prefix("https://") else {
+        return Err(format!("{field} must be an https URL, got `{value}`"));
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() {
+        return Err(format!("{field} has no host: `{value}`"));
+    }
+    if authority.contains('@') {
+        return Err(format!("{field} must not carry userinfo: `{value}`"));
+    }
+    if value.contains('*') {
+        return Err(format!(
+            "{field} must name an exact host, not a wildcard: `{value}`"
+        ));
+    }
+    if value.contains('#') {
+        return Err(format!("{field} must not carry a fragment: `{value}`"));
+    }
+    if authority.chars().any(char::is_whitespace) {
+        return Err(format!("{field} must not contain whitespace: `{value}`"));
+    }
+    Ok(())
+}
+
+/// A provider endpoint host is a bare exact host: non-empty, no wildcard, no
+/// path and no whitespace.
+fn validate_exact_host(field: &str, host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err(format!("{field} must not be empty"));
+    }
+    if host.contains('*') {
+        return Err(format!(
+            "{field} must be an exact host, not a wildcard: `{host}`"
+        ));
+    }
+    if host.contains('/') || host.chars().any(char::is_whitespace) {
+        return Err(format!("{field} must be a bare host, got `{host}`"));
+    }
+    Ok(())
+}
+
+/// The grant key that authorizes an ABI interface.
+///
+/// `provider-http` and `provider-stream` are two halves of the one `provider`
+/// decision (`provider-stream` is additionally call-scoped, not separately
+/// grantable); `oauth-http` maps to `oauth`, the `render-api` export to
+/// `render`, the package `resources` convention to `resources`, and the
+/// provider-request hook to `provider-request`. The bare interface name and
+/// the `kiqi:plugin/<name>@<version>` form are both accepted.
+pub fn grant_key_for_interface(interface: &str) -> Option<&'static str> {
+    let name = interface.strip_prefix("kiqi:plugin/").unwrap_or(interface);
+    let name = name.split('@').next().unwrap_or(name);
+    match name {
+        "provider-http" | "provider-stream" => Some("provider"),
+        "oauth-http" => Some("oauth"),
+        "render-api" => Some("render"),
+        "resources" => Some("resources"),
+        "provider-request" => Some("provider-request"),
+        _ => None,
+    }
+}
+
+/// Options a grant may carry beyond its value list. `fs`/`exec`/`proc` accept
+/// some; a caller setting one for another capability (including every 0.8.0
+/// key) gets an error, not a silently dropped flag.
 #[derive(Debug, Clone, Default)]
 pub struct GrantOptions {
-    /// `--cwd plugin-data|project` (exec and proc).
+    /// `--cwd plugin-data|project` (fs, exec and proc).
     pub cwd: Option<ExecCwd>,
     /// `--timeout <seconds>` (exec and proc; each has its own bounds).
     pub timeout_seconds: Option<u64>,
@@ -313,7 +1188,13 @@ impl Grants {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        serde_json::from_str(&text).unwrap_or_default()
+        let grants: Grants = serde_json::from_str(&text).unwrap_or_default();
+        // A hand-edited file must not buy policy the CLI would refuse, so the
+        // same validation the constructors use runs here. An invalid policy is
+        // treated as absent (that one capability is cleared, the rest of the
+        // file still loads), silently, exactly like a malformed file grants
+        // nothing: the caller sees only what survived.
+        grants.validated()
     }
 
     /// Write the grants, creating `plugins/<id>/` as needed.
@@ -384,6 +1265,21 @@ impl Grants {
         }
         if self.net_sockets.is_some() {
             out.push("net-sockets");
+        }
+        if self.oauth.is_some() {
+            out.push("oauth");
+        }
+        if self.provider.is_some() {
+            out.push("provider");
+        }
+        if self.render.is_some() {
+            out.push("render");
+        }
+        if self.resources.is_some() {
+            out.push("resources");
+        }
+        if self.provider_request.is_some() {
+            out.push("provider-request");
         }
         out
     }
@@ -484,6 +1380,50 @@ impl Grants {
                     max_open,
                 });
             }
+            "oauth" => {
+                reject_grant_options(capability, &options)?;
+                // A Vec<String> cannot describe an IdP profile, so the generic
+                // entry point refuses rather than inventing one.
+                return Err("`oauth` carries provider profiles; use grant_oauth".to_string());
+            }
+            "provider" => {
+                reject_grant_options(capability, &options)?;
+                return Err("`provider` carries provider profiles; use grant_provider".to_string());
+            }
+            "render" => {
+                reject_grant_options(capability, &options)?;
+                let kinds = if policy.is_empty() {
+                    default_render_kinds()
+                } else {
+                    policy.clone()
+                };
+                self.grant_render(RenderGrant {
+                    kinds,
+                    ..RenderGrant::default()
+                })?;
+            }
+            "resources" => {
+                reject_grant_options(capability, &options)?;
+                let kinds = if policy.is_empty() {
+                    default_resources_kinds()
+                } else {
+                    policy.clone()
+                };
+                self.grant_resources(ResourcesGrant {
+                    kinds,
+                    ..ResourcesGrant::default()
+                })?;
+            }
+            "provider-request" => {
+                reject_grant_options(capability, &options)?;
+                if !policy.is_empty() {
+                    return Err(
+                        "`provider-request` takes no value list; use grant_provider_request"
+                            .to_string(),
+                    );
+                }
+                self.grant_provider_request(ProviderRequestGrant::default())?;
+            }
             other => return Err(format!("unknown capability `{other}`")),
         }
         Ok(())
@@ -497,10 +1437,143 @@ impl Grants {
             "exec" => self.exec = None,
             "proc" => self.proc = None,
             "net-sockets" => self.net_sockets = None,
+            "oauth" => self.oauth = None,
+            "provider" => self.provider = None,
+            "render" => self.render = None,
+            "resources" => self.resources = None,
+            "provider-request" => self.provider_request = None,
             other => return Err(format!("unknown capability `{other}`")),
         }
         Ok(())
     }
+
+    /// Grant the `oauth` policy. The constructor validates first, so an
+    /// invalid profile never reaches the file.
+    pub fn grant_oauth(&mut self, grant: OAuthGrant) -> Result<(), String> {
+        grant.validate()?;
+        self.oauth = Some(grant);
+        Ok(())
+    }
+
+    /// Grant the `provider` policy. A provider with a shorter budget than an
+    /// existing `provider-request` patch deadline is refused, because it would
+    /// strand a patch the file already promises to run.
+    pub fn grant_provider(&mut self, grant: ProviderGrant) -> Result<(), String> {
+        grant.validate()?;
+        if let Some(request) = &self.provider_request {
+            request.validate(Some(grant.effective_timeout_seconds()))?;
+        }
+        self.provider = Some(grant);
+        Ok(())
+    }
+
+    /// Grant the `render` policy.
+    pub fn grant_render(&mut self, grant: RenderGrant) -> Result<(), String> {
+        grant.validate()?;
+        self.render = Some(grant);
+        Ok(())
+    }
+
+    /// Grant the `resources` policy.
+    pub fn grant_resources(&mut self, grant: ResourcesGrant) -> Result<(), String> {
+        grant.validate()?;
+        self.resources = Some(grant);
+        Ok(())
+    }
+
+    /// Grant the `provider-request` policy, bounded by the provider budget.
+    pub fn grant_provider_request(&mut self, grant: ProviderRequestGrant) -> Result<(), String> {
+        grant.validate(
+            self.provider
+                .as_ref()
+                .map(ProviderGrant::effective_timeout_seconds),
+        )?;
+        self.provider_request = Some(grant);
+        Ok(())
+    }
+
+    /// Validate every 0.8.0 policy present. The constructors call the
+    /// per-policy checks; this is the whole-file view, and the one the CLI can
+    /// run before writing.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(grant) = &self.oauth {
+            grant.validate()?;
+        }
+        if let Some(grant) = &self.provider {
+            grant.validate()?;
+        }
+        if let Some(grant) = &self.render {
+            grant.validate()?;
+        }
+        if let Some(grant) = &self.resources {
+            grant.validate()?;
+        }
+        if let Some(grant) = &self.provider_request {
+            grant.validate(
+                self.provider
+                    .as_ref()
+                    .map(ProviderGrant::effective_timeout_seconds),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The fail-closed load path: clear only the capability whose policy does
+    /// not validate, so a hand-edited file cannot smuggle an invalid policy in
+    /// while leaving unrelated valid grants intact.
+    fn validated(mut self) -> Self {
+        if self
+            .oauth
+            .as_ref()
+            .is_some_and(|grant| grant.validate().is_err())
+        {
+            self.oauth = None;
+        }
+        if self
+            .provider
+            .as_ref()
+            .is_some_and(|grant| grant.validate().is_err())
+        {
+            self.provider = None;
+        }
+        if self
+            .render
+            .as_ref()
+            .is_some_and(|grant| grant.validate().is_err())
+        {
+            self.render = None;
+        }
+        if self
+            .resources
+            .as_ref()
+            .is_some_and(|grant| grant.validate().is_err())
+        {
+            self.resources = None;
+        }
+        let provider_timeout = self
+            .provider
+            .as_ref()
+            .map(ProviderGrant::effective_timeout_seconds);
+        if self
+            .provider_request
+            .as_ref()
+            .is_some_and(|grant| grant.validate(provider_timeout).is_err())
+        {
+            self.provider_request = None;
+        }
+        self
+    }
+}
+
+/// Reject the `exec`/`proc` options on a capability that has no use for them.
+/// The one place the rule lives, so every 0.8.0 arm behaves like `net-http`.
+fn reject_grant_options(capability: &str, options: &GrantOptions) -> Result<(), String> {
+    if options.cwd.is_some() || options.timeout_seconds.is_some() || options.max_open.is_some() {
+        return Err(format!(
+            "`{capability}` takes no --cwd/--timeout/--max-open (set its own policy fields instead)"
+        ));
+    }
+    Ok(())
 }
 
 /// Exact match, or `*` for "any" — the one allow-list rule every policy uses.
@@ -1014,5 +2087,506 @@ mod tests {
         assert!(grants.granted().is_empty());
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The OAuth policy: profiles round-trip with kebab-case spellings, the
+    /// flow/request budgets keep their defaults out of the file, and the
+    /// constructor and `validate` agree.
+    #[test]
+    fn oauth_grant_validates_and_round_trips() {
+        let mut grants = Grants::default();
+        grants.grant_oauth(valid_oauth_grant()).unwrap();
+        assert_eq!(grants.granted(), vec!["oauth"]);
+        assert!(grants.validate().is_ok());
+
+        let json = serde_json::to_value(&grants).unwrap();
+        let profile = &json["oauth"]["providers"][0];
+        assert_eq!(
+            profile["authorization-endpoint"],
+            "https://id.acme.test/authorize"
+        );
+        assert_eq!(profile["token-endpoint"], "https://id.acme.test/token");
+        assert_eq!(profile["supports-pkce"], true);
+        assert_eq!(profile["flows"][0], "device-code");
+        assert!(
+            json["oauth"].get("timeout-seconds").is_none(),
+            "the default budget stays out of the file"
+        );
+        assert!(json["oauth"].get("max-requests").is_none());
+
+        let reparsed: Grants = serde_json::from_value(json).unwrap();
+        assert_eq!(reparsed, grants);
+
+        grants.revoke("oauth").unwrap();
+        assert!(grants.oauth.is_none());
+        assert!(grants.granted().is_empty());
+    }
+
+    /// Nothing about an OAuth profile is wildcard-friendly: the endpoints must
+    /// be exact https hosts, the flow set is closed, ids are non-empty and
+    /// unique, and the budgets are bounded.
+    #[test]
+    fn oauth_grant_rejects_wildcards_duplicates_and_bad_endpoints() {
+        let mut grants = Grants::default();
+
+        let mut wildcard = valid_oauth_grant();
+        wildcard.providers[0].authorization_endpoint = "https://*.acme.test/authorize".into();
+        assert!(grants.grant_oauth(wildcard).is_err(), "no wildcard hosts");
+
+        let mut plain_http = valid_oauth_grant();
+        plain_http.providers[0].token_endpoint = "http://id.acme.test/token".into();
+        assert!(grants.grant_oauth(plain_http).is_err(), "https only");
+
+        let mut duplicate = valid_oauth_grant();
+        duplicate
+            .providers
+            .push(valid_oauth_grant().providers[0].clone());
+        assert!(grants.grant_oauth(duplicate).is_err(), "ids are unique");
+
+        let mut empty_id = valid_oauth_grant();
+        empty_id.providers[0].id = String::new();
+        assert!(grants.grant_oauth(empty_id).is_err());
+
+        let mut no_flow = valid_oauth_grant();
+        no_flow.providers[0].flows.clear();
+        assert!(grants.grant_oauth(no_flow).is_err());
+
+        let mut zero_budget = valid_oauth_grant();
+        zero_budget.timeout_seconds = 0;
+        assert!(grants.grant_oauth(zero_budget).is_err());
+
+        let mut over_budget = valid_oauth_grant();
+        over_budget.timeout_seconds = OAUTH_TIMEOUT_MAX_SECONDS + 1;
+        assert!(grants.grant_oauth(over_budget).is_err());
+
+        let mut too_many = valid_oauth_grant();
+        too_many.max_requests = OAUTH_MAX_REQUESTS_MAX + 1;
+        assert!(grants.grant_oauth(too_many).is_err());
+
+        // An unknown flow is a closed-set violation, so parsing fails too.
+        let error = serde_json::from_value::<Grants>(serde_json::json!({
+            "oauth": {
+                "providers": [{
+                    "id": "acme",
+                    "flows": ["implicit"],
+                    "authorization-endpoint": "https://id.acme.test/authorize",
+                    "token-endpoint": "https://id.acme.test/token",
+                    "client-id": "client"
+                }]
+            }
+        }))
+        .expect_err("`implicit` is not one of the two flows");
+        assert!(error.to_string().contains("unknown variant"), "{error}");
+    }
+
+    /// The provider policy is a catalog plus a request filter: the api must be
+    /// a typed wire variant (no `Other`, no `faux`), the host is exact, the
+    /// path prefix starts at `/`, only GET/POST are allowed, and an attached
+    /// credential cannot be empty.
+    #[test]
+    fn provider_grant_validates_api_endpoint_and_credential() {
+        let mut grants = Grants::default();
+        grants.grant_provider(valid_provider_grant()).unwrap();
+        assert_eq!(grants.granted(), vec!["provider"]);
+        assert!(grants.validate().is_ok());
+
+        for api in ["made-up-api", "faux"] {
+            let mut invalid = valid_provider_grant();
+            invalid.providers[0].models[0].api = api.to_string();
+            assert!(
+                grants.grant_provider(invalid).is_err(),
+                "`{api}` must be rejected"
+            );
+        }
+
+        let mut no_prefix = valid_provider_grant();
+        no_prefix.providers[0].endpoint.path_prefix = "v1".into();
+        assert!(
+            grants.grant_provider(no_prefix).is_err(),
+            "path starts at /"
+        );
+
+        let mut bad_method = valid_provider_grant();
+        bad_method.providers[0].endpoint.methods = vec!["PUT".into()];
+        assert!(grants.grant_provider(bad_method).is_err(), "GET/POST only");
+
+        let mut wildcard_host = valid_provider_grant();
+        wildcard_host.providers[0].endpoint.host = "*.acme.test".into();
+        assert!(grants.grant_provider(wildcard_host).is_err());
+
+        let mut empty_host = valid_provider_grant();
+        empty_host.providers[0].endpoint.host = String::new();
+        assert!(grants.grant_provider(empty_host).is_err());
+
+        let mut not_https = valid_provider_grant();
+        not_https.providers[0].endpoint.scheme = "http".into();
+        assert!(grants.grant_provider(not_https).is_err());
+
+        let mut empty_credential = valid_provider_grant();
+        empty_credential.providers[0].credential = Some("   ".into());
+        assert!(grants.grant_provider(empty_credential).is_err());
+
+        let mut over_budget = valid_provider_grant();
+        over_budget.providers[0].timeout_seconds = PROVIDER_TIMEOUT_MAX_SECONDS + 1;
+        assert!(grants.grant_provider(over_budget).is_err());
+
+        let mut duplicate_model = valid_provider_grant();
+        duplicate_model.providers[0]
+            .models
+            .push(valid_provider_grant().providers[0].models[0].clone());
+        assert!(grants.grant_provider(duplicate_model).is_err());
+    }
+
+    /// A minimal provider entry takes the documented defaults (https, POST,
+    /// 600 s), and none of them is written back unless overridden.
+    #[test]
+    fn provider_grant_json_defaults_are_minimal() {
+        let grants: Grants = serde_json::from_value(serde_json::json!({
+            "provider": {
+                "providers": [{
+                    "id": "acme",
+                    "models": [{"id": "acme-1", "api": "anthropic-messages"}],
+                    "endpoint": {"host": "api.acme.test", "path-prefix": "/v1"}
+                }]
+            }
+        }))
+        .unwrap();
+        let profile = &grants.provider.as_ref().unwrap().providers[0];
+        assert_eq!(profile.endpoint.scheme, "https");
+        assert_eq!(profile.endpoint.methods, vec!["POST".to_string()]);
+        assert_eq!(profile.timeout_seconds, PROVIDER_TIMEOUT_DEFAULT_SECONDS);
+        assert!(profile.credential.is_none());
+        assert!(grants.validate().is_ok());
+
+        let out = serde_json::to_string(&grants).unwrap();
+        assert!(!out.contains("timeout-seconds"));
+        assert!(!out.contains("scheme"));
+        assert!(!out.contains("methods"));
+    }
+
+    /// Render accepts the bare `true` form, defaults to markdown with the
+    /// documented budget, and rejects every other kind or an over-cap value.
+    #[test]
+    fn render_grant_bare_true_and_bounds() {
+        let grants: Grants = serde_json::from_value(serde_json::json!({"render": true})).unwrap();
+        let render = grants.render.as_ref().unwrap();
+        assert_eq!(render.kinds, vec![RENDER_KIND_MARKDOWN.to_string()]);
+        assert_eq!(render.timeout_ms, RENDER_TIMEOUT_MS_DEFAULT);
+        assert_eq!(render.max_output_bytes, RENDER_MAX_OUTPUT_BYTES_DEFAULT);
+        assert_eq!(grants.granted(), vec!["render"]);
+
+        let mut grants = Grants::default();
+        assert!(grants
+            .grant_render(RenderGrant {
+                kinds: vec!["html".into()],
+                ..RenderGrant::default()
+            })
+            .is_err());
+        assert!(grants
+            .grant_render(RenderGrant {
+                timeout_ms: RENDER_TIMEOUT_MS_MAX + 1,
+                ..RenderGrant::default()
+            })
+            .is_err());
+        assert!(grants
+            .grant_render(RenderGrant {
+                max_output_bytes: RENDER_MAX_OUTPUT_BYTES_MAX + 1,
+                ..RenderGrant::default()
+            })
+            .is_err());
+
+        // The generic arm takes the kinds as its policy; the exec options stay
+        // rejected, the same rule `net-http` follows.
+        grants
+            .grant("render", vec![], GrantOptions::default())
+            .unwrap();
+        assert_eq!(grants.render.as_ref().unwrap().kinds, vec!["markdown"]);
+        assert!(grants
+            .grant(
+                "render",
+                vec!["markdown".into()],
+                GrantOptions {
+                    timeout_seconds: Some(1),
+                    ..GrantOptions::default()
+                }
+            )
+            .is_err());
+    }
+
+    /// Resources accepts bare `true`, defaults to both kinds, and rejects an
+    /// unknown kind or an over-cap value.
+    #[test]
+    fn resources_grant_bare_true_and_unknown_kind() {
+        let grants: Grants =
+            serde_json::from_value(serde_json::json!({"resources": true})).unwrap();
+        let resources = grants.resources.as_ref().unwrap();
+        assert_eq!(
+            resources.kinds,
+            vec![
+                RESOURCES_KIND_SKILLS.to_string(),
+                RESOURCES_KIND_PROMPTS.to_string()
+            ]
+        );
+        assert_eq!(resources.max_items, RESOURCES_MAX_ITEMS_DEFAULT);
+        assert_eq!(resources.max_bytes, RESOURCES_MAX_BYTES_DEFAULT);
+
+        let mut grants = Grants::default();
+        assert!(grants
+            .grant_resources(ResourcesGrant {
+                kinds: vec!["themes".into()],
+                ..ResourcesGrant::default()
+            })
+            .is_err());
+        assert!(grants
+            .grant_resources(ResourcesGrant {
+                max_items: RESOURCES_MAX_ITEMS_MAX + 1,
+                ..ResourcesGrant::default()
+            })
+            .is_err());
+        assert!(grants
+            .grant_resources(ResourcesGrant {
+                max_bytes: RESOURCES_MAX_BYTES_MAX + 1,
+                ..ResourcesGrant::default()
+            })
+            .is_err());
+
+        // The kinds are the generic arm's policy.
+        grants
+            .grant("resources", vec!["skills".into()], GrantOptions::default())
+            .unwrap();
+        assert_eq!(grants.resources.as_ref().unwrap().kinds, vec!["skills"]);
+        assert!(grants
+            .grant(
+                "resources",
+                vec![],
+                GrantOptions {
+                    max_open: Some(1),
+                    ..GrantOptions::default()
+                }
+            )
+            .is_err());
+    }
+
+    /// The provider-request defaults are all "nothing leaves the host", and
+    /// the patch deadline is the smaller of the fixed 10 s cap and the
+    /// provider budget.
+    #[test]
+    fn provider_request_defaults_and_patch_budget() {
+        let grants: Grants =
+            serde_json::from_value(serde_json::json!({"provider-request": {}})).unwrap();
+        let request = grants.provider_request.as_ref().unwrap();
+        assert_eq!(request.observe, ObserveMode::None);
+        assert_eq!(request.headers, HeadersMode::Names);
+        assert_eq!(request.messages, MessagesMode::None);
+        assert!(!request.patch);
+        assert_eq!(
+            request.patch_timeout_ms,
+            PROVIDER_REQUEST_PATCH_TIMEOUT_MS_DEFAULT
+        );
+        assert!(grants.validate().is_ok());
+
+        // Without a provider grant the fixed cap applies.
+        let mut grants = Grants::default();
+        assert!(grants
+            .grant_provider_request(ProviderRequestGrant {
+                patch: true,
+                patch_timeout_ms: PROVIDER_REQUEST_PATCH_TIMEOUT_MS_MAX,
+                ..ProviderRequestGrant::default()
+            })
+            .is_ok());
+        assert!(grants
+            .grant_provider_request(ProviderRequestGrant {
+                patch: true,
+                patch_timeout_ms: PROVIDER_REQUEST_PATCH_TIMEOUT_MS_MAX + 1,
+                ..ProviderRequestGrant::default()
+            })
+            .is_err());
+
+        // A short provider budget tightens the ceiling, in both directions:
+        // the provider cannot be granted over an existing deadline, and a new
+        // deadline cannot exceed the provider's budget.
+        let mut short = valid_provider_grant();
+        short.providers[0].timeout_seconds = 5;
+        let mut grants = Grants::default();
+        grants
+            .grant_provider_request(ProviderRequestGrant {
+                patch: true,
+                patch_timeout_ms: 8_000,
+                ..ProviderRequestGrant::default()
+            })
+            .unwrap();
+        assert!(
+            grants.grant_provider(short.clone()).is_err(),
+            "a 5 s provider would strand an 8 s patch budget"
+        );
+
+        let mut grants = Grants::default();
+        grants.grant_provider(short).unwrap();
+        assert!(grants
+            .grant_provider_request(ProviderRequestGrant {
+                patch: true,
+                patch_timeout_ms: 5_000,
+                ..ProviderRequestGrant::default()
+            })
+            .is_ok());
+        assert!(grants
+            .grant_provider_request(ProviderRequestGrant {
+                patch: true,
+                patch_timeout_ms: 5_001,
+                ..ProviderRequestGrant::default()
+            })
+            .is_err());
+
+        // The object form round-trips with the kebab-case keys.
+        let json = serde_json::to_value(ProviderRequestGrant {
+            observe: ObserveMode::Requests,
+            headers: HeadersMode::Values,
+            messages: MessagesMode::Full,
+            patch: true,
+            patch_timeout_ms: 5_000,
+        })
+        .unwrap();
+        assert_eq!(json["observe"], "requests");
+        assert_eq!(json["headers"], "values");
+        assert_eq!(json["messages"], "full");
+        assert_eq!(json["patch-timeout-ms"], 5_000);
+    }
+
+    /// The generic `grant()` arms for the profile-carrying keys refuse instead
+    /// of inventing a policy, and every new key rejects the exec options.
+    #[test]
+    fn new_keys_reject_the_generic_entry_point_and_exec_options() {
+        let mut grants = Grants::default();
+        assert!(grants
+            .grant("oauth", vec![], GrantOptions::default())
+            .is_err());
+        assert!(grants
+            .grant("provider", vec![], GrantOptions::default())
+            .is_err());
+        assert!(grants
+            .grant(
+                "provider-request",
+                vec!["wat".into()],
+                GrantOptions::default()
+            )
+            .is_err());
+        for capability in [
+            "oauth",
+            "provider",
+            "render",
+            "resources",
+            "provider-request",
+        ] {
+            assert!(
+                grants
+                    .grant(
+                        capability,
+                        vec![],
+                        GrantOptions {
+                            cwd: Some(ExecCwd::Project),
+                            ..GrantOptions::default()
+                        }
+                    )
+                    .is_err(),
+                "`{capability}` must reject --cwd"
+            );
+        }
+    }
+
+    /// A hand-edited file cannot smuggle invalid policy in: the offending
+    /// capability loads as absent while the rest of the file survives.
+    #[test]
+    fn a_hand_edited_invalid_policy_is_treated_as_absent() {
+        let root = std::env::temp_dir().join(format!("kiqi-invalid-grants-{}", std::process::id()));
+        let dir = plugin_dir_at(&root, "invalid");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("grants.json"),
+            r#"{
+                "net-http": {"hosts": ["api.example.test"]},
+                "provider": {
+                    "providers": [{
+                        "id": "p",
+                        "models": [{"id": "m", "api": "faux"}],
+                        "endpoint": {"host": "api.example.test", "path-prefix": "/v1"}
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let grants = Grants::load_for_at(&root, "invalid");
+        assert!(
+            grants.provider.is_none(),
+            "an api outside the typed wire set is dropped"
+        );
+        assert!(
+            grants.net_http.is_some(),
+            "unrelated valid grants survive the bad one"
+        );
+        assert_eq!(grants.granted(), vec!["net-http"]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The interface map is what a consent prompt uses to turn a component's
+    /// imports/exports into the grant keys the user is asked about.
+    #[test]
+    fn interfaces_map_to_their_grant_keys() {
+        assert_eq!(grant_key_for_interface("provider-http"), Some("provider"));
+        assert_eq!(
+            grant_key_for_interface("kiqi:plugin/provider-stream@0.8.0"),
+            Some("provider")
+        );
+        assert_eq!(grant_key_for_interface("oauth-http"), Some("oauth"));
+        assert_eq!(grant_key_for_interface("render-api"), Some("render"));
+        assert_eq!(grant_key_for_interface("resources"), Some("resources"));
+        assert_eq!(
+            grant_key_for_interface("provider-request"),
+            Some("provider-request")
+        );
+        assert_eq!(grant_key_for_interface("net-http"), None);
+    }
+
+    fn valid_oauth_grant() -> OAuthGrant {
+        OAuthGrant {
+            providers: vec![OAuthProviderProfile {
+                id: "acme".to_string(),
+                display_name: "Acme".to_string(),
+                scopes: vec!["openid".to_string()],
+                flows: vec![OAuthFlow::DeviceCode, OAuthFlow::AuthorizationCode],
+                authorization_endpoint: "https://id.acme.test/authorize".to_string(),
+                token_endpoint: "https://id.acme.test/token".to_string(),
+                revocation_endpoint: Some("https://id.acme.test/revoke".to_string()),
+                client_id: "client-123".to_string(),
+                supports_pkce: true,
+            }],
+            timeout_seconds: OAUTH_TIMEOUT_DEFAULT_SECONDS,
+            max_requests: OAUTH_MAX_REQUESTS_DEFAULT,
+        }
+    }
+
+    fn valid_provider_grant() -> ProviderGrant {
+        ProviderGrant {
+            providers: vec![ProviderProfile {
+                id: "acme".to_string(),
+                display_name: "Acme".to_string(),
+                models: vec![ProviderModel {
+                    id: "acme-1".to_string(),
+                    api: "anthropic-messages".to_string(),
+                    base_url: "https://api.acme.test".to_string(),
+                    reasoning: true,
+                    input: vec!["text".to_string()],
+                }],
+                endpoint: ProviderEndpoint {
+                    scheme: "https".to_string(),
+                    host: "api.acme.test".to_string(),
+                    path_prefix: "/v1".to_string(),
+                    methods: vec!["POST".to_string()],
+                },
+                credential: Some("pc-abc123".to_string()),
+                timeout_seconds: PROVIDER_TIMEOUT_DEFAULT_SECONDS,
+            }],
+        }
     }
 }
