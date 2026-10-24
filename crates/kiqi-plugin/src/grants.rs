@@ -1223,10 +1223,10 @@ pub enum HeadersMode {
     /// Names only; values are replaced by `<redacted>` (the default).
     #[default]
     Names,
-    /// Values too, except credential/framing headers (`authorization`,
-    /// `x-api-key`, `cookie`, ...), which the host strips by name,
-    /// case-insensitively, before delivery. Their names still cross in
-    /// `headerNames`; only the values are withheld.
+    /// Values too, but only for the host's explicit allowlist of
+    /// non-credential tracing/correlation headers. Every other value,
+    /// including nonstandard provider credentials, stays host-side. Header
+    /// names still cross in `headerNames`.
     Values,
 }
 

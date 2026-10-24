@@ -370,6 +370,59 @@ pub fn parse_token_form(form: &str) -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
+/// Enforce the grant on an already-normalized token form.
+///
+/// The guest may narrow `scope`, but every requested scope must be granted.
+/// An omitted scope uses the profile's set rather than an IdP default. Nothing
+/// outside the granted flow/scope reaches the transport or consumes budget.
+pub fn enforce_token_form_grant(
+    profile: &OAuthProviderProfile,
+    mut form: Vec<(String, String)>,
+) -> Result<Vec<(String, String)>, String> {
+    let grant_type = form
+        .iter()
+        .find(|(key, _)| key == "grant_type")
+        .map(|(_, value)| value.as_str())
+        .ok_or_else(|| "`oauth-http` normalized form has no grant_type".to_string())?;
+    let (flow, flow_name) = match grant_type {
+        "authorization_code" => (OAuthFlow::AuthorizationCode, "authorization-code"),
+        "urn:ietf:params:oauth:grant-type:device_code" => (OAuthFlow::DeviceCode, "device-code"),
+        _ => return Err("`oauth-http` normalized grant_type is not allowed".to_string()),
+    };
+    if !profile.flows.contains(&flow) {
+        return Err(format!(
+            "oauth provider `{}` does not grant the {flow_name} flow",
+            profile.id
+        ));
+    }
+
+    let requested_scopes = form
+        .iter()
+        .find(|(key, _)| key == "scope")
+        .map(|(_, value)| {
+            value
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        });
+    if let Some(scopes) = &requested_scopes {
+        if scopes.iter().any(|scope| !profile.scopes.contains(scope)) {
+            // Do not echo guest-controlled scope text into the error channel.
+            return Err(format!(
+                "oauth provider `{}` does not grant the requested scope",
+                profile.id
+            ));
+        }
+    }
+
+    form.retain(|(key, _)| key != "scope");
+    let scopes = requested_scopes.unwrap_or_else(|| profile.scopes.clone());
+    if !scopes.is_empty() {
+        form.push(("scope".to_string(), scopes.join(" ")));
+    }
+    Ok(form)
+}
+
 /// RFC 7636: 43-128 characters from the unreserved set.
 fn validate_code_verifier(value: &str) -> Result<(), String> {
     if !(43..=128).contains(&value.len()) {

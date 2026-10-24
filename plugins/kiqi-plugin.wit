@@ -528,7 +528,10 @@ interface oauth-http {
     /// string values; the only accepted keys are `grant_type`, `code`,
     /// `code_verifier`, `redirect_uri`, `scope` and `device_code`. The client id
     /// comes from the grant and `client_id`/`client_secret` in `form` are
-    /// refused. The host parses the standard OAuth response and stores
+    /// refused. The normalized grant type must be enabled by the profile's
+    /// flows. Requested scopes must be a subset of the profile's scopes; an
+    /// omitted scope uses exactly that granted set. Violations are refused
+    /// before HTTP. The host parses the standard OAuth response and stores
     /// access+refresh under `plugin:<install-id>:<provider-id>`. The raw token
     /// body is never returned.
     token-request: func(provider-id: string, form: string) -> result<oauth-token-outcome, capability-error>;

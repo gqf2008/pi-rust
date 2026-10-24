@@ -195,9 +195,9 @@ impl ProviderHooks for ExtensionProviderHooks {
         // The redacted form (header names only, never values) goes to cdylib
         // handlers, which have no grant model. The rich form additionally
         // carries the header values; the sandboxed host strips them per guest
-        // unless the grant says `headers: values`. Splitting the payload here is
-        // what keeps the source-redaction guarantee for the native tier while
-        // letting a granted wasm observer see values.
+        // unless the grant says `headers: values`, and then only for the
+        // host's non-credential allowlist. Splitting the payload here keeps
+        // the source-redaction guarantee for the native tier.
         let redacted = request.to_string();
         let header_values: serde_json::Map<String, serde_json::Value> = opts
             .headers

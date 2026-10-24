@@ -1262,7 +1262,9 @@ impl HostState {
         let install_id = self.oauth_install_id()?;
         let profile_fingerprint =
             oauth::oauth_profile_fingerprint(&profile).map_err(CapabilityError::Failed)?;
-        let mut form = oauth::parse_token_form(form).map_err(CapabilityError::Denied)?;
+        let form = oauth::parse_token_form(form).map_err(CapabilityError::Denied)?;
+        let mut form =
+            oauth::enforce_token_form_grant(&profile, form).map_err(CapabilityError::Denied)?;
         let endpoint =
             oauth::granted_endpoint(&profile.token_endpoint).map_err(CapabilityError::Failed)?;
         // The client id is the grant's, never the guest's.
@@ -3615,12 +3617,12 @@ fn to_wit_tool_call(event: &Event) -> ToolCall {
 /// * `messages` only with `messages = full`. Without it the payload still
 ///   carries `messageCount`, which tells an observer the size of the turn
 ///   without handing over the conversation;
-/// * header values only with `headers = values`; otherwise any value-bearing
-///   key is removed and `headerNames` remains. Even with `values`, the
-///   credential/framing headers in
-///   [`provider_patch::DENIED_HEADERS`] are stripped by name
-///   (case-insensitively) before delivery: `authorization`, `x-api-key` and
-///   friends never cross the ABI, while their names still do. The
+/// * header values only with `headers = values`, and then only for the
+///   explicit non-credential names in
+///   [`provider_patch::OBSERVABLE_VALUE_HEADERS`]; otherwise any value-bearing
+///   key is removed and `headerNames` remains. A deny-list is not a sufficient
+///   credential boundary because providers also use nonstandard secret names.
+///   The
 ///   `kiqi-extensions` bridge emits `headerValues` in its rich payload (the
 ///   redacted payload for cdylib handlers still carries names only), and this
 ///   strip is what keeps a default grant from receiving them.
@@ -3654,12 +3656,12 @@ fn graded_provider_request(event: &Event, grants: &Grants, for_gate: bool) -> Op
             object.remove("headers");
             object.remove("headerValues");
         } else {
-            // `headers = values` is not a credential grant: the deny-list still
-            // applies, matched case-insensitively so `Authorization` cannot
-            // slip past a lowercase `authorization`.
+            // `headers = values` is not a credential grant. Only explicitly
+            // non-credential tracing/correlation values cross; unknown names
+            // stay host-side because any of them may be provider credentials.
             for key in ["headers", "headerValues"] {
                 if let Some(map) = object.get_mut(key).and_then(Value::as_object_mut) {
-                    map.retain(|name, _| !provider_patch::is_denied_header(name));
+                    map.retain(|name, _| provider_patch::is_observable_value_header(name));
                 }
             }
         }
@@ -4712,8 +4714,8 @@ mod tests {
         };
         let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(payload["messages"].as_array().unwrap().len(), 2);
-        // `values` does not lift the deny-list: credential headers are
-        // stripped by name, case-insensitively, while ordinary values cross.
+        // `values` does not lift the credential boundary: denied names and
+        // every name outside the non-credential allowlist are stripped.
         assert!(
             payload["headerValues"].get("authorization").is_none(),
             "authorization must never cross the ABI: {payload}"
@@ -4746,6 +4748,44 @@ mod tests {
         };
         let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(payload["messageCount"], 0);
+    }
+
+    /// `headers = values` is an allowlist, not permission to disclose every
+    /// nonstandard provider credential.
+    #[test]
+    fn provider_observation_header_values_use_a_non_credential_allowlist() {
+        let event = Event::new(
+            kiqi_plugin::EventTag::BeforeProviderRequest,
+            serde_json::json!({
+                "headerNames": ["x-portkey-key", "private-token", "x-custom", "traceparent"],
+                "headerValues": {
+                    "x-portkey-key": "portkey-secret",
+                    "private-token": "private-secret",
+                    "x-custom": "unlisted-value",
+                    "traceparent": "00-abc-def-01",
+                },
+            }),
+        );
+        let mut grants = Grants::default();
+        grants.provider_request = Some(kiqi_plugin::grants::ProviderRequestGrant {
+            observe: ObserveMode::Requests,
+            headers: HeadersMode::Values,
+            ..kiqi_plugin::grants::ProviderRequestGrant::default()
+        });
+
+        let Some(WitEvent::BeforeProviderRequest(payload)) =
+            graded_provider_request(&event, &grants, false)
+        else {
+            panic!("the observe grant must deliver");
+        };
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let values = payload["headerValues"].as_object().unwrap();
+        assert_eq!(values.get("traceparent").unwrap(), "00-abc-def-01");
+        assert_eq!(values.len(), 1, "only allowlisted values may cross");
+        let serialized = payload.to_string();
+        for secret in ["portkey-secret", "private-secret", "unlisted-value"] {
+            assert!(!serialized.contains(secret), "leaked {secret}: {payload}");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4951,6 +4991,49 @@ mod tests {
         );
 
         // Policy refusals never reach the network.
+        assert!(transport.requests().is_empty());
+    }
+
+    #[test]
+    fn oauth_http_refuses_a_flow_outside_the_profile_before_http() {
+        let mut profile = oauth_profile();
+        profile.flows = vec![OAuthFlow::AuthorizationCode];
+        let transport = std::sync::Arc::new(ScriptedTransport::default());
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let mut state = oauth_state(oauth_grants(profile), transport.clone(), sink);
+
+        let error = state
+            .token_request(
+                "acme".to_string(),
+                r#"{"grant_type":"urn:ietf:params:oauth:grant-type:device_code","device_code":"device-secret"}"#
+                    .to_string(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, CapabilityError::Denied(message) if message.contains("device-code") && message.contains("flow")),
+            "{error:?}"
+        );
+        assert!(!format!("{error:?}").contains("device-secret"));
+        assert!(transport.requests().is_empty());
+    }
+
+    #[test]
+    fn oauth_http_refuses_a_scope_outside_the_profile_before_http() {
+        let transport = std::sync::Arc::new(ScriptedTransport::default());
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let mut state = oauth_state(oauth_grants(oauth_profile()), transport.clone(), sink);
+
+        let error = state
+            .token_request(
+                "acme".to_string(),
+                r#"{"code":"abc","scope":"openid admin"}"#.to_string(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, CapabilityError::Denied(message) if message.contains("scope")),
+            "{error:?}"
+        );
+        assert!(!format!("{error:?}").contains("admin"));
         assert!(transport.requests().is_empty());
     }
 

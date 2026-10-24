@@ -52,6 +52,24 @@ pub fn is_denied_header(name: &str) -> bool {
     DENIED_HEADERS.contains(&name.to_ascii_lowercase().as_str())
 }
 
+/// Whether a header's value is explicitly safe to expose to a wasm observer.
+/// This allowlist is deliberately separate from [`DENIED_HEADERS`]: a patch
+/// deny-list cannot prove that an arbitrary provider-specific header is not a
+/// credential. Header names remain visible independently of this decision.
+pub fn is_observable_value_header(name: &str) -> bool {
+    OBSERVABLE_VALUE_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+}
+
+/// Non-credential tracing/correlation headers whose values may cross the ABI
+/// when `headers = values` is granted. Every other value stays host-side.
+pub const OBSERVABLE_VALUE_HEADERS: &[&str] = &[
+    "traceparent",
+    "tracestate",
+    "x-request-id",
+    "x-correlation-id",
+    "x-trace",
+];
+
 /// Header names a patch may never touch and an observer never sees the value
 /// of. Matched case-insensitively, and enforced for both insertion and
 /// deletion.
