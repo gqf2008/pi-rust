@@ -1138,18 +1138,19 @@ fn validate_exact_host(field: &str, host: &str) -> Result<(), String> {
 
 /// The grant key that authorizes an ABI interface.
 ///
-/// `provider-http` and `provider-stream` are two halves of the one `provider`
-/// decision (`provider-stream` is additionally call-scoped, not separately
-/// grantable); `oauth-http` maps to `oauth`, the `render-api` export to
-/// `render`, the package `resources` convention to `resources`, and the
-/// provider-request hook to `provider-request`. The bare interface name and
-/// the `kiqi:plugin/<name>@<version>` form are both accepted.
+/// `provider-http` and `provider-stream` are the imports and `provider-api`
+/// the export of the one `provider` decision (`provider-stream` is additionally
+/// call-scoped, not separately grantable); `oauth-http` and `oauth-api` are the
+/// two faces of `oauth`; the `render-api` export maps to `render`, the package
+/// `resources` convention to `resources`, and the provider-request hook to
+/// `provider-request`. The bare interface name and the
+/// `kiqi:plugin/<name>@<version>` form are both accepted.
 pub fn grant_key_for_interface(interface: &str) -> Option<&'static str> {
     let name = interface.strip_prefix("kiqi:plugin/").unwrap_or(interface);
     let name = name.split('@').next().unwrap_or(name);
     match name {
-        "provider-http" | "provider-stream" => Some("provider"),
-        "oauth-http" => Some("oauth"),
+        "provider-http" | "provider-stream" | "provider-api" => Some("provider"),
+        "oauth-http" | "oauth-api" => Some("oauth"),
         "render-api" => Some("render"),
         "resources" => Some("resources"),
         "provider-request" => Some("provider-request"),
@@ -2539,6 +2540,11 @@ mod tests {
             Some("provider")
         );
         assert_eq!(grant_key_for_interface("oauth-http"), Some("oauth"));
+        assert_eq!(grant_key_for_interface("oauth-api"), Some("oauth"));
+        assert_eq!(
+            grant_key_for_interface("kiqi:plugin/provider-api@0.8.0"),
+            Some("provider")
+        );
         assert_eq!(grant_key_for_interface("render-api"), Some("render"));
         assert_eq!(grant_key_for_interface("resources"), Some("resources"));
         assert_eq!(

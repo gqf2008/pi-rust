@@ -156,35 +156,109 @@ pub use kiqi_plugin::grants::{
     allows, ExecCwd, ExecGrant, FsGrant, Grants, NetHttpGrant, NetSocketsGrant, ProcGrant,
 };
 
-/// The user-grantable capabilities a component declares — the `kiqi:plugin/*`
-/// imports that need authorization (`net-http`, `fs`, `exec`, `proc`,
-/// `net-sockets`).
+/// The user-grantable capabilities a component declares: the `kiqi:plugin/*`
+/// interfaces that need authorization.
+///
+/// Imports and exports both count. An import names a channel the guest reaches
+/// for (`net-http`, `fs`, `exec`, `proc`, `net-sockets`, `provider-http`,
+/// `oauth-http`, `provider-request`); an export names a surface it offers the
+/// host (`oauth-api`, `provider-api`, `render-api`).
+/// [`kiqi_plugin::grants::grant_key_for_interface`] turns either spelling into
+/// its grant key, so the scanner and the grants model can never disagree
+/// (`provider-http`/`provider-stream` → `provider`, `oauth-http` → `oauth`, …).
 ///
 /// The domain interfaces (`log`, `session-read`, …) are always available through
 /// `HostCaps` and are not part of the grant set, so they are filtered out. This
 /// is what `ki plugin install` shows the user and re-prompts about when it grows.
+/// `resources` has no interface at all (it is a package convention,
+/// `resources.json`), so it is grantable but never declared here.
 pub fn declared_capabilities(wasm: &Path) -> Result<Vec<String>, String> {
-    const GRANTABLE: &[&str] = &["net-http", "fs", "exec", "proc", "net-sockets"];
     let bytes = std::fs::read(wasm).map_err(|error| format!("read {}: {error}", wasm.display()))?;
     let mut caps: Vec<String> = Vec::new();
     for payload in wasmparser::Parser::new(0).parse_all(&bytes) {
-        if let wasmparser::Payload::ComponentImportSection(reader) =
-            payload.map_err(|error| error.to_string())?
-        {
-            for import in reader {
-                let import = import.map_err(|error| error.to_string())?;
-                let Some(rest) = import.name.name.strip_prefix("kiqi:plugin/") else {
-                    continue;
-                };
-                let cap = rest.split('@').next().unwrap_or(rest);
-                if GRANTABLE.contains(&cap) && !caps.iter().any(|seen| seen == cap) {
-                    caps.push(cap.to_string());
+        match payload.map_err(|error| error.to_string())? {
+            wasmparser::Payload::ComponentImportSection(reader) => {
+                for import in reader {
+                    let import = import.map_err(|error| error.to_string())?;
+                    note_declared(import.name.name, &mut caps);
                 }
             }
+            wasmparser::Payload::ComponentExportSection(reader) => {
+                for export in reader {
+                    let export = export.map_err(|error| error.to_string())?;
+                    note_declared(export.name.name, &mut caps);
+                }
+            }
+            _ => {}
         }
     }
     caps.sort();
     Ok(caps)
+}
+
+/// The grant keys the host can honour, in one place.
+const GRANTABLE: &[&str] = &[
+    "net-http",
+    "fs",
+    "exec",
+    "proc",
+    "net-sockets",
+    "oauth",
+    "provider",
+    "render",
+    "resources",
+    "provider-request",
+];
+
+/// Record the grant key `name` declares, if it is grantable.
+///
+/// The interface→grant-key map handles the 0.8.0 names; the fallback keeps the
+/// capability-as-interface convention (`kiqi:plugin/exec@0.7.1` → `exec`), which
+/// is what every 0.7.1 component imports.
+fn note_declared(name: &str, caps: &mut Vec<String>) {
+    let key = kiqi_plugin::grants::grant_key_for_interface(name).or_else(|| {
+        let bare = name.strip_prefix("kiqi:plugin/").unwrap_or(name);
+        let bare = bare.split('@').next().unwrap_or(bare);
+        GRANTABLE.iter().copied().find(|cap| *cap == bare)
+    });
+    let Some(key) = key else { return };
+    if GRANTABLE.contains(&key) && !caps.iter().any(|seen| seen == key) {
+        caps.push(key.to_string());
+    }
+}
+
+/// The export interfaces a component offers (`oauth-api`, `provider-api`,
+/// `render-api`), without package/version decoration.
+///
+/// [`declared_capabilities`] collapses these into grant keys; discovery needs
+/// the interface itself, because it probes only what the guest actually
+/// exports. A guest that merely imports `provider-http` (and does not implement
+/// `provider-api`) is therefore never probed.
+pub fn exported_interfaces(wasm: &Path) -> Result<Vec<String>, String> {
+    let bytes = std::fs::read(wasm).map_err(|error| format!("read {}: {error}", wasm.display()))?;
+    let mut out: Vec<String> = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(&bytes) {
+        if let wasmparser::Payload::ComponentExportSection(reader) =
+            payload.map_err(|error| error.to_string())?
+        {
+            for export in reader {
+                let export = export.map_err(|error| error.to_string())?;
+                let bare = export
+                    .name
+                    .name
+                    .strip_prefix("kiqi:plugin/")
+                    .unwrap_or(export.name.name);
+                let bare = bare.split('@').next().unwrap_or(bare);
+                if matches!(bare, "oauth-api" | "provider-api" | "render-api")
+                    && !out.iter().any(|seen| seen == bare)
+                {
+                    out.push(bare.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// The capabilities this build of the host actually enforces.
@@ -192,13 +266,268 @@ pub fn declared_capabilities(wasm: &Path) -> Result<Vec<String>, String> {
 /// [`declared_capabilities`] reports what a *component* asks for; this reports
 /// what the host can honour. `ki plugin install` names any difference, so a user
 /// is never asked to grant something that would only ever come back denied.
-/// All five grantable capabilities are enforced: `net-http`, `fs`, `exec`,
-/// `proc`, `net-sockets`.
-pub const ENFORCED_CAPABILITIES: &[&str] = &["net-http", "fs", "exec", "proc", "net-sockets"];
+/// All ten grantable capabilities are enforced: `net-http`, `fs`, `exec`,
+/// `proc`, `net-sockets`, `oauth`, `provider`, `render`, `resources` and
+/// `provider-request`.
+pub const ENFORCED_CAPABILITIES: &[&str] = &[
+    "net-http",
+    "fs",
+    "exec",
+    "proc",
+    "net-sockets",
+    "oauth",
+    "provider",
+    "render",
+    "resources",
+    "provider-request",
+];
 
 /// See [`ENFORCED_CAPABILITIES`].
 pub fn capability_is_enforced(name: &str) -> bool {
     ENFORCED_CAPABILITIES.contains(&name)
+}
+
+/// Fuel granted to one install-time discovery instance. A guest that spins
+/// traps instead of hanging `ki plugin install`.
+pub const DISCOVERY_FUEL: u64 = 200_000_000;
+
+/// Linear-memory cap for discovery: enough for a metadata call, far below the
+/// normal guest budget.
+pub const DISCOVERY_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Wall-clock deadline for one discovery run.
+pub const DISCOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long the install thread waits for the discovery thread. It is longer
+/// than [`DISCOVERY_DEADLINE`] so epoch/fuel get the first chance to fire.
+pub const DISCOVERY_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// At most this many providers are accepted from one `list-providers` call.
+pub const DISCOVERY_MAX_ENTRIES: usize = 16;
+
+/// At most this many bytes of ids/display names are accepted in total.
+pub const DISCOVERY_MAX_BYTES: usize = 4 * 1024;
+
+/// At most this many bytes for one id or display name.
+pub const DISCOVERY_MAX_STRING_BYTES: usize = 256;
+
+/// One provider a component disclosed at install time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredProvider {
+    /// The export interface that answered (`oauth-api` / `provider-api`).
+    pub interface: String,
+    /// The provider id the guest reported.
+    pub id: String,
+    pub display_name: String,
+}
+
+/// Result of the bounded install-time `list-providers` discovery.
+///
+/// `diagnostics` non-empty means discovery failed closed: nothing was learned
+/// and installation continues, because the GRANT — not the guest — is the
+/// catalog authority. Discovery can only narrow what a grant already allows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Discovery {
+    pub providers: Vec<DiscoveredProvider>,
+    pub diagnostics: Vec<String>,
+}
+
+/// Ask a freshly installed component which providers it can drive.
+///
+/// This runs before any grant exists (`Grants::default()`), on a **separate**,
+/// bounded engine: fuel [`DISCOVERY_FUEL`], a [`DISCOVERY_MAX_MEMORY_BYTES`]
+/// memory cap, epoch interruption with a [`DISCOVERY_DEADLINE`] deadline, and a
+/// [`DISCOVERY_WAIT`] bound on the install thread. Only components exporting
+/// `oauth-api`/`provider-api` are probed, and only `list-providers` is called —
+/// never a request. Any trap, timeout, missing import or over-cap answer is a
+/// diagnostic and installation continues (fail closed).
+pub fn discover_providers(wasm: &Path) -> Discovery {
+    let interfaces: Vec<String> = match exported_interfaces(wasm) {
+        Ok(list) => list
+            .into_iter()
+            .filter(|name| name == "oauth-api" || name == "provider-api")
+            .collect(),
+        Err(error) => return discovery_failure(format!("scan: {error}")),
+    };
+    if interfaces.is_empty() {
+        return Discovery::default();
+    }
+
+    let options = Options {
+        fuel: Some(DISCOVERY_FUEL),
+        max_memory_bytes: Some(DISCOVERY_MAX_MEMORY_BYTES),
+        ..Options::default()
+    };
+    let mut config = wasmtime_config(&options);
+    config.epoch_interruption(true);
+    let engine = match Engine::new(&config) {
+        Ok(engine) => engine,
+        Err(error) => return discovery_failure(format!("engine: {error}")),
+    };
+    let component = match Component::from_file(&engine, wasm) {
+        Ok(component) => component,
+        Err(error) => {
+            return discovery_failure(format!(
+                "cannot compile for discovery (fail closed): {error}"
+            ))
+        }
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker_engine = engine.clone();
+    let spawned = std::thread::Builder::new()
+        .name("kiqi-plugin-discovery".to_string())
+        .spawn(move || {
+            let _ = tx.send(probe_providers(&worker_engine, &component, &interfaces));
+        });
+    if let Err(error) = spawned {
+        return discovery_failure(format!("discovery thread: {error}"));
+    }
+    match rx.recv_timeout(DISCOVERY_WAIT) {
+        Ok(Ok(providers)) => Discovery {
+            providers,
+            diagnostics: Vec::new(),
+        },
+        Ok(Err(error)) => discovery_failure(error),
+        Err(_) => discovery_failure(format!(
+            "discovery did not finish within {}s (fail closed)",
+            DISCOVERY_WAIT.as_secs()
+        )),
+    }
+}
+
+fn discovery_failure(message: String) -> Discovery {
+    Discovery {
+        providers: Vec::new(),
+        diagnostics: vec![format!("provider discovery: {message}")],
+    }
+}
+
+/// The bounded half of [`discover_providers`]; runs on its own thread.
+fn probe_providers(
+    engine: &Engine,
+    component: &Component,
+    interfaces: &[String],
+) -> Result<Vec<DiscoveredProvider>, String> {
+    // No grants: the store carries `Grants::default()` so any host import
+    // linked into this probe (none is today) would be denied, not authorized.
+    let mut store = Store::new(engine, Grants::default());
+    store
+        .set_fuel(DISCOVERY_FUEL)
+        .map_err(|error| format!("set fuel: {error}"))?;
+    // One epoch tick = the deadline below. The ticker only fires if the call
+    // is still running when the deadline passes.
+    store.set_epoch_deadline(1);
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ticker_engine = engine.clone();
+    let ticker_done = done.clone();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + DISCOVERY_DEADLINE;
+        while std::time::Instant::now() < deadline {
+            if ticker_done.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if !ticker_done.load(std::sync::atomic::Ordering::Relaxed) {
+            ticker_engine.increment_epoch();
+        }
+    });
+
+    let linker: Linker<Grants> = Linker::new(engine);
+    let instance = linker
+        .instantiate(&mut store, component)
+        .map_err(|error| format!("cannot instantiate for discovery (fail closed): {error}"))?;
+    let mut out = Vec::new();
+    for interface in interfaces {
+        out.extend(probe_interface(&mut store, &instance, interface)?);
+    }
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(out)
+}
+
+/// Call one export interface's `list-providers` and apply the output caps.
+fn probe_interface(
+    store: &mut Store<Grants>,
+    instance: &wasmtime::component::Instance,
+    interface: &str,
+) -> Result<Vec<DiscoveredProvider>, String> {
+    let names = [
+        format!("kiqi:plugin/{interface}@0.8.0"),
+        format!("kiqi:plugin/{interface}"),
+        interface.to_string(),
+    ];
+    let Some(interface_index) = names
+        .iter()
+        .find_map(|name| instance.get_export_index(&mut *store, None, name))
+    else {
+        // The export scan saw the name but the compiled component cannot
+        // resolve it (a malformed or pre-link component): nothing to learn.
+        return Ok(Vec::new());
+    };
+    let Some(function_index) =
+        instance.get_export_index(&mut *store, Some(&interface_index), "list-providers")
+    else {
+        return Err(format!("{interface} exports no list-providers"));
+    };
+    let Some(function) = instance.get_func(&mut *store, &function_index) else {
+        return Err(format!("{interface}.list-providers is not a function"));
+    };
+    let results_len = function.ty(&*store).results().len();
+    let mut results: Vec<wasmtime::component::Val> = (0..results_len)
+        .map(|_| wasmtime::component::Val::Bool(false))
+        .collect();
+    function
+        .call(&mut *store, &[], &mut results)
+        .map_err(|error| format!("{interface}.list-providers: {error}"))?;
+
+    let Some(wasmtime::component::Val::List(entries)) = results.into_iter().next() else {
+        return Err(format!("{interface}.list-providers did not return a list"));
+    };
+    if entries.len() > DISCOVERY_MAX_ENTRIES {
+        return Err(format!(
+            "{interface}.list-providers returned {} entries (cap {DISCOVERY_MAX_ENTRIES})",
+            entries.len()
+        ));
+    }
+    let mut out = Vec::new();
+    let mut bytes = 0usize;
+    for entry in entries {
+        let id = record_string(&entry, "id").unwrap_or_default();
+        let display_name = record_string(&entry, "display-name").unwrap_or_default();
+        if id.len() > DISCOVERY_MAX_STRING_BYTES || display_name.len() > DISCOVERY_MAX_STRING_BYTES
+        {
+            return Err(format!(
+                "{interface}.list-providers returned a string over {DISCOVERY_MAX_STRING_BYTES} bytes"
+            ));
+        }
+        bytes += id.len() + display_name.len();
+        if bytes > DISCOVERY_MAX_BYTES {
+            return Err(format!(
+                "{interface}.list-providers returned over {DISCOVERY_MAX_BYTES} bytes"
+            ));
+        }
+        out.push(DiscoveredProvider {
+            interface: interface.to_string(),
+            id,
+            display_name,
+        });
+    }
+    Ok(out)
+}
+
+/// Read one string field from a returned record, if it has that shape.
+fn record_string(value: &wasmtime::component::Val, field: &str) -> Option<String> {
+    let wasmtime::component::Val::Record(fields) = value else {
+        return None;
+    };
+    fields
+        .iter()
+        .find(|(name, _)| name == field)
+        .and_then(|(_, value)| match value {
+            wasmtime::component::Val::String(text) => Some(text.clone()),
+            _ => None,
+        })
 }
 
 /// State every instantiated component gets: WASI plus the resource table and
@@ -2265,5 +2594,157 @@ mod tests {
             "a signal to every thread killed the child ({status}); wasmtime's \
              Mach-port trap handler aborts on MACH_RCV_INTERRUPTED"
         );
+    }
+    // -----------------------------------------------------------------
+    // Declaration scanning and bounded discovery
+    // -----------------------------------------------------------------
+
+    /// Encode one component section (id + LEB128 length + contents).
+    fn push_section(out: &mut Vec<u8>, id: u8, contents: &[u8]) {
+        out.push(id);
+        push_leb(out, contents.len() as u32);
+        out.extend_from_slice(contents);
+    }
+
+    fn push_leb(out: &mut Vec<u8>, mut value: u32) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    /// A component external name: discriminator 0x00 + UTF-8 string.
+    fn push_name(out: &mut Vec<u8>, name: &str) {
+        out.push(0x00);
+        push_leb(out, name.len() as u32);
+        out.extend_from_slice(name.as_bytes());
+    }
+
+    /// A minimal component with the given import/export name list.
+    ///
+    /// It is intentionally not instantiable (the instance type index is
+    /// dangling): the scanners read names, and discovery must fail closed on a
+    /// component it cannot link. That is exactly the shape the install test
+    /// needs before the 0.8.0 WIT lands.
+    fn synthetic_component(imports: &[&str], exports: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"\0asm");
+        out.extend_from_slice(&[0x0d, 0x00, 0x01, 0x00]);
+        if !imports.is_empty() {
+            let mut body = Vec::new();
+            push_leb(&mut body, imports.len() as u32);
+            for name in imports {
+                push_name(&mut body, name);
+                body.push(0x05); // instance
+                push_leb(&mut body, 0); // type index
+            }
+            push_section(&mut out, 10, &body);
+        }
+        if !exports.is_empty() {
+            let mut body = Vec::new();
+            push_leb(&mut body, exports.len() as u32);
+            for name in exports {
+                push_name(&mut body, name);
+                body.push(0x05); // instance
+                push_leb(&mut body, 0); // type index
+                body.push(0x00); // no optional type
+            }
+            push_section(&mut out, 11, &body);
+        }
+        out
+    }
+
+    /// A component exporting `oauth-api` and importing `provider-http` declares
+    /// both `oauth` and `provider` — the import scan and the new export scan
+    /// agree through the shared interface→grant-key map.
+    #[test]
+    fn declared_capabilities_scan_imports_and_exports_through_the_grant_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = dir.path().join("plugin.wasm");
+        std::fs::write(
+            &wasm,
+            synthetic_component(
+                &["kiqi:plugin/provider-http@0.8.0"],
+                &["kiqi:plugin/oauth-api@0.8.0"],
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            declared_capabilities(&wasm).unwrap(),
+            vec!["oauth".to_string(), "provider".to_string()]
+        );
+        assert_eq!(
+            exported_interfaces(&wasm).unwrap(),
+            vec!["oauth-api".to_string()]
+        );
+    }
+
+    /// 0.7.1 imports keep declaring their own name as the grant key, and an
+    /// export with no grant key is ignored.
+    #[test]
+    fn legacy_imports_and_render_exports_declare_their_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = dir.path().join("plugin.wasm");
+        std::fs::write(
+            &wasm,
+            synthetic_component(
+                &["kiqi:plugin/exec@0.7.1", "kiqi:plugin/fs@0.7.1"],
+                &["kiqi:plugin/render-api@0.8.0", "kiqi:plugin/log@0.8.0"],
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            declared_capabilities(&wasm).unwrap(),
+            vec!["exec".to_string(), "fs".to_string(), "render".to_string()]
+        );
+        assert_eq!(
+            exported_interfaces(&wasm).unwrap(),
+            vec!["render-api".to_string()]
+        );
+    }
+
+    /// Discovery is advisory and fail-closed: a component that cannot be
+    /// compiled/linked produces a diagnostic and never an install failure.
+    #[test]
+    fn discovery_fails_closed_without_an_instantiable_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = dir.path().join("plugin.wasm");
+        std::fs::write(
+            &wasm,
+            synthetic_component(
+                &["kiqi:plugin/provider-http@0.8.0"],
+                &["kiqi:plugin/provider-api@0.8.0"],
+            ),
+        )
+        .unwrap();
+
+        let discovery = discover_providers(&wasm);
+        assert!(discovery.providers.is_empty());
+        assert!(
+            !discovery.diagnostics.is_empty(),
+            "a failed discovery must say why"
+        );
+    }
+
+    /// No export means no probe at all: discovery stays off the install path
+    /// for every component that is not oauth/provider-shaped.
+    #[test]
+    fn discovery_is_skipped_without_provider_exports() {
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = dir.path().join("plugin.wasm");
+        std::fs::write(
+            &wasm,
+            synthetic_component(&["kiqi:plugin/net-http@0.7.1"], &[]),
+        )
+        .unwrap();
+
+        assert_eq!(discover_providers(&wasm), Discovery::default());
     }
 }

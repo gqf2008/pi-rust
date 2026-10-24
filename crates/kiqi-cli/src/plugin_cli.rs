@@ -12,6 +12,10 @@ use sha2::{Digest, Sha256};
 
 use kiqi_plugin::grants::{
     agent_dir, grants_path, installed_plugins, plugin_dir_at, ExecCwd, GrantOptions, Grants,
+    HeadersMode, MessagesMode, OAuthFlow, OAuthGrant, OAuthProviderProfile, ObserveMode,
+    ProviderEndpoint, ProviderGrant, ProviderModel, ProviderProfile, ProviderRequestGrant,
+    RenderGrant, ResourcesGrant, OAUTH_MAX_REQUESTS_DEFAULT, OAUTH_TIMEOUT_DEFAULT_SECONDS,
+    RENDER_KIND_MARKDOWN, RESOURCES_KIND_PROMPTS, RESOURCES_KIND_SKILLS,
 };
 
 /// Entry for `ki plugin [sub]`; `args` is the slice after `plugin`.
@@ -66,6 +70,17 @@ fn show(id: Option<&str>) -> i32 {
         Ok(text) => println!("{text}"),
         Err(error) => eprintln!("error: {error}"),
     }
+    // The resolved policy, in words: endpoint hosts, model ids and kinds are
+    // what the user is actually agreeing to. A credential is shown only as its
+    // handle (plus the display name/fingerprint recorded at grant time) — the
+    // value lives outside grants.json and is never printed.
+    let credentials = agent_dir()
+        .map(|root| read_credentials_at(&root, id))
+        .unwrap_or_default();
+    let disclosure = policy_disclosure(&grants, &credentials);
+    if !disclosure.is_empty() {
+        println!("\n{disclosure}");
+    }
     print_digest(id);
     // Declarations, not grants: what the plugin claims it contributes. This is
     // the consumer for `flags`/`shortcuts`, whose runtime paths are
@@ -97,6 +112,241 @@ fn digest_report(wasm: &Path) -> String {
         Ok(DigestStatus::Missing) => "digest: missing sidecar (unverified)".to_string(),
         Err(error) => format!("digest: cannot verify ({error})"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Resolved policy disclosure (and the credential-handle sidecar)
+// ---------------------------------------------------------------------------
+
+/// The handle→metadata sidecar that lets `grants.json` name a credential
+/// without ever holding its value. Lives at `plugins/<id>/credentials.json`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct CredentialRecord {
+    /// The user-facing source (`auth-json:<provider-id>`), never a secret.
+    source: String,
+    /// The auth-store provider id the value came from.
+    provider: String,
+    /// A display name resolved at grant time (never the value).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    display: String,
+    /// SHA-256 of the value, so a changed credential can be detected later.
+    fingerprint: String,
+}
+
+type CredentialSidecar = std::collections::BTreeMap<String, CredentialRecord>;
+
+const CREDENTIALS_FILE: &str = "credentials.json";
+
+fn credentials_path_at(root: &Path, plugin_id: &str) -> PathBuf {
+    plugin_dir_at(root, plugin_id).join(CREDENTIALS_FILE)
+}
+
+fn read_credentials_at(root: &Path, plugin_id: &str) -> CredentialSidecar {
+    std::fs::read_to_string(credentials_path_at(root, plugin_id))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_credentials_at(
+    root: &Path,
+    plugin_id: &str,
+    sidecar: &CredentialSidecar,
+) -> Result<(), String> {
+    let path = credentials_path_at(root, plugin_id);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|error| format!("create {}: {error}", dir.display()))?;
+    }
+    let text = serde_json::to_string_pretty(sidecar).map_err(|error| error.to_string())?;
+    std::fs::write(&path, text).map_err(|error| format!("write {}: {error}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("chmod {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Resolve `--credential-from auth-json:<provider-id>` into the opaque handle
+/// `grants.json` stores.
+///
+/// The value is read, fingerprinted and dropped: the handle and the non-secret
+/// metadata (source, display name, fingerprint) go to `credentials.json`, and
+/// `show` can later say whether the credential changed without ever printing
+/// it. `--credential-from` deliberately has no form that accepts a raw secret
+/// on the command line.
+fn mint_credential_handle(root: &Path, plugin_id: &str, source: &str) -> Result<String, String> {
+    let provider_id = source
+        .strip_prefix("auth-json:")
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            format!("--credential-from expects `auth-json:<provider-id>`, got `{source}`")
+        })?;
+    let path = root.join("auth.json");
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "read {} (has `{provider_id}` been logged in?): {error}",
+            path.display()
+        )
+    })?;
+    let store: crate::config::AuthStore =
+        serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    let value = match store.get(provider_id) {
+        Some(crate::config::Credential::ApiKey { key: Some(key), .. }) => key.as_str(),
+        Some(crate::config::Credential::Oauth { access, .. }) => access.as_str(),
+        _ => {
+            return Err(format!(
+                "auth.json has no usable credential for `{provider_id}`"
+            ))
+        }
+    };
+    let fingerprint = sha256_hex(value.as_bytes());
+    let handle = format!("pc-{}", &fingerprint[..16]);
+    let mut sidecar = read_credentials_at(root, plugin_id);
+    sidecar.insert(
+        handle.clone(),
+        CredentialRecord {
+            source: source.to_string(),
+            provider: provider_id.to_string(),
+            display: provider_id.to_string(),
+            fingerprint,
+        },
+    );
+    write_credentials_at(root, plugin_id, &sidecar)?;
+    Ok(handle)
+}
+
+fn display_name(recorded: &str, fallback: &str) -> String {
+    if recorded.is_empty() {
+        fallback.to_string()
+    } else {
+        recorded.to_string()
+    }
+}
+
+fn observe_name(mode: ObserveMode) -> &'static str {
+    match mode {
+        ObserveMode::None => "none",
+        ObserveMode::Requests => "requests",
+    }
+}
+
+fn headers_name(mode: HeadersMode) -> &'static str {
+    match mode {
+        HeadersMode::Names => "names",
+        HeadersMode::Values => "values",
+    }
+}
+
+fn messages_name(mode: MessagesMode) -> &'static str {
+    match mode {
+        MessagesMode::None => "none",
+        MessagesMode::Full => "full",
+    }
+}
+
+/// The resolved policy in words. Endpoint hosts, model ids, kinds and budgets
+/// are the thing the user is agreeing to; a credential appears only as its
+/// handle (with display name, source and fingerprint), never its value.
+fn policy_disclosure(grants: &Grants, credentials: &CredentialSidecar) -> String {
+    let mut out = String::new();
+    if let Some(oauth) = &grants.oauth {
+        out.push_str("oauth policy:\n");
+        for profile in &oauth.providers {
+            let flows = profile
+                .flows
+                .iter()
+                .map(|flow| match flow {
+                    OAuthFlow::AuthorizationCode => "authorization-code",
+                    OAuthFlow::DeviceCode => "device-code",
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "  {} ({}) token: {}; authorization: {}; flows: {}; pkce: {}\n",
+                profile.id,
+                display_name(&profile.display_name, &profile.id),
+                profile.token_endpoint,
+                profile.authorization_endpoint,
+                flows,
+                if profile.supports_pkce { "yes" } else { "no" },
+            ));
+        }
+        out.push_str(&format!(
+            "  budget: {}s, {} requests\n",
+            oauth.timeout_seconds, oauth.max_requests
+        ));
+    }
+    if let Some(provider) = &grants.provider {
+        out.push_str("provider policy:\n");
+        for profile in &provider.providers {
+            let models = profile
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let credential = match &profile.credential {
+                Some(handle) => match credentials.get(handle) {
+                    Some(record) => format!(
+                        "{handle} ({} · {} · fingerprint {})",
+                        display_name(&record.display, &record.provider),
+                        record.source,
+                        &record.fingerprint[..record.fingerprint.len().min(16)]
+                    ),
+                    None => format!("{handle} (no sidecar record)"),
+                },
+                None => "(none)".to_string(),
+            };
+            out.push_str(&format!(
+                "  {} ({}) endpoint: {}://{}{} methods: {}; models: {}; credential: {}\n",
+                profile.id,
+                display_name(&profile.display_name, &profile.id),
+                profile.endpoint.scheme,
+                profile.endpoint.host,
+                profile.endpoint.path_prefix,
+                profile.endpoint.methods.join(","),
+                if models.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    models
+                },
+                credential,
+            ));
+            out.push_str(&format!("  budget: {}s\n", profile.timeout_seconds));
+        }
+    }
+    if let Some(render) = &grants.render {
+        out.push_str(&format!(
+            "render policy: kinds: {}; timeout: {}ms; max output: {} bytes\n",
+            render.kinds.join(","),
+            render.timeout_ms,
+            render.max_output_bytes
+        ));
+    }
+    if let Some(resources) = &grants.resources {
+        out.push_str(&format!(
+            "resources policy: kinds: {}; max items: {}; max bytes: {}\n",
+            resources.kinds.join(","),
+            resources.max_items,
+            resources.max_bytes
+        ));
+    }
+    if let Some(request) = &grants.provider_request {
+        out.push_str(&format!(
+            "provider-request policy: observe: {}; headers: {}; messages: {}; patch: {}; \
+             patch timeout: {}ms\n",
+            observe_name(request.observe),
+            headers_name(request.headers),
+            messages_name(request.messages),
+            if request.patch { "enabled" } else { "disabled" },
+            request.patch_timeout_ms
+        ));
+    }
+    out
 }
 
 /// List a plugin's declared surfaces, or say why nothing could be listed.
@@ -222,11 +472,20 @@ fn capability_is_enforced(_name: &str) -> bool {
 }
 
 fn grant(args: &[String]) -> i32 {
+    grant_into(args, None)
+}
+
+/// [`grant`] against an explicit agent root (the test seam).
+fn grant_into(args: &[String], root: Option<&Path>) -> i32 {
     let parsed = match parse_target(args) {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
-    let mut grants = Grants::load_for(&parsed.id);
+    let Some(root) = resolve_root(root) else {
+        eprintln!("error: cannot resolve the agent directory");
+        return 1;
+    };
+    let mut grants = Grants::load_for_at(&root, &parsed.id);
     // Grant REPLACES the capability's whole policy. When an exec grant with a
     // non-default scope or budget is replaced without those flags, say what
     // was reset rather than letting it silently revert.
@@ -236,11 +495,11 @@ fn grant(args: &[String]) -> i32 {
         None
     };
     let given_options = parsed.options.clone();
-    if let Err(error) = grants.grant(&parsed.capability, parsed.policy, parsed.options) {
+    if let Err(error) = apply_grant(&mut grants, &parsed, &root) {
         eprintln!("error: {error}");
         return 2;
     }
-    if let Err(error) = Grants::save_for(&parsed.id, &grants) {
+    if let Err(error) = Grants::save_for_at(&root, &parsed.id, &grants) {
         eprintln!("error: {error}");
         return 1;
     }
@@ -251,6 +510,256 @@ fn grant(args: &[String]) -> i32 {
         }
     }
     0
+}
+
+/// Apply one parsed grant. The five policy-shaped keys build their structured
+/// policy here; every legacy key keeps the value-list form.
+fn apply_grant(grants: &mut Grants, target: &Target, root: &Path) -> Result<(), String> {
+    target.flags.validate_for(&target.capability)?;
+    if !target.policy.is_empty() {
+        return Err(format!(
+            "`{}` takes no --host/--command; set its own policy flags instead",
+            target.capability
+        ));
+    }
+    match target.capability.as_str() {
+        "oauth" => {
+            reject_cwd_and_max_open(target)?;
+            grants.grant_oauth(build_oauth(target)?)
+        }
+        "provider" => {
+            reject_cwd_and_max_open(target)?;
+            grants.grant_provider(build_provider(target, root)?)
+        }
+        "render" => {
+            reject_all_grant_options(target)?;
+            grants.grant_render(build_render(target))
+        }
+        "resources" => {
+            reject_all_grant_options(target)?;
+            grants.grant_resources(build_resources(target))
+        }
+        "provider-request" => {
+            reject_all_grant_options(target)?;
+            grants.grant_provider_request(build_provider_request(target)?)
+        }
+        _ => grants.grant(
+            &target.capability,
+            target.policy.clone(),
+            target.options.clone(),
+        ),
+    }
+}
+
+/// `--cwd`/`--max-open` are exec/proc knobs. `--timeout` is meaningful for
+/// `oauth`/`provider` (their flow/request budget), so it stays.
+fn reject_cwd_and_max_open(target: &Target) -> Result<(), String> {
+    if target.options.cwd.is_some() || target.options.max_open.is_some() {
+        return Err(format!(
+            "`{}` takes no --cwd/--max-open (set its own policy fields instead)",
+            target.capability
+        ));
+    }
+    Ok(())
+}
+
+/// `render`/`resources`/`provider-request` carry their own budgets; none of the
+/// exec-era options apply.
+fn reject_all_grant_options(target: &Target) -> Result<(), String> {
+    if target.options.cwd.is_some()
+        || target.options.timeout_seconds.is_some()
+        || target.options.max_open.is_some()
+    {
+        return Err(format!(
+            "`{}` takes no --cwd/--timeout/--max-open (set its own policy fields instead)",
+            target.capability
+        ));
+    }
+    Ok(())
+}
+
+fn build_oauth(target: &Target) -> Result<OAuthGrant, String> {
+    let flags = &target.flags;
+    if flags.oauth_profiles.is_empty() {
+        return Err("`oauth` needs --provider <id> --profile <file.json>".to_string());
+    }
+    if flags.oauth_providers.len() != flags.oauth_profiles.len() {
+        return Err("each --profile needs a matching --provider <id>".to_string());
+    }
+    let mut providers = Vec::new();
+    for (provider_id, path) in flags.oauth_providers.iter().zip(&flags.oauth_profiles) {
+        let text =
+            std::fs::read_to_string(path).map_err(|error| format!("read {path}: {error}"))?;
+        let mut profile: OAuthProviderProfile =
+            serde_json::from_str(&text).map_err(|error| format!("{path}: {error}"))?;
+        if profile.id.is_empty() {
+            profile.id = provider_id.clone();
+        } else if profile.id != *provider_id {
+            return Err(format!(
+                "{path} names provider `{}`, but --provider said `{provider_id}`",
+                profile.id
+            ));
+        }
+        providers.push(profile);
+    }
+    Ok(OAuthGrant {
+        providers,
+        timeout_seconds: target
+            .options
+            .timeout_seconds
+            .unwrap_or(OAUTH_TIMEOUT_DEFAULT_SECONDS),
+        max_requests: flags.max_requests.unwrap_or(OAUTH_MAX_REQUESTS_DEFAULT),
+    })
+}
+
+fn build_provider(target: &Target, root: &Path) -> Result<ProviderGrant, String> {
+    let flags = &target.flags;
+    if flags.model_json.is_empty() {
+        return Err("`provider` needs --model-json <file.json>".to_string());
+    }
+    let endpoint_text = flags
+        .endpoint
+        .as_deref()
+        .ok_or_else(|| "`provider` needs --endpoint <scheme://host/prefix>".to_string())?;
+    let endpoint = parse_provider_endpoint(endpoint_text, &flags.methods)?;
+    let mut models = Vec::new();
+    for path in &flags.model_json {
+        models.extend(read_provider_models(path)?);
+    }
+    let credential = match &flags.credential_from {
+        Some(source) => Some(mint_credential_handle(root, &target.id, source)?),
+        None => None,
+    };
+    Ok(ProviderGrant {
+        providers: vec![ProviderProfile {
+            id: target.id.clone(),
+            display_name: String::new(),
+            models,
+            endpoint,
+            credential,
+            timeout_seconds: target
+                .options
+                .timeout_seconds
+                .unwrap_or(kiqi_plugin::grants::PROVIDER_TIMEOUT_DEFAULT_SECONDS),
+        }],
+    })
+}
+
+/// One `--model-json` file. A bare model object, an array of them, or an
+/// object with a `models` array are all accepted, because the catalog file the
+/// user already has may be any of the three.
+fn read_provider_models(path: &str) -> Result<Vec<ProviderModel>, String> {
+    let text = std::fs::read_to_string(path).map_err(|error| format!("read {path}: {error}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| format!("{path}: {error}"))?;
+    let items = match value {
+        serde_json::Value::Array(items) => items,
+        serde_json::Value::Object(mut map) => match map.remove("models") {
+            Some(serde_json::Value::Array(items)) => items,
+            Some(other) => vec![other],
+            None => vec![serde_json::Value::Object(map)],
+        },
+        other => vec![other],
+    };
+    items
+        .into_iter()
+        .map(|item| serde_json::from_value(item).map_err(|error| format!("{path}: {error}")))
+        .collect()
+}
+
+/// `--endpoint <scheme://host/path-prefix>`. The host is exact (no wildcard);
+/// the grants model re-checks scheme/host/path and the methods.
+fn parse_provider_endpoint(value: &str, methods: &[String]) -> Result<ProviderEndpoint, String> {
+    let (scheme, rest) = value
+        .split_once("://")
+        .ok_or_else(|| format!("--endpoint needs `scheme://host/prefix`, got `{value}`"))?;
+    if scheme.is_empty() || rest.is_empty() {
+        return Err(format!(
+            "--endpoint needs `scheme://host/prefix`, got `{value}`"
+        ));
+    }
+    if rest.contains('@') {
+        return Err("--endpoint must not carry userinfo".to_string());
+    }
+    let (host, path_prefix) = match rest.split_once('/') {
+        Some((host, path)) => (host.to_string(), format!("/{path}")),
+        None => (rest.to_string(), "/".to_string()),
+    };
+    if host.is_empty() {
+        return Err(format!("--endpoint needs a host, got `{value}`"));
+    }
+    Ok(ProviderEndpoint {
+        scheme: scheme.to_string(),
+        host,
+        path_prefix,
+        methods: if methods.is_empty() {
+            vec!["POST".to_string()]
+        } else {
+            methods.to_vec()
+        },
+    })
+}
+
+fn build_render(target: &Target) -> RenderGrant {
+    let kinds = if target.flags.kinds.is_empty() {
+        vec![RENDER_KIND_MARKDOWN.to_string()]
+    } else {
+        target.flags.kinds.clone()
+    };
+    RenderGrant {
+        kinds,
+        ..RenderGrant::default()
+    }
+}
+
+fn build_resources(target: &Target) -> ResourcesGrant {
+    let kinds = if target.flags.kinds.is_empty() {
+        vec![
+            RESOURCES_KIND_SKILLS.to_string(),
+            RESOURCES_KIND_PROMPTS.to_string(),
+        ]
+    } else {
+        target.flags.kinds.clone()
+    };
+    ResourcesGrant {
+        kinds,
+        ..ResourcesGrant::default()
+    }
+}
+
+fn build_provider_request(target: &Target) -> Result<ProviderRequestGrant, String> {
+    let flags = &target.flags;
+    let headers = match flags.headers.as_deref() {
+        None | Some("names") => HeadersMode::Names,
+        Some("values") => HeadersMode::Values,
+        Some(other) => {
+            return Err(format!(
+                "--headers must be `names` or `values`, got `{other}`"
+            ))
+        }
+    };
+    let messages = match flags.messages.as_deref() {
+        None | Some("none") => MessagesMode::None,
+        Some("full") => MessagesMode::Full,
+        Some(other) => {
+            return Err(format!(
+                "--messages must be `none` or `full`, got `{other}`"
+            ))
+        }
+    };
+    Ok(ProviderRequestGrant {
+        observe: if flags.observe {
+            ObserveMode::Requests
+        } else {
+            ObserveMode::None
+        },
+        headers,
+        messages,
+        patch: flags.patch,
+        patch_timeout_ms: flags
+            .patch_timeout_ms
+            .unwrap_or(kiqi_plugin::grants::PROVIDER_REQUEST_PATCH_TIMEOUT_MS_DEFAULT),
+    })
 }
 
 /// The note to print when re-granting `exec` silently resets a non-default
@@ -285,6 +794,7 @@ fn revoke(args: &[String]) -> i32 {
     if !parsed.policy.is_empty()
         || parsed.options.cwd.is_some()
         || parsed.options.timeout_seconds.is_some()
+        || !parsed.flags.is_empty()
     {
         eprintln!("error: `revoke` takes no flags (it clears the whole capability)");
         return 2;
@@ -302,6 +812,75 @@ fn revoke(args: &[String]) -> i32 {
     0
 }
 
+/// Flags for the five policy-shaped keys. Kept apart from the value-list
+/// `policy`/`options` pair so an exec-era flag can never leak into a profile.
+#[derive(Default, Clone)]
+struct StructuredFlags {
+    oauth_providers: Vec<String>,
+    oauth_profiles: Vec<String>,
+    model_json: Vec<String>,
+    endpoint: Option<String>,
+    methods: Vec<String>,
+    credential_from: Option<String>,
+    kinds: Vec<String>,
+    observe: bool,
+    headers: Option<String>,
+    messages: Option<String>,
+    patch: bool,
+    patch_timeout_ms: Option<u64>,
+    max_requests: Option<u32>,
+}
+
+impl StructuredFlags {
+    fn is_empty(&self) -> bool {
+        self.oauth_providers.is_empty()
+            && self.oauth_profiles.is_empty()
+            && self.model_json.is_empty()
+            && self.endpoint.is_none()
+            && self.methods.is_empty()
+            && self.credential_from.is_none()
+            && self.kinds.is_empty()
+            && !self.observe
+            && self.headers.is_none()
+            && self.messages.is_none()
+            && !self.patch
+            && self.patch_timeout_ms.is_none()
+            && self.max_requests.is_none()
+    }
+
+    /// Reject a flag that belongs to a different capability, so `--kind` on
+    /// `oauth` is an error instead of a silently ignored option.
+    fn validate_for(&self, capability: &str) -> Result<(), String> {
+        let oauth_used = !self.oauth_providers.is_empty()
+            || !self.oauth_profiles.is_empty()
+            || self.max_requests.is_some();
+        let provider_used = !self.model_json.is_empty()
+            || self.endpoint.is_some()
+            || !self.methods.is_empty()
+            || self.credential_from.is_some();
+        let kind_used = !self.kinds.is_empty();
+        let request_used = self.observe
+            || self.headers.is_some()
+            || self.messages.is_some()
+            || self.patch
+            || self.patch_timeout_ms.is_some();
+        let ok = match capability {
+            "oauth" => !provider_used && !kind_used && !request_used,
+            "provider" => !oauth_used && !kind_used && !request_used,
+            "render" | "resources" => !oauth_used && !provider_used && !request_used,
+            "provider-request" => !oauth_used && !provider_used && !kind_used,
+            _ => !oauth_used && !provider_used && !kind_used && !request_used,
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(format!(
+                "one or more flags do not apply to `{capability}`; see `ki plugin --help`"
+            ))
+        }
+    }
+}
+
 struct Target {
     id: String,
     capability: String,
@@ -310,6 +889,8 @@ struct Target {
     policy: Vec<String>,
     /// Exec-only options (`--cwd`, `--timeout`); other capabilities reject them.
     options: GrantOptions,
+    /// Policy flags for `oauth`/`provider`/`render`/`resources`/`provider-request`.
+    flags: StructuredFlags,
 }
 
 /// The `--timeout` ceiling for a capability: `proc` runs long jobs by design,
@@ -341,13 +922,13 @@ fn parse_timeout(value: &str) -> Result<u64, String> {
     Ok(seconds)
 }
 
-/// `<id> <capability> [--host H | --command C | --cwd S | --timeout N]...`,
-/// shared by grant and revoke.
+/// `<id> <capability> [flags]...`, shared by grant and revoke.
 fn parse_target(args: &[String]) -> Result<Target, i32> {
     let mut id = None;
     let mut capability = None;
     let mut policy = Vec::new();
     let mut options = GrantOptions::default();
+    let mut flags = StructuredFlags::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -397,6 +978,97 @@ fn parse_target(args: &[String]) -> Result<Target, i32> {
                     return Err(2);
                 }
             },
+            "--provider" => match iter.next() {
+                Some(value) => flags.oauth_providers.push(value.clone()),
+                None => {
+                    eprintln!("error: --provider needs a provider id");
+                    return Err(2);
+                }
+            },
+            "--profile" => match iter.next() {
+                Some(value) => flags.oauth_profiles.push(value.clone()),
+                None => {
+                    eprintln!("error: --profile needs a JSON file");
+                    return Err(2);
+                }
+            },
+            "--model-json" => match iter.next() {
+                Some(value) => flags.model_json.push(value.clone()),
+                None => {
+                    eprintln!("error: --model-json needs a JSON file");
+                    return Err(2);
+                }
+            },
+            "--endpoint" => match iter.next() {
+                Some(value) => flags.endpoint = Some(value.clone()),
+                None => {
+                    eprintln!("error: --endpoint needs a value");
+                    return Err(2);
+                }
+            },
+            "--method" => match iter.next() {
+                Some(value) => flags.methods.push(value.to_ascii_uppercase()),
+                None => {
+                    eprintln!("error: --method needs GET or POST");
+                    return Err(2);
+                }
+            },
+            "--credential-from" => match iter.next() {
+                Some(value) => flags.credential_from = Some(value.clone()),
+                None => {
+                    eprintln!("error: --credential-from needs `auth-json:<provider-id>`");
+                    return Err(2);
+                }
+            },
+            "--kind" => match iter.next() {
+                Some(value) => flags.kinds.push(value.clone()),
+                None => {
+                    eprintln!("error: --kind needs a value");
+                    return Err(2);
+                }
+            },
+            "--observe" => flags.observe = true,
+            "--patch" => flags.patch = true,
+            "--headers" => match iter.next() {
+                Some(value) => flags.headers = Some(value.clone()),
+                None => {
+                    eprintln!("error: --headers needs `names` or `values`");
+                    return Err(2);
+                }
+            },
+            "--messages" => match iter.next() {
+                Some(value) => flags.messages = Some(value.clone()),
+                None => {
+                    eprintln!("error: --messages needs `none` or `full`");
+                    return Err(2);
+                }
+            },
+            "--patch-timeout-ms" => match iter.next() {
+                Some(value) => match value.parse::<u64>() {
+                    Ok(n) => flags.patch_timeout_ms = Some(n),
+                    Err(_) => {
+                        eprintln!("error: --patch-timeout-ms needs a number, got `{value}`");
+                        return Err(2);
+                    }
+                },
+                None => {
+                    eprintln!("error: --patch-timeout-ms needs a value");
+                    return Err(2);
+                }
+            },
+            "--max-requests" => match iter.next() {
+                Some(value) => match value.parse::<u32>() {
+                    Ok(n) => flags.max_requests = Some(n),
+                    Err(_) => {
+                        eprintln!("error: --max-requests needs a number, got `{value}`");
+                        return Err(2);
+                    }
+                },
+                None => {
+                    eprintln!("error: --max-requests needs a value");
+                    return Err(2);
+                }
+            },
             other if other.starts_with("--") => {
                 eprintln!("error: unknown flag `{other}`");
                 return Err(2);
@@ -411,7 +1083,8 @@ fn parse_target(args: &[String]) -> Result<Target, i32> {
     }
     let (Some(id), Some(capability)) = (id, capability) else {
         eprintln!(
-            "error: expected `ki plugin <grant|revoke> <id> <capability> [--host H | --command C | --cwd S | --timeout N]...`"
+            "error: expected `ki plugin <grant|revoke> <id> <capability> [flags]...` \
+             (see `ki plugin --help`)"
         );
         return Err(2);
     };
@@ -426,6 +1099,20 @@ fn parse_target(args: &[String]) -> Result<Target, i32> {
             }
         }
     }
+    // Enumerated values are checked here so a bad --headers/--messages is a
+    // usage error rather than a silently defaulted policy.
+    if let Some(value) = &flags.headers {
+        if value != "names" && value != "values" {
+            eprintln!("error: --headers must be `names` or `values`, got `{value}`");
+            return Err(2);
+        }
+    }
+    if let Some(value) = &flags.messages {
+        if value != "none" && value != "full" {
+            eprintln!("error: --messages must be `none` or `full`, got `{value}`");
+            return Err(2);
+        }
+    }
     if let Err(error) = validate_id(&id) {
         eprintln!("error: {error}");
         return Err(2);
@@ -435,6 +1122,7 @@ fn parse_target(args: &[String]) -> Result<Target, i32> {
         capability,
         policy,
         options,
+        flags,
     })
 }
 
@@ -452,7 +1140,7 @@ USAGE:
     ki plugin install <path.wasm> [--id <id>] [--yes] [--host <host>]... [--command <cmd>]...
                                   [--cwd <plugin-data|project>] [--timeout <seconds>]
     ki plugin uninstall <id>
-    ki plugin grant <id> <capability> [--host <host> | --command <cmd> | --cwd <scope> | --timeout <seconds>]...
+    ki plugin grant <id> <capability> [flags]...
     ki plugin revoke <id> <capability>
 
 CAPABILITIES:
@@ -469,10 +1157,29 @@ CAPABILITIES:
                   --max-open <n> (default 100)
     net-sockets   raw TCP; --host <host> (repeatable, `*` allows any)
 
+    0.8.0 capabilities (never auto-granted by `--yes`):
+    oauth         drive an IdP; --provider <id> --profile <file.json>
+                  (repeatable pairs), optional --timeout <seconds>,
+                  --max-requests <n>
+    provider      serve a model catalog; --model-json <file.json> (repeatable),
+                  --endpoint <scheme://host/prefix>, optional --method GET|POST,
+                  --credential-from auth-json:<provider-id>, --timeout <seconds>
+    render        markdown transform; --kind <kind> (only `markdown` today)
+    resources     package skills/prompts; --kind skills|prompts (repeatable)
+    provider-request  observe/patch a provider request; --observe, --headers
+                  names|values, --messages none|full, --patch,
+                  --patch-timeout-ms <n>
+
 `install` copies the component to `plugins/<id>/plugin.wasm`, shows the
 capabilities it declares, and grants only what the user approves (`--yes` for a
 non-interactive run; without a terminal and without `--yes`, nothing is
-granted). `uninstall` moves the directory aside instead of deleting it.
+granted). oauth/provider/render/resources/provider-request need an explicit
+`ki plugin grant` with their policy. `uninstall` moves the directory aside
+instead of deleting it.
+
+`show` prints the resolved policy: endpoint hosts, model ids, kinds and budgets,
+and a credential only as its handle (with display name/source/fingerprint),
+never its value.
 
 A missing grants file grants nothing; the host never authorizes for a plugin."
     );
@@ -485,6 +1192,23 @@ A missing grants file grants nothing; the host never authorizes for a plugin."
 fn resolve_root(root: Option<&Path>) -> Option<PathBuf> {
     root.map(Path::to_path_buf).or_else(agent_dir)
 }
+
+/// Capabilities `--yes` never auto-grants.
+///
+/// Their policy is not derivable from an import name: oauth needs exact IdP
+/// profiles, provider needs a catalog, an endpoint and a credential handle,
+/// render/resources need kinds and budgets, and provider-request needs the
+/// observe/patch switches. A blanket yes would write an empty or wrong policy,
+/// so each one requires an explicit
+/// `ki plugin grant <id> <capability> ...`. `--yes` behaviour for
+/// `net-http`/`fs`/`exec`/`proc`/`net-sockets` is unchanged.
+const AUTO_GRANT_EXEMPT: &[&str] = &[
+    "oauth",
+    "provider",
+    "render",
+    "resources",
+    "provider-request",
+];
 
 /// Whether to grant the capabilities an install newly declares.
 ///
@@ -908,6 +1632,30 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
         }
     }
 
+    // Install-time provider discovery: bounded, grant-less, and advisory. The
+    // GRANT stays the catalog authority; a guest that cannot answer is a
+    // diagnostic, not an install failure (`--yes`/fail-closed rules still
+    // decide what is granted).
+    #[cfg(feature = "plugin-wasm")]
+    if declared
+        .iter()
+        .any(|cap| cap == "oauth" || cap == "provider")
+    {
+        let discovery = kiqi_plugin_host::discover_providers(&target);
+        for diagnostic in &discovery.diagnostics {
+            eprintln!("note: {diagnostic}");
+        }
+        if !discovery.providers.is_empty() {
+            let listed = discovery
+                .providers
+                .iter()
+                .map(|provider| format!("{} ({})", provider.id, provider.interface))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("providers disclosed by the guest: {listed}");
+        }
+    }
+
     // Only capabilities this plugin declares that are not already granted need a
     // decision, so an update that does not grow the set never re-prompts.
     let mut grants = Grants::load_for_at(&root, &id);
@@ -916,13 +1664,19 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
         .iter()
         .filter(|cap| !already.contains(&cap.as_str()))
         .collect();
+    // `--yes` covers only capabilities whose policy an import name fully
+    // describes. The five policy-shaped keys are never auto-granted: they need
+    // profiles/endpoints/credentials/kinds that no default can invent.
+    let (auto_caps, explicit_caps): (Vec<&String>, Vec<&String>) = new_caps
+        .iter()
+        .partition(|cap| !AUTO_GRANT_EXEMPT.contains(&cap.as_str()));
     let mut granted_now: Vec<String> = Vec::new();
-    if !new_caps.is_empty() {
+    if !auto_caps.is_empty() {
         let interactive = std::io::stdin().is_terminal();
         if !yes && interactive {
             print!(
                 "grant {} to `{id}`? [y/N] ",
-                new_caps
+                auto_caps
                     .iter()
                     .map(|cap| cap.as_str())
                     .collect::<Vec<_>>()
@@ -938,7 +1692,7 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
         };
         let approve = approve_new_capabilities(yes, interactive, answer.as_deref());
         if approve {
-            for cap in &new_caps {
+            for cap in &auto_caps {
                 // Each capability carries its own policy: hosts for the network
                 // capabilities, command names (plus --cwd/--timeout) for exec.
                 let (policy, options) = if cap.as_str() == "exec" || cap.as_str() == "proc" {
@@ -958,6 +1712,17 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
                 }
             }
         }
+    }
+    if !explicit_caps.is_empty() {
+        eprintln!(
+            "note: {} need an explicit `ki plugin grant {id} <capability> ...` — \
+             --yes does not grant them",
+            explicit_caps
+                .iter()
+                .map(|cap| cap.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     // `--cwd`/`--timeout` only reach a *newly granted* exec; when exec was
@@ -1567,5 +2332,342 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
         }
+    }
+    // -----------------------------------------------------------------
+    // 0.8.0 capabilities: scanning, explicit grants, consent, disclosure
+    // -----------------------------------------------------------------
+
+    fn push_section(out: &mut Vec<u8>, id: u8, contents: &[u8]) {
+        out.push(id);
+        push_leb(out, contents.len() as u32);
+        out.extend_from_slice(contents);
+    }
+
+    fn push_leb(out: &mut Vec<u8>, mut value: u32) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    fn push_name(out: &mut Vec<u8>, name: &str) {
+        out.push(0x00);
+        push_leb(out, name.len() as u32);
+        out.extend_from_slice(name.as_bytes());
+    }
+
+    /// A minimal, deliberately non-instantiable component carrying the given
+    /// import/export names. The scanners read names; install must still work
+    /// when discovery fails closed.
+    fn synthetic_component(imports: &[&str], exports: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"\0asm");
+        out.extend_from_slice(&[0x0d, 0x00, 0x01, 0x00]);
+        if !imports.is_empty() {
+            let mut body = Vec::new();
+            push_leb(&mut body, imports.len() as u32);
+            for name in imports {
+                push_name(&mut body, name);
+                body.push(0x05);
+                push_leb(&mut body, 0);
+            }
+            push_section(&mut out, 10, &body);
+        }
+        if !exports.is_empty() {
+            let mut body = Vec::new();
+            push_leb(&mut body, exports.len() as u32);
+            for name in exports {
+                push_name(&mut body, name);
+                body.push(0x05);
+                push_leb(&mut body, 0);
+                body.push(0x00);
+            }
+            push_section(&mut out, 11, &body);
+        }
+        out
+    }
+
+    fn write_provider_fixtures(root: &Path, dir: &Path) -> (PathBuf, PathBuf) {
+        let model = dir.join("model.json");
+        std::fs::write(
+            &model,
+            r#"{"id":"claude-sonnet","api":"anthropic-messages","base-url":"https://api.example.com"}"#,
+        )
+        .unwrap();
+        let profile = dir.join("oauth.json");
+        std::fs::write(
+            &profile,
+            r#"{
+  "id": "acme",
+  "display-name": "Acme",
+  "scopes": ["read"],
+  "flows": ["authorization-code", "device-code"],
+  "authorization-endpoint": "https://auth.example.com/authorize",
+  "token-endpoint": "https://auth.example.com/token",
+  "client-id": "client-123",
+  "supports-pkce": true
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("auth.json"),
+            r#"{"anthropic":{"type":"api_key","key":"sk-live-super-secret"}}"#,
+        )
+        .unwrap();
+        (model, profile)
+    }
+
+    /// The five policy-shaped keys are exempt from `--yes`; the old five are
+    /// not. A `--yes` install of a component exporting `oauth-api` and
+    /// importing `provider-http` therefore declares both and grants neither.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn install_yes_never_auto_grants_the_policy_shaped_keys() {
+        for capability in [
+            "oauth",
+            "provider",
+            "render",
+            "resources",
+            "provider-request",
+        ] {
+            assert!(
+                AUTO_GRANT_EXEMPT.contains(&capability),
+                "{capability} must require an explicit grant"
+            );
+        }
+
+        let source = tempfile::tempdir().unwrap();
+        let wasm = source.path().join("plugin.wasm");
+        std::fs::write(
+            &wasm,
+            synthetic_component(
+                &["kiqi:plugin/provider-http@0.8.0"],
+                &["kiqi:plugin/oauth-api@0.8.0"],
+            ),
+        )
+        .unwrap();
+        let agent = tempfile::tempdir().unwrap();
+        let code = install_into(
+            &[
+                wasm.display().to_string(),
+                "--id".into(),
+                "prov".into(),
+                "--yes".into(),
+            ],
+            Some(agent.path()),
+        );
+        assert_eq!(code, 0, "discovery failure must not fail the install");
+        assert!(
+            Grants::load_for_at(agent.path(), "prov")
+                .granted()
+                .is_empty(),
+            "--yes must not grant oauth/provider/render/resources/provider-request"
+        );
+    }
+
+    /// Each 0.8.0 key has a policy-shaped spelling; the resolved policy lands
+    /// in grants.json (and the credential only as a handle).
+    #[test]
+    fn grant_spellings_build_the_policy_shaped_keys() {
+        let agent = tempfile::tempdir().unwrap();
+        let fixtures = tempfile::tempdir().unwrap();
+        let root = agent.path();
+        let (model, profile) = write_provider_fixtures(root, fixtures.path());
+
+        let steps: Vec<Vec<String>> = vec![
+            vec![
+                "p".into(),
+                "oauth".into(),
+                "--provider".into(),
+                "acme".into(),
+                "--profile".into(),
+                profile.display().to_string(),
+            ],
+            vec![
+                "p".into(),
+                "provider".into(),
+                "--model-json".into(),
+                model.display().to_string(),
+                "--endpoint".into(),
+                "https://api.example.com/v1".into(),
+                "--credential-from".into(),
+                "auth-json:anthropic".into(),
+                "--timeout".into(),
+                "300".into(),
+            ],
+            vec![
+                "p".into(),
+                "render".into(),
+                "--kind".into(),
+                "markdown".into(),
+            ],
+            vec![
+                "p".into(),
+                "resources".into(),
+                "--kind".into(),
+                "skills".into(),
+            ],
+            vec![
+                "p".into(),
+                "provider-request".into(),
+                "--observe".into(),
+                "--headers".into(),
+                "names".into(),
+                "--messages".into(),
+                "none".into(),
+                "--patch".into(),
+                "--patch-timeout-ms".into(),
+                "2000".into(),
+            ],
+        ];
+        for (index, step) in steps.iter().enumerate() {
+            assert_eq!(
+                grant_into(step, Some(root)),
+                0,
+                "step {index} should grant:\n{}",
+                step.join(" ")
+            );
+        }
+
+        let grants = Grants::load_for_at(root, "p");
+        assert_eq!(
+            grants.granted(),
+            vec![
+                "oauth",
+                "provider",
+                "render",
+                "resources",
+                "provider-request"
+            ]
+        );
+        let provider = grants.provider.as_ref().expect("provider grant");
+        assert_eq!(provider.providers[0].id, "p");
+        assert_eq!(provider.providers[0].endpoint.host, "api.example.com");
+        assert_eq!(provider.providers[0].endpoint.path_prefix, "/v1");
+        assert_eq!(provider.providers[0].timeout_seconds, 300);
+        let handle = provider.providers[0]
+            .credential
+            .as_ref()
+            .expect("a handle was minted");
+        assert!(handle.starts_with("pc-"));
+
+        let oauth = grants.oauth.as_ref().expect("oauth grant");
+        assert_eq!(oauth.providers[0].id, "acme");
+        assert!(oauth.providers[0].supports_pkce);
+        assert_eq!(
+            grants.render.as_ref().unwrap().kinds,
+            vec!["markdown".to_string()]
+        );
+        assert_eq!(
+            grants.resources.as_ref().unwrap().kinds,
+            vec!["skills".to_string()]
+        );
+        let request = grants.provider_request.as_ref().expect("request grant");
+        assert_eq!(request.observe, ObserveMode::Requests);
+        assert!(request.patch);
+    }
+
+    /// A mismatched `--provider` / profile id is a usage error, not a silently
+    /// renamed profile.
+    #[test]
+    fn grant_oauth_rejects_a_profile_id_mismatch() {
+        let agent = tempfile::tempdir().unwrap();
+        let fixtures = tempfile::tempdir().unwrap();
+        let (_, profile) = write_provider_fixtures(agent.path(), fixtures.path());
+        let code = grant_into(
+            &[
+                "p".into(),
+                "oauth".into(),
+                "--provider".into(),
+                "other".into(),
+                "--profile".into(),
+                profile.display().to_string(),
+            ],
+            Some(agent.path()),
+        );
+        assert_eq!(code, 2);
+    }
+
+    /// `--credential-from` stores a handle plus a fingerprint, never the value.
+    #[test]
+    fn credential_handle_sidecar_never_contains_the_value() {
+        let agent = tempfile::tempdir().unwrap();
+        let fixtures = tempfile::tempdir().unwrap();
+        let _ = write_provider_fixtures(agent.path(), fixtures.path());
+        let handle = mint_credential_handle(agent.path(), "p", "auth-json:anthropic").unwrap();
+        assert!(handle.starts_with("pc-"));
+        let sidecar = std::fs::read_to_string(credentials_path_at(agent.path(), "p")).unwrap();
+        assert!(sidecar.contains(&handle));
+        assert!(!sidecar.contains("sk-live-super-secret"));
+    }
+
+    /// `show`'s policy section names the credential handle and its display
+    /// name/endpoint, and never the value.
+    #[test]
+    fn show_discloses_the_handle_but_never_the_value() {
+        let request = ProviderRequestGrant {
+            observe: ObserveMode::Requests,
+            ..ProviderRequestGrant::default()
+        };
+        let mut grants = Grants::default();
+        grants
+            .grant_provider(ProviderGrant {
+                providers: vec![ProviderProfile {
+                    id: "p".to_string(),
+                    display_name: "P".to_string(),
+                    models: vec![ProviderModel {
+                        id: "claude-sonnet".to_string(),
+                        api: "anthropic-messages".to_string(),
+                        base_url: "https://api.example.com".to_string(),
+                        reasoning: false,
+                        input: Vec::new(),
+                    }],
+                    endpoint: ProviderEndpoint {
+                        scheme: "https".to_string(),
+                        host: "api.example.com".to_string(),
+                        path_prefix: "/v1".to_string(),
+                        methods: vec!["POST".to_string()],
+                    },
+                    credential: Some("pc-0123456789abcdef".to_string()),
+                    timeout_seconds: 600,
+                }],
+            })
+            .unwrap();
+        grants.grant_provider_request(request).unwrap();
+
+        let mut credentials = CredentialSidecar::default();
+        credentials.insert(
+            "pc-0123456789abcdef".to_string(),
+            CredentialRecord {
+                source: "auth-json:anthropic".to_string(),
+                provider: "anthropic".to_string(),
+                display: "Anthropic".to_string(),
+                fingerprint: "deadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+            },
+        );
+
+        let text = policy_disclosure(&grants, &credentials);
+        for expected in [
+            "provider policy:",
+            "api.example.com",
+            "/v1",
+            "claude-sonnet",
+            "pc-0123456789abcdef",
+            "Anthropic",
+            "deadbeefdeadbeef",
+            "provider-request policy:",
+            "observe: requests",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+        }
+        assert!(
+            !text.contains("sk-live-super-secret"),
+            "the credential value must never be printed:\n{text}"
+        );
     }
 }
