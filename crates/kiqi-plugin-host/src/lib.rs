@@ -67,20 +67,53 @@ pub use provider_patch::{
     validate_provider_patch, DENIED_HEADERS, MAX_ENVELOPE_BYTES, NON_PATCHABLE_KEYS,
 };
 
+pub mod provider_host;
+pub mod provider_http;
+pub use provider_host::{
+    DeltaKind, DeltaPhase, ProviderHost, ProviderHostOptions, ProviderResponse,
+    ProviderStreamSegment,
+};
+pub use provider_http::{
+    fingerprint_credential, ProviderHttpError, ProviderHttpRequest, ProviderHttpStream,
+    ProviderHttpTransport, ReqwestTransport, ResolvedCredential, STRIPPED_HEADERS,
+};
+
 /// The generated world struct is named after the world (`plugin`); alias it so
 /// it does not collide with the `kiqi_plugin::Plugin` trait.
 const NOT_GRANTED: &str = "capability not granted";
+
+/// Which kind of entry point is running on this thread.
+///
+/// The kind is what makes a contribution channel call-scoped rather than
+/// plugin-scoped: `provider-stream.emit` is honored only for
+/// [`CallKind::ProviderRequest`], as `event-action.patch` is honored only for
+/// the provider gate. `Metadata` is the implicit answer outside a call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallKind {
+    Metadata,
+    Tool,
+    Event,
+    Command,
+    Probe,
+    PromptHook,
+    ProviderRequest,
+    Render,
+    Oauth,
+}
 
 /// What the call running on this thread may reach.
 ///
 /// The host imports run on the thread that drives the guest call, and
 /// [`WasmPlugin`] serializes calls behind a mutex, so one thread-local carries
-/// the running call's capabilities and progress sink. The pointers only need to
-/// live for the duration of that call.
+/// the running call's capabilities, progress sink and delta sink. The pointers
+/// only need to live for the duration of that call.
 #[derive(Clone, Copy)]
 struct CallContext {
     sink: Option<*const (dyn ProgressSink + 'static)>,
     caps: *const HostCaps<'static>,
+    kind: CallKind,
+    /// Set only for a provider request; `provider-stream.emit` writes here.
+    deltas: Option<*mut crate::provider_host::DeltaAssembler>,
 }
 
 thread_local! {
@@ -92,7 +125,18 @@ thread_local! {
 /// # Safety
 /// The erased lifetimes are only valid while the borrows the pointers came from
 /// are alive; [`clear_context`] must run before either ends.
-fn install_context(sink: Option<&dyn ProgressSink>, caps: &HostCaps<'_>) -> CallContext {
+/// Install the current call's context, including its kind and (for a provider
+/// request) the delta assembler the call owns.
+///
+/// # Safety
+/// The erased pointers are valid only while the borrows they came from are
+/// alive; [`clear_context`] must run before either ends.
+fn install_context_kind(
+    sink: Option<&dyn ProgressSink>,
+    caps: &HostCaps<'_>,
+    kind: CallKind,
+    deltas: Option<&mut crate::provider_host::DeltaAssembler>,
+) -> CallContext {
     let context = CallContext {
         sink: sink.map(|sink| {
             // SAFETY: erased for the guest call's duration only.
@@ -104,9 +148,39 @@ fn install_context(sink: Option<&dyn ProgressSink>, caps: &HostCaps<'_>) -> Call
         }),
         // SAFETY: as above.
         caps: unsafe { std::mem::transmute::<*const HostCaps<'_>, *const HostCaps<'static>>(caps) },
+        kind,
+        // SAFETY: as above.
+        deltas: deltas.map(|deltas| deltas as *mut crate::provider_host::DeltaAssembler),
     };
     CURRENT.with(|slot| *slot.borrow_mut() = Some(context));
     context
+}
+
+/// The kind of call running on this thread; `Metadata` outside a call.
+fn current_kind() -> CallKind {
+    CURRENT.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|context| context.kind)
+            .unwrap_or(CallKind::Metadata)
+    })
+}
+
+/// Push one delta to the running provider call's assembler. A no-op for every
+/// other call kind, which is what keeps `provider-stream` from being a general
+/// side channel out of a tool or event handler.
+fn emit_provider_delta(delta: WitDelta) {
+    if current_kind() != CallKind::ProviderRequest {
+        return;
+    }
+    CURRENT.with(|slot| {
+        if let Some(pointer) = slot.borrow().as_ref().and_then(|context| context.deltas) {
+            // SAFETY: `install_context_kind` set this for the call; it is
+            // cleared before the borrow ends.
+            let assembler = unsafe { &mut *pointer };
+            assembler.push(delta);
+        }
+    });
 }
 
 fn clear_context() {
@@ -590,7 +664,7 @@ fn bounded_oauth_provider_ids(
             timeout.as_secs()
         )
     })?;
-    store.data_mut().reap_procs();
+    store.data_mut().reap_call_scoped();
     let ids = match result {
         Ok(providers) => match bounded_oauth_ids(providers) {
             Ok(ids) => Some(ids),
@@ -711,6 +785,12 @@ struct HostState {
     /// credential sink. `grants.oauth` still decides *which* provider may be
     /// driven; this only carries the machinery and the allow-list's counters.
     oauth: OAuthState,
+    /// Open `provider-http` streams, scoped to one provider call.
+    provider_http: provider_http::ProviderHttpTable,
+    /// The grant-backed provider call, installed only for the duration of a
+    /// `provider-api.request`. `None` everywhere else (the tool, render and
+    /// OAuth instances), which is why those can never open a handle.
+    provider_call: Option<provider_http::ProviderCallState>,
 }
 
 /// The OAuth machinery one instance carries.
@@ -810,12 +890,18 @@ impl crate::kiqi::plugin::progress::Host for HostState {
     }
 }
 
-/// Streamed provider deltas. The 0.8.0 surface is wired but no capability is
-/// granted yet, so the sink is a no-op: there is no provider call for a delta
-/// to belong to.
+/// Streamed provider deltas. Honored only while a `provider-api.request` call
+/// is on the stack; outside one this is a no-op by contract, so a tool or an
+/// event handler cannot smuggle deltas into another call's stream.
 impl crate::kiqi::plugin::provider_stream::Host for HostState {
-    fn emit(&mut self, _delta: WitDelta) {}
-    fn emit_batch(&mut self, _deltas: Vec<WitDelta>) {}
+    fn emit(&mut self, delta: WitDelta) {
+        emit_provider_delta(delta);
+    }
+    fn emit_batch(&mut self, deltas: Vec<WitDelta>) {
+        for delta in deltas {
+            emit_provider_delta(delta);
+        }
+    }
 }
 
 /// Host-attributed OAuth endpoints. Deny-by-default: a provider id is reachable
@@ -833,17 +919,89 @@ impl crate::kiqi::plugin::oauth_http::Host for HostState {
     }
 }
 
-/// Host-attributed streaming HTTP for provider requests. Deny-by-default: the
-/// `provider` grant is not wired yet, so nothing can be opened.
+/// Host-attributed streaming HTTP for provider requests.
+///
+/// Deny-by-default twice over: the call must be a `provider-api.request` (the
+/// thread-local call kind), and that call must have installed a grant-backed
+/// [`HostState::provider_call`]. The tool and OAuth instances satisfy neither,
+/// so they can never hold a handle.
 impl crate::kiqi::plugin::provider_http::Host for HostState {
-    fn open(&mut self, _request: String) -> Result<u32, CapabilityError> {
-        Err(denied())
+    fn open(&mut self, request: String) -> Result<u32, CapabilityError> {
+        self.provider_http_open(&request)
+            .map_err(provider_http::ProviderHttpError::into_capability)
     }
-    fn read(&mut self, _handle: u32, _max_bytes: u64) -> Result<Option<Vec<u8>>, CapabilityError> {
-        Err(denied())
+    fn read(&mut self, handle: u32, max_bytes: u64) -> Result<Option<Vec<u8>>, CapabilityError> {
+        self.provider_http_read(handle, max_bytes)
+            .map_err(provider_http::ProviderHttpError::into_capability)
     }
-    fn close(&mut self, _handle: u32) -> Result<(), CapabilityError> {
-        Err(denied())
+    fn close(&mut self, handle: u32) -> Result<(), CapabilityError> {
+        self.provider_http_close(handle)
+            .map_err(provider_http::ProviderHttpError::into_capability)
+    }
+}
+
+impl HostState {
+    /// `provider-http.open`: authorize the request against the grant, then let
+    /// the transport connect. A policy failure never makes a connection.
+    fn provider_http_open(&mut self, raw: &str) -> Result<u32, provider_http::ProviderHttpError> {
+        use provider_http::ProviderHttpError;
+        if current_kind() != CallKind::ProviderRequest {
+            return Err(ProviderHttpError::Denied(
+                "provider-http is only available during a provider request".to_string(),
+            ));
+        }
+        let Some(call) = self.provider_call.as_ref() else {
+            return Err(ProviderHttpError::Denied(
+                "provider-http is not granted".to_string(),
+            ));
+        };
+        let request = provider_http::checked_request(&call.profile, call.credential.as_ref(), raw)?;
+        let max_handles = call.profile.max_handles;
+        let stream = call
+            .transport
+            .open(request)
+            .map_err(ProviderHttpError::Failed)?;
+        let status = stream.status();
+        if (300..400).contains(&status) {
+            return Err(ProviderHttpError::Denied(format!(
+                "provider-http refused a {status} redirect"
+            )));
+        }
+        self.provider_http.open(stream, max_handles)
+    }
+
+    /// `provider-http.read`: bounded by the per-call table, the response cap
+    /// and the grant's cancellation probe.
+    fn provider_http_read(
+        &mut self,
+        handle: u32,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, provider_http::ProviderHttpError> {
+        use provider_http::ProviderHttpError;
+        if current_kind() != CallKind::ProviderRequest {
+            return Err(ProviderHttpError::Denied(
+                "provider-http is only available during a provider request".to_string(),
+            ));
+        }
+        let Some(call) = self.provider_call.as_ref() else {
+            return Err(ProviderHttpError::Denied(
+                "provider-http is not granted".to_string(),
+            ));
+        };
+        let max_response_bytes = call.profile.max_response_bytes;
+        let cancel = call.cancel.clone();
+        self.provider_http
+            .read(handle, max_bytes, max_response_bytes, cancel.as_deref())
+    }
+
+    fn provider_http_close(&mut self, handle: u32) -> Result<(), provider_http::ProviderHttpError> {
+        use provider_http::ProviderHttpError;
+        if current_kind() != CallKind::ProviderRequest {
+            return Err(ProviderHttpError::Denied(
+                "provider-http is only available during a provider request".to_string(),
+            ));
+        }
+        self.provider_http.close(handle)
     }
 }
 
@@ -1303,6 +1461,21 @@ impl HostState {
             child.shutdown();
         }
         self.next_proc = 1;
+    }
+
+    /// Every handle scoped to the current call, not just `proc`.
+    ///
+    /// Entry points that call [`Self::reap_procs`] call this instead, so the
+    /// provider-http table cannot outlive the call that opened a stream.
+    fn reap_call_scoped(&mut self) {
+        self.reap_procs();
+        self.reap_provider_http();
+    }
+
+    /// Drop every open `provider-http` handle. Called at entry and exit of
+    /// every guest-visible entry point and on unload.
+    fn reap_provider_http(&mut self) {
+        self.provider_http.reap();
     }
 
     fn data_dir(&self) -> Result<std::path::PathBuf, CapabilityError> {
@@ -2370,6 +2543,8 @@ impl WasmPlugin {
                 next_proc: 1,
                 limits,
                 oauth,
+                provider_http: provider_http::ProviderHttpTable::default(),
+                provider_call: None,
             },
         );
         // The cap only matters if the store consults it.
@@ -2416,7 +2591,7 @@ impl WasmPlugin {
                     (std::collections::BTreeSet::new(), Vec::new())
                 }
             };
-        store.data_mut().reap_procs();
+        store.data_mut().reap_call_scoped();
         store.data_mut().declared_flags = std::sync::Arc::new(declared_flags);
 
         // A granted OAuth guest declares the providers it drives. The check is
@@ -2467,7 +2642,7 @@ impl WasmPlugin {
             // `shutdown` is a guest entry point like any other: a plugin may
             // spawn through `proc` in it, and nothing else runs after this
             // point, so reap here too — a handle's lifetime is "one call".
-            inner.store.data_mut().reap_procs();
+            inner.store.data_mut().reap_call_scoped();
             // `inner` drops here, releasing the store (and its memory).
         }
     }
@@ -2498,14 +2673,14 @@ impl WasmPlugin {
         } else {
             to_wit_event(event)
         };
-        let _context = install_context(None, caps);
+        let _context = install_context_kind(None, caps, CallKind::Event, None);
         let result = inner
             .guest
             .kiqi_plugin_plugin_api()
             .call_on_event(&mut inner.store, &wit);
         clear_context();
         // A `proc` handle lives for this call and nothing beyond it.
-        inner.store.data_mut().reap_procs();
+        inner.store.data_mut().reap_call_scoped();
         match result {
             Ok(WitEventAction::Continue) => EventAction::Continue,
             Ok(WitEventAction::Claimed) => EventAction::Claimed,
@@ -2553,14 +2728,14 @@ impl WasmPlugin {
         let Some(wit) = graded_provider_request(event, &inner.store.data().grants, true) else {
             return Ok(None);
         };
-        let _context = install_context(None, caps);
+        let _context = install_context_kind(None, caps, CallKind::Event, None);
         let result = inner
             .guest
             .kiqi_plugin_plugin_api()
             .call_on_event(&mut inner.store, &wit);
         clear_context();
         // A `proc` handle lives for this call and nothing beyond it.
-        inner.store.data_mut().reap_procs();
+        inner.store.data_mut().reap_call_scoped();
         let (grant, provider_budget_ms) = {
             let grants = &inner.store.data().grants;
             let budget = grants
@@ -2612,7 +2787,7 @@ impl WasmPlugin {
             .guest
             .kiqi_plugin_plugin_api()
             .call_list_commands(&mut inner.store);
-        inner.store.data_mut().reap_procs();
+        inner.store.data_mut().reap_call_scoped();
         let commands = match result {
             Ok(specs) => specs
                 .into_iter()
@@ -2652,7 +2827,7 @@ impl WasmPlugin {
             .guest
             .kiqi_plugin_plugin_api()
             .call_list_flags(&mut inner.store);
-        inner.store.data_mut().reap_procs();
+        inner.store.data_mut().reap_call_scoped();
         let flags: Vec<kiqi_plugin::FlagSpec> = match result {
             Ok(specs) => specs
                 .into_iter()
@@ -2693,7 +2868,7 @@ impl WasmPlugin {
             .guest
             .kiqi_plugin_plugin_api()
             .call_list_shortcuts(&mut inner.store);
-        inner.store.data_mut().reap_procs();
+        inner.store.data_mut().reap_call_scoped();
         let shortcuts: Vec<kiqi_plugin::ShortcutSpec> = match result {
             Ok(specs) => specs
                 .into_iter()
@@ -2733,7 +2908,7 @@ impl WasmPlugin {
             .guest
             .kiqi_plugin_plugin_api()
             .call_list_probe_points(&mut inner.store);
-        inner.store.data_mut().reap_procs();
+        inner.store.data_mut().reap_call_scoped();
         let points = match result {
             Ok(points) => points,
             Err(error) => {
@@ -2768,7 +2943,7 @@ impl PluginTrait for WasmPlugin {
         let guest = inner.guest.kiqi_plugin_plugin_api();
         let result = guest.call_list_tools(&mut inner.store);
         // Spawning in a metadata call is legal; nothing survives it either.
-        inner.store.data_mut().reap_procs();
+        inner.store.data_mut().reap_call_scoped();
         match result {
             Ok(specs) => specs
                 .into_iter()
@@ -2800,7 +2975,7 @@ impl PluginTrait for WasmPlugin {
         let Some(inner) = guard.as_mut() else {
             return Err(PluginError::Failed(format!("{} is unloaded", self.id)));
         };
-        let _context = install_context(None, caps);
+        let _context = install_context_kind(None, caps, CallKind::Command, None);
         let result = inner.guest.kiqi_plugin_plugin_api().call_run_command(
             &mut inner.store,
             name,
@@ -2808,7 +2983,7 @@ impl PluginTrait for WasmPlugin {
         );
         clear_context();
         // A `proc` handle lives for this call and nothing beyond it.
-        inner.store.data_mut().reap_procs();
+        inner.store.data_mut().reap_call_scoped();
         match result {
             Ok(Ok(result)) => match sanitize_command_result(to_command_result(result)) {
                 Ok(result) => Ok(result),
@@ -2844,7 +3019,7 @@ impl PluginTrait for WasmPlugin {
         let Some(inner) = guard.as_mut() else {
             return Err(PluginError::Failed(format!("{} is unloaded", self.id)));
         };
-        let _context = install_context(None, caps);
+        let _context = install_context_kind(None, caps, CallKind::Command, None);
         let result = inner.guest.kiqi_plugin_plugin_api().call_continue_command(
             &mut inner.store,
             name,
@@ -2852,7 +3027,7 @@ impl PluginTrait for WasmPlugin {
             &to_wit_reply(reply),
         );
         clear_context();
-        inner.store.data_mut().reap_procs();
+        inner.store.data_mut().reap_call_scoped();
         match result {
             Ok(Ok(result)) => match sanitize_command_result(to_command_result(result)) {
                 Ok(result) => Ok(result),
@@ -2887,14 +3062,14 @@ impl PluginTrait for WasmPlugin {
     ) -> Option<String> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let inner = guard.as_mut()?;
-        let _context = install_context(None, caps);
+        let _context = install_context_kind(None, caps, CallKind::PromptHook, None);
         let result = inner
             .guest
             .kiqi_plugin_plugin_api()
             .call_before_agent_start(&mut inner.store, &prompt.to_string());
         clear_context();
         // A `proc` handle lives for this call and nothing beyond it.
-        inner.store.data_mut().reap_procs();
+        inner.store.data_mut().reap_call_scoped();
         match result {
             Ok(value) => value,
             Err(e) => {
@@ -2913,7 +3088,7 @@ impl PluginTrait for WasmPlugin {
         let Some(inner) = guard.as_mut() else {
             return Verdict::Continue;
         };
-        let _context = install_context(None, caps);
+        let _context = install_context_kind(None, caps, CallKind::Probe, None);
         let result = inner.guest.kiqi_plugin_plugin_api().call_probe(
             &mut inner.store,
             point,
@@ -2921,7 +3096,7 @@ impl PluginTrait for WasmPlugin {
         );
         clear_context();
         // A `proc` handle lives for this call and nothing beyond it.
-        inner.store.data_mut().reap_procs();
+        inner.store.data_mut().reap_call_scoped();
         match result {
             Ok(WitVerdict::Continue) => Verdict::Continue,
             Ok(WitVerdict::Replace(json)) => {
@@ -2948,7 +3123,7 @@ impl PluginTrait for WasmPlugin {
         };
 
         let arguments = serde_json::to_string(arguments).unwrap_or_else(|_| "null".to_string());
-        let _context = install_context(Some(sink), caps);
+        let _context = install_context_kind(Some(sink), caps, CallKind::Tool, None);
         let result =
             inner
                 .guest
@@ -2956,7 +3131,7 @@ impl PluginTrait for WasmPlugin {
                 .call_call_tool(&mut inner.store, name, &arguments);
         clear_context();
         // A `proc` handle lives for this call and nothing beyond it.
-        inner.store.data_mut().reap_procs();
+        inner.store.data_mut().reap_call_scoped();
 
         match result {
             Ok(Ok(tool_result)) => Ok(to_tool_outcome(tool_result)),
@@ -3075,7 +3250,7 @@ impl PluginTrait for WasmPlugin {
                     &wit_action,
                 );
                 // A `proc` handle lives for this call and nothing beyond it.
-                inner.store.data_mut().reap_procs();
+                inner.store.data_mut().reap_call_scoped();
                 // The receiver may be gone on timeout; the store still drops.
                 let _ = tx.send((result, inner));
             });
@@ -3617,6 +3792,8 @@ impl RenderHost {
             next_proc: 1,
             limits,
             oauth: OAuthState::default(),
+            provider_http: provider_http::ProviderHttpTable::default(),
+            provider_call: None,
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|state| &mut state.limits);
@@ -3871,6 +4048,8 @@ mod tests {
             next_proc: 1,
             limits: wasmtime::StoreLimitsBuilder::new().build(),
             oauth: OAuthState::default(),
+            provider_http: provider_http::ProviderHttpTable::default(),
+            provider_call: None,
         }
     }
 
@@ -4486,6 +4665,8 @@ mod tests {
                 transport: Some(transport),
                 sink: Some(sink),
             },
+            provider_http: provider_http::ProviderHttpTable::default(),
+            provider_call: None,
         }
     }
 

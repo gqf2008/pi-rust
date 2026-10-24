@@ -4359,3 +4359,446 @@ fn oauth_action_times_out_on_a_spinning_guest() {
         "the deadline must bound the call: {elapsed:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// provider-api / provider-http / provider-stream
+// ---------------------------------------------------------------------------
+
+use kiqi_plugin::grants::{
+    ProviderEndpoint, ProviderGrant, ProviderModel, ProviderProfile,
+    PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
+};
+use kiqi_plugin_host::{
+    fingerprint_credential, ProviderHost, ProviderHostOptions, ProviderHttpRequest,
+    ProviderHttpStream, ProviderHttpTransport, ProviderResponse,
+};
+
+/// A transport that never touches the network: it records the already-sanitized
+/// request and serves one canned body.
+struct FakeProviderTransport {
+    status: u16,
+    body: Vec<u8>,
+    requests: Mutex<Vec<ProviderHttpRequest>>,
+}
+
+impl FakeProviderTransport {
+    fn new(status: u16, body: &[u8]) -> Self {
+        Self {
+            status,
+            body: body.to_vec(),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn take_requests(&self) -> Vec<ProviderHttpRequest> {
+        std::mem::take(&mut *self.requests.lock().unwrap())
+    }
+}
+
+struct FakeProviderStream {
+    status: u16,
+    chunks: Vec<Vec<u8>>,
+}
+
+impl ProviderHttpStream for FakeProviderStream {
+    fn status(&self) -> u16 {
+        self.status
+    }
+
+    fn read(&mut self, _max: usize) -> Result<Option<Vec<u8>>, String> {
+        if self.chunks.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(self.chunks.remove(0)))
+        }
+    }
+}
+
+impl ProviderHttpTransport for FakeProviderTransport {
+    fn open(&self, request: ProviderHttpRequest) -> Result<Box<dyn ProviderHttpStream>, String> {
+        self.requests.lock().unwrap().push(request);
+        let chunks = if self.body.is_empty() {
+            Vec::new()
+        } else {
+            vec![self.body.clone()]
+        };
+        Ok(Box::new(FakeProviderStream {
+            status: self.status,
+            chunks,
+        }))
+    }
+}
+
+struct ProviderFixture {
+    _dir: tempfile::TempDir,
+    pub wasm: PathBuf,
+    pub root: PathBuf,
+}
+
+/// A component in `plugins/conformance/`, plus the host-held credential
+/// sidecar and `auth.json` the grant's handle resolves through.
+fn provider_fixture() -> ProviderFixture {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("agent");
+    let plugin_dir = root.join("plugins").join("conformance");
+    std::fs::create_dir_all(&plugin_dir).expect("plugin dir");
+    let wasm = plugin_dir.join("plugin.wasm");
+    std::fs::copy(fixture_wasm(), &wasm).expect("copy the fixture");
+    std::fs::write(
+        root.join("auth.json"),
+        r#"{"anthropic":{"type":"api_key","key":"sk-conformance-secret"}}"#,
+    )
+    .expect("auth.json");
+    let sidecar = serde_json::json!({
+        "pc-test": {
+            "source": "auth-json:anthropic",
+            "provider": "anthropic",
+            "display": "Anthropic",
+            "fingerprint": fingerprint_credential("sk-conformance-secret"),
+        }
+    });
+    std::fs::write(
+        plugin_dir.join("credentials.json"),
+        serde_json::to_string(&sidecar).unwrap(),
+    )
+    .expect("credentials.json");
+    ProviderFixture {
+        _dir: dir,
+        wasm,
+        root,
+    }
+}
+
+fn provider_model(id: &str) -> ProviderModel {
+    ProviderModel {
+        id: id.to_string(),
+        api: "openai-completions".to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        reasoning: true,
+        input: vec!["text".to_string()],
+    }
+}
+
+fn provider_grants(timeout_seconds: u64, models: Vec<ProviderModel>) -> Grants {
+    let mut grants = Grants::default();
+    grants
+        .grant_provider(ProviderGrant {
+            providers: vec![ProviderProfile {
+                id: "conformance".to_string(),
+                display_name: "Conformance Provider".to_string(),
+                models,
+                endpoint: ProviderEndpoint {
+                    scheme: "https".to_string(),
+                    host: "api.example.test".to_string(),
+                    path_prefix: "/v1".to_string(),
+                    methods: vec!["POST".to_string()],
+                },
+                credential: Some("pc-test".to_string()),
+                auth: None,
+                timeout_seconds,
+                max_response_bytes: PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
+                max_handles: 2,
+            }],
+        })
+        .expect("valid provider grant");
+    grants
+}
+
+fn provider_host(
+    fixture: &ProviderFixture,
+    grants: &Grants,
+    transport: std::sync::Arc<dyn ProviderHttpTransport>,
+) -> ProviderHost {
+    ProviderHost::load_with_options(
+        "conformance",
+        &fixture.wasm,
+        grants,
+        ProviderHostOptions {
+            transport: Some(transport),
+            agent_root: Some(fixture.root.clone()),
+            ..ProviderHostOptions::default()
+        },
+    )
+    .expect("load")
+    .expect("a granted profile instantiates the guest")
+}
+
+fn provider_text(response: &ProviderResponse) -> String {
+    let value: serde_json::Value = serde_json::from_str(&response.message).expect("message json");
+    value["content"][0]["text"]
+        .as_str()
+        .expect("text content")
+        .to_string()
+}
+
+fn provider_request(mode: &str, extra: serde_json::Value) -> String {
+    let mut value = serde_json::json!({"model": "conformance-model", "mode": mode});
+    if let serde_json::Value::Object(entries) = extra {
+        for (key, entry) in entries {
+            value[key] = entry;
+        }
+    }
+    value.to_string()
+}
+
+#[test]
+fn provider_http_injects_the_credential_and_strips_guest_framing_headers() {
+    let fixture = provider_fixture();
+    let transport = std::sync::Arc::new(FakeProviderTransport::new(200, b"wire-body"));
+    let grants = provider_grants(30, vec![provider_model("conformance-model")]);
+    let host = provider_host(&fixture, &grants, transport.clone());
+
+    let request = provider_request(
+        "fetch",
+        serde_json::json!({
+            "url": "https://api.example.test/v1/messages",
+            "method": "POST",
+            "body": "hello",
+            "headers": {
+                "authorization": "guest-secret",
+                "x-api-key": "guest-key",
+                "x-goog-api-key": "guest-key",
+                "proxy-authorization": "guest-proxy",
+                "host": "evil.test",
+                "content-length": "999",
+                "transfer-encoding": "chunked",
+                "connection": "close",
+                "cookie": "session=1",
+                "x-test": "kept",
+            },
+        }),
+    );
+    let response = host.request(&request).expect("request");
+    assert_eq!(provider_text(&response), "wire-body");
+
+    let requests = transport.take_requests();
+    assert_eq!(requests.len(), 1);
+    let sent = &requests[0];
+    assert_eq!(sent.method, "POST");
+    assert_eq!(sent.body.as_deref(), Some(b"hello".as_slice()));
+    let names: Vec<&str> = sent.headers.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, vec!["x-test", "authorization"]);
+    assert_eq!(sent.headers[1].1, "Bearer sk-conformance-secret");
+    for forbidden in [
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "x-api-key",
+        "x-goog-api-key",
+        "proxy-authorization",
+        "cookie",
+        "guest-secret",
+    ] {
+        assert!(
+            !names.contains(&forbidden)
+                && !sent.headers.iter().any(|(_, value)| value == forbidden),
+            "guest header `{forbidden}` must not reach the wire: {:?}",
+            sent.headers
+        );
+    }
+}
+
+#[test]
+fn provider_http_refuses_encoded_slashes_dot_segments_and_redirects() {
+    let fixture = provider_fixture();
+    let transport = std::sync::Arc::new(FakeProviderTransport::new(200, b"ok"));
+    let grants = provider_grants(30, vec![provider_model("conformance-model")]);
+    let host = provider_host(&fixture, &grants, transport.clone());
+
+    for url in [
+        "https://api.example.test/v1/%2Fadmin",
+        "https://api.example.test/v1/%2e%2e/admin",
+        "https://api.example.test/v1/a/../admin",
+        "https://api.example.test/v1//admin",
+        "https://api.example.test/v10/messages",
+        "https://other.test/v1/messages",
+        "http://api.example.test/v1/messages",
+    ] {
+        let request = provider_request("fetch", serde_json::json!({"url": url}));
+        let response = host.request(&request).expect("guest answered");
+        let text = provider_text(&response);
+        assert!(
+            text.starts_with("open-denied:"),
+            "`{url}` must be refused before a connection: {text}"
+        );
+    }
+    assert!(
+        transport.take_requests().is_empty(),
+        "a refused request must never reach the transport"
+    );
+
+    // A redirect is a refusal, never followed.
+    let redirecting = std::sync::Arc::new(FakeProviderTransport::new(302, b"moved"));
+    let host = provider_host(&fixture, &grants, redirecting.clone());
+    let request = provider_request(
+        "fetch",
+        serde_json::json!({"url": "https://api.example.test/v1/messages"}),
+    );
+    let response = host.request(&request).expect("guest answered");
+    let text = provider_text(&response);
+    assert!(text.starts_with("open-denied:"), "{text}");
+    assert!(text.contains("redirect"), "{text}");
+    assert_eq!(redirecting.take_requests().len(), 1);
+}
+
+#[test]
+fn provider_http_handles_are_reaped_at_call_exit() {
+    let fixture = provider_fixture();
+    let transport = std::sync::Arc::new(FakeProviderTransport::new(200, b"ok"));
+    let grants = provider_grants(30, vec![provider_model("conformance-model")]);
+    let host = provider_host(&fixture, &grants, transport.clone());
+
+    // The guest opens a stream and never closes it.
+    let leaked = provider_request(
+        "leak",
+        serde_json::json!({"url": "https://api.example.test/v1/messages"}),
+    );
+    let response = host.request(&leaked).expect("leaked request");
+    assert_eq!(provider_text(&response), "opened:1");
+    assert_eq!(
+        host.open_handle_count(),
+        0,
+        "every handle is gone when the call returns"
+    );
+
+    // The next call cannot read a handle from the previous one.
+    let stale = host.request(&provider_request("stale", serde_json::json!({})));
+    let text = provider_text(&stale.expect("stale request"));
+    assert!(text.starts_with("stale:"), "{text}");
+    assert!(text.contains("no open provider-http handle 1"), "{text}");
+}
+
+#[test]
+fn provider_stream_deltas_are_assembled_and_bad_order_fails() {
+    let fixture = provider_fixture();
+    let transport = std::sync::Arc::new(FakeProviderTransport::new(200, b""));
+    let grants = provider_grants(30, vec![provider_model("conformance-model")]);
+    let host = provider_host(&fixture, &grants, transport);
+
+    let response = host
+        .request(&provider_request("stream", serde_json::json!({})))
+        .expect("streamed request");
+    assert_eq!(response.provider, "conformance");
+    assert_eq!(response.model, "conformance-model");
+    assert_eq!(response.api, "openai-completions");
+    assert_eq!(response.segments.len(), 3);
+    assert_eq!(response.segments[0].kind, kiqi_plugin_host::DeltaKind::Text);
+    assert_eq!(response.segments[0].text, "Hello world");
+    assert_eq!(
+        response.segments[1].kind,
+        kiqi_plugin_host::DeltaKind::Thinking
+    );
+    assert_eq!(response.segments[1].text, "reasoned");
+    assert_eq!(
+        response.segments[2].kind,
+        kiqi_plugin_host::DeltaKind::ToolCall
+    );
+    assert!(response.segments[2]
+        .text
+        .contains("\"name\":\"conformance\""));
+
+    let error = host
+        .request(&provider_request("stream-bad", serde_json::json!({})))
+        .expect_err("a delta before start fails the request");
+    assert!(error.contains("delta before start"), "{error}");
+}
+
+#[test]
+fn a_spinning_provider_guest_is_interrupted_by_the_deadline() {
+    let fixture = provider_fixture();
+    let transport = std::sync::Arc::new(FakeProviderTransport::new(200, b""));
+    // The grant's own budget is the deadline: one second.
+    let grants = provider_grants(1, vec![provider_model("conformance-model")]);
+    let host = provider_host(&fixture, &grants, transport);
+    let started = std::time::Instant::now();
+    let error = host
+        .request(&provider_request("spin", serde_json::json!({})))
+        .expect_err("a spinning guest must not return an answer");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(6),
+        "the deadline must fire promptly: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        error.contains("trapped") || error.contains("deadline"),
+        "{error}"
+    );
+}
+
+#[test]
+fn without_a_provider_grant_the_guest_is_never_instantiated() {
+    let fixture = provider_fixture();
+    assert!(
+        ProviderHost::load("conformance", &fixture.wasm, &Grants::default())
+            .expect("load")
+            .is_none(),
+        "no grant means no instance"
+    );
+    let mut other = Grants::default();
+    other
+        .grant_provider(ProviderGrant {
+            providers: vec![ProviderProfile {
+                id: "someone-else".to_string(),
+                display_name: String::new(),
+                models: vec![provider_model("conformance-model")],
+                endpoint: ProviderEndpoint {
+                    scheme: "https".to_string(),
+                    host: "api.example.test".to_string(),
+                    path_prefix: "/v1".to_string(),
+                    methods: vec!["POST".to_string()],
+                },
+                credential: None,
+                auth: None,
+                timeout_seconds: 30,
+                max_response_bytes: PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
+                max_handles: 8,
+            }],
+        })
+        .unwrap();
+    assert!(
+        ProviderHost::load("conformance", &fixture.wasm, &other)
+            .expect("load")
+            .is_none(),
+        "a grant for another id does not reach this guest"
+    );
+}
+
+#[test]
+fn the_guest_provider_list_can_only_narrow_the_grant() {
+    let fixture = provider_fixture();
+    let transport = std::sync::Arc::new(FakeProviderTransport::new(200, b""));
+    let grants = provider_grants(
+        30,
+        vec![
+            provider_model("conformance-model"),
+            provider_model("ungranted-model"),
+        ],
+    );
+    let host = provider_host(&fixture, &grants, transport);
+    let specs = host.list_specs().expect("list specs");
+    let ids: Vec<&str> = specs.iter().map(|model| model.id.as_str()).collect();
+    assert_eq!(ids, vec!["conformance-model"]);
+}
+
+#[test]
+fn a_changed_credential_is_refused_before_any_connection() {
+    let fixture = provider_fixture();
+    // The value no longer matches the fingerprint recorded at grant time.
+    std::fs::write(
+        fixture.root.join("auth.json"),
+        r#"{"anthropic":{"type":"api_key","key":"sk-rotated-without-regrant"}}"#,
+    )
+    .expect("rotate auth.json");
+    let transport = std::sync::Arc::new(FakeProviderTransport::new(200, b"ok"));
+    let grants = provider_grants(30, vec![provider_model("conformance-model")]);
+    let host = provider_host(&fixture, &grants, transport.clone());
+    let error = host
+        .request(&provider_request(
+            "fetch",
+            serde_json::json!({"url": "https://api.example.test/v1/messages"}),
+        ))
+        .expect_err("a changed credential is refused");
+    assert!(error.contains("credential changed"), "{error}");
+    assert!(transport.take_requests().is_empty());
+}

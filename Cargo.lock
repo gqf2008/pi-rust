@@ -2248,6 +2248,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tracing",
  "wasmparser 0.259.0",

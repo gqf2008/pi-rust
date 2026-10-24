@@ -535,6 +535,59 @@ fn is_default_provider_timeout(value: &u64) -> bool {
     *value == PROVIDER_TIMEOUT_DEFAULT_SECONDS
 }
 
+/// Default cap on one provider response body.
+pub const PROVIDER_MAX_RESPONSE_BYTES_DEFAULT: u64 = 8 * 1024 * 1024;
+
+/// Smallest response cap a grant may ask for.
+pub const PROVIDER_MAX_RESPONSE_BYTES_MIN: u64 = 64 * 1024;
+
+/// Largest response cap a grant may ask for.
+pub const PROVIDER_MAX_RESPONSE_BYTES_MAX: u64 = 32 * 1024 * 1024;
+
+fn default_provider_max_response_bytes() -> u64 {
+    PROVIDER_MAX_RESPONSE_BYTES_DEFAULT
+}
+
+fn is_default_provider_max_response_bytes(value: &u64) -> bool {
+    *value == PROVIDER_MAX_RESPONSE_BYTES_DEFAULT
+}
+
+/// Default cap on concurrently open `provider-http` handles.
+pub const PROVIDER_MAX_HANDLES_DEFAULT: u32 = 8;
+
+/// Largest handle cap a grant may ask for.
+pub const PROVIDER_MAX_HANDLES_MAX: u32 = 64;
+
+fn default_provider_max_handles() -> u32 {
+    PROVIDER_MAX_HANDLES_DEFAULT
+}
+
+fn is_default_provider_max_handles(value: &u32) -> bool {
+    *value == PROVIDER_MAX_HANDLES_DEFAULT
+}
+
+/// The header a provider credential is injected into by default.
+pub const PROVIDER_AUTH_HEADER_DEFAULT: &str = "authorization";
+
+/// The prefix a provider credential value gets by default.
+pub const PROVIDER_AUTH_PREFIX_DEFAULT: &str = "Bearer ";
+
+fn default_provider_auth_header() -> String {
+    PROVIDER_AUTH_HEADER_DEFAULT.to_string()
+}
+
+fn is_default_provider_auth_header(value: &String) -> bool {
+    value == "authorization"
+}
+
+fn default_provider_auth_prefix() -> String {
+    PROVIDER_AUTH_PREFIX_DEFAULT.to_string()
+}
+
+fn is_default_provider_auth_prefix(value: &String) -> bool {
+    value == "Bearer "
+}
+
 fn default_provider_methods() -> Vec<String> {
     vec!["POST".to_string()]
 }
@@ -665,6 +718,10 @@ pub struct ProviderProfile {
     /// file. Empty is rejected when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+    /// How the host injects the resolved credential: which header and which
+    /// prefix. Absent = `authorization: Bearer <value>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ProviderAuth>,
     /// Wall-clock budget for one request; absent = the default, capped at
     /// [`PROVIDER_TIMEOUT_MAX_SECONDS`].
     #[serde(
@@ -672,6 +729,45 @@ pub struct ProviderProfile {
         skip_serializing_if = "is_default_provider_timeout"
     )]
     pub timeout_seconds: u64,
+    /// Cap on one response body across all `provider-http.read` calls.
+    #[serde(
+        default = "default_provider_max_response_bytes",
+        skip_serializing_if = "is_default_provider_max_response_bytes"
+    )]
+    pub max_response_bytes: u64,
+    /// Cap on concurrently open `provider-http` handles in one call.
+    #[serde(
+        default = "default_provider_max_handles",
+        skip_serializing_if = "is_default_provider_max_handles"
+    )]
+    pub max_handles: u32,
+}
+
+/// How a resolved credential is written onto a granted request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ProviderAuth {
+    /// Header name, lowercase HTTP token. Absent = `authorization`.
+    #[serde(
+        default = "default_provider_auth_header",
+        skip_serializing_if = "is_default_provider_auth_header"
+    )]
+    pub header: String,
+    /// Value prefix (`Bearer ` for most APIs). Absent = `Bearer `.
+    #[serde(
+        default = "default_provider_auth_prefix",
+        skip_serializing_if = "is_default_provider_auth_prefix"
+    )]
+    pub prefix: String,
+}
+
+impl Default for ProviderAuth {
+    fn default() -> Self {
+        Self {
+            header: default_provider_auth_header(),
+            prefix: default_provider_auth_prefix(),
+        }
+    }
 }
 
 /// The `provider` policy.
@@ -680,6 +776,72 @@ pub struct ProviderProfile {
 pub struct ProviderGrant {
     #[serde(default)]
     pub providers: Vec<ProviderProfile>,
+}
+
+/// An injected credential header name must be a lowercase HTTP token.
+fn validate_provider_auth_header(provider_id: &str, header: &str) -> Result<(), String> {
+    if header.is_empty() || header.len() > 128 {
+        return Err(format!(
+            "provider `{provider_id}` auth `header` must be 1..=128 bytes"
+        ));
+    }
+    if !header.bytes().all(|byte| {
+        matches!(byte, b'a'..=b'z' | b'0'..=b'9')
+            || matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            )
+    }) {
+        return Err(format!(
+            "provider `{provider_id}` auth `header` `{header}` is not a lowercase HTTP token"
+        ));
+    }
+    if header.eq_ignore_ascii_case("host")
+        || header.eq_ignore_ascii_case("content-length")
+        || header.eq_ignore_ascii_case("transfer-encoding")
+        || header.eq_ignore_ascii_case("connection")
+    {
+        return Err(format!(
+            "provider `{provider_id}` auth `header` `{header}` is a framing header and cannot \
+             carry a credential"
+        ));
+    }
+    Ok(())
+}
+
+/// The path prefix must be a plain absolute path: no dot segments, no empty
+/// segments and no percent-encoded separators. The host re-checks requests
+/// against it, so a sloppy prefix would widen the filter.
+fn validate_provider_path_prefix(provider_id: &str, prefix: &str) -> Result<(), String> {
+    let lower = prefix.to_ascii_lowercase();
+    if lower.contains("%2f") || lower.contains("%5c") || lower.contains("%2e") {
+        return Err(format!(
+            "provider `{provider_id}` `path-prefix` must not contain encoded separators or dots"
+        ));
+    }
+    if prefix.contains("//")
+        || prefix
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(format!(
+            "provider `{provider_id}` `path-prefix` must not contain dot or empty segments"
+        ));
+    }
+    Ok(())
 }
 
 impl ProviderGrant {
@@ -781,13 +943,55 @@ impl ProviderGrant {
                         profile.id
                     ));
                 }
+                // A credential is injected on a matching request, so the
+                // filter must actually narrow the host: `/` would mean the
+                // whole host and defeat the endpoint record.
+                if endpoint.path_prefix == "/" {
+                    return Err(format!(
+                        "provider `{}` has a credential but `path-prefix` is `/`;                          name the API root instead",
+                        profile.id
+                    ));
+                }
             }
+            if let Some(auth) = &profile.auth {
+                validate_provider_auth_header(&profile.id, &auth.header)?;
+                if auth.prefix.contains(['\r', '\n', '\0']) {
+                    return Err(format!(
+                        "provider `{}` auth `prefix` must not contain CR, LF or NUL",
+                        profile.id
+                    ));
+                }
+                if auth.prefix.len() > 1024 {
+                    return Err(format!(
+                        "provider `{}` auth `prefix` is over 1024 bytes",
+                        profile.id
+                    ));
+                }
+            }
+            validate_provider_path_prefix(&profile.id, &endpoint.path_prefix)?;
             if profile.timeout_seconds == 0
                 || profile.timeout_seconds > PROVIDER_TIMEOUT_MAX_SECONDS
             {
                 return Err(format!(
                     "provider `{}` `timeout-seconds` must be 1..={PROVIDER_TIMEOUT_MAX_SECONDS}, got {}",
                     profile.id, profile.timeout_seconds
+                ));
+            }
+            if profile.max_response_bytes < PROVIDER_MAX_RESPONSE_BYTES_MIN
+                || profile.max_response_bytes > PROVIDER_MAX_RESPONSE_BYTES_MAX
+            {
+                return Err(format!(
+                    "provider `{}` `max-response-bytes` must be {}..={}, got {}",
+                    profile.id,
+                    PROVIDER_MAX_RESPONSE_BYTES_MIN,
+                    PROVIDER_MAX_RESPONSE_BYTES_MAX,
+                    profile.max_response_bytes
+                ));
+            }
+            if profile.max_handles == 0 || profile.max_handles > PROVIDER_MAX_HANDLES_MAX {
+                return Err(format!(
+                    "provider `{}` `max-handles` must be 1..={PROVIDER_MAX_HANDLES_MAX}, got {}",
+                    profile.id, profile.max_handles
                 ));
             }
         }
@@ -2328,6 +2532,72 @@ mod tests {
     /// A minimal provider entry takes the documented defaults (https, POST,
     /// 600 s), and none of them is written back unless overridden.
     #[test]
+    fn provider_http_budgets_auth_and_prefix_are_bounded() {
+        let mut grants = Grants::default();
+        let mut credential = valid_provider_grant();
+        credential.providers[0].endpoint.path_prefix = "/".to_string();
+        assert!(
+            grants.grant_provider(credential).is_err(),
+            "a credential with a whole-host prefix defeats the filter"
+        );
+
+        let mut bad_prefix = valid_provider_grant();
+        bad_prefix.providers[0].endpoint.path_prefix = "/v1/../admin".to_string();
+        assert!(grants.grant_provider(bad_prefix).is_err());
+
+        let mut encoded = valid_provider_grant();
+        encoded.providers[0].endpoint.path_prefix = "/v1/%2fadmin".to_string();
+        assert!(grants.grant_provider(encoded).is_err());
+
+        let mut too_small = valid_provider_grant();
+        too_small.providers[0].max_response_bytes = 1024;
+        assert!(grants.grant_provider(too_small).is_err());
+
+        let mut too_big = valid_provider_grant();
+        too_big.providers[0].max_response_bytes = PROVIDER_MAX_RESPONSE_BYTES_MAX + 1;
+        assert!(grants.grant_provider(too_big).is_err());
+
+        let mut no_handles = valid_provider_grant();
+        no_handles.providers[0].max_handles = 0;
+        assert!(grants.grant_provider(no_handles).is_err());
+
+        let mut bad_header = valid_provider_grant();
+        bad_header.providers[0].auth = Some(ProviderAuth {
+            header: "X Api Key".to_string(),
+            prefix: "Bearer ".to_string(),
+        });
+        assert!(grants.grant_provider(bad_header).is_err());
+
+        let mut framing_header = valid_provider_grant();
+        framing_header.providers[0].auth = Some(ProviderAuth {
+            header: "host".to_string(),
+            prefix: String::new(),
+        });
+        assert!(grants.grant_provider(framing_header).is_err());
+
+        let mut good = valid_provider_grant();
+        good.providers[0].auth = Some(ProviderAuth {
+            header: "x-api-key".to_string(),
+            prefix: String::new(),
+        });
+        assert!(grants.grant_provider(good).is_ok());
+    }
+
+    #[test]
+    fn provider_budgets_round_trip_through_json() {
+        let mut grant = valid_provider_grant();
+        grant.providers[0].auth = Some(ProviderAuth {
+            header: "x-goog-api-key".to_string(),
+            prefix: String::new(),
+        });
+        grant.providers[0].max_response_bytes = 1024 * 1024;
+        grant.providers[0].max_handles = 4;
+        let text = serde_json::to_string(&grant).unwrap();
+        let parsed: ProviderGrant = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, grant);
+    }
+
+    #[test]
     fn provider_grant_json_defaults_are_minimal() {
         let grants: Grants = serde_json::from_value(serde_json::json!({
             "provider": {
@@ -2679,7 +2949,10 @@ mod tests {
                     methods: vec!["POST".to_string()],
                 },
                 credential: Some("pc-abc123".to_string()),
+                auth: None,
                 timeout_seconds: PROVIDER_TIMEOUT_DEFAULT_SECONDS,
+                max_response_bytes: PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
+                max_handles: PROVIDER_MAX_HANDLES_DEFAULT,
             }],
         }
     }

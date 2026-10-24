@@ -704,10 +704,13 @@ fn build_provider(target: &Target, root: &Path) -> Result<ProviderGrant, String>
             models,
             endpoint,
             credential,
+            auth: None,
             timeout_seconds: target
                 .options
                 .timeout_seconds
                 .unwrap_or(kiqi_plugin::grants::PROVIDER_TIMEOUT_DEFAULT_SECONDS),
+            max_response_bytes: kiqi_plugin::grants::PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
+            max_handles: kiqi_plugin::grants::PROVIDER_MAX_HANDLES_DEFAULT,
         }],
     })
 }
@@ -2746,7 +2749,10 @@ mod tests {
                         methods: vec!["POST".to_string()],
                     },
                     credential: Some("pc-0123456789abcdef".to_string()),
+                    auth: None,
                     timeout_seconds: 600,
+                    max_response_bytes: kiqi_plugin::grants::PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
+                    max_handles: kiqi_plugin::grants::PROVIDER_MAX_HANDLES_DEFAULT,
                 }],
             })
             .unwrap();

@@ -19,7 +19,8 @@ use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::provider_api::Guest as ProviderGuest;
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::render_api::Guest as RenderGuest;
 use kiqi_plugin_guest::bindings::kiqi::plugin::{
-    exec, fs, log, net_http, net_sockets, proc, progress, session_read, types, ui,
+    exec, fs, log, net_http, net_sockets, proc, progress, provider_http, provider_stream,
+    session_read, types, ui,
 };
 
 const TOOL: &str = "conformance";
@@ -657,15 +658,164 @@ impl OAuthGuest for Conformance {
     }
 }
 
+/// The one provider the fixture declares. The `provider` grant is still the
+/// catalog authority; this list can only narrow it.
+const PROVIDER_ID: &str = "conformance";
+const PROVIDER_MODEL: &str = "conformance-model";
+
+/// Wrap one answer in the assistant-message shape the host validates, with
+/// deliberately wrong identity fields: the host must overwrite them.
+fn provider_reply(text: String) -> Result<String, types::PluginError> {
+    Ok(serde_json::json!({
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+        "provider": "impostor",
+        "model": "impostor",
+        "api": "faux",
+    })
+    .to_string())
+}
+
+fn emit_delta(
+    kind: types::DeltaKind,
+    phase: types::DeltaPhase,
+    content_index: u32,
+    text: &str,
+) {
+    provider_stream::emit(&types::ProviderDelta {
+        kind,
+        phase,
+        content_index,
+        text: text.to_string(),
+    });
+}
+
 impl ProviderGuest for Conformance {
     fn list_providers() -> Vec<types::ProviderSpec> {
-        Vec::new()
+        vec![types::ProviderSpec {
+            provider_id: PROVIDER_ID.to_string(),
+            display_name: "Conformance Provider".to_string(),
+            models: vec![types::ModelSpec {
+                id: PROVIDER_MODEL.to_string(),
+                name: "Conformance Model".to_string(),
+                api: "openai-completions".to_string(),
+                base_url: "https://api.example.test/v1".to_string(),
+                reasoning: true,
+                input: vec!["text".to_string()],
+                context_window: 8_000,
+                max_tokens: 1_024,
+            }],
+        }]
     }
 
-    fn request(_request: String) -> Result<String, types::PluginError> {
-        Err(types::PluginError::Denied(
-            "provider requests are not granted".to_string(),
-        ))
+    fn request(request: String) -> Result<String, types::PluginError> {
+        let value: serde_json::Value = serde_json::from_str(&request).unwrap_or_default();
+        let mode = value
+            .get("mode")
+            .and_then(|mode| mode.as_str())
+            .unwrap_or("plain");
+        if mode == "spin" {
+            // The host's epoch deadline must interrupt this.
+            loop {
+                std::hint::black_box(0u64);
+            }
+        }
+        if mode == "stream" {
+            emit_delta(
+                types::DeltaKind::Text,
+                types::DeltaPhase::Start,
+                0,
+                "",
+            );
+            emit_delta(types::DeltaKind::Text, types::DeltaPhase::Delta, 0, "Hello");
+            emit_delta(types::DeltaKind::Text, types::DeltaPhase::Delta, 0, " world");
+            emit_delta(types::DeltaKind::Text, types::DeltaPhase::End, 0, "");
+            provider_stream::emit_batch(&[
+                types::ProviderDelta {
+                    kind: types::DeltaKind::Thinking,
+                    phase: types::DeltaPhase::Start,
+                    content_index: 1,
+                    text: String::new(),
+                },
+                types::ProviderDelta {
+                    kind: types::DeltaKind::Thinking,
+                    phase: types::DeltaPhase::End,
+                    content_index: 1,
+                    text: "reasoned".to_string(),
+                },
+            ]);
+            emit_delta(
+                types::DeltaKind::ToolCall,
+                types::DeltaPhase::Start,
+                2,
+                "",
+            );
+            emit_delta(
+                types::DeltaKind::ToolCall,
+                types::DeltaPhase::End,
+                2,
+                r#"{"id":"call-1","name":"conformance","arguments":"{}"}"#,
+            );
+            return provider_reply("streamed".to_string());
+        }
+        if mode == "stream-bad" {
+            // Delta before start: the host must reject the whole stream.
+            emit_delta(types::DeltaKind::Text, types::DeltaPhase::Delta, 0, "x");
+            return provider_reply("bad".to_string());
+        }
+        if mode == "stale" {
+            // No open in this call: handle 1 must not resolve.
+            return match provider_http::read(1, 64) {
+                Ok(_) => provider_reply("stale-read-succeeded".to_string()),
+                Err(error) => provider_reply(format!("stale:{}", capability_reason(error))),
+            };
+        }
+
+        let Some(url) = value.get("url").and_then(|url| url.as_str()) else {
+            return provider_reply("no-url".to_string());
+        };
+        let headers = value
+            .get("headers")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let method = value
+            .get("method")
+            .and_then(|method| method.as_str())
+            .unwrap_or("POST");
+        let body = value
+            .get("body")
+            .and_then(|body| body.as_str())
+            .unwrap_or("");
+        let open_request = serde_json::json!({
+            "url": url,
+            "method": method,
+            "headers": headers,
+            "body": body,
+        })
+        .to_string();
+        let handle = match provider_http::open(&open_request) {
+            Ok(handle) => handle,
+            Err(error) => {
+                return provider_reply(format!("open-denied:{}", capability_reason(error)))
+            }
+        };
+        if mode == "leak" {
+            // Deliberately never closed: the host must reap it at call exit.
+            return provider_reply(format!("opened:{handle}"));
+        }
+        let mut body = Vec::new();
+        loop {
+            match provider_http::read(handle, 64 * 1024) {
+                Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = provider_http::close(handle);
+                    return provider_reply(format!("read-failed:{}", capability_reason(error)));
+                }
+            }
+        }
+        let _ = provider_http::close(handle);
+        provider_reply(String::from_utf8_lossy(&body).into_owned())
     }
 }
 
