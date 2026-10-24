@@ -37,6 +37,7 @@ pub mod brand;
 pub mod changelog;
 pub mod config;
 pub mod configure;
+pub mod cron;
 pub mod dev_extension;
 pub mod docs_tool;
 pub(crate) mod env_lock;
