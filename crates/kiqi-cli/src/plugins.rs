@@ -495,12 +495,18 @@ pub(crate) fn dispatch_to_compiled(
         // and keeps the blocking call.
         let action = match mode {
             kiqi_extensions::DispatchMode::Observe => {
-                // Per-host partition: a patch-capable host is invoked only by
-                // the provider gate, and a host with neither switch granted is
-                // never called. An in-process host (no policy) keeps observing.
-                if let Some(policy) = host.provider_request_policy() {
-                    if policy.patch || !policy.observe {
-                        continue;
+                // The partition belongs to the provider request alone: there a
+                // patch-capable host is invoked only by the gate, and a host
+                // with neither switch granted is never called. Every other tag
+                // (SessionStart, MessageUpdate, ToolExecution, ...) still fans
+                // out to every host, so a patch-capable plugin keeps its
+                // lifecycle trace. An in-process host (no policy) observes
+                // throughout.
+                if tag == kiqi_plugin::EventTag::BeforeProviderRequest {
+                    if let Some(policy) = host.provider_request_policy() {
+                        if policy.patch || !policy.observe {
+                            continue;
+                        }
                     }
                 }
                 host.try_on_event(&event, &caps)
@@ -1842,17 +1848,53 @@ pub(crate) fn load_package_resources_manifest(
     Ok(Some(policy))
 }
 
-/// Read every file under `root`, rejecting symlinks and non-regular entries.
+/// The item/byte ceiling one resource walk must stay within.
+///
+/// `scope` names the side that set the ceiling (`declared` at install time,
+/// `granted` at resolve time) so the error says which budget was exceeded.
+#[derive(Clone, Copy)]
+struct ResourceBudget {
+    max_items: u64,
+    max_bytes: u64,
+    scope: &'static str,
+}
+
+impl ResourceBudget {
+    /// Reject an entry from its metadata, before it is read. `seen_items`
+    /// counts this file; `seen_bytes` includes its size.
+    fn check(&self, seen_items: u64, seen_bytes: u64) -> Result<(), String> {
+        if seen_items > self.max_items {
+            return Err(format!(
+                "resources contribute at least {seen_items} file(s), over the {} max-items {}",
+                self.scope, self.max_items
+            ));
+        }
+        if seen_bytes > self.max_bytes {
+            return Err(format!(
+                "resources contribute at least {seen_bytes} bytes, over the {} max-bytes {}",
+                self.scope, self.max_bytes
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Read every file under `root`, rejecting symlinks and non-regular entries,
+/// keeping the whole tree within `budget` *before* each file is read.
 ///
 /// Returned paths are relative to `root` with `/` separators; the caller maps
 /// them to package-relative `resources/<path>`.
-fn read_resource_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+fn read_resource_files(
+    root: &Path,
+    budget: ResourceBudget,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let meta = checked_metadata(root)?;
     if !meta.is_dir() {
         return Err(format!("{} is not a directory", root.display()));
     }
     let mut out = Vec::new();
-    read_resource_dir(root, "", &mut out)?;
+    let mut bytes = 0u64;
+    read_resource_dir(root, "", &mut out, &mut bytes, budget)?;
     Ok(out)
 }
 
@@ -1860,6 +1902,8 @@ fn read_resource_dir(
     dir: &Path,
     prefix: &str,
     out: &mut Vec<(String, Vec<u8>)>,
+    bytes: &mut u64,
+    budget: ResourceBudget,
 ) -> Result<(), String> {
     let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)
         .map_err(|error| format!("read {}: {error}", dir.display()))?
@@ -1879,11 +1923,24 @@ fn read_resource_dir(
             format!("{prefix}/{name}")
         };
         if meta.is_dir() {
-            read_resource_dir(&path, &relative, out)?;
+            read_resource_dir(&path, &relative, out, bytes, budget)?;
         } else if meta.is_file() {
-            let bytes = std::fs::read(&path)
+            // Check the budget from the directory entry's metadata BEFORE
+            // reading: a multi-GiB resource must fail as a cap violation at
+            // install (and on every session start), not be loaded into memory
+            // first and OOM the host.
+            let seen_items = out.len() as u64 + 1;
+            let seen_bytes = (*bytes).checked_add(meta.len()).unwrap_or(u64::MAX);
+            budget.check(seen_items, seen_bytes)?;
+            let content = std::fs::read(&path)
                 .map_err(|error| format!("read {}: {error}", path.display()))?;
-            out.push((relative, bytes));
+            // A file that grew between the metadata read and the read itself
+            // still has to fit, so account for the bytes actually read.
+            *bytes = (*bytes)
+                .checked_add(content.len() as u64)
+                .unwrap_or(u64::MAX);
+            budget.check(seen_items, *bytes)?;
+            out.push((relative, content));
         } else {
             return Err(format!("{} is not a regular file", path.display()));
         }
@@ -1903,26 +1960,20 @@ pub(crate) fn prepare_package_resources(
         return Ok(None);
     };
     let root = resources_root(source_dir);
-    let files = read_resource_files(&root).map_err(|error| {
+    let files = read_resource_files(
+        &root,
+        ResourceBudget {
+            max_items: u64::from(policy.max_items),
+            max_bytes: policy.max_bytes,
+            scope: "declared",
+        },
+    )
+    .map_err(|error| {
         format!(
             "{} declares resources but {}/ is unusable: {error}",
             PACKAGE_RESOURCES_MANIFEST, PACKAGE_RESOURCES_DIR
         )
     })?;
-    let items = files.len() as u64;
-    if items > policy.max_items as u64 {
-        return Err(format!(
-            "resources contribute {items} file(s), over the declared max-items {}",
-            policy.max_items
-        ));
-    }
-    let bytes: u64 = files.iter().map(|(_, content)| content.len() as u64).sum();
-    if bytes > policy.max_bytes {
-        return Err(format!(
-            "resources contribute {bytes} bytes, over the declared max-bytes {}",
-            policy.max_bytes
-        ));
-    }
     let manifest = std::fs::read(source_dir.join(PACKAGE_RESOURCES_MANIFEST))
         .map_err(|error| format!("read {}: {error}", PACKAGE_RESOURCES_MANIFEST))?;
     Ok(Some(PreparedPackageResources {
@@ -2103,22 +2154,14 @@ pub fn resolve_package_resources(
         ));
     };
     let root = resources_root(package_dir);
-    let files = read_resource_files(&root)?;
-
-    let items = files.len() as u64;
-    let bytes: u64 = files.iter().map(|(_, content)| content.len() as u64).sum();
-    let max_items = u64::from(grant.max_items.min(manifest.max_items));
-    let max_bytes = grant.max_bytes.min(manifest.max_bytes);
-    if items > max_items {
-        return Err(format!(
-            "resources contribute {items} file(s), over the granted max-items {max_items}"
-        ));
-    }
-    if bytes > max_bytes {
-        return Err(format!(
-            "resources contribute {bytes} bytes, over the granted max-bytes {max_bytes}"
-        ));
-    }
+    let files = read_resource_files(
+        &root,
+        ResourceBudget {
+            max_items: u64::from(grant.max_items.min(manifest.max_items)),
+            max_bytes: grant.max_bytes.min(manifest.max_bytes),
+            scope: "granted",
+        },
+    )?;
 
     let digests = read_digest_manifest(package_dir)?;
     let manifest_path = package_dir.join(PACKAGE_RESOURCES_MANIFEST);
@@ -4030,6 +4073,57 @@ mod tests {
         );
     }
 
+    /// The provider partition is scoped to `BeforeProviderRequest`: a
+    /// patch-capable host is skipped only on that tag, so it still receives
+    /// lifecycle events (SessionStart, MessageUpdate) that its trace needs.
+    #[test]
+    fn a_patch_capable_host_still_observes_lifecycle_events() {
+        let caps = empty_caps();
+        let (patch_host, counts) = gate_probe(
+            "patch",
+            Some(gate_policy(false, true, 500)),
+            serde_json::json!({ "maxTokens": 8 }),
+            None,
+            kiqi_plugin::EventAction::Continue,
+        );
+        for tag in [
+            kiqi_plugin::EventTag::SessionStart,
+            kiqi_plugin::EventTag::MessageUpdate,
+        ] {
+            assert_eq!(
+                dispatch_to_compiled(
+                    &[patch_host.clone()],
+                    &caps,
+                    tag,
+                    serde_json::json!({}),
+                    kiqi_extensions::DispatchMode::Observe,
+                ),
+                kiqi_extensions::CompiledVerdict::Continue,
+                "{tag:?} is observed, not claimed"
+            );
+        }
+        assert_eq!(
+            counts.observe.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a patch-capable host must still see the lifecycle fan-out"
+        );
+
+        // The provider event keeps the partition: the gate, not the fan-out,
+        // invokes this host.
+        dispatch_to_compiled(
+            &[patch_host],
+            &caps,
+            kiqi_plugin::EventTag::BeforeProviderRequest,
+            serde_json::json!({ "model": "m" }),
+            kiqi_extensions::DispatchMode::Observe,
+        );
+        assert_eq!(
+            counts.observe.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the patch-capable host is not also observed for the request"
+        );
+    }
+
     /// One host's rejected patch drops the whole request patch, including a
     /// patch an earlier host contributed.
     #[test]
@@ -4591,6 +4685,44 @@ mod tests {
         let resolve_error =
             resolve_package_resources(package.path(), &ResourcesGrant::default()).unwrap_err();
         assert!(resolve_error.contains("symlink"), "{resolve_error}");
+    }
+
+    /// The item/byte cap is enforced while walking, from metadata, before the
+    /// file is read. The fixture file is over budget *and* unreadable: a walk
+    /// that read first would fail with EACCES, so the cap error proves the
+    /// budget was checked first. This is what keeps a multi-GiB resource from
+    /// OOMing the host at install and on every session start.
+    #[cfg(unix)]
+    #[test]
+    fn package_resources_over_budget_is_rejected_before_reading() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let package = tempfile::tempdir().unwrap();
+        write_package_fixture(
+            package.path(),
+            r#"{"kinds":["skills"],"max-items":8,"max-bytes":8}"#,
+            &[("skills/a.md", "0123456789")],
+        );
+        let file = package
+            .path()
+            .join(PACKAGE_RESOURCES_DIR)
+            .join("skills/a.md");
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&file, perms).unwrap();
+
+        let install_error = prepare_package_resources(package.path()).unwrap_err();
+        assert!(
+            install_error.contains("max-bytes"),
+            "the install walk must report the cap, not fail reading: {install_error}"
+        );
+
+        let resolve_error =
+            resolve_package_resources(package.path(), &ResourcesGrant::default()).unwrap_err();
+        assert!(
+            resolve_error.contains("max-bytes"),
+            "the resolve walk must report the cap, not fail reading: {resolve_error}"
+        );
     }
 
     /// A `..` entry in the digest manifest cannot reach outside the package.

@@ -44,8 +44,17 @@ pub const MAX_TOKENS_MAX: u64 = 262_144;
 pub const TEMPERATURE_MIN: f64 = 0.0;
 pub const TEMPERATURE_MAX: f64 = 2.0;
 
-/// Header names a patch may never touch. Matched case-insensitively, and
-/// enforced for both insertion and deletion.
+/// Whether `name` is a protected header: the credential/framing names a guest
+/// may neither patch nor see the value of. The comparison is
+/// case-insensitive, so `Authorization` and `authorization` are the same
+/// header.
+pub fn is_denied_header(name: &str) -> bool {
+    DENIED_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+}
+
+/// Header names a patch may never touch and an observer never sees the value
+/// of. Matched case-insensitively, and enforced for both insertion and
+/// deletion.
 pub const DENIED_HEADERS: &[&str] = &[
     "authorization",
     "x-api-key",
@@ -184,7 +193,7 @@ fn validate_map(
                 key.len()
             ));
         }
-        if deny_headers && DENIED_HEADERS.contains(&key.to_ascii_lowercase().as_str()) {
+        if deny_headers && is_denied_header(key) {
             return Err(format!(
                 "`{field}` may not change the protected header `{key}` (insert or delete)"
             ));

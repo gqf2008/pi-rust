@@ -3956,8 +3956,8 @@ fn deny_all_render_instance_cannot_reach_ui_session_or_exec() {
     assert_eq!(host.transform_markdown("ui:").unwrap(), "ui-denied=true");
     assert_eq!(
         host.transform_markdown("session:").unwrap(),
-        "session-id=",
-        "a session id means the render instance saw host call context"
+        "session-id= cwd=",
+        "a session id or a cwd means the render instance saw host call context"
     );
     assert_eq!(
         host.transform_markdown("exec:").unwrap(),

@@ -844,9 +844,16 @@ impl crate::kiqi::plugin::session_read::Host for HostState {
                 .flatten()
                 .unwrap_or_default(),
             run_id: String::new(),
-            cwd: std::env::current_dir()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            // Only a call with a host context may learn the working directory.
+            // A render-only instance never installs one (it is deny-all), and
+            // std::env::current_dir() here would otherwise hand the sandbox the
+            // host's absolute path.
+            cwd: with_caps_context(|_| {
+                std::env::current_dir()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default(),
         }
     }
     fn active_tools(&mut self) -> Vec<String> {
@@ -3608,10 +3615,14 @@ fn to_wit_tool_call(event: &Event) -> ToolCall {
 ///   carries `messageCount`, which tells an observer the size of the turn
 ///   without handing over the conversation;
 /// * header values only with `headers = values`; otherwise any value-bearing
-///   key is removed and `headerNames` remains. The `kiqi-extensions` bridge
-///   now emits `headerValues` in its rich payload (the redacted payload for
-///   cdylib handlers still carries names only), and this strip is what keeps a
-///   default grant from receiving them.
+///   key is removed and `headerNames` remains. Even with `values`, the
+///   credential/framing headers in
+///   [`provider_patch::DENIED_HEADERS`] are stripped by name
+///   (case-insensitively) before delivery: `authorization`, `x-api-key` and
+///   friends never cross the ABI, while their names still do. The
+///   `kiqi-extensions` bridge emits `headerValues` in its rich payload (the
+///   redacted payload for cdylib handlers still carries names only), and this
+///   strip is what keeps a default grant from receiving them.
 ///
 /// `BeforeProviderHeaders` and `AfterProviderResponse` keep their current
 /// semantics in this phase (deferred: they are not grant-gated yet).
@@ -3641,6 +3652,15 @@ fn graded_provider_request(event: &Event, grants: &Grants, for_gate: bool) -> Op
         if grant.headers != HeadersMode::Values {
             object.remove("headers");
             object.remove("headerValues");
+        } else {
+            // `headers = values` is not a credential grant: the deny-list still
+            // applies, matched case-insensitively so `Authorization` cannot
+            // slip past a lowercase `authorization`.
+            for key in ["headers", "headerValues"] {
+                if let Some(map) = object.get_mut(key).and_then(Value::as_object_mut) {
+                    map.retain(|name, _| !provider_patch::is_denied_header(name));
+                }
+            }
         }
     }
     Some(WitEvent::BeforeProviderRequest(payload.to_string()))
@@ -4604,8 +4624,12 @@ mod tests {
             serde_json::json!({
                 "model": "m",
                 "apiKeyPresent": true,
-                "headerNames": ["authorization"],
-                "headerValues": { "authorization": "secret" },
+                "headerNames": ["authorization", "x-api-key", "x-trace"],
+                "headerValues": {
+                    "authorization": "secret",
+                    "X-API-Key": "api-secret",
+                    "x-trace": "abc",
+                },
                 "messages": [{ "role": "user" }, { "role": "assistant" }],
             }),
         );
@@ -4642,7 +4666,17 @@ mod tests {
         };
         let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(payload["messages"].as_array().unwrap().len(), 2);
-        assert_eq!(payload["headerValues"]["authorization"], "secret");
+        // `values` does not lift the deny-list: credential headers are
+        // stripped by name, case-insensitively, while ordinary values cross.
+        assert!(
+            payload["headerValues"].get("authorization").is_none(),
+            "authorization must never cross the ABI: {payload}"
+        );
+        assert!(
+            payload["headerValues"].get("X-API-Key").is_none(),
+            "the deny-list is case-insensitive: {payload}"
+        );
+        assert_eq!(payload["headerValues"]["x-trace"], "abc");
         assert_eq!(payload["messageCount"], 2);
     }
 

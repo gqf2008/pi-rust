@@ -955,7 +955,8 @@ impl RenderGuest for Conformance {
             ));
         }
         if markdown.starts_with("session:") {
-            return Ok(format!("session-id={}", session_read::info().session_id));
+            let info = session_read::info();
+            return Ok(format!("session-id={} cwd={}", info.session_id, info.cwd));
         }
         if markdown.starts_with("exec:") {
             return Ok(format!(
