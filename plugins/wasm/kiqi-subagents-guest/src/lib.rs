@@ -37,6 +37,18 @@ const SCHEMA: &str = r#"{"type":"object","properties":{"task":{"type":"string","
 struct Subagents;
 
 impl Guest for Subagents {
+    /// No selector/editor/prompt flow exists in this plugin yet; a reply is
+    /// refused rather than silently dropped.
+    fn continue_command(
+        _name: String,
+        _flow_id: String,
+        _reply: types::CommandReply,
+    ) -> Result<types::CommandResult, types::PluginError> {
+        Err(types::PluginError::Failed(
+            "this plugin declares no command continuations".to_string(),
+        ))
+    }
+
     fn id() -> String {
         ID.to_string()
     }
@@ -159,3 +171,6 @@ fn optional_string(params: &Value, name: &str, default: &str) -> String {
 }
 
 kiqi_plugin_guest::bindings::export!(Subagents with_types_in kiqi_plugin_guest::bindings);
+
+// The 0.8.0 contribution exports are mandatory world exports; deny them all.
+kiqi_plugin_guest::deny_contribution_exports!(Subagents);

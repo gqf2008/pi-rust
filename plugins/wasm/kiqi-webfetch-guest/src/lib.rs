@@ -33,6 +33,18 @@ const MAX_BODY_BYTES: usize = 1_048_576;
 struct Webfetch;
 
 impl Guest for Webfetch {
+    /// No selector/editor/prompt flow exists in this plugin yet; a reply is
+    /// refused rather than silently dropped.
+    fn continue_command(
+        _name: String,
+        _flow_id: String,
+        _reply: types::CommandReply,
+    ) -> Result<types::CommandResult, types::PluginError> {
+        Err(types::PluginError::Failed(
+            "this plugin declares no command continuations".to_string(),
+        ))
+    }
+
     fn id() -> String {
         ID.to_string()
     }
@@ -270,3 +282,6 @@ fn strip_html(s: &str) -> String {
 }
 
 kiqi_plugin_guest::bindings::export!(Webfetch with_types_in kiqi_plugin_guest::bindings);
+
+// The 0.8.0 contribution exports are mandatory world exports; deny them all.
+kiqi_plugin_guest::deny_contribution_exports!(Webfetch);

@@ -42,8 +42,9 @@ use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::kiqi::plugin::types::{
-    CapabilityError, ContentBlock, Event as WitEvent, EventAction as WitEventAction, LogLevel,
-    OtherEvent, ProgressBlock, ToolCall, ToolResult, ToolResultEvent, Verdict as WitVerdict,
+    CapabilityError, ContentBlock, Event as WitEvent, EventAction as WitEventAction, InputEvent,
+    InputKind, LogLevel, OauthTokenOutcome, OtherEvent, ProgressBlock, ProviderDelta as WitDelta,
+    ToolCall, ToolResult, ToolResultEvent, Verdict as WitVerdict,
 };
 use crate::Plugin as World;
 
@@ -628,6 +629,43 @@ impl crate::kiqi::plugin::progress::Host for HostState {
                 serde_json::from_str(&json).unwrap_or(serde_json::Value::String(json)),
             ),
         });
+    }
+}
+
+/// Streamed provider deltas. The 0.8.0 surface is wired but no capability is
+/// granted yet, so the sink is a no-op: there is no provider call for a delta
+/// to belong to.
+impl crate::kiqi::plugin::provider_stream::Host for HostState {
+    fn emit(&mut self, _delta: WitDelta) {}
+    fn emit_batch(&mut self, _deltas: Vec<WitDelta>) {}
+}
+
+/// Host-attributed OAuth endpoints. Deny-by-default: the `oauth` grant is not
+/// wired yet, so every call is refused.
+impl crate::kiqi::plugin::oauth_http::Host for HostState {
+    fn token_request(
+        &mut self,
+        _provider_id: String,
+        _form: String,
+    ) -> Result<OauthTokenOutcome, CapabilityError> {
+        Err(denied())
+    }
+    fn revoke(&mut self, _provider_id: String) -> Result<(), CapabilityError> {
+        Err(denied())
+    }
+}
+
+/// Host-attributed streaming HTTP for provider requests. Deny-by-default: the
+/// `provider` grant is not wired yet, so nothing can be opened.
+impl crate::kiqi::plugin::provider_http::Host for HostState {
+    fn open(&mut self, _request: String) -> Result<u32, CapabilityError> {
+        Err(denied())
+    }
+    fn read(&mut self, _handle: u32, _max_bytes: u64) -> Result<Option<Vec<u8>>, CapabilityError> {
+        Err(denied())
+    }
+    fn close(&mut self, _handle: u32) -> Result<(), CapabilityError> {
+        Err(denied())
     }
 }
 
@@ -2013,10 +2051,12 @@ impl WasmPlugin {
         match result {
             Ok(WitEventAction::Continue) => EventAction::Continue,
             Ok(WitEventAction::Claimed) => EventAction::Claimed,
-            // The 0.8.0 variant exists in the ABI, but routing a patch to the
-            // provider gate is not wired yet, so honoring it is out of scope
-            // here. Refusing it (continue) is the fail-closed answer.
-            Ok(WitEventAction::Patch(_)) => EventAction::Continue,
+            // The 0.8.0 channel is carried through typed, but no host path
+            // consumes it yet: applying a patch belongs to the provider gate,
+            // so every tag currently proceeds unpatched.
+            Ok(WitEventAction::Patch(patch)) => EventAction::Patch(
+                serde_json::from_str(&patch).unwrap_or(serde_json::Value::String(patch)),
+            ),
             Err(trap) => {
                 eprintln!("[kiqi-plugin] {}: on-event trapped: {trap}", self.id);
                 EventAction::Continue
@@ -2412,6 +2452,36 @@ fn graded_provider_request(event: &Event, grants: &Grants) -> Option<WitEvent> {
     Some(WitEvent::BeforeProviderRequest(payload.to_string()))
 }
 
+/// The typed form of a hotkey, read from the `Input` event's payload.
+///
+/// The payload is the one the TUI builds (`type`, `key`, `kind`, `ctrl`,
+/// `alt`, `shift`); a missing field degrades to the neutral value rather than
+/// dropping the key, because a shortcut should still see its own event.
+fn to_wit_input(event: &Event) -> InputEvent {
+    let payload = &event.payload;
+    let flag = |name: &str| {
+        payload
+            .get(name)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
+    InputEvent {
+        key: payload
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        kind: match payload.get("kind").and_then(serde_json::Value::as_str) {
+            Some("repeat") => InputKind::Repeat,
+            Some("release") => InputKind::Release,
+            _ => InputKind::Press,
+        },
+        ctrl: flag("ctrl"),
+        alt: flag("alt"),
+        shift: flag("shift"),
+    }
+}
+
 fn to_wit_event(event: &Event) -> WitEvent {
     use kiqi_plugin::EventTag as T;
     match event.tag {
@@ -2438,6 +2508,7 @@ fn to_wit_event(event: &Event) -> WitEvent {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
         }),
+        T::Input => WitEvent::Input(to_wit_input(event)),
         other => WitEvent::Other(OtherEvent {
             kind: format!("{other:?}"),
             payload: payload_string(event),

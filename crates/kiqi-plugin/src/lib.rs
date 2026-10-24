@@ -180,6 +180,181 @@ impl CommandResult {
     }
 }
 
+/// The user's answer to a selector/editor/prompt flow.
+///
+/// Mirrors the wasm `command-reply`: [`Selected`] answers a
+/// [`CommandResultBody::Selector`], [`Submitted`] answers an editor or a
+/// prompt, and [`Cancelled`] means the user dismissed the flow.
+///
+/// [`Selected`]: CommandReply::Selected
+/// [`Submitted`]: CommandReply::Submitted
+/// [`Cancelled`]: CommandReply::Cancelled
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandReply {
+    /// A selector item.
+    Selected(String),
+    /// The editor contents or a prompt line.
+    Submitted(String),
+    /// The user dismissed the flow.
+    Cancelled,
+}
+
+// ---------------------------------------------------------------------------
+// OAuth and model-provider contributions (0.8.0)
+// ---------------------------------------------------------------------------
+
+/// Which OAuth flow a grant profile enables for a provider.
+///
+/// Mirrors the wasm `oauth-flow`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthFlow {
+    AuthorizationCode,
+    DeviceCode,
+}
+
+/// A provider this guest declares it can drive.
+///
+/// Endpoints, client id and secrets stay host-side; the guest only sees this
+/// metadata. [`Plugin::oauth_action`] advances the flow and the resulting
+/// credential never crosses the boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthProvider {
+    pub id: String,
+    pub display_name: String,
+    pub scopes: Vec<String>,
+    pub flows: Vec<OAuthFlow>,
+    pub supports_pkce: bool,
+}
+
+/// What the user must do (or what the host already did) to continue a flow.
+///
+/// `url` is built by the host from the grant profile; the guest never supplies
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthInteraction {
+    pub title: String,
+    pub url: Option<String>,
+    pub instructions: Vec<String>,
+    pub user_code: Option<String>,
+}
+
+/// The credential the host stored for a granted provider.
+///
+/// No token material crosses this boundary. `expires_at` is a Unix timestamp in
+/// seconds; `0` means no known expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OAuthCredentialStatus {
+    pub expires_at: i64,
+}
+
+/// One step of an OAuth flow.
+///
+/// Mirrors the wasm `oauth-action`. [`Begin`] carries the PKCE
+/// `code_challenge` (43 base64url characters) for authorization-code and an
+/// empty string for device-code; the host constructs every URL.
+///
+/// [`Begin`]: OAuthAction::Begin
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthAction {
+    Begin(String),
+    Poll,
+    /// Exchange the authorization code the user pasted back.
+    Exchange(String),
+    Cancel,
+}
+
+/// The guest-visible result of one flow step.
+///
+/// Mirrors the wasm `oauth-response`. Both [`Denied`] and [`Error`] are flow
+/// outcomes the guest has to display or retry, not host traps.
+///
+/// [`Denied`]: OAuthResponse::Denied
+/// [`Error`]: OAuthResponse::Error
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthResponse {
+    /// Show this to the user and wait for the next step.
+    Interaction(OAuthInteraction),
+    /// The host stored a credential for this provider.
+    Stored(OAuthCredentialStatus),
+    AuthorizationPending,
+    SlowDown,
+    Denied(String),
+    Error(String),
+}
+
+/// One model a provider exposes.
+///
+/// Mirrors the wasm `model-spec`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelSpec {
+    pub id: String,
+    pub name: String,
+    /// A typed `Api` variant name; `other` and `faux` are rejected by the host
+    /// at grant validation.
+    pub api: String,
+    pub base_url: String,
+    pub reasoning: bool,
+    pub input: Vec<String>,
+    pub context_window: u64,
+    pub max_tokens: u64,
+}
+
+/// A provider this guest offers.
+///
+/// The `provider` grant is the sole catalog authority; this list can only
+/// narrow it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSpec {
+    pub provider_id: String,
+    pub display_name: String,
+    pub models: Vec<ModelSpec>,
+}
+
+/// Which part of a model response a delta belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaKind {
+    Text,
+    Thinking,
+    ToolCall,
+}
+
+/// Where in a delta's lifecycle a chunk belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaPhase {
+    Start,
+    Delta,
+    End,
+}
+
+/// One streamed delta of a provider response.
+///
+/// Mirrors the wasm `provider-delta`. `content_index` keeps two concurrent tool
+/// calls and two thinking/text streams apart. On [`DeltaPhase::End`] of a
+/// [`DeltaKind::ToolCall`], `text` is the complete `{id, name, arguments}`
+/// JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderDelta {
+    pub kind: DeltaKind,
+    pub phase: DeltaPhase,
+    pub content_index: u32,
+    pub text: String,
+}
+
+/// Where a running provider request writes its streamed deltas.
+///
+/// Mirrors the wasm `provider-stream` import, which is valid only while a
+/// [`Plugin::provider_request`] call is on the stack.
+pub trait ProviderDeltaSink {
+    fn delta(&self, delta: ProviderDelta);
+}
+
+/// A no-op delta sink, for callers that do not want the stream.
+pub struct NoProviderDeltas;
+
+impl ProviderDeltaSink for NoProviderDeltas {
+    fn delta(&self, _delta: ProviderDelta) {}
+}
+
 /// A CLI flag the plugin claims.
 ///
 /// Registration is a **declaration**, not a callable: the host records that the
@@ -424,17 +599,25 @@ impl ToolResult {
 /// What a plugin decided to do about an event.
 ///
 /// The native ABI returned an `i32` with `CONTINUE` / `CLAIMED`; this is the
-/// same two outcomes with the magic numbers replaced by a type.
+/// same two outcomes with the magic numbers replaced by a type, plus the 0.8.0
+/// [`Patch`] channel.
+///
+/// [`Patch`]: EventAction::Patch
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventAction {
     /// Observed; pass the event on to the next plugin and to normal handling.
     Continue,
     /// Consumed: no later plugin sees it and normal handling is skipped.
     ///
-    /// The enum stops here on purpose: it mirrors the native ABI's
-    /// `EVENT_HANDLER_CLAIMED` / `0`, and the host has no channel for a rewritten
-    /// event payload, so a `Replace` variant would be a promise nothing keeps.
+    /// Mirrors the native ABI's `EVENT_HANDLER_CLAIMED` / `0`.
     Claimed,
+    /// Rewrite the event payload (JSON) before handling continues.
+    ///
+    /// Honored ONLY for `before-provider-request` during a provider gate;
+    /// every other tag ignores it. The host validates the patch against the
+    /// `provider-request` grant and, when any limit is violated, rejects the
+    /// WHOLE patch and proceeds unpatched with one diagnostic.
+    Patch(Value),
 }
 
 /// A permission gate's verdict.
@@ -643,6 +826,24 @@ pub trait Plugin: Send + Sync + 'static {
         ))
     }
 
+    /// Continue a selector/editor/prompt flow started by [`Plugin::run_command`].
+    ///
+    /// `flow_id` is the id the earlier [`CommandResult`] carried; the host
+    /// rejects a stale or unknown id before this is called. The default
+    /// refuses, so a plugin that only returns [`CommandResultBody::Message`]
+    /// keeps compiling.
+    fn continue_command(
+        &self,
+        _name: &str,
+        _flow_id: &str,
+        _reply: CommandReply,
+        _caps: &HostCaps<'_>,
+    ) -> Result<CommandResult, PluginError> {
+        Err(PluginError::Failed(
+            "this plugin declares no continuable commands".into(),
+        ))
+    }
+
     /// CLI flags this plugin claims.
     fn flags(&self) -> Vec<FlagSpec> {
         Vec::new()
@@ -652,6 +853,61 @@ pub trait Plugin: Send + Sync + 'static {
     /// [`EventTag::Input`] event.
     fn shortcuts(&self) -> Vec<ShortcutSpec> {
         Vec::new()
+    }
+
+    /// OAuth providers this plugin can drive (0.8.0).
+    ///
+    /// This is install-time discovery and a load-time cross-check only: the
+    /// `oauth` grant is the sole catalog authority and may only narrow the
+    /// list. Deny-by-default, like every 0.8.0 capability.
+    fn oauth_providers(&self) -> Vec<OAuthProvider> {
+        Vec::new()
+    }
+
+    /// Advance one OAuth flow step.
+    ///
+    /// The host owns endpoints, HTTP and credential storage; the guest only
+    /// generates PKCE material and reports what the user must do, so no token
+    /// crosses this boundary. The default refuses because a plugin without the
+    /// `oauth` grant is never called.
+    fn oauth_action(
+        &self,
+        provider_id: &str,
+        action: OAuthAction,
+    ) -> Result<OAuthResponse, PluginError> {
+        Err(PluginError::Denied(format!(
+            "oauth is not granted for provider `{provider_id}`: {action:?}"
+        )))
+    }
+
+    /// Model providers this plugin offers (0.8.0).
+    ///
+    /// Metadata only; the `provider` grant is the sole catalog authority and
+    /// may only narrow the list.
+    fn provider_specs(&self) -> Vec<ProviderSpec> {
+        Vec::new()
+    }
+
+    /// Serve one synchronous model request, streaming deltas to `sink`.
+    ///
+    /// Deny-by-default: without a `provider` grant the plugin is never asked
+    /// and the default below refuses.
+    fn provider_request(
+        &self,
+        _request: &str,
+        _sink: &dyn ProviderDeltaSink,
+    ) -> Result<String, PluginError> {
+        Err(PluginError::Denied(
+            "provider requests are not granted".into(),
+        ))
+    }
+
+    /// Rewrite model markdown output (0.8.0).
+    ///
+    /// Deny-by-default: the `render` grant decides, and the host owns theming,
+    /// sanitization, scheduling and caching.
+    fn transform_markdown(&self, _markdown: &str) -> Result<String, PluginError> {
+        Err(PluginError::Denied("render is not granted".into()))
     }
 
     /// Rewrite the system prompt for the coming run, or `None` to leave it.

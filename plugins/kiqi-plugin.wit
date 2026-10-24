@@ -6,10 +6,11 @@
 ///
 /// Shape decisions this version encodes:
 ///   * the exported surface is exactly `kiqi_plugin::Plugin`'s: `id`, `shutdown`,
-///     `list-tools`/`call-tool`, `list-commands`/`run-command`, `list-flags`,
-///     `list-shortcuts`, `on-event`, `before-agent-start`,
-///     `list-probe-points`/`probe`. Nothing the trait has is missing, and nothing
-///     the trait lacks is invented here;
+///     `list-tools`/`call-tool`, `list-commands`/`run-command`/`continue-command`,
+///     `list-flags`, `list-shortcuts`, `on-event`, `before-agent-start`,
+///     `list-probe-points`/`probe`, plus the 0.8.0 contribution exports
+///     `oauth-api`, `provider-api` and `render-api`. Nothing the trait has is
+///     missing, and nothing the trait lacks is invented here;
 ///   * capability calls are fallible (`result<_, capability-error>`) so a plugin still
 ///     loads when a capability is not granted and can degrade at call time;
 ///   * every capability is its own interface, so a deny stub, audit and future
@@ -498,7 +499,7 @@ interface proc {
 }
 
 
-// ---- 0.8.0 interfaces (not yet reachable from `world plugin`) --------------
+// ---- 0.8.0 interfaces -----------------------------------------------------
 
 /// OAuth login this guest can drive. An export: the guest is the flow
 /// controller (PKCE verifier, device polling quirks); the host owns endpoints,
@@ -580,7 +581,7 @@ interface render-api {
 
 /// What a plugin contributes to the runtime.
 interface plugin-api {
-    use types.{command-result, command-spec, event, event-action, flag-spec, plugin-error, shortcut-spec, tool-result, tool-spec, verdict};
+    use types.{command-reply, command-result, command-spec, event, event-action, flag-spec, plugin-error, shortcut-spec, tool-result, tool-spec, verdict};
 
     /// Stable identity: log prefix, config key, root of tool names. Mirrors
     /// `kiqi_plugin::Plugin::id`. The host cross-checks it against the directory
@@ -595,6 +596,12 @@ interface plugin-api {
 
     list-commands: func() -> list<command-spec>;
     run-command: func(name: string, arguments: string) -> result<command-result, plugin-error>;
+
+    /// Continue a selector/editor/prompt flow started by `run-command`.
+    ///
+    /// `flow-id` is the id the earlier `command-result` carried; the host
+    /// rejects a stale or unknown id before the guest is called.
+    continue-command: func(name: string, flow-id: string, reply: command-reply) -> result<command-result, plugin-error>;
     list-flags: func() -> list<flag-spec>;
     list-shortcuts: func() -> list<shortcut-spec>;
 
@@ -622,6 +629,14 @@ world plugin {
     import net-sockets;
     import exec;
     import proc;
+    // 0.8.0 capabilities: every one is deny-by-default, so the host always
+    // links a stub and the grant decides at call time.
+    import oauth-http;
+    import provider-stream;
+    import provider-http;
 
     export plugin-api;
+    export oauth-api;
+    export provider-api;
+    export render-api;
 }

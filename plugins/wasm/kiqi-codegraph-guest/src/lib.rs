@@ -54,6 +54,18 @@ const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
 struct KiCodegraph;
 
 impl Guest for KiCodegraph {
+    /// No selector/editor/prompt flow exists in this plugin yet; a reply is
+    /// refused rather than silently dropped.
+    fn continue_command(
+        _name: String,
+        _flow_id: String,
+        _reply: types::CommandReply,
+    ) -> Result<types::CommandResult, types::PluginError> {
+        Err(types::PluginError::Failed(
+            "this plugin declares no command continuations".to_string(),
+        ))
+    }
+
     fn id() -> String {
         ID.to_string()
     }
@@ -118,6 +130,9 @@ impl Guest for KiCodegraph {
 }
 
 kiqi_plugin_guest::bindings::export!(KiCodegraph with_types_in kiqi_plugin_guest::bindings);
+
+// The 0.8.0 contribution exports are mandatory world exports; deny them all.
+kiqi_plugin_guest::deny_contribution_exports!(KiCodegraph);
 
 // ---------------------------------------------------------------------------
 // Tool surface (ported verbatim: the model must see the same eight tools)

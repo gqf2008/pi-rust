@@ -41,6 +41,18 @@ const MAX_OUTPUT_BYTES: usize = 40_000;
 struct KiLens;
 
 impl Guest for KiLens {
+    /// No selector/editor/prompt flow exists in this plugin yet; a reply is
+    /// refused rather than silently dropped.
+    fn continue_command(
+        _name: String,
+        _flow_id: String,
+        _reply: types::CommandReply,
+    ) -> Result<types::CommandResult, types::PluginError> {
+        Err(types::PluginError::Failed(
+            "this plugin declares no command continuations".to_string(),
+        ))
+    }
+
     fn id() -> String {
         ID.to_string()
     }
@@ -101,6 +113,9 @@ impl Guest for KiLens {
 }
 
 kiqi_plugin_guest::bindings::export!(KiLens with_types_in kiqi_plugin_guest::bindings);
+
+// The 0.8.0 contribution exports are mandatory world exports; deny them all.
+kiqi_plugin_guest::deny_contribution_exports!(KiLens);
 
 /// Run one allowlisted check through the host's `exec` capability.
 fn code_lens(arguments: &str) -> Result<String, types::PluginError> {

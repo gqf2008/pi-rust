@@ -1184,10 +1184,15 @@ fn ask_user_honours_timeout() {
 
 /// `ki plugin install` shows the user what a component declares. Only the
 /// grantable interfaces count; `log`/`progress`/`ui` are not gated.
+///
+/// From 0.8.0 the three contribution exports (`oauth-api`, `provider-api`,
+/// `render-api`) are mandatory world exports, so every component declares them
+/// even when the plugin only denies them. They are listed for disclosure and
+/// stay ungranted: none of them is auto-granted by `--yes`.
 #[test]
-fn declared_capabilities_reads_the_components_imports() {
+fn declared_capabilities_reads_the_components_imports_and_exports() {
     let wasm = fixture_wasm();
-    let caps = kiqi_plugin_host::declared_capabilities(&wasm).expect("read component imports");
+    let caps = kiqi_plugin_host::declared_capabilities(&wasm).expect("read component surface");
     assert_eq!(
         caps,
         vec![
@@ -1195,7 +1200,10 @@ fn declared_capabilities_reads_the_components_imports() {
             "fs".to_string(),
             "net-http".to_string(),
             "net-sockets".to_string(),
+            "oauth".to_string(),
             "proc".to_string(),
+            "provider".to_string(),
+            "render".to_string(),
         ],
         "got {caps:?}"
     );
