@@ -2,7 +2,15 @@
 
 # 插件 ABI：从 cdylib 到 wasm 组件
 
-状态：**推迟为第一方契约；作为第三方（不受信）层推进验证** · 目标版本 `kiqi:plugin@0.6.0`
+状态：**推迟为第一方契约；作为第三方（不受信）层推进验证** · 目标版本 `kiqi:plugin@0.8.0`
+
+> **0.8.0 兼容性（2026-10-24）**：包版本即 ABI 版本。0.8.0 关闭了两个既有 variant
+> （`event` 加 `input`、`event-action` 加 `patch`）、改了两个既有签名（`run-command` 返回
+> `command-result`、`session-read.cli-flag` 返回 `option<flag-value>`），world 面新增
+> `oauth-http`/`provider-stream`/`provider-http` 导入与 `oauth-api`/`provider-api`/`render-api`
+> 导出。因此 **0.7.1 组件无法实例化，必须重建**：仓库内 12 个 guest 同批改完
+> （`run-command` 返回类型 + `continue-command` + 三个新导出接口的 Guest 实现）；
+> 0.8.0 之前没有已发布的第三方 wasm 生态。
 
 > **本方案不再作为第一方插件的契约。** 实测 `rpi-package` 的 18 个包后改为
 > 「Rust `trait Plugin` + cargo feature 全编译接入」，见
@@ -16,7 +24,7 @@
 > 判据是 §6.3 的 8 条门禁，而不是「迁了几个插件」。第一方**其余插件留在编译期**，
 > 只有明确需要第三方分发/沙箱的才迁。
 >
-> `plugins/kiqi-plugin.wit` 已升到 parse-validated 的 `0.6.0`（0.1.0 连 `wasm-tools component wit`
+> `plugins/kiqi-plugin.wit` 自 0.6.0 起逐版 parse-validated；当前包版本 `0.8.0`（见 §6.39–§6.44，0.1.0 连 `wasm-tools component wit`
 > 都过不了：variant case 带命名/多字段是非法的）：导出面与 `trait Plugin` **一一对应**、四个可授权能力
 > （`net-http`/`fs`/`exec`/`net-sockets`）**全部真实现且授权自带策略**、调用一律 `result<_, capability-error>`
 > （`denied` 授权拒 / `failed` 操作失败）、进度用 import sink。
@@ -949,3 +957,326 @@ interface proc {
 
 验证：`crates/kiqi-cli/src/plugins.rs::a_cancelled_wasm_dispatch_returns_immediately`
 （构造一个已取消的探针，断言 wasm `dispatch` 在 spawn 前返回 `cancelled by the host`）。
+
+### 6.39 授权模型：`oauth` / `provider` / `render` / `resources` / `provider-request`（0.8.0）
+
+0.8.0 新增五个授权 key，全部 **deny-by-default**（key 缺失即能力不存在），且全部**授权自带策略**
+——沿用 `net-http` 确立的规则：「granted」与「to what」是同一个决定。五个 key 都不接受
+`exec`/`proc` 的 `--cwd`/`--max-open`；通用 `Grants::grant()` 会拒绝新 key 并指向专用构造函数
+（`crates/kiqi-plugin/src/grants.rs:1529-1570`）。
+
+| key | serde 形状（kebab-case） | 默认值 | 校验 / 夹取 |
+|---|---|---|---|
+| `oauth` | `{providers: [{id, display-name?, scopes?, flows, authorization-endpoint, token-endpoint, device-authorization-endpoint?, revocation-endpoint?, client-id, supports-pkce?}], timeout-seconds?, max-requests?}` | `timeout-seconds` 600；`max-requests` 16 | providers 非空；id 非空且唯一；flows 非空；两个必需端点及可选端点都必须是**精确主机的 `https://` URL**（无通配、无 userinfo、无 fragment）；授予 device-code 时必须有 `device-authorization-endpoint`；timeout 1..=900；max-requests 1..=64（`grants.rs:353-363,395-437,444-517`） |
+| `provider` | `{providers: [{id, display-name?, models: [{id, api, base-url?, reasoning?, input?}], endpoint: {scheme, host, path-prefix, methods?}, credential?, timeout-seconds?}]}` | `timeout-seconds` 600；`methods` `["POST"]` | providers/models 非空；id 与 model id 唯一；`api` 只接受 10 个 typed wire API（`faux` 与未知值拒绝，`grants.rs:568-600`）；endpoint scheme 必须 `https`、host 精确无通配、`path-prefix` 以 `/` 开头、methods 仅 `GET`/`POST`；`credential` 存在时必须非空；timeout 1..=900（`grants.rs:525-528,619-800`） |
+| `render` | `true` 或 `{kinds?, timeout-ms?, max-output-bytes?}` | kinds `["markdown"]`；2000 ms；1 MiB | kind 仅 `markdown`；timeout 1..=10000；output 1..=8 MiB（`grants.rs:799-896`） |
+| `resources` | `true` 或 `{kinds?, max-items?, max-bytes?}` | kinds `["skills","prompts"]`；64 项；1 MiB | kind 仅 `skills`/`prompts`；max-items 1..=256；max-bytes 1..=16 MiB（`grants.rs:899-1001`） |
+| `provider-request` | `{observe?, headers?, messages?, patch?, patch-timeout-ms?}` | observe `none`；headers `names`；messages `none`；patch `false`；2000 ms | `patch-timeout-ms` 1..=min(10000, provider 最紧预算)；`patch: true` 才接受补丁；observe 只有 `none`/`requests`（`grants.rs:1048-1150`） |
+
+`render`/`resources` 的裸 `true` 走与 `fs` 同款的 bool-or-default 反序列化，等于「按默认值授予」
+（`grants.rs:258-282`）。`provider-request` 的 `patch` 是**布尔开关**而不是字段白名单：一旦打开，
+可改的键与每个键的夹取由宿主固定表决定（§6.44），插件不能自定义补丁面。
+
+两个容易看错的地方：
+
+- `oauth.providers` 与 `provider.providers` 是**列表**，不是以 id 为键的 map；id 的唯一性是校验项，
+  而不是 JSON 对象天然保证的。
+- `provider` 的 `models` 是**授权书目**（id / api / base-url / reasoning / input）；`provider-api`
+  导出的 `model-spec` 多出 `name`/`context-window`/`max-tokens`，但授权是唯一目录权威，
+  导出只能收窄（§6.41）。
+
+**手改文件 fail-closed。** `Grants::load_for_at` 在读完文件后统一跑 `validated()`：JSON 解析失败
+按「什么都没授予」处理；某个 key 的策略校验失败时**只清掉该 key**，其余合法授权保留
+（`crates/kiqi-plugin/src/grants.rs:1263-1275,1600-1638`）。宿主使用策略时还会再夹一次
+（例如 render 把越界的 `timeout-ms`/`max-output-bytes` 收敛到上限并打印一句，
+`crates/kiqi-plugin-host/src/lib.rs:3571-3577`），所以手改文件买不到 CLI 会拒绝的策略。
+
+**接口 → grant key 映射。** 导入名、导出名与授权 key 不是同名关系，`grant_key_for_interface`
+是唯一映射（`crates/kiqi-plugin/src/grants.rs:1214-1235`）：
+
+| ABI 面 | grant key |
+|---|---|
+| `provider-http`、`provider-stream`（导入）与 `provider-api`（导出） | `provider` |
+| `oauth-http`（导入）与 `oauth-api`（导出） | `oauth` |
+| `render-api`（导出） | `render` |
+| `resources.json` + `resources/`（包约定，无 WIT 面） | `resources` |
+| `provider-request`（`on-event` 的 `before-provider-request` 通道） | `provider-request` |
+
+裸接口名与 `kiqi:plugin/<name>@<version>` 两种拼写都接受。`GRANTABLE`/`ENFORCED_CAPABILITIES`
+（`crates/kiqi-plugin-host/src/lib.rs:222-305`）与 `Grants` 的 grant/revoke/granted 分支必须同时更新；
+install 的声明扫描也因此分成导入与导出两半（`lib.rs:252-290`）。
+
+**`--yes` 豁免清单。** 安装时 `--yes` 从不自动授予这五个 key：
+`AUTO_GRANT_EXEMPT = [oauth, provider, render, resources, provider-request]`
+（`crates/kiqi-cli/src/plugin_cli.rs:1263-1278,1772-1785`）。原因是它们的策略无法从 import 名推导：
+oauth 要精确 IdP profile，provider 要书目/端点/凭据句柄，render/resources 要 kind 与预算，
+provider-request 要 observe/patch 开关。用户必须显式执行
+`ki plugin grant <id> <capability> ...`（`plugin_cli.rs:1227-1238`）；`--yes` 对
+`net-http`/`fs`/`exec`/`proc`/`net-sockets` 的行为不变。install 的 `oauth`/`provider` 发现调用
+在 deny-all 实例上做，有界（条目/字节/时间/燃料上限），任意超限即放弃发现并安装零授权。
+
+**仍然不对称的同意面（业主决定，0.8.0 不修）。** 本轮给 `before-provider-request` 的观察加了
+`provider-request` 授权，但 `probe`/`verdict.replace`、`before-agent-start` 的系统提示替换、
+以及 `session-read`/`session-control`/`inject`/`ui` 仍不需要 grant。这是明知的遗留差异，
+记录在此以免被误读成「所有敏感面都已授权」。
+
+**O17 残余风险：exec/fs/net-sockets 与 provider/oauth 并存。** host attribution 只保证
+**没有任何 token 跨过 WASM ABI**，不保证插件整体拿不到凭据：`exec` 只对裸命令名做 allow-list、
+参数原样传递（`crates/kiqi-plugin-host/src/lib.rs:1182-1206`），所以同时持有 `exec` 的插件仍可
+`cat` 认证存储；`fs`/`net-sockets` 同理从别的通道出去。O17 的裁决是**授权时警告而非拒绝**
+（拒绝会误伤需要 `fs` 缓存的合法 provider 插件）；0.8.0 只做到「不拒绝」，授权时的告警
+尚未落地。警告本身也不改变爆炸半径——这里如实记录为残余风险，而不是声称
+「token 永远不会离开宿主」。
+
+### 6.40 宿主归因 OAuth：token 不进沙箱，URL 不由 guest 提供
+
+`oauth` 的基本取舍：**guest 是流程控制器，宿主拥有端点、HTTP、凭据存储与展示**。
+读 token 的请求一律由宿主发出，guest 只推进流程步骤。原因不是洁癖：如果让 guest 自己用
+`net-http` 访问 IdP，token 就落在沙箱里，而外泄边界会变成插件的**另一份** `net-http` 授权
+（可能是 `*`），与 OAuth 授权本身无关。
+
+WIT 面因此没有 `oauth-credential` 类型，只有 `oauth-credential-status`
+（`expires-at: s64`，`0` 表示无已知过期时间；`plugins/kiqi-plugin.wit:210-215`）。
+token 材料没有任何跨边界的类型可走。
+
+**guest 不提供 URL。** `oauth-action.begin(string)` 的字符串是授权码流的 PKCE `code_challenge`
+（恰好 43 个 base64url 字符），设备码流传空串（`plugins/kiqi-plugin.wit:218-224`）。
+`oauth-interaction.url` 由宿主依据 grant profile 构造；guest 返回的 `url` 被显式忽略
+（`crates/kiqi-cli/src/wasm_oauth.rs:172-176`）。设备码流的 `verification_uri`/`user_code`
+也由宿主从自己发出的 device-authorization 响应里解析并展示，`device_code` 从不进入沙箱。
+
+| 流 | 步骤（`ki auth login`，`wasm_oauth.rs:157-245`） |
+|---|---|
+| authorization-code | 宿主生成 PKCE verifier/challenge → `action(begin(challenge))` 取 guest 的文案提示 → 宿主用 grant 的 `client-id`/scope/`S256` 与固定 OOB redirect 构造授权 URL → 用户粘贴授权码 → 宿主在 token 端点交换（`crates/kiqi-plugin-host/src/oauth.rs:603-632`）→ 写入命名空间 key |
+| device-code | 宿主 `action(begin(""))` → 宿主向 grant 的 device-authorization 端点请求（`oauth.rs:461-527`）→ 打印 `verification_uri`/`user_code` → 宿主轮询 token 端点，遵守 `interval`（夹取 1..=60 秒）与 `expires_in`（`oauth.rs:536-590`） |
+
+**`oauth-http` 只有两个函数**：`token-request`（授权码兑换；表单白名单保留 `device_code`
+以完整表达标准 OAuth 响应，但设备码轮询在 `ki auth` 里由宿主完成，guest 拿不到 device code）
+与 `revoke`（`plugins/kiqi-plugin.wit:523-542`）。这是相对早期草案的收窄：
+草案里的 `device-authorization` 导入被删掉，因为设备授权与轮询整体移到宿主后，guest 再拿到
+`device_code` 只会重开残余秘密面。`token-request` 的 `form` 是字符串 JSON，键只允许
+`grant_type`、`code`、`code_verifier`、`redirect_uri`、`scope`、`device_code`；
+`client_id` 从 grant 取，`client_secret` 直接拒绝（`crates/kiqi-plugin-host/src/oauth.rs:28-40`）。
+返回只有 `oauth-token-outcome::{stored(oauth-credential-status), failed(string)}`，
+原始 token 响应体从不回传。
+
+**凭据存储。** 插件 OAuth token 写在 `plugin:<install-id>:<provider-id>`
+（`crates/kiqi-cli/src/config.rs:380-400`）。命名空间本身就是隔离：插件即使把 provider id
+写成 `anthropic`，也只能落到 `plugin:<id>:anthropic`，碰不到裸的 `anthropic` 条目。
+`upsert_credential` 保持原样（`ki auth login` 与 `/login` 的重新登录必须能覆盖同一 provider）；
+因此「不覆盖裸条目」的保证来自 key 前缀，而不是写路径的全局拒绝。`ki auth refresh` 与
+`ki auth logout` 是纯宿主操作：refresh token 从 `auth.json` 直达 IdP；logout 先 revoke，
+成功后才删除命名空间 key，失败则保留本地凭据（`wasm_oauth.rs:247-300`）。
+
+**残余秘密与诚实的边界。** 在 `ki auth` 的实现里 verifier 与 `device_code` 都在宿主，
+guest 只收到 challenge；如果某个 guest 选择自己调 `token-request` 完成 `exchange`，
+授权码会经过 guest，但 token 仍不回传。另需如实说明：0.8.0 存储的插件 OAuth token
+**尚未被任何请求路径消费**——`stored_api_key` 只匹配 `ApiKey`
+（`crates/kiqi-cli/src/provider.rs:1060-1069`），所以这一轮恢复的是 `ki auth` 的能力对等，
+不是模型调用链路的 OAuth 支持。
+
+### 6.41 provider：grant 是唯一书目，专用实例，受控 HTTP 与带索引的流
+
+**书目权威。** `provider` grant 的 `models` 是唯一目录权威；`provider-api.list-providers`
+只是**建议性**元数据，用于两件事：安装时发现（deny-all 实例上调用，有界），以及加载时交叉核对。
+有效书目是**交集**：guest 声明但 grant 没有的 model 被忽略；grant 授予但 guest 没有声明的
+model 在加载时拒绝并给出一条诊断。`provider-api.request` 的请求绑定 grant 里的 model id；
+宿主在返回的 assistant message 上用 grant 覆盖 `provider`/`model`/`api`，guest 不能冒充别的模型。
+`model-spec.api` 必须解析成 typed `Api`（`faux` 与未知值在授权校验时就被拒绝，
+`crates/kiqi-plugin/src/grants.rs:568-600`）。`provider-api` 与 `provider-stream`/`provider-http`
+都映射到同一个 `provider` key（§6.39），`provider-stream` 不单独授权。
+
+**专用实例。** provider 调用跑在独立的 `ProviderHost` 上：同一 Component、独立的
+`Engine`/`Store`，只安装 provider 授权，没有工具能力、没有 UI/session。这样一次数分钟的生成
+不会占着工具调用、`on_event` 与快捷键查询共用的实例锁。调用期间 `CallContext.kind` 是
+`ProviderRequest`，它同时是下面两个门的判据。取消沿用 `proc.cancel-requested`
+（WIT:462-500），语义从「当前工具调用」扩宽为「当前 guest 调用」。
+
+**`provider-http` 是请求过滤器，不是通用 HTTP 客户端。**
+`open(request-json) -> handle`、`read(handle, max-bytes) -> option<list<u8>>`（`none` = EOF）、
+`close(handle)`（`plugins/kiqi-plugin.wit:567-577`）。一次请求必须**同时**匹配 grant 的
+`scheme`（必须 `https`）、`host`（精确、无通配）、`path-prefix` 与 `methods`；任何一项不匹配
+返回 `denied` 且**不建立连接**——不是「匹配才注入凭据、其余照常发」。路径在比较前缀前按
+RFC 3986 归一（先把 `%2e` 大小写不敏感地解码，再消 dot segment，再折叠 `//`），query 不参与
+匹配；`path-prefix` 为 `/` 等于整台主机，契约要求带凭据的 grant 拒绝这种写法
+（当前 `validate` 只检查它以 `/` 开头，尚未拒绝单斜杠）。重定向一律拒绝（重定向会逃出已匹配路径）。宿主在发出前剥离 guest 提供的
+`Host`、`Content-Length`、`Transfer-Encoding`、`Connection`、`Authorization`、`x-api-key`、
+`x-goog-api-key`、`proxy-authorization`、`cookie`、`api-key`、`x-auth-token`、
+`cf-aig-authorization`，只为自己匹配的请求注入宿主持有的凭据；响应受总字节上限约束，
+读取超时与取消检查在块之间进行。句柄表属于 provider 实例自己的 `Store`，在
+`new`/`list_specs`/`request`/`unload`+`Drop` 四个入口进出时回收；一次调用结束后旧句柄失效，
+`CallKind != ProviderRequest` 时导入直接返回 `denied`。
+
+**`provider-stream` 有 call-kind 门。** `emit`/`emit-batch` 只有在
+`CallContext.kind == ProviderRequest` 时才有效，否则是 no-op 加一条诊断
+（`plugins/kiqi-plugin.wit:554-564`）。delta 是
+`provider-delta {kind: text|thinking|tool-call, phase: start|delta|end, content-index: u32, text}`：
+`content-index` 让两个并发 tool call、以及 thinking 与 text 的两条流可以区分；`start` 由宿主在
+第一个 delta 前合成，`end` 的 tool-call 携带完整的 `{id, name, arguments}` JSON，返回值是唯一的
+终态消息。
+
+**凭据句柄与指纹。** grant 里只有不透明句柄（`pc-…`），值不在 `grants.json`
+（`crates/kiqi-plugin/src/grants.rs:656-674`）。用户执行
+`ki plugin grant <id> provider --credential-from auth-json:<pid>` 时，宿主解析来源、把
+`{source, provider, display, fingerprint}` 写入 `plugins/<id>/credentials.json`（0600，
+在 fs jail 之外），grant 只保留句柄（`crates/kiqi-cli/src/plugin_cli.rs:129-230`）。
+授权提示与 `ki plugin show` 展示解析后的 display name/来源/指纹前缀，从不展示值。契约要求
+每次使用都重新读取值并重算指纹，和授权时不一致就拒绝——这把「用户换过 key」变成显式失败，
+而不是拿旧句柄继续跑（校验随 provider 运行时一并接线）。
+
+**落地边界（本提交时）。** WIT、授权 schema/校验、CLI 的 `--credential-from` 与句柄文件已经
+在树里；宿主侧 `provider-http` 目前仍是返回 `denied` 的桩
+（`crates/kiqi-plugin-host/src/lib.rs:836-853`），provider 书目注入与 `WasmProvider` 适配器
+（§6.41 的运行时部分）尚未接线。因此在 P5 之前，grant 可以写、guest 可以被发现，但一个
+provider 请求还发不出去；这不是契约缺口，而是实现阶段边界。
+
+### 6.42 render：deny-all 实例、仅定稿转换、输出上限与超时语义
+
+**只保留一个函数。** `render-api.transform-markdown(markdown) -> result<string, plugin-error>`：
+纯文本到文本，没有主题、没有消息/entry renderer 导出（`plugins/kiqi-plugin.wit:579-584`）。
+宿主负责主题、清洗、调度、缓存，以及运行它的实例。
+
+**deny-all 实例。** `RenderHost` 不是 `WasmPlugin`：它有自己的 `Engine`（打开 epoch 中断）、
+自己的 `Store`（`Grants::default()`），从不调用 `install_context`，调用跑在刚 spawn 的
+`std::thread` 上，`CURRENT` 线程局部为空，并有 debug 断言钉住
+（`crates/kiqi-plugin-host/src/lib.rs:3499-3637,3670-3695`）。因此 `session-read`/`ui`/`inject`/
+`exec` 等即使没有 grant 门，也在结构上不可达——它们没有 `HostCaps`。epoch 是 Engine 级开关，
+deadline 是 Store 级；所有 Engine 都经 `wasmtime_config` 构造，保证 macOS Mach-port 设置进程一致。
+进程级 ticker 每 `RENDER_TICK_MS = 10` ms 推进所有活跃 render Engine 的 epoch
+（`lib.rs:3421-3495`）。
+
+**仅定稿转换。** `AssistantMessageComponent::transform_markdown` 在 `is_streaming` 为真时直接
+返回原文，**根本不咨询 transformer**；`finalize(blocks)` 先把 streaming 置 false，再重建一次；
+`set_streaming(false)` 在 true→false 的边沿也只重建一次
+（`crates/kiqi-tui/src/assistant_message.rs:78-152,391-415`）。CLI 侧还有一层
+`(plugin id, 文本 hash)` 缓存（上限 128 条），同一条定稿文本的重复重建不会二次调用 guest
+（`crates/kiqi-cli/src/plugins.rs:1586-1695`）。定稿调用点统一走 `finalize`
+（`crates/kiqi-cli/src/interactive_tui/run.rs:135`、`crates/kiqi-cli/src/transcript_view.rs:201,288`）。
+这直接回答了流式路径的 O(n²) 成本：**delta 期间 0 次 guest 调用，每条定稿消息恰好 1 次**。
+
+**输出上限与清洗。** grant 的 `max-output-bytes` 默认 1 MiB、上限 8 MiB
+（`crates/kiqi-plugin/src/grants.rs:808-811`）。宿主先剥掉 CSI/OSC/两字节 ANSI 转义，
+再把仍存在的 C0/C1（换行/制表除外）当作硬错误，最后在 UTF-8 字符边界截断
+（`crates/kiqi-plugin-host/src/lib.rs:3762-3774`；控制字符判定见 `:3821`）。
+任何失败（guest Err、trap、超时、控制字符）都保留原文并记一条诊断；trap 会禁用本会话的
+renderer（`lib.rs:3705-3730`、`plugins.rs:1679-1690`）。
+
+**超时语义与实现值。** 一个 transform 的 deadline 默认 **2000 ms**、上限 **10 s**
+（`grants.rs:802-805`）。宿主把毫秒数向上取整成 epoch tick 数（至少 1 tick）后
+`set_epoch_deadline`，所以实际粒度是 10 ms；超时表现为 guest 被 epoch 中断，走「失败→原文」
+路径。这个取值与早期 spec 草案的 **50..2000 ms** 不同，理由记录如下：
+
+- 早期范围是按「每个 delta 可能调用一次」估的，50 ms 是给流式路径的延迟预算；
+  定稿制让每消息只调用一次，per-delta 预算不再有意义。
+- 真实 markdown renderer（语法高亮、树解析）在长消息上远超 50 ms；2 s 默认值把超时定位为
+  **存活兜底**而不是性能预算。上限 10 s 给大消息留余量，同时仍能保证 TUI 不会永久卡住。
+- 早期草案里的 `max-input-bytes` 与 `debounce-ms` 没有落地：输入大小由会话消息本身约束，
+  定稿一次调用也使去抖失去对象。0.8.0 的 `render` grant 只有
+  `kinds`/`timeout-ms`/`max-output-bytes` 三个字段。
+
+### 6.43 resources：`resources.json` 包约定、安装期摘要与 first-wins 顺序
+
+`resources` 没有 WIT 面，也没有运行时导出。它是**包约定**：guest crate 在
+`plugin.wasm` 旁带 `resources.json`、`resources/<kind>/…`，`ki insmod` 复制它们并写
+`resources.sha256`（`crates/kiqi-cli/src/plugins.rs:1705-1740,1930-1990`）。
+`resources.json` 的形状就是 `ResourcesGrant`（kinds / max-items / max-bytes）：
+manifest 是**包声明**，grant 是**用户授权**，实际加载取两者交集
+（`plugins.rs:1811-1840,2100-2145`）。
+
+安装期校验：
+
+- manifest 必须是普通文件（symlink 拒绝），未知 kind 或越界 cap 是**安装错误**，不是静默收窄；
+- `resources/` 树逐项拒绝 symlink、绝对路径与 `..`；
+- `resources.sha256` 记录每个文件的摘要，**manifest 自己也在内**——安装后手改 kinds/caps 会像
+  手改 skill 一样失败；
+- 文件数/总字节同时受 manifest 与 grant 的 cap 约束，取两者较小值；`resources.sha256` 列出
+  包外文件即安装错误。
+
+解析与顺序（`crates/kiqi-cli/src/session.rs:619-700`、`crates/kiqi-cli/src/plugins.rs:2165-2200`）：
+
+- 只处理 `plugins/<id>/plugin.wasm` 存在、且持有 `resources` 授权的包；没有 grants 的目录跳过；
+- grant 的 `kinds` 决定哪一类被交给 loader（只授 `skills` 时不会加载 prompts）；
+- 插件目录在启动与 `/reload` 两处都**追加在最后**。`load_skills_with_precedence` 与
+  `load_prompt_templates_with_precedence` 按名字 **first-wins** 去重
+  （`crates/kiqi-cli/src/resource_dirs.rs:247-284`），所以内建/项目资源永远赢过插件资源，
+  未来重排也不能让插件遮蔽内建；冲突仍会产出 `ResourceDiagnostic`。
+- 主题（themes）被丢弃：它们被收集但没有消费者，`ThemeManager` 是 preset 驱动的；
+- `/reload` 会重读 grants 与包 manifest，但**不会重建 wasm host**
+  （`compiled_plugin_hosts` 是 `OnceLock`），新安装插件的资源目录会被重读，工具仍需重启；
+- 绝不扫描 `plugins/<id>/data/`——那是 guest 可写的 fs jail，资源必须来自宿主校验过的包树。
+
+### 6.44 类型化命令面、`event.input` 与 `event-action.patch`
+
+**`command-result` 与 `continue-command`。** `run-command` 不再返回裸字符串，而是
+`command-result {flow-id: string, body: command-result-body}`；body 是
+`message(string) | selector(selector-spec) | editor(editor-spec) | prompt(prompt-spec)`。
+`continue-command(name, flow-id, reply)` 接收
+`command-reply {selected(string), submitted(string), cancelled}`
+（`plugins/kiqi-plugin.wit:322-343,601-607`）。`flow-id` 是防串线的关键：命令调用已被移到
+独立线程（TUI 键循环不得阻塞在 guest 上），没有 flow id 时，一个迟到的 selector 回复会打到
+下一次命令上。
+
+TUI 侧是一个显式状态机（`crates/kiqi-cli/src/interactive_tui/plugin_commands.rs:71-230`，
+入口 `commands.rs:884-900`）：
+
+- `execute` 只 spawn，立即返回；pending 槽记录 `{host, name, flow-id, kind}`；
+- selector/editor/prompt 返回时槽位生效；回复携带 flow-id，宿主在**调用 guest 之前**校验
+  host/name/flow-id/kind，未知或过期一律拒绝；
+- 同一命令再次执行会替换旧槽（旧回复随即变成 stale）；
+- Esc 发送 `cancelled` 并清槽；message 类结果经现有 TUI 消息通道
+  `add_note_message` + `request_render` 显示。
+
+命令返回的每个字符串在渲染或写入编辑器缓冲区前都过宿主清洗：ANSI 剥离、C0/C1（换行/制表除外）
+拒绝、selector 最多 64 项、单项/标题/占位符 1 KiB、selector 总量 64 KiB、editor 预填 256 KiB、
+message 256 KiB；selector/editor/prompt 的 `flow-id` 为空直接判错
+（`crates/kiqi-plugin-host/src/lib.rs:3177-3265`）。
+
+**`cli-flag` 带值与声明域。** `session-read.cli-flag(name) -> option<flag-value>`，
+`flag-value {bare, text(string)}`（`plugins/kiqi-plugin.wit:345-350,365`）。这修掉旧实现把
+JSON Bool 丢掉的问题：裸 `--foo` 现在是 `bare`，带值标志是 `text`。读取是**声明域**的：
+`HostState` 在实例化后缓存一次 `list-flags`（`plugin_id` + `declared_flags`），
+`cli-flag` 先检查名字是否在调用插件自己的声明里，不在就返回 `none`
+（`crates/kiqi-plugin-host/src/lib.rs:682-690,781-795,2399-2420`）。因此一个插件读不到邻居
+插件的 flag；这条收紧不需要 grant，也是 0.8.0 的默认（不需要额外选择）。
+
+**`event.input`。** `event` 新增 `input(input-event)`；`input-event {key, kind, ctrl, alt,
+shift}`，`kind ∈ {press, repeat, release}`（`plugins/kiqi-plugin.wit:154-157,290-303`）。
+宿主把 `EventTag::Input`（u32 32，`crates/kiqi-plugin/src/lib.rs:466`）映射成这个类型；
+缺失字段退化为中性值而不是丢事件（`crates/kiqi-plugin-host/src/lib.rs:3356-3384,3412`）。
+旧 guest 的 `on_event` 若用 `_`/`if let`/`matches!` 分支则不受影响。
+
+**`event-action.patch`：唯一的改写通道，且只在 provider gate 生效。**
+`event-action` 新增 `patch(string)`（`plugins/kiqi-plugin.wit:168-177`）。它**只**对
+`before-provider-request` 且发生在 provider gate 时生效；其他任何 tag 返回的 `Patch` 都被忽略
+（`crates/kiqi-plugin-host/src/lib.rs:2513-2521`；gate 见 `:2533-2580`）。这也是对 §6.23 的修订：
+那一节写的是「全局 sink 没有返回值，编译期/wasm 插件永远无法 claim，也没有改写通道」——
+0.8.0 起 `patch` 是**事件通道上**唯一的改写概念，但 observe/claiming 漏斗仍不消费它，
+`Patch` 不会把事件变成 `Claimed`。
+
+补丁是**整包校验**的：任一键/值违规就拒绝整个补丁，请求按未打补丁继续，并记一条诊断。
+固定表（`crates/kiqi-plugin-host/src/provider_patch.rs:30-70,77-190`）：
+
+| 项 | 限制 |
+|---|---|
+| 信封 | 只能是 JSON 对象，序列化后 ≤ 32 KiB；顶层只接受下列键，未知键与不可补丁键都整包拒绝 |
+| `headers` | ≤ 32 项；名字非空且 ≤ 128 B，小写后命中拒绝表即整包拒绝（插入与删除都命中）；值只接受字符串或 `null`（`null` = 删除），字符串 ≤ 2048 B；序列化后 ≤ 16 KiB |
+| `metadata` | ≤ 64 项；键非空且 ≤ 128 B；值只接受字符串或 `null`；字符串 ≤ 2048 B；序列化后 ≤ 16 KiB |
+| `timeoutMs` | 整数 1000..=900000，且不超过 provider grant 的最紧预算 |
+| `maxTokens` | 整数 1..=262144 |
+| `temperature` | 有限数，0.0..=2.0 |
+| 不可补丁 | `sessionId`、`cacheRetention`、`maxRetries`、`maxRetryDelay` |
+
+拒绝表（大小写不敏感，插入/删除都算）：`authorization`、`x-api-key`、`x-goog-api-key`、
+`api-key`、`x-auth-token`、`cf-aig-authorization`、`cookie`、`proxy-authorization`、`host`、
+`content-length`、`transfer-encoding`、`content-type`（`provider_patch.rs:49-63`）。
+`null` 表示删除 map 项，与 `SimpleStreamOptionsPatch` 的 inner-`None` 语义一致；
+插件不能靠「先删后加」绕过凭据头保护。
+
+**provider-request 的投递面。** `provider-request` 授权决定两件事：`observe` 是否投递脱敏事件
+（默认 `none`），以及 `patch: true` 是否接受补丁。观察载荷保留 `model`/`provider`/`baseUrl`/
+`reasoning`/`timeoutMs`/`metadata`/`maxTokens`/`temperature` 与 `headerNames`，并做三处替换：
+`apiKey` 换成 `apiKeyPresent`（布尔）；header 值只有 `headers: values` 才以 `headerValues` 出现，
+否则删除所有带值的键；`messages` 只有 `messages: full` 才保留，默认删除并补一个 `messageCount`
+（`crates/kiqi-plugin-host/src/lib.rs:3302-3355`）。一个 patch-capable host **只**被 provider gate
+调用，observe-only host **只**被观察漏斗调用，无授权则两者都不调用——每个请求对每个 host
+恰好一次调用，避免同一事件扇两遍。
