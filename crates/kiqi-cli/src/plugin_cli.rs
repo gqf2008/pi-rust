@@ -571,12 +571,46 @@ fn grant_into(args: &[String], root: Option<&Path>) -> i32 {
         return 1;
     }
     println!("granted `{}` to {}", parsed.capability, parsed.id);
+    if let Some(warning) = credential_capability_warning(&grants, &parsed.capability, &parsed.id) {
+        eprintln!("{warning}");
+    }
     if let (Some(old), Some(new)) = (old_exec.as_ref(), grants.exec.as_ref()) {
         if let Some(note) = exec_reset_note(old, &given_options, new) {
             eprintln!("{note}");
         }
     }
     0
+}
+
+/// The residual O17 risk made visible: a plugin that already holds exec, fs or
+/// raw sockets can read `auth.json` (and every `plugin:*` token) directly, so
+/// granting it `oauth`/`provider` does not actually keep the credential out of
+/// its reach. The grant still goes through — this is a warning, not a refusal —
+/// and names the cleanup commands.
+fn credential_capability_warning(grants: &Grants, capability: &str, id: &str) -> Option<String> {
+    if capability != "oauth" && capability != "provider" {
+        return None;
+    }
+    let mut held = Vec::new();
+    if grants.exec.is_some() {
+        held.push("exec");
+    }
+    if grants.fs.is_some() {
+        held.push("fs");
+    }
+    if grants.net_sockets.is_some() {
+        held.push("net-sockets");
+    }
+    if held.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "warning: `{id}` already holds {}; that can read auth.json and every stored plugin \
+         token, so granting `{capability}` does not keep the credential out of its reach \
+         (revoke it with `ki plugin revoke {id} exec|fs|net-sockets`; clear a stored token \
+         with `ki auth logout --provider <provider>`)",
+        held.join("/"),
+    ))
 }
 
 /// Apply one parsed grant. The five policy-shaped keys build their structured
@@ -857,6 +891,11 @@ fn exec_reset_note(
 }
 
 fn revoke(args: &[String]) -> i32 {
+    revoke_into(args, None)
+}
+
+/// [`revoke`] against an explicit agent root (the test seam).
+fn revoke_into(args: &[String], root: Option<&Path>) -> i32 {
     let parsed = match parse_target(args) {
         Ok(parsed) => parsed,
         Err(code) => return code,
@@ -869,17 +908,153 @@ fn revoke(args: &[String]) -> i32 {
         eprintln!("error: `revoke` takes no flags (it clears the whole capability)");
         return 2;
     }
-    let mut grants = Grants::load_for(&parsed.id);
+    let Some(root) = resolve_root(root) else {
+        eprintln!("error: cannot resolve the agent directory");
+        return 1;
+    };
+    let mut grants = Grants::load_for_at(&root, &parsed.id);
+    // Revoking `oauth` must also take the tokens away. Clearing the grant alone
+    // leaves a live refresh token in auth.json that no command can reach any
+    // more (`ki auth logout` needs a grant to find the provider). Attempt the
+    // IdP revocation while the profile is still known, then delete the
+    // namespaced entry whether or not the endpoint answered.
+    if parsed.capability == "oauth" {
+        #[cfg(feature = "plugin-wasm")]
+        let report = revoke_oauth_credentials(&root, &parsed.id, grants.oauth.as_ref(), None);
+        #[cfg(not(feature = "plugin-wasm"))]
+        let report = revoke_oauth_credentials(&root, &parsed.id, grants.oauth.as_ref());
+        for provider in &report.removed {
+            println!("removed stored OAuth credential for `{provider}`");
+        }
+        for failure in &report.failures {
+            eprintln!(
+                "warning: could not revoke OAuth credential ({failure}); \
+                 the local credential was removed anyway"
+            );
+        }
+    }
     if let Err(error) = grants.revoke(&parsed.capability) {
         eprintln!("error: {error}");
         return 2;
     }
-    if let Err(error) = Grants::save_for(&parsed.id, &grants) {
+    if let Err(error) = Grants::save_for_at(&root, &parsed.id, &grants) {
         eprintln!("error: {error}");
         return 1;
     }
     println!("revoked `{}` from {}", parsed.capability, parsed.id);
     0
+}
+
+/// What one `revoke oauth` did to the stored credentials.
+#[derive(Default)]
+struct OAuthRevocation {
+    /// Provider ids whose namespaced entry was deleted.
+    removed: Vec<String>,
+    /// Remote/local failures, already worded for the user.
+    failures: Vec<String>,
+}
+
+/// Delete the namespaced credential(s) named by an `oauth` grant, attempting
+/// host-side revocation for every provider that still has a stored token.
+///
+/// The local delete is unconditional: a failing IdP endpoint must not leave a
+/// token on disk that no CLI command can reach once the grant is gone.
+#[cfg(feature = "plugin-wasm")]
+fn revoke_oauth_credentials(
+    root: &Path,
+    install_id: &str,
+    grant: Option<&OAuthGrant>,
+    transport: Option<&dyn kiqi_plugin_host::OAuthTransport>,
+) -> OAuthRevocation {
+    let default;
+    let transport = match transport {
+        Some(transport) => transport,
+        None => {
+            default = kiqi_plugin_host::default_transport();
+            &*default
+        }
+    };
+    revoke_oauth_credentials_with(root, install_id, grant, transport)
+}
+
+/// [`revoke_oauth_credentials`] against an injected transport (the test seam).
+#[cfg(feature = "plugin-wasm")]
+fn revoke_oauth_credentials_with(
+    root: &Path,
+    install_id: &str,
+    grant: Option<&OAuthGrant>,
+    transport: &dyn kiqi_plugin_host::OAuthTransport,
+) -> OAuthRevocation {
+    let mut report = OAuthRevocation::default();
+    let Some(grant) = grant else {
+        return report;
+    };
+    for profile in &grant.providers {
+        let stored = match crate::config::read_plugin_oauth_token_at(root, install_id, &profile.id)
+        {
+            Ok(Some(crate::config::Credential::Oauth {
+                access,
+                refresh,
+                expires,
+            })) => Some(kiqi_plugin_host::StoredOAuthToken {
+                access,
+                refresh,
+                expires,
+            }),
+            Ok(_) => None,
+            Err(error) => {
+                report
+                    .failures
+                    .push(format!("read the credential for `{}`: {error}", profile.id));
+                None
+            }
+        };
+        if let Some(token) = &stored {
+            if profile.revocation_endpoint.is_some() {
+                let mut budget = kiqi_plugin_host::OAuthRequestBudget::for_grant(grant);
+                if let Err(error) =
+                    kiqi_plugin_host::revoke_stored_token(profile, token, &mut budget, transport)
+                {
+                    report
+                        .failures
+                        .push(format!("`{}` at the IdP: {error}", profile.id));
+                }
+            }
+        }
+        match crate::config::delete_plugin_oauth_token_at(root, install_id, &profile.id) {
+            Ok(true) => report.removed.push(profile.id.clone()),
+            Ok(false) => {}
+            Err(error) => report.failures.push(format!(
+                "remove the local credential for `{}`: {error}",
+                profile.id
+            )),
+        }
+    }
+    report
+}
+
+/// Without the wasm tier there is no host transport; the tokens still must go.
+#[cfg(not(feature = "plugin-wasm"))]
+fn revoke_oauth_credentials(
+    root: &Path,
+    install_id: &str,
+    grant: Option<&OAuthGrant>,
+) -> OAuthRevocation {
+    let mut report = OAuthRevocation::default();
+    let Some(grant) = grant else {
+        return report;
+    };
+    for profile in &grant.providers {
+        match crate::config::delete_plugin_oauth_token_at(root, install_id, &profile.id) {
+            Ok(true) => report.removed.push(profile.id.clone()),
+            Ok(false) => {}
+            Err(error) => report.failures.push(format!(
+                "remove the local credential for `{}`: {error}",
+                profile.id
+            )),
+        }
+    }
+    report
 }
 
 /// Flags for the five policy-shaped keys. Kept apart from the value-list
@@ -1756,17 +1931,15 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
 
     // Only capabilities this plugin declares that are not already granted need a
     // decision, so an update that does not grow the set never re-prompts.
+    //
+    // `resources` is treated exactly like the other declared capabilities: the
+    // package's `resources.json` is a declaration, never an authorization, so
+    // install must not write a grant for it. It is in `AUTO_GRANT_EXEMPT`, which
+    // means a fresh install asks for an explicit `ki plugin grant`. Because an
+    // existing policy is left untouched, a reinstall can neither widen a
+    // narrowed grant nor resurrect one the user revoked.
     let mut grants = Grants::load_for_at(&root, &id);
-    // The resources grant is recorded from the verified package manifest, not
-    // from an import scan: `resources.json` is the declaration, install has
-    // just checked kinds/caps/digests, and a bare `{}` manifest therefore
-    // means the documented defaults (both kinds). `--yes` still cannot invent
-    // a policy for the five policy-shaped keys; this one is package metadata.
     let mut grants_changed = false;
-    if let Some(prepared) = &prepared_resources {
-        grants.resources = Some(prepared.policy().clone());
-        grants_changed = true;
-    }
     let already = grants.granted();
     let new_caps: Vec<&String> = declared
         .iter()
@@ -1823,9 +1996,6 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
             eprintln!("error: {error}");
             return 1;
         }
-    }
-    if prepared_resources.is_some() && !granted_now.iter().any(|cap| cap == "resources") {
-        granted_now.push("resources".to_string());
     }
     if !explicit_caps.is_empty() {
         eprintln!(
@@ -1923,7 +2093,20 @@ fn uninstall_into(args: &[String], root: Option<&Path>) -> i32 {
         eprintln!("error: move {}: {error}", dir.display());
         return 1;
     }
+    // The directory is gone, so nothing can use or re-discover these tokens;
+    // leaving them in auth.json would strand live credentials with no CLI path
+    // to remove them (the grant that named their provider is gone too).
+    let removed = match crate::config::delete_plugin_credentials_at(&root, id) {
+        Ok(count) => count,
+        Err(error) => {
+            eprintln!("error: remove stored credentials for `{id}`: {error}");
+            return 1;
+        }
+    };
     println!("uninstalled `{id}` (moved to {})", backup.display());
+    if removed > 0 {
+        println!("removed {removed} stored credential(s)");
+    }
     0
 }
 
@@ -2788,46 +2971,51 @@ mod tests {
             "the credential value must never be printed:\n{text}"
         );
     }
-    /// `ki insmod` copies a package's `resources/` beside `plugin.wasm`,
-    /// records one digest per file, and records the manifest's policy as the
-    /// `resources` grant (the manifest is the authorization basis).
-    #[cfg(feature = "plugin-wasm")]
-    #[test]
-    fn install_copies_package_resources_and_records_the_grant() {
-        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let wasm = build_guest(&workspace.join("plugins/wasm/kiqi-conformance-guest"))
-            .expect("build the conformance guest");
-
-        let source = tempfile::tempdir().unwrap();
-        std::fs::copy(&wasm, source.path().join("plugin.wasm")).unwrap();
-        std::fs::create_dir_all(source.path().join("resources/skills/demo")).unwrap();
+    /// Write a minimal package that declares `kinds` and ships one skill.
+    fn write_resources_package(dir: &std::path::Path, kinds: &str) {
+        std::fs::write(dir.join("plugin.wasm"), synthetic_component(&[], &[])).unwrap();
+        std::fs::create_dir_all(dir.join("resources/skills/demo")).unwrap();
         std::fs::write(
-            source.path().join("resources.json"),
-            r#"{"kinds":["skills"],"max-items":4,"max-bytes":4096}"#,
+            dir.join("resources.json"),
+            format!(r#"{{"kinds":{kinds},"max-items":4,"max-bytes":4096}}"#),
         )
         .unwrap();
         std::fs::write(
-            source.path().join("resources/skills/demo/SKILL.md"),
+            dir.join("resources/skills/demo/SKILL.md"),
             "---\nname: demo\ndescription: demo\n---\nbody\n",
         )
         .unwrap();
+    }
 
-        let agent = tempfile::tempdir().unwrap();
-        let root = agent.path();
-        let code = install_into(
+    fn install_resources_package(
+        source: &std::path::Path,
+        root: &std::path::Path,
+        id: &str,
+    ) -> i32 {
+        install_into(
             &[
-                source.path().join("plugin.wasm").display().to_string(),
+                source.join("plugin.wasm").display().to_string(),
                 "--id".into(),
-                "res".into(),
+                id.into(),
                 "--yes".into(),
-                "--host".into(),
-                "127.0.0.1".into(),
-                "--command".into(),
-                "echo".into(),
             ],
             Some(root),
-        );
-        assert_eq!(code, 0);
+        )
+    }
+
+    /// The package manifest is a declaration, not an authorization: a
+    /// non-interactive `--yes` install copies the tree but records no
+    /// `resources` grant. `resources` is in `AUTO_GRANT_EXEMPT`, so only an
+    /// explicit `ki plugin grant` authorizes it.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn install_without_consent_leaves_no_resources_grant() {
+        let source = tempfile::tempdir().unwrap();
+        write_resources_package(source.path(), r#"["skills"]"#);
+        let agent = tempfile::tempdir().unwrap();
+        let root = agent.path();
+
+        assert_eq!(install_resources_package(source.path(), root, "res"), 0);
 
         let package = root.join("plugins/res");
         assert!(package.join("resources/skills/demo/SKILL.md").is_file());
@@ -2840,10 +3028,51 @@ mod tests {
         );
 
         let grants = Grants::load_for_at(root, "res");
-        let resources = grants.resources.as_ref().expect("resources recorded");
+        assert!(
+            grants.resources.is_none(),
+            "install must not write a grant the user did not approve: {:?}",
+            grants.resources
+        );
+    }
+
+    /// An explicit grant is the authorization; only then does the verified
+    /// tree resolve into the session.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn explicit_resources_grant_resolves_the_installed_tree() {
+        let source = tempfile::tempdir().unwrap();
+        write_resources_package(source.path(), r#"["skills"]"#);
+        let agent = tempfile::tempdir().unwrap();
+        let root = agent.path();
+
+        assert_eq!(install_resources_package(source.path(), root, "res"), 0);
+        assert_eq!(
+            grant_into(
+                &[
+                    "res".into(),
+                    "resources".into(),
+                    "--kind".into(),
+                    "skills".into()
+                ],
+                Some(root)
+            ),
+            0
+        );
+
+        let package = root.join("plugins/res");
+        let grants = Grants::load_for_at(root, "res");
+        let resources = grants.resources.as_ref().expect("resources granted");
         assert_eq!(resources.kinds, vec!["skills"]);
-        assert_eq!(resources.max_items, 4);
-        assert_eq!(resources.max_bytes, 4096);
+        // The explicit grant carries the CLI's budgets, not the package's
+        // declared ones: the manifest is not the authorization.
+        assert_eq!(
+            resources.max_items,
+            kiqi_plugin::grants::RESOURCES_MAX_ITEMS_DEFAULT
+        );
+        assert_eq!(
+            resources.max_bytes,
+            kiqi_plugin::grants::RESOURCES_MAX_BYTES_DEFAULT
+        );
 
         let resolved = crate::plugins::resolve_package_resources(&package, resources)
             .expect("the install output resolves");
@@ -2853,6 +3082,284 @@ mod tests {
         // Integrity: tampering after install drops the whole package.
         std::fs::write(package.join("resources/skills/demo/SKILL.md"), "tampered").unwrap();
         assert!(crate::plugins::resolve_package_resources(&package, resources).is_err());
+    }
+
+    /// Revoking a resources grant and reinstalling the same package must not
+    /// resurrect it: the manifest is declaration only, never consent.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn reinstall_after_revoke_keeps_resources_revoked() {
+        let source = tempfile::tempdir().unwrap();
+        write_resources_package(source.path(), r#"["skills"]"#);
+        let agent = tempfile::tempdir().unwrap();
+        let root = agent.path();
+
+        assert_eq!(install_resources_package(source.path(), root, "res"), 0);
+        assert_eq!(
+            grant_into(
+                &[
+                    "res".into(),
+                    "resources".into(),
+                    "--kind".into(),
+                    "skills".into()
+                ],
+                Some(root)
+            ),
+            0
+        );
+        assert!(Grants::load_for_at(root, "res").resources.is_some());
+        assert_eq!(
+            revoke_into(&["res".into(), "resources".into()], Some(root)),
+            0
+        );
+        assert!(Grants::load_for_at(root, "res").resources.is_none());
+
+        assert_eq!(install_resources_package(source.path(), root, "res"), 0);
+        assert!(
+            Grants::load_for_at(root, "res").resources.is_none(),
+            "a reinstall must not resurrect a revoked grant"
+        );
+    }
+
+    /// A reinstall whose manifest grows the declared kinds must not widen a
+    /// grant the user narrowed: the existing policy is left untouched.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn reinstall_does_not_widen_a_narrowed_resources_grant() {
+        let source = tempfile::tempdir().unwrap();
+        write_resources_package(source.path(), r#"["skills"]"#);
+        let agent = tempfile::tempdir().unwrap();
+        let root = agent.path();
+
+        assert_eq!(install_resources_package(source.path(), root, "res"), 0);
+        assert_eq!(
+            grant_into(
+                &[
+                    "res".into(),
+                    "resources".into(),
+                    "--kind".into(),
+                    "skills".into()
+                ],
+                Some(root)
+            ),
+            0
+        );
+
+        // The package now declares both kinds; reinstall must leave the
+        // narrowed `skills`-only grant exactly as the user set it.
+        write_resources_package(source.path(), r#"["skills","prompts"]"#);
+        assert_eq!(install_resources_package(source.path(), root, "res"), 0);
+        let grants = Grants::load_for_at(root, "res");
+        assert_eq!(
+            grants.resources.as_ref().expect("still granted").kinds,
+            vec!["skills"],
+            "a reinstall must not widen the user's grant"
+        );
+    }
+
+    /// A transport that never reaches the IdP, for the "revocation failed"
+    /// branch.
+    #[cfg(feature = "plugin-wasm")]
+    #[derive(Debug)]
+    struct FailingTransport;
+
+    #[cfg(feature = "plugin-wasm")]
+    impl kiqi_plugin_host::OAuthTransport for FailingTransport {
+        fn post_form(
+            &self,
+            _url: &str,
+            _form: &[(String, String)],
+            _timeout: std::time::Duration,
+        ) -> Result<kiqi_plugin_host::HttpResponse, String> {
+            Err("connection refused".to_string())
+        }
+    }
+
+    /// `revoke oauth` clears the grant *and* the namespaced token; a bare
+    /// provider credential is untouched. (A profile without a revocation
+    /// endpoint makes no network call.)
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn revoke_oauth_deletes_the_namespaced_credential() {
+        let agent = tempfile::tempdir().unwrap();
+        let fixtures = tempfile::tempdir().unwrap();
+        let root = agent.path();
+        let (_, profile) = write_provider_fixtures(root, fixtures.path());
+        assert_eq!(
+            grant_into(
+                &[
+                    "acme".into(),
+                    "oauth".into(),
+                    "--provider".into(),
+                    "acme".into(),
+                    "--profile".into(),
+                    profile.display().to_string(),
+                ],
+                Some(root)
+            ),
+            0
+        );
+
+        let mut store = crate::config::read_auth_at(root).unwrap();
+        store.insert(
+            crate::config::plugin_credential_key("acme", "acme"),
+            crate::config::Credential::Oauth {
+                access: "at-secret".to_string(),
+                refresh: "rt-secret".to_string(),
+                expires: 123,
+            },
+        );
+        crate::config::write_auth_at(root, &store).unwrap();
+
+        assert_eq!(revoke_into(&["acme".into(), "oauth".into()], Some(root)), 0);
+
+        let grants = Grants::load_for_at(root, "acme");
+        assert!(grants.oauth.is_none(), "the grant is cleared");
+        let after = crate::config::read_auth_at(root).unwrap();
+        assert!(
+            after
+                .get(&crate::config::plugin_credential_key("acme", "acme"))
+                .is_none(),
+            "the namespaced token must be gone: {after:?}"
+        );
+        assert!(
+            after.contains_key("anthropic"),
+            "a bare provider credential is never touched: {after:?}"
+        );
+    }
+
+    /// A failed IdP revocation still removes the local credential, and the
+    /// failure is reported rather than swallowed.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn revoke_oauth_failure_still_removes_the_local_credential() {
+        let agent = tempfile::tempdir().unwrap();
+        let root = agent.path();
+        let fixtures = tempfile::tempdir().unwrap();
+        let profile = fixtures.path().join("oauth.json");
+        std::fs::write(
+            &profile,
+            r#"{
+  "id": "acme",
+  "scopes": ["read"],
+  "flows": ["authorization-code"],
+  "authorization-endpoint": "https://auth.example.com/authorize",
+  "token-endpoint": "https://auth.example.com/token",
+  "revocation-endpoint": "https://auth.example.com/revoke",
+  "client-id": "client-123"
+}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            grant_into(
+                &[
+                    "acme".into(),
+                    "oauth".into(),
+                    "--provider".into(),
+                    "acme".into(),
+                    "--profile".into(),
+                    profile.display().to_string(),
+                ],
+                Some(root)
+            ),
+            0
+        );
+
+        let mut store = crate::config::AuthStore::new();
+        store.insert(
+            crate::config::plugin_credential_key("acme", "acme"),
+            crate::config::Credential::Oauth {
+                access: "at-secret".to_string(),
+                refresh: "rt-secret".to_string(),
+                expires: 123,
+            },
+        );
+        crate::config::write_auth_at(root, &store).unwrap();
+
+        let grants = Grants::load_for_at(root, "acme");
+        let report =
+            revoke_oauth_credentials_with(root, "acme", grants.oauth.as_ref(), &FailingTransport);
+        assert_eq!(report.removed, vec!["acme".to_string()]);
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|failure| failure.contains("IdP")),
+            "the failure must be reported: {:?}",
+            report.failures
+        );
+        let after = crate::config::read_auth_at(root).unwrap();
+        assert!(
+            after
+                .get(&crate::config::plugin_credential_key("acme", "acme"))
+                .is_none(),
+            "the local credential is deleted despite the failure: {after:?}"
+        );
+    }
+
+    /// `uninstall` deletes every `plugin:<install>:` credential and nothing
+    /// else, so no live token is stranded once the grant that named it is gone.
+    #[test]
+    fn uninstall_removes_every_namespaced_credential() {
+        let agent = tempfile::tempdir().unwrap();
+        let root = agent.path();
+        std::fs::create_dir_all(root.join("plugins/foo")).unwrap();
+        assert!(root.join("plugins/foo").is_dir());
+
+        let mut store = crate::config::AuthStore::new();
+        for (key, access) in [
+            ("plugin:foo:acme", "at-acme"),
+            ("plugin:foo:other", "at-other"),
+            ("plugin:bar:acme", "at-other-plugin"),
+            ("anthropic", "sk-live"),
+        ] {
+            store.insert(
+                key.to_string(),
+                crate::config::Credential::Oauth {
+                    access: access.to_string(),
+                    refresh: "rt".to_string(),
+                    expires: 1,
+                },
+            );
+        }
+        crate::config::write_auth_at(root, &store).unwrap();
+
+        assert_eq!(uninstall_into(&["foo".into()], Some(root)), 0);
+
+        let after = crate::config::read_auth_at(root).unwrap();
+        assert!(!after.contains_key("plugin:foo:acme"), "{after:?}");
+        assert!(!after.contains_key("plugin:foo:other"), "{after:?}");
+        assert!(after.contains_key("plugin:bar:acme"), "{after:?}");
+        assert!(after.contains_key("anthropic"), "{after:?}");
+    }
+
+    /// Granting `oauth`/`provider` to a plugin that already holds exec (or fs,
+    /// or raw sockets) warns that those can read the credential store; other
+    /// capabilities and a clean plugin produce no warning.
+    #[test]
+    fn credential_grants_warn_when_the_plugin_can_read_auth_json() {
+        let mut grants = Grants::default();
+        assert!(
+            credential_capability_warning(&grants, "oauth", "p").is_none(),
+            "nothing held: no warning"
+        );
+        grants
+            .grant("exec", vec!["cat".to_string()], GrantOptions::default())
+            .unwrap();
+        let warning = credential_capability_warning(&grants, "oauth", "p").expect("warning");
+        for expected in ["p", "exec", "auth.json", "oauth", "ki plugin revoke"] {
+            assert!(
+                warning.contains(expected),
+                "missing {expected:?}: {warning}"
+            );
+        }
+        assert!(
+            credential_capability_warning(&grants, "fs", "p").is_none(),
+            "a non-credential capability is not this warning's subject"
+        );
+        assert!(credential_capability_warning(&grants, "provider", "p")
+            .expect("provider warns too")
+            .contains("provider"));
     }
 
     /// An unknown resource kind aborts the install before the component is

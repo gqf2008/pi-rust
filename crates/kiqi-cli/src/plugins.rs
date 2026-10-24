@@ -1745,7 +1745,11 @@ pub(crate) struct PreparedPackageResources {
 }
 
 impl PreparedPackageResources {
-    /// The policy the manifest declares — what install records as the grant.
+    /// The policy the manifest declares. This is the package's *declaration*,
+    /// not an authorization: install never writes it as a grant (the user's
+    /// explicit `ki plugin grant <id> resources` does that), and `--yes` cannot
+    /// auto-grant it because `resources` is in `AUTO_GRANT_EXEMPT`.
+    #[allow(dead_code)] // read by the install tests; kept beside the data it describes
     pub(crate) fn policy(&self) -> &ResourcesGrant {
         &self.policy
     }

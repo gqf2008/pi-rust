@@ -313,7 +313,13 @@ pub type AuthStore = BTreeMap<String, Credential>;
 /// Read the auth store. Missing file ⇒ empty store (not an error). Malformed
 /// JSON ⇒ `ConfigError::Json` (we do not silently swallow a corrupt auth file).
 pub fn read_auth() -> Result<AuthStore, ConfigError> {
-    let path = auth_path()?;
+    read_auth_at(&agent_dir()?)
+}
+
+/// [`read_auth`] against an explicit agent directory (the test/CLI seam used by
+/// `ki plugin revoke`/`uninstall`, which already resolve their root).
+pub fn read_auth_at(root: &Path) -> Result<AuthStore, ConfigError> {
+    let path = root.join("auth.json");
     match read_text_with_fallback(path, None)? {
         Some((path, text)) => {
             serde_json::from_str(&text).map_err(|source| ConfigError::Json { path, source })
@@ -325,9 +331,13 @@ pub fn read_auth() -> Result<AuthStore, ConfigError> {
 /// Atomically write the whole auth store (ensures the dir exists, writes a
 /// temp sibling, `rename`s over the target, then `chmod 0o600` on Unix).
 pub fn write_auth(store: &AuthStore) -> Result<(), ConfigError> {
-    let path = auth_path()?;
-    let dir = agent_dir()?;
-    ensure_dir(&dir)?;
+    write_auth_at(&agent_dir()?, store)
+}
+
+/// [`write_auth`] against an explicit agent directory.
+pub fn write_auth_at(root: &Path, store: &AuthStore) -> Result<(), ConfigError> {
+    let path = root.join("auth.json");
+    ensure_dir(root)?;
     let json = serde_json::to_string_pretty(store).unwrap();
     atomic_write(&path, json.as_bytes())?;
     set_owner_only(&path);
@@ -441,10 +451,51 @@ pub fn read_plugin_oauth_token(
     })
 }
 
+/// Read one plugin's namespaced OAuth credential from an explicit agent
+/// directory.
+pub fn read_plugin_oauth_token_at(
+    root: &Path,
+    install_id: &str,
+    provider_id: &str,
+) -> Result<Option<Credential>, ConfigError> {
+    Ok(read_auth_at(root)?
+        .get(&plugin_credential_key(install_id, provider_id))
+        .cloned())
+}
+
 /// Remove one plugin's namespaced OAuth credential, leaving every bare
 /// provider entry (and every other plugin's entry) untouched.
 pub fn delete_plugin_oauth_token(install_id: &str, provider_id: &str) -> Result<bool, ConfigError> {
     delete_credential(&plugin_credential_key(install_id, provider_id))
+}
+
+/// [`delete_plugin_oauth_token`] against an explicit agent directory.
+pub fn delete_plugin_oauth_token_at(
+    root: &Path,
+    install_id: &str,
+    provider_id: &str,
+) -> Result<bool, ConfigError> {
+    delete_credential_at(root, &plugin_credential_key(install_id, provider_id))
+}
+
+/// Remove every `plugin:<install-id>:*` credential, returning how many entries
+/// went away. Bare provider keys and other plugins' entries are untouched.
+pub fn delete_plugin_credentials_at(root: &Path, install_id: &str) -> Result<usize, ConfigError> {
+    let prefix = format!("plugin:{install_id}:");
+    let mut store = read_auth_at(root)?;
+    let keys: Vec<String> = store
+        .keys()
+        .filter(|key| key.starts_with(&prefix))
+        .cloned()
+        .collect();
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    for key in &keys {
+        store.remove(key);
+    }
+    write_auth_at(root, &store)?;
+    Ok(keys.len())
 }
 
 /// Remove `provider_id` from the store. Returns `true` if a credential was
@@ -452,9 +503,14 @@ pub fn delete_plugin_oauth_token(install_id: &str, provider_id: &str) -> Result<
 /// the file when the provider existed (so `auth logout` reflects the new state
 /// on disk even if the map isn't empty).
 pub fn delete_credential(provider_id: &str) -> Result<bool, ConfigError> {
-    let mut store = read_auth()?;
+    delete_credential_at(&agent_dir()?, provider_id)
+}
+
+/// [`delete_credential`] against an explicit agent directory.
+pub fn delete_credential_at(root: &Path, provider_id: &str) -> Result<bool, ConfigError> {
+    let mut store = read_auth_at(root)?;
     if store.remove(provider_id).is_some() {
-        write_auth(&store)?;
+        write_auth_at(root, &store)?;
         Ok(true)
     } else {
         Ok(false)
