@@ -662,6 +662,11 @@ impl OAuthGuest for Conformance {
 /// catalog authority; this list can only narrow it.
 const PROVIDER_ID: &str = "conformance";
 const PROVIDER_MODEL: &str = "conformance-model";
+/// The host side of the adapter test drives these by granted model id, so the
+/// production `WasmProvider` envelope (which carries no fixture-only `mode`
+/// field) can exercise streaming and cancellation end to end.
+const PROVIDER_STREAM_MODEL: &str = "conformance-stream";
+const PROVIDER_SLOW_MODEL: &str = "conformance-slow";
 
 /// Wrap one answer in the assistant-message shape the host validates, with
 /// deliberately wrong identity fields: the host must overwrite them.
@@ -690,26 +695,101 @@ fn emit_delta(
     });
 }
 
+fn provider_model_spec(id: &str) -> types::ModelSpec {
+    types::ModelSpec {
+        id: id.to_string(),
+        name: "Conformance Model".to_string(),
+        api: "openai-completions".to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        reasoning: true,
+        input: vec!["text".to_string()],
+        context_window: 8_000,
+        max_tokens: 1_024,
+    }
+}
+
+/// The terminal message for the model-driven streaming fixture. It matches the
+/// deltas emitted above, so a host-side adapter can assert the terminal message
+/// and the live partials describe the same answer.
+fn provider_stream_reply() -> Result<String, types::PluginError> {
+    Ok(serde_json::json!({
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "Hello world"},
+            {"type": "thinking", "thinking": "reasoned"},
+            {"type": "toolCall", "id": "call-1", "name": "conformance", "arguments": {}},
+        ],
+        "provider": "impostor",
+        "model": "impostor",
+        "api": "faux",
+        "stopReason": "tooluse",
+    })
+    .to_string())
+}
+
 impl ProviderGuest for Conformance {
     fn list_providers() -> Vec<types::ProviderSpec> {
         vec![types::ProviderSpec {
             provider_id: PROVIDER_ID.to_string(),
             display_name: "Conformance Provider".to_string(),
-            models: vec![types::ModelSpec {
-                id: PROVIDER_MODEL.to_string(),
-                name: "Conformance Model".to_string(),
-                api: "openai-completions".to_string(),
-                base_url: "https://api.example.test/v1".to_string(),
-                reasoning: true,
-                input: vec!["text".to_string()],
-                context_window: 8_000,
-                max_tokens: 1_024,
-            }],
+            models: vec![
+                provider_model_spec(PROVIDER_MODEL),
+                provider_model_spec(PROVIDER_STREAM_MODEL),
+                provider_model_spec(PROVIDER_SLOW_MODEL),
+            ],
         }]
     }
 
     fn request(request: String) -> Result<String, types::PluginError> {
         let value: serde_json::Value = serde_json::from_str(&request).unwrap_or_default();
+        let model = value
+            .get("model")
+            .and_then(|model| model.as_str())
+            .unwrap_or("");
+        if model == PROVIDER_STREAM_MODEL {
+            emit_delta(types::DeltaKind::Text, types::DeltaPhase::Start, 0, "");
+            emit_delta(types::DeltaKind::Text, types::DeltaPhase::Delta, 0, "Hello");
+            emit_delta(types::DeltaKind::Text, types::DeltaPhase::Delta, 0, " world");
+            emit_delta(types::DeltaKind::Text, types::DeltaPhase::End, 0, "");
+            provider_stream::emit_batch(&[
+                types::ProviderDelta {
+                    kind: types::DeltaKind::Thinking,
+                    phase: types::DeltaPhase::Start,
+                    content_index: 1,
+                    text: String::new(),
+                },
+                types::ProviderDelta {
+                    kind: types::DeltaKind::Thinking,
+                    phase: types::DeltaPhase::End,
+                    content_index: 1,
+                    text: "reasoned".to_string(),
+                },
+            ]);
+            emit_delta(types::DeltaKind::ToolCall, types::DeltaPhase::Start, 2, "");
+            emit_delta(
+                types::DeltaKind::ToolCall,
+                types::DeltaPhase::End,
+                2,
+                r#"{"id":"call-1","name":"conformance","arguments":"{}"}"#,
+            );
+            return provider_stream_reply();
+        }
+        if model == PROVIDER_SLOW_MODEL {
+            // Poll the host's cancel probe the way a real streaming guest
+            // should, so aborting a run winds this down mid-generation.
+            for step in 0..400u32 {
+                if proc::cancel_requested() {
+                    return Err(types::PluginError::Failed("cancelled by host".to_string()));
+                }
+                if step == 0 {
+                    emit_delta(types::DeltaKind::Text, types::DeltaPhase::Start, 0, "");
+                }
+                emit_delta(types::DeltaKind::Text, types::DeltaPhase::Delta, 0, "tick ");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            emit_delta(types::DeltaKind::Text, types::DeltaPhase::End, 0, "");
+            return provider_reply("slow done".to_string());
+        }
         let mode = value
             .get("mode")
             .and_then(|mode| mode.as_str())

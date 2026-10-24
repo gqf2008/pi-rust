@@ -81,6 +81,7 @@ use kiqi_ai::{
 use crate::args::parse_thinking_level;
 use crate::config::{self, Credential, DEFAULT_PROVIDER_ID};
 use crate::settings;
+use crate::wasm_provider::WasmProvider;
 
 /// The default Anthropic model when `--model` is absent. Kept in sync with the
 /// current upstream `defaultModelPerProvider.anthropic` entry.
@@ -304,70 +305,6 @@ impl Provider for UnconfiguredProvider {
     }
 }
 
-/// The runtime handle for a granted plugin provider.
-///
-/// The dedicated `ProviderHost` adapter is wired in the provider-host phase.
-/// Until then a granted plugin model must still be selectable and visible in
-/// `/model`, but a send has to fail closed: falling through to
-/// [`build_runtime`] would build an ordinary HTTP client from the grant's base
-/// URL and send the conversation directly, bypassing the grant-owned
-/// `provider-http` filter and the host-held credential.
-#[derive(Debug)]
-struct GrantedPluginProvider {
-    id: String,
-    models: Vec<Model>,
-}
-
-impl GrantedPluginProvider {
-    fn new(id: impl Into<String>, models: Vec<Model>) -> Self {
-        Self {
-            id: id.into(),
-            models,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl Provider for GrantedPluginProvider {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn models(&self) -> &[Model] {
-        &self.models
-    }
-
-    async fn stream_simple(
-        &self,
-        model: &Model,
-        _ctx: &Context,
-        _opts: &SimpleStreamOptions,
-    ) -> AssistantMessageEventStream {
-        use kiqi_ai::event_stream::create_assistant_message_event_stream;
-        use kiqi_ai::{AssistantMessage, AssistantMessageEvent, ErrorReason, StopReason};
-
-        let (mut producer, stream) = create_assistant_message_event_stream();
-        let message = AssistantMessage::terminal(
-            model.api.clone(),
-            self.id.clone(),
-            model.id.clone(),
-            StopReason::Error,
-            format!(
-                "Plugin provider `{}` is granted, but this build has no wasm provider runtime \
-                 wired yet, so the request was not sent. Reinstall ki or wait for the \
-                 provider adapter to land.",
-                self.id
-            ),
-            now_millis(),
-        );
-        producer.push(AssistantMessageEvent::Error {
-            reason: ErrorReason::Error,
-            error: message,
-        });
-        stream
-    }
-}
-
 fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -522,11 +459,11 @@ fn resolve_with_settings(
     let models_cfg = config::load_models_config()?;
     // ---- Granted plugin providers: read before selection so their ids are
     // valid `--provider` / `provider/id` spellings and their models are authed.
-    let granted_plugins = match agent_root
+    let granted_root: Option<PathBuf> = agent_root
         .map(Path::to_path_buf)
-        .or_else(kiqi_plugin::grants::agent_dir)
-    {
-        Some(root) => granted_plugin_models(&root),
+        .or_else(kiqi_plugin::grants::agent_dir);
+    let granted_plugins = match &granted_root {
+        Some(root) => granted_plugin_models(root),
         None => Vec::new(),
     };
     let granted_plugin_providers: BTreeSet<String> = granted_plugins
@@ -837,16 +774,23 @@ fn resolve_with_settings(
     }
     // A granted plugin provider never goes through `build_runtime`: that would
     // build a keyless direct HTTP client for a model whose requests belong on
-    // the grant-owned `provider-http` channel.
+    // the grant-owned `provider-http` channel. `WasmProvider` creates the
+    // dedicated wasm host lazily, on the first request.
     let (provider, has_provider_key) = if is_granted_plugin {
+        let granted = granted_plugins
+            .iter()
+            .find(|plugin| plugin.id == selected_provider)
+            .expect("a selected granted provider comes from the grant scan");
         (
-            Arc::new(GrantedPluginProvider::new(
-                selected_provider.clone(),
+            Arc::new(WasmProvider::new(
+                granted.id.clone(),
                 full_catalog
                     .iter()
                     .filter(|candidate| candidate.provider == selected_provider)
                     .cloned()
                     .collect(),
+                granted.wasm.clone(),
+                granted_root.clone(),
             )) as Arc<dyn Provider>,
             false,
         )
@@ -925,7 +869,8 @@ fn resolve_with_settings(
         }
     }
     // One runtime handle per granted plugin provider, so
-    // `authenticated_catalog` (and therefore `/model`) sees them.
+    // `authenticated_catalog` (and therefore `/model`) sees them. Each adapter
+    // is independent and compiles nothing until its first request.
     for plugin in &granted_plugins {
         if providers.iter().any(|runtime| runtime.id() == plugin.id) {
             continue;
@@ -935,9 +880,11 @@ fn resolve_with_settings(
             .filter(|candidate| candidate.provider == plugin.id)
             .cloned()
             .collect();
-        providers.push(Arc::new(GrantedPluginProvider::new(
+        providers.push(Arc::new(WasmProvider::new(
             plugin.id.clone(),
             models,
+            plugin.wasm.clone(),
+            granted_root.clone(),
         )));
     }
 
@@ -1151,7 +1098,6 @@ struct GrantedPlugin {
     id: String,
     /// `plugins/<id>/plugin.wasm`, verified through the digest sidecar before
     /// its catalog is surfaced. The provider adapter loads from here.
-    #[allow(dead_code)]
     wasm: PathBuf,
     grant: kiqi_plugin::grants::ProviderGrant,
 }
@@ -3892,6 +3838,57 @@ mod tests {
         Grants::save_for_at(root, id, &grants).unwrap();
     }
 
+    /// Install the real conformance guest under `root/plugins/conformance` with
+    /// a provider grant covering `models`. Unlike [`install_plugin_provider`]
+    /// these bytes are a loadable component, so a test may drive a request.
+    #[cfg(feature = "plugin-wasm")]
+    fn install_real_conformance_provider(root: &Path, models: &[&str]) -> PathBuf {
+        use kiqi_plugin::grants::{
+            Grants, ProviderEndpoint, ProviderGrant, ProviderModel, ProviderProfile,
+            PROVIDER_MAX_HANDLES_DEFAULT, PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
+        };
+
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let built =
+            crate::plugin_cli::build_guest(&workspace.join("plugins/wasm/kiqi-conformance-guest"))
+                .expect("build the conformance guest");
+        let dir = root.join("plugins/conformance");
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm = dir.join("plugin.wasm");
+        std::fs::copy(&built, &wasm).expect("install plugin.wasm");
+        let grant = ProviderGrant {
+            providers: vec![ProviderProfile {
+                id: "conformance".to_string(),
+                display_name: "Conformance Provider".to_string(),
+                models: models
+                    .iter()
+                    .map(|id| ProviderModel {
+                        id: (*id).to_string(),
+                        api: "openai-completions".to_string(),
+                        base_url: "https://api.example.test/v1".to_string(),
+                        reasoning: true,
+                        input: vec!["text".to_string()],
+                    })
+                    .collect(),
+                endpoint: ProviderEndpoint {
+                    scheme: "https".to_string(),
+                    host: "api.example.test".to_string(),
+                    path_prefix: "/v1".to_string(),
+                    methods: vec!["POST".to_string()],
+                },
+                credential: None,
+                auth: None,
+                timeout_seconds: 30,
+                max_response_bytes: PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
+                max_handles: PROVIDER_MAX_HANDLES_DEFAULT,
+            }],
+        };
+        let mut grants = Grants::default();
+        grants.grant_provider(grant).expect("valid provider grant");
+        Grants::save_for_at(root, "conformance", &grants).unwrap();
+        wasm
+    }
+
     /// Install a component directory with no capability grant at all.
     #[cfg(feature = "plugin-wasm")]
     fn install_plugin_without_grants(root: &Path, id: &str) {
@@ -3982,6 +3979,86 @@ mod tests {
         )
         .unwrap();
         assert_eq!(by_provider.model.provider, "acme");
+    }
+
+    /// `/model` is built from `resolved.providers`, so a reload must keep the
+    /// granted plugin adapter in that list. Adapters are per-resolve and lazy:
+    /// resolving compiles nothing, and a second resolve never reuses the first
+    /// adapter's host.
+    #[cfg(feature = "plugin-wasm")]
+    #[tokio::test]
+    async fn granted_plugin_adapters_survive_reload_and_compile_lazily() {
+        let _lock = crate::wasm_provider::HOST_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let env = TestEnv::new();
+        let root = env._tmp.path();
+        install_real_conformance_provider(root, &["conformance-stream"]);
+        crate::wasm_provider::reset_hosts_built();
+
+        let resolve = || {
+            resolve_with_settings(
+                None,
+                Some("conformance/conformance-stream"),
+                None,
+                None,
+                None,
+                settings::Settings::default(),
+                Some(root),
+            )
+            .unwrap()
+        };
+        let first = resolve();
+        let second = resolve();
+        assert_eq!(
+            crate::wasm_provider::hosts_built(),
+            0,
+            "resolve must not compile a provider guest"
+        );
+        assert!(
+            !Arc::ptr_eq(&first.provider, &second.provider),
+            "each resolve owns its own adapter"
+        );
+        for resolved in [&first, &second] {
+            assert!(
+                authenticated_catalog(resolved).iter().any(
+                    |model| model.provider == "conformance" && model.id == "conformance-stream"
+                ),
+                "the /model selector must see the granted model after a reload"
+            );
+        }
+
+        let opts = SimpleStreamOptions::default();
+        let mut stream = first
+            .provider
+            .stream_simple(&first.model, &Context::default(), &opts)
+            .await;
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            crate::wasm_provider::hosts_built(),
+            1,
+            "the first request compiles its own host"
+        );
+
+        // A reload after a successful request still compiles nothing.
+        let third = resolve();
+        assert_eq!(crate::wasm_provider::hosts_built(), 1);
+        assert!(authenticated_catalog(&third)
+            .iter()
+            .any(|model| model.id == "conformance-stream"));
+
+        // The adapter from the second resolve had no host; its first request
+        // builds a fresh one instead of borrowing the first adapter's.
+        let mut stream = second
+            .provider
+            .stream_simple(&second.model, &Context::default(), &opts)
+            .await;
+        while stream.next().await.is_some() {}
+        assert_eq!(
+            crate::wasm_provider::hosts_built(),
+            2,
+            "a second resolve must not reuse the first adapter's host"
+        );
     }
 
     #[cfg(feature = "plugin-wasm")]

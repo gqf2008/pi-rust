@@ -70,7 +70,7 @@ pub use provider_patch::{
 pub mod provider_host;
 pub mod provider_http;
 pub use provider_host::{
-    DeltaKind, DeltaPhase, ProviderHost, ProviderHostOptions, ProviderResponse,
+    DeltaKind, DeltaPhase, ProviderDeltaEvent, ProviderHost, ProviderHostOptions, ProviderResponse,
     ProviderStreamSegment,
 };
 pub use provider_http::{

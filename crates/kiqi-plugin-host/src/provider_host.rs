@@ -55,6 +55,18 @@ pub enum DeltaPhase {
     End,
 }
 
+/// One delta as it arrives, before assembly. This is the live counterpart of
+/// [`ProviderStreamSegment`]: a caller that wants to render while the guest is
+/// still running subscribes to these, and the assembled segments stay the
+/// authoritative end-of-call summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderDeltaEvent {
+    pub kind: DeltaKind,
+    pub phase: DeltaPhase,
+    pub content_index: u32,
+    pub text: String,
+}
+
 /// One assembled content block: all deltas for one `(kind, content-index)`,
 /// concatenated in emission order.
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +131,10 @@ pub(crate) struct DeltaAssembler {
     /// `content-index -> kind`, so one index cannot label two blocks.
     index_kind: HashMap<u32, DeltaKind>,
     error: Option<String>,
+    /// Live mirror of accepted deltas. Only ever called on the guest's thread,
+    /// and only for a delta the assembler accepted, so a subscriber never sees
+    /// a stream the host is about to reject.
+    sink: Option<Box<dyn FnMut(ProviderDeltaEvent) + Send>>,
 }
 
 impl DeltaAssembler {
@@ -137,6 +153,7 @@ impl DeltaAssembler {
             WitDeltaPhase::End => DeltaPhase::End,
         };
         let index = delta.content_index;
+        let text = delta.text;
         match phase {
             DeltaPhase::Start => {
                 if self.by_key.contains_key(&(kind, index)) {
@@ -154,7 +171,7 @@ impl DeltaAssembler {
                 self.segments.push(ProviderStreamSegment {
                     kind,
                     content_index: index,
-                    text: delta.text,
+                    text: text.clone(),
                 });
                 self.by_key.insert((kind, index), (position, true));
             }
@@ -167,7 +184,7 @@ impl DeltaAssembler {
                     self.fail(format!("delta after end for {kind:?} block {index}"));
                     return;
                 }
-                self.segments[position].text.push_str(&delta.text);
+                self.segments[position].text.push_str(&text);
             }
             DeltaPhase::End => {
                 let Some((position, open)) = self.by_key.get(&(kind, index)).copied() else {
@@ -178,9 +195,17 @@ impl DeltaAssembler {
                     self.fail(format!("duplicate end for {kind:?} block {index}"));
                     return;
                 }
-                self.segments[position].text.push_str(&delta.text);
+                self.segments[position].text.push_str(&text);
                 self.by_key.insert((kind, index), (position, false));
             }
+        }
+        if let Some(sink) = &mut self.sink {
+            sink(ProviderDeltaEvent {
+                kind,
+                phase,
+                content_index: index,
+                text,
+            });
         }
     }
 
@@ -484,6 +509,30 @@ impl ProviderHost {
         request: &str,
         cancel: Option<Arc<dyn CancelProbe>>,
     ) -> Result<ProviderResponse, String> {
+        self.request_with_cancel_and_sink(request, cancel, None)
+    }
+
+    /// [`Self::request_with_cancel`] plus a live delta sink.
+    ///
+    /// The sink runs on the provider worker thread and sees only deltas the
+    /// assembler accepted, in emission order. The assembled segments on the
+    /// returned [`ProviderResponse`] remain the end-of-call record; a caller
+    /// that renders live must still treat the final message as terminal.
+    pub fn request_streaming(
+        &self,
+        request: &str,
+        cancel: Option<Arc<dyn CancelProbe>>,
+        sink: Box<dyn FnMut(ProviderDeltaEvent) + Send>,
+    ) -> Result<ProviderResponse, String> {
+        self.request_with_cancel_and_sink(request, cancel, Some(sink))
+    }
+
+    fn request_with_cancel_and_sink(
+        &self,
+        request: &str,
+        cancel: Option<Arc<dyn CancelProbe>>,
+        sink: Option<Box<dyn FnMut(ProviderDeltaEvent) + Send>>,
+    ) -> Result<ProviderResponse, String> {
         if self.disabled.load(Ordering::Acquire) {
             return Err(format!(
                 "{}: provider instance disabled after an earlier failure",
@@ -529,7 +578,10 @@ impl ProviderHost {
                 inner.store.data_mut().provider_http.begin_call();
                 inner.store.data_mut().provider_call = Some(call);
                 inner.store.set_epoch_deadline(ticks);
-                let mut assembler = DeltaAssembler::default();
+                let mut assembler = DeltaAssembler {
+                    sink,
+                    ..DeltaAssembler::default()
+                };
                 let caps = HostCaps {
                     session: None,
                     control: None,
@@ -628,6 +680,13 @@ impl ProviderHost {
                 .cloned()
                 .ok_or_else(|| format!("{}: the grant has no models", self.id)),
         }
+    }
+
+    /// Whether an earlier trap or deadline marked this instance unusable. A
+    /// caller that keeps the adapter across calls should build a fresh instance
+    /// instead of reusing this one.
+    pub fn is_disabled(&self) -> bool {
+        self.disabled.load(Ordering::Acquire)
     }
 
     /// Number of open `provider-http` handles. Used by tests to prove the
