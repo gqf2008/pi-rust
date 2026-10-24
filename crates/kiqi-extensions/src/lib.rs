@@ -96,6 +96,13 @@ pub use registry::{
 };
 pub use resources::{emit_resources_discover, DiscoveredResources};
 pub use status::ExtensionStatusMailbox;
+/// Serialises every test that installs the process-global compiled-event sink.
+///
+/// The sink is one static shared by the whole test binary; two modules testing
+/// it in parallel would otherwise install/clear each other's sink mid-test.
+#[cfg(test)]
+pub(crate) static SINK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 mod panel;
 pub use panel::{ExtensionPanel, PanelAnchor, PanelLayout};
 pub use tool::{PluginToolAdapter, PluginToolHandle, ToolCallContext};

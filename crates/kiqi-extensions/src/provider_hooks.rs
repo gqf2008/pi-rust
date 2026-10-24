@@ -21,7 +21,7 @@ use kiqi_plugin_sdk::EventTag;
 use crate::loader::ExtensionSession;
 use crate::prompt_transform::emit_before_agent_start;
 use crate::registry::RegistrySnapshot;
-use crate::translate::dispatch_data_event;
+use crate::translate::{dispatch_before_provider_request, dispatch_data_event};
 use crate::PluginKeepalive;
 
 /// A [`ProviderHooks`] that dispatches to the registered extension handlers.
@@ -75,7 +75,12 @@ impl ExtensionProviderHooks {
         .iter()
         .any(|t| !snapshot.handlers_for(*t).is_empty());
         let transforms_prompt = !snapshot.before_agent_start().is_empty();
-        if !observes_events && !transforms_prompt {
+        // A wasm-only install has no cdylib handler in the snapshot, but the
+        // compiled/wasm fan-out is still installed and is the observer. Without
+        // this, a sandboxed plugin's provider-request grant would be dead in a
+        // real session (it was only ever exercised by direct host tests).
+        let observes_compiled = crate::compiled::sink_installed();
+        if !observes_events && !transforms_prompt && !observes_compiled {
             return None;
         }
         Some(Self {
@@ -170,7 +175,7 @@ impl ProviderHooks for ExtensionProviderHooks {
             .as_ref()
             .map(|h| h.keys().cloned().collect())
             .unwrap_or_default();
-        let request = serde_json::json!({
+        let mut request = serde_json::json!({
             "model": model.id,
             "provider": model.provider,
             "baseUrl": model.base_url,
@@ -187,11 +192,28 @@ impl ProviderHooks for ExtensionProviderHooks {
             // always null for plugins.
             "messages": ctx.messages,
         });
-        dispatch_data_event(
-            &self.snapshot,
-            EventTag::BeforeProviderRequest,
-            &request.to_string(),
-        );
+        // The redacted form (header names only, never values) goes to cdylib
+        // handlers, which have no grant model. The rich form additionally
+        // carries the header values; the sandboxed host strips them per guest
+        // unless the grant says `headers: values`. Splitting the payload here is
+        // what keeps the source-redaction guarantee for the native tier while
+        // letting a granted wasm observer see values.
+        let redacted = request.to_string();
+        let header_values: serde_json::Map<String, serde_json::Value> = opts
+            .headers
+            .as_ref()
+            .map(|headers| {
+                headers
+                    .iter()
+                    .map(|(name, value)| (name.clone(), serde_json::json!(value)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !header_values.is_empty() {
+            request["headerValues"] = serde_json::Value::Object(header_values);
+        }
+        let rich = request.to_string();
+        let patch = dispatch_before_provider_request(&self.snapshot, &redacted, &rich);
         let headers = serde_json::json!({
             "headerNames": opts
                 .headers
@@ -204,7 +226,7 @@ impl ProviderHooks for ExtensionProviderHooks {
             EventTag::BeforeProviderHeaders,
             &headers.to_string(),
         );
-        None
+        patch.as_ref().and_then(options_patch_from_value)
     }
 
     /// Fan the terminal assistant message out to `AfterProviderResponse`
@@ -217,6 +239,45 @@ impl ProviderHooks for ExtensionProviderHooks {
             &json.to_string(),
         );
     }
+}
+
+/// Convert a host-validated patch JSON into the live options patch.
+///
+/// The wasm host has already enforced the clamp table and the protected-header
+/// deny-list, so this is a mechanical mapping: `null` deletes a map entry.
+/// Returns `None` for an empty patch (nothing to apply).
+fn options_patch_from_value(value: &serde_json::Value) -> Option<SimpleStreamOptionsPatch> {
+    let mut patch = SimpleStreamOptionsPatch::default();
+    let mut any = false;
+    if let Some(map) = value.get("headers").and_then(serde_json::Value::as_object) {
+        let mut out = std::collections::BTreeMap::new();
+        for (name, entry) in map {
+            out.insert(name.clone(), entry.as_str().map(str::to_string));
+        }
+        patch.headers = Some(out);
+        any = true;
+    }
+    if let Some(map) = value.get("metadata").and_then(serde_json::Value::as_object) {
+        let mut out = std::collections::BTreeMap::new();
+        for (name, entry) in map {
+            out.insert(name.clone(), entry.as_str().map(str::to_string));
+        }
+        patch.metadata = Some(out);
+        any = true;
+    }
+    if let Some(ms) = value.get("timeoutMs").and_then(serde_json::Value::as_u64) {
+        patch.timeout = Some(Some(std::time::Duration::from_millis(ms)));
+        any = true;
+    }
+    if let Some(tokens) = value.get("maxTokens").and_then(serde_json::Value::as_u64) {
+        patch.max_tokens = Some(Some(tokens));
+        any = true;
+    }
+    if let Some(temperature) = value.get("temperature").and_then(serde_json::Value::as_f64) {
+        patch.temperature = Some(Some(temperature));
+        any = true;
+    }
+    any.then_some(patch)
 }
 
 /// The `before_agent_start` envelope: what the observer event carries and what
@@ -448,6 +509,102 @@ mod tests {
             "request payload must forward messages: {}",
             requests[0].1
         );
+    }
+
+    /// A host-validated patch maps mechanically onto the live options patch;
+    /// `null` deletes a map entry and an empty patch is "no patch".
+    #[test]
+    fn a_validated_patch_maps_onto_live_options() {
+        let patch = options_patch_from_value(&serde_json::json!({
+            "headers": { "x-trace": "abc", "x-remove": null },
+            "metadata": { "user_id": "u-1" },
+            "timeoutMs": 1500,
+            "maxTokens": 64,
+            "temperature": 0.4,
+        }))
+        .expect("a non-empty patch");
+        let headers = patch.headers.as_ref().expect("headers");
+        assert_eq!(headers.get("x-trace"), Some(&Some("abc".to_string())));
+        assert_eq!(headers.get("x-remove"), Some(&None));
+        assert_eq!(
+            patch.metadata.as_ref().unwrap().get("user_id"),
+            Some(&Some("u-1".to_string()))
+        );
+        assert_eq!(
+            patch.timeout,
+            Some(Some(std::time::Duration::from_millis(1500)))
+        );
+        assert_eq!(patch.max_tokens, Some(Some(64)));
+        assert_eq!(patch.temperature, Some(Some(0.4)));
+
+        assert!(options_patch_from_value(&serde_json::json!({})).is_none());
+    }
+
+    /// The whole bridge: the gate pass runs after the observe pass, its patch
+    /// becomes the live options patch, and the observe payload carries the
+    /// header values the host grades per guest.
+    #[test]
+    fn before_request_returns_the_gate_patch() {
+        let _guard = PROVIDER_LOCK.lock().unwrap();
+        let _sink = crate::SINK_TEST_LOCK.lock().unwrap();
+
+        type Seen = Vec<(crate::compiled::DispatchMode, u32, serde_json::Value)>;
+        let seen: Arc<Mutex<Seen>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        crate::compiled::set_compiled_event_sink(Arc::new(move |mode, tag, payload| {
+            recorder.lock().unwrap().push((mode, tag, payload.clone()));
+            if mode == crate::compiled::DispatchMode::ProviderGate {
+                crate::compiled::CompiledVerdict::Patch(serde_json::json!({ "maxTokens": 64 }))
+            } else {
+                crate::compiled::CompiledVerdict::Continue
+            }
+        }));
+
+        let registry = crate::registry::ExtensionRegistry::new();
+        let hooks = ExtensionProviderHooks {
+            snapshot: Arc::new(registry.snapshot()),
+            _keepalive: Arc::new(crate::PluginKeepalive::new(Vec::new(), None)),
+            last_before_agent_start: Mutex::new(None),
+            last_forced_prompt: Mutex::new(None),
+        };
+        let model = kiqi_ai::Model::new(
+            "m",
+            "m",
+            kiqi_ai::Api::AnthropicMessages,
+            "anthropic",
+            "https://api.anthropic.com",
+        );
+        let ctx = kiqi_ai::Context::default();
+        let mut opts = kiqi_ai::SimpleStreamOptions::default();
+        opts.headers = Some(std::collections::BTreeMap::from([
+            ("Authorization".to_string(), "secret".to_string()),
+            ("x-trace".to_string(), "abc".to_string()),
+        ]));
+
+        let patch = hooks
+            .before_request(&model, &ctx, &opts)
+            .expect("the gate patch");
+        assert_eq!(patch.max_tokens, Some(Some(64)));
+
+        let seen = seen.lock().unwrap();
+        let request_tag = EventTag::BeforeProviderRequest as u32;
+        let rich = seen
+            .iter()
+            .find(|(mode, tag, payload)| {
+                *mode == crate::compiled::DispatchMode::Observe
+                    && *tag == request_tag
+                    && payload.get("headerValues").is_some()
+            })
+            .expect("the rich observe payload");
+        assert_eq!(rich.2["headerValues"]["x-trace"], "abc");
+        assert!(
+            seen.iter().any(|(mode, tag, _)| {
+                *mode == crate::compiled::DispatchMode::ProviderGate && *tag == request_tag
+            }),
+            "the gate pass runs exactly once after the observe pass"
+        );
+        drop(seen);
+        crate::compiled::clear_compiled_event_sink();
     }
 
     /// `dispatch_data_event` fans the JSON to the tag's handlers, and the

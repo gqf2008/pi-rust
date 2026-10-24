@@ -2656,7 +2656,13 @@ impl AgentHarness {
                             if let Some(patch) = hooks.transform_context(&model, &ctx) {
                                 patch.apply(&mut ctx);
                             }
-                            if let Some(patch) = hooks.before_request(&model, &ctx, &opts) {
+                            // The provider gate may wait on a sandboxed guest
+                            // on a plain thread with a wall-clock deadline;
+                            // that wait must not occupy a tokio worker.
+                            let provider_patch = tokio::task::block_in_place(|| {
+                                hooks.before_request(&model, &ctx, &opts)
+                            });
+                            if let Some(patch) = provider_patch {
                                 patch.apply(&mut opts);
                             }
                         }

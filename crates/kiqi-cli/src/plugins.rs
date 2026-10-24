@@ -380,6 +380,12 @@ fn install_compiled_event_sink_locked(caps: OwnedCaps) {
             let Some(tag) = kiqi_plugin::EventTag::from_u32(tag) else {
                 return kiqi_extensions::CompiledVerdict::Continue;
             };
+            if mode == kiqi_extensions::DispatchMode::ProviderGate {
+                return match dispatch_provider_gate(&hosts, &caps, tag, payload) {
+                    Some(patch) => kiqi_extensions::CompiledVerdict::Patch(patch),
+                    None => kiqi_extensions::CompiledVerdict::Continue,
+                };
+            }
             dispatch_to_compiled(&hosts, &caps, tag, payload, mode)
         });
     kiqi_extensions::set_compiled_event_sink(sink);
@@ -488,16 +494,159 @@ pub(crate) fn dispatch_to_compiled(
         // lock while its dialog is open). Claiming fan-out decides control flow
         // and keeps the blocking call.
         let action = match mode {
-            kiqi_extensions::DispatchMode::Observe => host.try_on_event(&event, &caps),
+            kiqi_extensions::DispatchMode::Observe => {
+                // Per-host partition: a patch-capable host is invoked only by
+                // the provider gate, and a host with neither switch granted is
+                // never called. An in-process host (no policy) keeps observing.
+                if let Some(policy) = host.provider_request_policy() {
+                    if policy.patch || !policy.observe {
+                        continue;
+                    }
+                }
+                host.try_on_event(&event, &caps)
+            }
             kiqi_extensions::DispatchMode::Claiming => host.on_event(&event, &caps),
+            // The gate goes through `dispatch_provider_gate`, never this fold.
+            kiqi_extensions::DispatchMode::ProviderGate => continue,
         };
-        // `Replace` counts as claimed: the plugin took the event, but the carried
-        // payload has no host channel to travel down.
-        if !matches!(action, kiqi_plugin::EventAction::Continue) {
-            verdict = kiqi_extensions::CompiledVerdict::Claimed;
+        match action {
+            // A patch is consumed only by the provider gate; on this fan-out it
+            // changes nothing and does not claim the event.
+            kiqi_plugin::EventAction::Patch(_) => {}
+            kiqi_plugin::EventAction::Continue => {}
+            // `Claimed` (and the legacy `Replace`, folded to `Claimed` upstream)
+            // takes the event, but the carried payload has no channel here.
+            kiqi_plugin::EventAction::Claimed => {
+                verdict = kiqi_extensions::CompiledVerdict::Claimed;
+            }
         }
     }
     verdict
+}
+
+/// Run the provider gate: ask only patch-capable hosts, in host order, and
+/// merge their patches.
+///
+/// The gate is a separate pass from the observe fan-out, so each host is called
+/// at most once per request. A host whose patch violates its grant (or a
+/// non-JSON patch) produces one diagnostic and the WHOLE request proceeds
+/// unpatched. A timeout is the same: the slow host has no say, and it is not
+/// retried.
+pub(crate) fn dispatch_provider_gate(
+    hosts: &[std::sync::Arc<PluginHost>],
+    caps: &OwnedCaps,
+    tag: kiqi_plugin::EventTag,
+    payload: serde_json::Value,
+) -> Option<serde_json::Value> {
+    if tag != kiqi_plugin::EventTag::BeforeProviderRequest {
+        return None;
+    }
+    let event = kiqi_plugin::Event::new(tag, payload);
+    let mut merged: Option<serde_json::Value> = None;
+    for host in hosts {
+        let Some(policy) = host.provider_request_policy() else {
+            continue;
+        };
+        if !policy.patch {
+            continue;
+        }
+        match gate_with_deadline(
+            host.clone(),
+            caps.clone(),
+            event.clone(),
+            policy.patch_timeout,
+        ) {
+            Ok(Some(patch)) => merged = Some(merge_patches(merged, patch)),
+            Ok(None) => {}
+            Err(reason) => {
+                tracing::warn!(
+                    plugin = host.id(),
+                    %reason,
+                    "provider patch rejected; request proceeds unpatched"
+                );
+                return None;
+            }
+        }
+    }
+    if let Some(value) = &merged {
+        let size = serde_json::to_vec(value)
+            .map(|bytes| bytes.len())
+            .unwrap_or(0);
+        if size > kiqi_plugin_host::MAX_ENVELOPE_BYTES {
+            tracing::warn!(
+                bytes = size,
+                cap = kiqi_plugin_host::MAX_ENVELOPE_BYTES,
+                "merged provider patch is over the envelope cap; request proceeds unpatched"
+            );
+            return None;
+        }
+    }
+    merged
+}
+
+/// Run one host's gate on a plain thread and wait at most `deadline`.
+///
+/// A plain `std::thread` (no tokio context) matches the `spawn_plugin_call`
+/// rule: a wasm guest's WASI waits panic if the calling thread carries a
+/// runtime. The caller is the harness's provider path, which may itself be on a
+/// tokio worker, so it waits with `recv_timeout` — the request never blocks on
+/// a slow or busy guest past the grant's budget.
+fn gate_with_deadline(
+    host: std::sync::Arc<PluginHost>,
+    caps: OwnedCaps,
+    event: kiqi_plugin::Event,
+    deadline: std::time::Duration,
+) -> Result<Option<serde_json::Value>, String> {
+    let id = host.id().to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name(format!("plugin-gate {id}"))
+        .spawn(move || {
+            let caps = caps.caps();
+            let _ = tx.send(host.provider_gate(&event, &caps));
+        });
+    if let Err(error) = spawned {
+        return Err(format!("could not spawn the provider gate: {error}"));
+    }
+    match rx.recv_timeout(deadline) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            tracing::warn!(
+                plugin = %id,
+                timeout_ms = deadline.as_millis() as u64,
+                "provider gate timed out; request proceeds unpatched"
+            );
+            Ok(None)
+        }
+        // The worker panicked or was dropped: no patch.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(None),
+    }
+}
+
+/// Merge a later host's patch over an earlier one. Scalar keys are replaced;
+/// `headers`/`metadata` maps are merged key-by-key (a later `null` deletes).
+fn merge_patches(base: Option<serde_json::Value>, patch: serde_json::Value) -> serde_json::Value {
+    let Some(mut base) = base else {
+        return patch;
+    };
+    let (Some(base_object), Some(patch_object)) = (base.as_object_mut(), patch.as_object()) else {
+        return patch;
+    };
+    for (key, value) in patch_object {
+        if matches!(key.as_str(), "headers" | "metadata") {
+            if let (Some(target), Some(source)) = (
+                base_object.get_mut(key).and_then(|v| v.as_object_mut()),
+                value.as_object(),
+            ) {
+                for (name, entry) in source {
+                    target.insert(name.clone(), entry.clone());
+                }
+                continue;
+            }
+        }
+        base_object.insert(key.clone(), value.clone());
+    }
+    base
 }
 
 /// The capabilities compiled plugins currently run with.
@@ -953,6 +1102,29 @@ impl PluginHost {
     ) -> kiqi_plugin::EventAction {
         self.guard("on-event", || self.plugin.try_on_event(event, caps))
             .unwrap_or(kiqi_plugin::EventAction::Continue)
+    }
+
+    /// The `provider-request` policy this plugin enforces, if it has one.
+    pub fn provider_request_policy(&self) -> Option<kiqi_plugin::grants::ProviderRequestPolicy> {
+        self.plugin.provider_request_policy()
+    }
+
+    /// Run the provider gate. `Err` means the produced patch was rejected whole
+    /// (the caller then proceeds unpatched); `Ok(None)` means no patch.
+    pub fn provider_gate(
+        &self,
+        event: &kiqi_plugin::Event,
+        caps: &HostCaps<'_>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.plugin.provider_gate(event, caps)
+        })) {
+            Ok(result) => result,
+            Err(_) => {
+                eprintln!("[plugin] {}: provider gate panicked — ignored", self.id);
+                Ok(None)
+            }
+        }
     }
 
     pub fn run_command(
@@ -3590,6 +3762,316 @@ mod tests {
             ),
             kiqi_extensions::CompiledVerdict::Continue,
             "claiming must use the blocking on_event"
+        );
+    }
+
+    // ---- provider-request partition and gate --------------------------------
+
+    #[derive(Default)]
+    struct GateCounts {
+        observe: std::sync::atomic::AtomicUsize,
+        gate: std::sync::atomic::AtomicUsize,
+    }
+
+    struct GateProbe {
+        id: &'static str,
+        policy: Option<kiqi_plugin::grants::ProviderRequestPolicy>,
+        counts: std::sync::Arc<GateCounts>,
+        patch: serde_json::Value,
+        reject: Option<String>,
+        observe_action: kiqi_plugin::EventAction,
+    }
+
+    impl Plugin for GateProbe {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn provider_request_policy(&self) -> Option<kiqi_plugin::grants::ProviderRequestPolicy> {
+            self.policy
+        }
+
+        fn on_event(&self, _: &kiqi_plugin::Event, _: &HostCaps<'_>) -> kiqi_plugin::EventAction {
+            self.counts
+                .observe
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.observe_action.clone()
+        }
+
+        fn try_on_event(
+            &self,
+            _: &kiqi_plugin::Event,
+            _: &HostCaps<'_>,
+        ) -> kiqi_plugin::EventAction {
+            self.counts
+                .observe
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.observe_action.clone()
+        }
+
+        fn provider_gate(
+            &self,
+            _: &kiqi_plugin::Event,
+            _: &HostCaps<'_>,
+        ) -> Result<Option<serde_json::Value>, String> {
+            self.counts
+                .gate
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(reason) = &self.reject {
+                return Err(reason.clone());
+            }
+            Ok((self.patch != serde_json::Value::Null).then(|| self.patch.clone()))
+        }
+    }
+
+    fn gate_policy(
+        observe: bool,
+        patch: bool,
+        timeout_ms: u64,
+    ) -> kiqi_plugin::grants::ProviderRequestPolicy {
+        kiqi_plugin::grants::ProviderRequestPolicy {
+            observe,
+            patch,
+            patch_timeout: std::time::Duration::from_millis(timeout_ms),
+        }
+    }
+
+    fn gate_probe(
+        id: &'static str,
+        policy: Option<kiqi_plugin::grants::ProviderRequestPolicy>,
+        patch: serde_json::Value,
+        reject: Option<&str>,
+        observe_action: kiqi_plugin::EventAction,
+    ) -> (std::sync::Arc<PluginHost>, std::sync::Arc<GateCounts>) {
+        let counts = std::sync::Arc::new(GateCounts::default());
+        let plugin = Box::new(GateProbe {
+            id,
+            policy,
+            counts: counts.clone(),
+            patch,
+            reject: reject.map(str::to_string),
+            observe_action,
+        });
+        (std::sync::Arc::new(PluginHost::new(id, plugin)), counts)
+    }
+
+    /// Per-host partition: patch-capable hosts are invoked only by the gate,
+    /// observe-only hosts only by the fan-out, ungranted hosts by neither — and
+    /// each host is called exactly once per request.
+    #[test]
+    fn provider_request_partition_invokes_each_host_exactly_once() {
+        let caps = empty_caps();
+        let (patch_host, patch_counts) = gate_probe(
+            "patch",
+            Some(gate_policy(false, true, 500)),
+            serde_json::json!({ "maxTokens": 128 }),
+            None,
+            kiqi_plugin::EventAction::Continue,
+        );
+        let (observe_host, observe_counts) = gate_probe(
+            "observe",
+            Some(gate_policy(true, false, 500)),
+            serde_json::Value::Null,
+            None,
+            kiqi_plugin::EventAction::Continue,
+        );
+        let (none_host, none_counts) = gate_probe(
+            "none",
+            Some(gate_policy(false, false, 500)),
+            serde_json::Value::Null,
+            None,
+            kiqi_plugin::EventAction::Continue,
+        );
+        let hosts = vec![patch_host, observe_host, none_host];
+
+        let verdict = dispatch_to_compiled(
+            &hosts,
+            &caps,
+            kiqi_plugin::EventTag::BeforeProviderRequest,
+            serde_json::json!({ "model": "m" }),
+            kiqi_extensions::DispatchMode::Observe,
+        );
+        assert_eq!(verdict, kiqi_extensions::CompiledVerdict::Continue);
+        assert_eq!(
+            patch_counts
+                .observe
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a patch-capable host must not be observed"
+        );
+        assert_eq!(
+            observe_counts
+                .observe
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an observe-only host is observed once"
+        );
+        assert_eq!(
+            none_counts
+                .observe
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a host with neither switch is never called"
+        );
+
+        let patch = dispatch_provider_gate(
+            &hosts,
+            &caps,
+            kiqi_plugin::EventTag::BeforeProviderRequest,
+            serde_json::json!({ "model": "m" }),
+        );
+        assert_eq!(patch, Some(serde_json::json!({ "maxTokens": 128 })));
+        assert_eq!(
+            patch_counts.gate.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the patch-capable host is gated once"
+        );
+        assert_eq!(
+            observe_counts
+                .gate
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an observe-only host is never gated"
+        );
+
+        // Exactly one invocation per request, per host.
+        assert_eq!(
+            patch_counts
+                .observe
+                .load(std::sync::atomic::Ordering::SeqCst)
+                + patch_counts.gate.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            observe_counts
+                .observe
+                .load(std::sync::atomic::Ordering::SeqCst)
+                + observe_counts
+                    .gate
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            none_counts
+                .observe
+                .load(std::sync::atomic::Ordering::SeqCst)
+                + none_counts.gate.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    /// One host's rejected patch drops the whole request patch, including a
+    /// patch an earlier host contributed.
+    #[test]
+    fn one_rejected_patch_leaves_the_request_unpatched() {
+        let caps = empty_caps();
+        let (valid, _) = gate_probe(
+            "valid",
+            Some(gate_policy(false, true, 500)),
+            serde_json::json!({ "temperature": 0.5 }),
+            None,
+            kiqi_plugin::EventAction::Continue,
+        );
+        let (invalid, _) = gate_probe(
+            "invalid",
+            Some(gate_policy(false, true, 500)),
+            serde_json::json!({ "maxTokens": 8 }),
+            Some("protected header"),
+            kiqi_plugin::EventAction::Continue,
+        );
+        assert_eq!(
+            dispatch_provider_gate(
+                &[valid, invalid],
+                &caps,
+                kiqi_plugin::EventTag::BeforeProviderRequest,
+                serde_json::json!({ "model": "m" }),
+            ),
+            None
+        );
+    }
+
+    /// A `Patch` action on the observe fan-out is not a claim and changes
+    /// nothing; the gate ignores any tag other than `before-provider-request`.
+    #[test]
+    fn a_patch_outside_the_gate_changes_nothing() {
+        let caps = empty_caps();
+        let (patch_host, counts) = gate_probe(
+            "patch",
+            Some(gate_policy(true, true, 500)),
+            serde_json::json!({ "maxTokens": 8 }),
+            None,
+            kiqi_plugin::EventAction::Patch(serde_json::json!({ "maxTokens": 8 })),
+        );
+        assert_eq!(
+            dispatch_to_compiled(
+                &[patch_host.clone()],
+                &caps,
+                kiqi_plugin::EventTag::BeforeProviderRequest,
+                serde_json::json!({ "model": "m" }),
+                kiqi_extensions::DispatchMode::Observe,
+            ),
+            kiqi_extensions::CompiledVerdict::Continue,
+            "an observe patch is ignored"
+        );
+        assert_eq!(
+            dispatch_provider_gate(
+                &[patch_host],
+                &caps,
+                kiqi_plugin::EventTag::Context,
+                serde_json::json!({ "tagPatch": { "maxTokens": 8 } }),
+            ),
+            None,
+            "the gate only handles before-provider-request"
+        );
+        assert_eq!(
+            counts.gate.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a non-provider tag must not reach the host at all"
+        );
+    }
+
+    /// The gate deadline is wall-clock: a slow guest has no say, and the host is
+    /// not retried.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn provider_gate_times_out_without_patching_or_retrying() {
+        let wasm = build_guest("kiqi-conformance-guest");
+        let grants = kiqi_plugin::grants::Grants {
+            provider_request: Some(kiqi_plugin::grants::ProviderRequestGrant {
+                observe: kiqi_plugin::grants::ObserveMode::Requests,
+                patch: true,
+                patch_timeout_ms: 100,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants("conformance", &wasm, grants)
+            .expect("load the conformance guest");
+        let host = std::sync::Arc::new(PluginHost::new("conformance", Box::new(plugin)));
+        let caps = OwnedCaps {
+            session: None,
+            control: None,
+            inject: None,
+            ui: None,
+            log: std::sync::Arc::new(Silent),
+        };
+
+        let started = std::time::Instant::now();
+        let patch = dispatch_provider_gate(
+            &[host],
+            &caps,
+            kiqi_plugin::EventTag::BeforeProviderRequest,
+            serde_json::json!({
+                "model": "m",
+                "gatePatch": { "maxTokens": 8 },
+                "gateSpin": true,
+            }),
+        );
+        assert!(patch.is_none(), "a timed-out gate must not patch");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(350),
+            "the deadline must fire well before the guest's 400 ms sleep: {:?}",
+            started.elapsed()
         );
     }
 

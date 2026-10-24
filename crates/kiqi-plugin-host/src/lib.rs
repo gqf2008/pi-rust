@@ -32,11 +32,14 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Mutex;
 
-use kiqi_plugin::grants::{HeadersMode, MessagesMode, ObserveMode};
+use kiqi_plugin::grants::{
+    resolve_provider_request_policy, HeadersMode, MessagesMode, ObserveMode, ProviderRequestPolicy,
+};
 use kiqi_plugin::{
     Block, CommandSpec, Event, EventAction, FlagSpec, HostCaps, Plugin as PluginTrait, PluginError,
     Progress, ProgressSink, ShortcutSpec, ToolOutcome, ToolSpec, Verdict,
 };
+use serde_json::Value;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -47,6 +50,11 @@ use crate::kiqi::plugin::types::{
     ToolCall, ToolResult, ToolResultEvent, Verdict as WitVerdict,
 };
 use crate::Plugin as World;
+
+mod provider_patch;
+pub use provider_patch::{
+    validate_provider_patch, DENIED_HEADERS, MAX_ENVELOPE_BYTES, NON_PATCHABLE_KEYS,
+};
 
 /// The generated world struct is named after the world (`plugin`); alias it so
 /// it does not collide with the `kiqi_plugin::Plugin` trait.
@@ -1928,6 +1936,13 @@ pub struct WasmPlugin {
     component: Component,
     /// Declared surfaces, captured lazily on first use (see [`DeclaredSurfaces`]).
     declared: Mutex<DeclaredSurfaces>,
+    /// The resolved `provider-request` policy (observe / patch / deadline).
+    ///
+    /// Kept beside the instance rather than behind [`Self::inner`]: the event
+    /// fan-out partitions hosts on every provider request, and reading this
+    /// must never wait for a guest that is mid-call (`ask_user` holds that
+    /// mutex while its dialog is open).
+    provider_request: Option<ProviderRequestPolicy>,
     inner: Mutex<Option<Inner>>,
 }
 
@@ -1980,6 +1995,9 @@ impl WasmPlugin {
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
             .map_err(|error| PluginError::Failed(format!("link wasi: {error}")))?;
 
+        // Resolve the provider-request policy before the grants move into the
+        // store: the fan-out needs it without locking the guest.
+        let provider_request = resolve_provider_request_policy(&grants);
         let fs_root = wasm.parent().map(|dir| dir.join("data"));
         let limits = wasmtime::StoreLimitsBuilder::new()
             .memory_size(options.max_memory_bytes.unwrap_or(DEFAULT_MAX_MEMORY_BYTES))
@@ -2056,6 +2074,7 @@ impl WasmPlugin {
                 flags: Some(declared_flag_specs),
                 ..DeclaredSurfaces::default()
             }),
+            provider_request,
             inner: Mutex::new(Some(Inner { store, guest })),
         })
     }
@@ -2101,7 +2120,7 @@ impl WasmPlugin {
         // grants live in the store (that is why this happens here and not in
         // kiqi-extensions, which cannot see them).
         let wit = if event.tag == kiqi_plugin::EventTag::BeforeProviderRequest {
-            match graded_provider_request(event, &inner.store.data().grants) {
+            match graded_provider_request(event, &inner.store.data().grants, false) {
                 Some(wit) => wit,
                 None => return EventAction::Continue,
             }
@@ -2119,12 +2138,11 @@ impl WasmPlugin {
         match result {
             Ok(WitEventAction::Continue) => EventAction::Continue,
             Ok(WitEventAction::Claimed) => EventAction::Claimed,
-            // The 0.8.0 channel is carried through typed, but no host path
-            // consumes it yet: applying a patch belongs to the provider gate,
-            // so every tag currently proceeds unpatched.
-            Ok(WitEventAction::Patch(patch)) => EventAction::Patch(
-                serde_json::from_str(&patch).unwrap_or(serde_json::Value::String(patch)),
-            ),
+            // The patch channel belongs to the provider gate, which calls
+            // [`WasmPlugin::provider_gate`] directly. An observe or claiming
+            // dispatch ignores it: a patch returned for any tag (including
+            // `before-provider-request` on the observe path) changes nothing.
+            Ok(WitEventAction::Patch(_)) => EventAction::Continue,
             Err(trap) => {
                 eprintln!("[kiqi-plugin] {}: on-event trapped: {trap}", self.id);
                 EventAction::Continue
@@ -2134,6 +2152,76 @@ impl WasmPlugin {
 }
 
 impl WasmPlugin {
+    /// Run the provider gate for one `before-provider-request` event.
+    ///
+    /// Deny-by-default: a host whose policy does not grant `patch` is never
+    /// called. The guest sees the same graded (redacted) payload an observer
+    /// would; a returned patch is validated against the clamp table, and any
+    /// violation rejects the WHOLE patch (`Err`) so the request proceeds
+    /// unpatched. A patch for any other tag is ignored.
+    pub fn provider_gate(
+        &self,
+        event: &Event,
+        caps: &HostCaps<'_>,
+    ) -> Result<Option<Value>, String> {
+        if event.tag != kiqi_plugin::EventTag::BeforeProviderRequest {
+            return Ok(None);
+        }
+        let Some(policy) = self.provider_request else {
+            return Ok(None);
+        };
+        if !policy.patch {
+            return Ok(None);
+        }
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.as_mut() else {
+            return Ok(None);
+        };
+        // Gate delivery ignores the observe switch: a patch-only grant must
+        // still see the request it is patching.
+        let Some(wit) = graded_provider_request(event, &inner.store.data().grants, true) else {
+            return Ok(None);
+        };
+        let _context = install_context(None, caps);
+        let result = inner
+            .guest
+            .kiqi_plugin_plugin_api()
+            .call_on_event(&mut inner.store, &wit);
+        clear_context();
+        // A `proc` handle lives for this call and nothing beyond it.
+        inner.store.data_mut().reap_procs();
+        let (grant, provider_budget_ms) = {
+            let grants = &inner.store.data().grants;
+            let budget = grants
+                .provider
+                .as_ref()
+                .map(|grant| grant.effective_timeout_seconds().saturating_mul(1000));
+            (grants.provider_request.clone(), budget)
+        };
+        match result {
+            Ok(WitEventAction::Patch(patch)) => {
+                let Some(grant) = grant else {
+                    return Ok(None);
+                };
+                if !grant.patch {
+                    return Ok(None);
+                }
+                let raw: Value = serde_json::from_str(&patch)
+                    .map_err(|error| format!("{}: provider patch is not JSON: {error}", self.id))?;
+                provider_patch::validate_provider_patch(&raw, provider_budget_ms)
+                    .map(Some)
+                    .map_err(|error| format!("{}: provider patch rejected: {error}", self.id))
+            }
+            // `Continue`/`Claimed` mean "no patch"; `Claimed` does not stop the
+            // request, because only a patch can change it.
+            Ok(_) => Ok(None),
+            Err(trap) => {
+                self.report_guest_error("provider-gate", &trap);
+                Ok(None)
+            }
+        }
+    }
+
     /// `list-commands`, captured on first use.
     fn cached_commands(&self) -> Vec<kiqi_plugin::CommandSpec> {
         if let Some(cached) = self
@@ -2527,6 +2615,16 @@ impl PluginTrait for WasmPlugin {
         self.dispatch_event(&mut guard, event, caps)
     }
 
+    fn provider_request_policy(&self) -> Option<ProviderRequestPolicy> {
+        self.provider_request
+    }
+
+    fn provider_gate(&self, event: &Event, caps: &HostCaps<'_>) -> Result<Option<Value>, String> {
+        // The inherent method is the real one; this is the trait surface the
+        // fan-out dispatcher calls.
+        WasmPlugin::provider_gate(self, event, caps)
+    }
+
     fn shutdown(&self) {
         self.unload();
     }
@@ -2714,8 +2812,9 @@ fn to_wit_tool_call(event: &Event) -> ToolCall {
 ///
 /// * no `provider-request` grant — the grant is the only authorization for
 ///   observation, so a merely-loaded plugin sees nothing;
-/// * `observe` is not `requests` — a grant that was recorded without the
-///   observe switch still delivers nothing.
+/// * the observe fan-out, when `observe` is not `requests`; the provider gate
+///   (`for_gate`) also requires `patch`, so a grant with neither delivers
+///   nothing on either path.
 ///
 /// What crosses the boundary is graded by the same grant:
 ///
@@ -2724,15 +2823,18 @@ fn to_wit_tool_call(event: &Event) -> ToolCall {
 ///   without handing over the conversation;
 /// * header values only with `headers = values`; otherwise any value-bearing
 ///   key is removed and `headerNames` remains. The `kiqi-extensions` bridge
-///   currently emits names only (credentials are redacted at the source), so
-///   `values` has nothing extra to add until that bridge carries values; the
-///   strip here is what keeps a future bridge from leaking them by default.
+///   now emits `headerValues` in its rich payload (the redacted payload for
+///   cdylib handlers still carries names only), and this strip is what keeps a
+///   default grant from receiving them.
 ///
 /// `BeforeProviderHeaders` and `AfterProviderResponse` keep their current
 /// semantics in this phase (deferred: they are not grant-gated yet).
-fn graded_provider_request(event: &Event, grants: &Grants) -> Option<WitEvent> {
+fn graded_provider_request(event: &Event, grants: &Grants, for_gate: bool) -> Option<WitEvent> {
     let grant = grants.provider_request.as_ref()?;
-    if grant.observe != ObserveMode::Requests {
+    // The gate needs the event even when the grant is patch-only; the observe
+    // fan-out requires the observe switch. A grant with neither never delivers.
+    let deliver = grant.observe == ObserveMode::Requests || (for_gate && grant.patch);
+    if !deliver {
         return None;
     }
     let mut payload = event.payload.clone();
@@ -3657,11 +3759,11 @@ mod tests {
         );
 
         let mut grants = Grants::default();
-        assert!(graded_provider_request(&event, &grants).is_none());
+        assert!(graded_provider_request(&event, &grants, false).is_none());
 
         grants.provider_request = Some(kiqi_plugin::grants::ProviderRequestGrant::default());
         assert!(
-            graded_provider_request(&event, &grants).is_none(),
+            graded_provider_request(&event, &grants, false).is_none(),
             "a grant with observe = none delivers nothing"
         );
     }
@@ -3687,7 +3789,7 @@ mod tests {
         });
 
         let Some(WitEvent::BeforeProviderRequest(payload)) =
-            graded_provider_request(&event, &grants)
+            graded_provider_request(&event, &grants, false)
         else {
             panic!("the observe grant must deliver");
         };
@@ -3707,7 +3809,7 @@ mod tests {
             ..kiqi_plugin::grants::ProviderRequestGrant::default()
         });
         let Some(WitEvent::BeforeProviderRequest(payload)) =
-            graded_provider_request(&event, &grants)
+            graded_provider_request(&event, &grants, false)
         else {
             panic!("the observe grant must deliver");
         };
@@ -3731,7 +3833,7 @@ mod tests {
             ..kiqi_plugin::grants::ProviderRequestGrant::default()
         });
         let Some(WitEvent::BeforeProviderRequest(payload)) =
-            graded_provider_request(&event, &grants)
+            graded_provider_request(&event, &grants, false)
         else {
             panic!("the observe grant must deliver");
         };

@@ -688,6 +688,115 @@ fn provider_observation_is_not_delivered_without_a_grant() {
     );
 }
 
+/// Grants for the provider-gate fixture. `patch` is the switch under test;
+/// observation is left off in most cases to prove the gate does not depend on
+/// it (a patch-only grant still sees the request it patches).
+fn gate_grants(patch: bool, timeout_ms: u64) -> Grants {
+    Grants {
+        provider_request: Some(kiqi_plugin::grants::ProviderRequestGrant {
+            observe: kiqi_plugin::grants::ObserveMode::Requests,
+            patch,
+            patch_timeout_ms: timeout_ms,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn gate_event(patch: serde_json::Value) -> Event {
+    Event::new(
+        EventTag::BeforeProviderRequest,
+        serde_json::json!({ "model": "m", "gatePatch": patch }),
+    )
+}
+
+/// A valid patch is returned to the caller (the guarded request path applies
+/// it); the payload is the fixture's `gatePatch` verbatim.
+#[test]
+fn provider_gate_returns_a_validated_patch() {
+    let wasm = fixture_wasm();
+    let plugin =
+        WasmPlugin::load_with_grants("conformance", &wasm, gate_grants(true, 500)).expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let event = gate_event(serde_json::json!({
+        "headers": { "x-trace": "abc" },
+        "metadata": { "user_id": "u-1" },
+        "timeoutMs": 1500,
+        "maxTokens": 4096,
+        "temperature": 0.5,
+    }));
+
+    let patch = plugin
+        .provider_gate(&event, &caps)
+        .expect("a valid patch")
+        .expect("the guest returned a patch");
+    assert_eq!(patch["headers"]["x-trace"], "abc");
+    assert_eq!(patch["metadata"]["user_id"], "u-1");
+    assert_eq!(patch["timeoutMs"], 1500);
+    assert_eq!(patch["maxTokens"], 4096);
+    assert_eq!(patch["temperature"], 0.5);
+}
+
+/// One protected header rejects the WHOLE patch: the valid `maxTokens` next to
+/// it must not be applied alone.
+#[test]
+fn provider_gate_rejects_the_whole_patch_on_one_bad_key() {
+    let wasm = fixture_wasm();
+    let plugin =
+        WasmPlugin::load_with_grants("conformance", &wasm, gate_grants(true, 500)).expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let event = gate_event(serde_json::json!({
+        "maxTokens": 128,
+        "headers": { "Authorization": "secret" },
+    }));
+
+    let error = plugin
+        .provider_gate(&event, &caps)
+        .expect_err("the protected header rejects the patch");
+    assert!(
+        error.to_ascii_lowercase().contains("authorization"),
+        "{error}"
+    );
+}
+
+/// Without the `patch` switch the guest is never asked, even though it would
+/// return a patch for this exact event.
+#[test]
+fn provider_gate_is_denied_without_a_patch_grant() {
+    let wasm = fixture_wasm();
+    let plugin =
+        WasmPlugin::load_with_grants("conformance", &wasm, gate_grants(false, 500)).expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let event = gate_event(serde_json::json!({ "maxTokens": 128 }));
+
+    assert_eq!(plugin.provider_gate(&event, &caps), Ok(None));
+}
+
+/// A patch returned for any other tag is ignored: the gate refuses it on the
+/// tag check, and the observe/claiming dispatch drops the action.
+#[test]
+fn a_patch_for_a_non_provider_tag_is_ignored() {
+    let wasm = fixture_wasm();
+    let plugin =
+        WasmPlugin::load_with_grants("conformance", &wasm, gate_grants(true, 500)).expect("load");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let event = Event::new(
+        EventTag::Context,
+        serde_json::json!({ "tagPatch": { "maxTokens": 7 } }),
+    );
+
+    assert_eq!(plugin.provider_gate(&event, &caps), Ok(None));
+    assert_eq!(
+        plugin.on_event(&event, &caps),
+        EventAction::Continue,
+        "an observe dispatch must not surface a patch"
+    );
+}
+
 /// A `UiApi` that records what the guest asked for and answers dialogs.
 #[derive(Default)]
 struct RecordingUi {

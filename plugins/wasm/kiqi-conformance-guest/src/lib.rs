@@ -529,9 +529,42 @@ impl Guest for Conformance {
         // Claim one lifecycle event so the host test can assert the action
         // channel, and claim the declared `f8` shortcut so the typed `Input`
         // event path (key/kind/modifiers) is exercised end to end.
+        //
+        // The provider gate fixture is driven entirely by the request payload:
+        // `gatePatch` is the patch to return, `gateSpin` makes the guest slow
+        // (the host's deadline must let the request proceed unpatched). A
+        // `tagPatch` on any other tag proves the host ignores a patch outside
+        // `before-provider-request`.
         match event {
             types::Event::BeforeAgentStart(_) => types::EventAction::Claimed,
             types::Event::Input(input) if input.key == "f8" => types::EventAction::Claimed,
+            types::Event::BeforeProviderRequest(payload) => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                    return types::EventAction::Continue;
+                };
+                if value
+                    .get("gateSpin")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    // Long enough that the host's deadline fires first; the
+                    // late result must be discarded, not applied.
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                }
+                match value.get("gatePatch") {
+                    Some(patch) => types::EventAction::Patch(patch.to_string()),
+                    None => types::EventAction::Continue,
+                }
+            }
+            types::Event::Other(other) if other.kind == "Context" => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&other.payload) else {
+                    return types::EventAction::Continue;
+                };
+                match value.get("tagPatch") {
+                    Some(patch) => types::EventAction::Patch(patch.to_string()),
+                    None => types::EventAction::Continue,
+                }
+            }
             _ => types::EventAction::Continue,
         }
     }

@@ -19,17 +19,23 @@ use serde_json::Value;
 
 /// What the compiled plugins decided about one event.
 ///
-/// Deliberately a *claim* channel, mirroring the native ABI's
-/// `EVENT_HANDLER_CLAIMED` / `0`: the host has nowhere to deliver a replacement
-/// payload, so `kiqi_plugin::EventAction::Replace` maps to [`Self::Claimed`]
-/// (the plugin took the event) rather than pretending a rewrite can propagate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The claim channel mirrors the native ABI's `EVENT_HANDLER_CLAIMED` / `0`:
+/// `kiqi_plugin::EventAction::Replace` maps to [`Self::Claimed`] (the plugin
+/// took the event) because no rewrite can propagate down the native path.
+///
+/// [`Self::Patch`] is the one mutation channel: it exists only for the
+/// provider gate, which asks patch-capable hosts on their own dispatch and
+/// applies the validated result to the live request options. An observe or
+/// claiming fan-out never consumes it.
+#[derive(Debug, Clone, PartialEq)]
 pub enum CompiledVerdict {
     /// No plugin objected; later handlers still run.
     Continue,
     /// A plugin consumed the event: a routing dispatcher must stop and report it
     /// handled, exactly as a native handler's `CLAIMED` does.
     Claimed,
+    /// A provider-gate patch (already validated by the host that produced it).
+    Patch(Value),
 }
 
 /// Whether a dispatch may wait for a busy plugin.
@@ -41,6 +47,9 @@ pub enum DispatchMode {
     /// Routing fan-out (claiming dispatchers): the verdict decides control
     /// flow, so the call waits — failing open would drop a veto.
     Claiming,
+    /// Provider gate: only patch-capable hosts are invoked, and only they may
+    /// return [`CompiledVerdict::Patch`].
+    ProviderGate,
 }
 
 /// Receives one dispatched event as `(mode, wire tag, JSON payload)` and
@@ -59,6 +68,15 @@ fn sink_slot() -> &'static RwLock<Option<CompiledEventSink>> {
 /// with the session's capabilities captured in the closure.
 pub fn set_compiled_event_sink(sink: CompiledEventSink) {
     *sink_slot().write().unwrap() = Some(sink);
+}
+
+/// Whether a sink is installed (a session build has reached this process).
+///
+/// The provider-hook bridge uses this to install itself for a wasm-only
+/// install: there are no cdylib handlers to subscribe, but the compiled/wasm
+/// fan-out is still a live observer.
+pub fn sink_installed() -> bool {
+    sink_slot().read().unwrap().is_some()
 }
 
 /// Remove the sink, returning the host to no compiled fan-out.
@@ -83,6 +101,15 @@ pub(crate) fn dispatch_observe(event: &StablePluginEvent) -> CompiledVerdict {
 /// for rather than skipped.
 pub(crate) fn dispatch_claiming(event: &StablePluginEvent) -> CompiledVerdict {
     dispatch_with(DispatchMode::Claiming, event)
+}
+
+/// Provider-gate variant: asks only the patch-capable hosts and returns the
+/// merged patch, if any. The caller applies it; an observe fan-out never does.
+pub(crate) fn dispatch_provider_gate(event: &StablePluginEvent) -> Option<Value> {
+    match dispatch_with(DispatchMode::ProviderGate, event) {
+        CompiledVerdict::Patch(value) => Some(value),
+        _ => None,
+    }
 }
 
 fn dispatch_with(mode: DispatchMode, event: &StablePluginEvent) -> CompiledVerdict {
@@ -135,8 +162,8 @@ mod tests {
     use kiqi_plugin_sdk::{EventTag, StbString};
     use std::sync::Mutex;
 
-    /// Serializes the tests in this module; the sink is process-global.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    /// Serializes the sink tests across the crate; the sink is process-global.
+    use crate::SINK_TEST_LOCK as TEST_LOCK;
 
     #[test]
     fn a_sink_observes_data_and_empty_events() {

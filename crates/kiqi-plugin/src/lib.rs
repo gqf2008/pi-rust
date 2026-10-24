@@ -947,6 +947,29 @@ pub trait Plugin: Send + Sync + 'static {
         self.on_event(event, caps)
     }
 
+    /// The `provider-request` policy this host enforces, if it is a sandboxed
+    /// host with grants.
+    ///
+    /// `None` means the host has no grant model (an in-process compiled plugin):
+    /// it keeps the unconditional observe fan-out it has always had. A
+    /// `Some` policy partitions the hosts: `patch: true` hosts are excluded
+    /// from the observe fan-out and invoked only by the provider gate;
+    /// `observe: true` hosts are invoked only by the fan-out; neither means the
+    /// guest is never called.
+    fn provider_request_policy(&self) -> Option<grants::ProviderRequestPolicy> {
+        None
+    }
+
+    /// Decide in front of one provider request, returning a patch to apply.
+    ///
+    /// Called ONLY for `BeforeProviderRequest`, and only on hosts whose policy
+    /// says `patch: true`. The implementation validates the returned patch
+    /// against its grant; a violation is `Err` so the whole patch is dropped
+    /// (the request then proceeds unpatched). `Ok(None)` means "no patch".
+    fn provider_gate(&self, _event: &Event, _caps: &HostCaps<'_>) -> Result<Option<Value>, String> {
+        Ok(None)
+    }
+
     /// Best-effort teardown.
     fn shutdown(&self) {}
 }

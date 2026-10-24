@@ -1082,6 +1082,60 @@ impl ProviderRequestGrant {
         }
         Ok(())
     }
+
+    /// The deadline the host actually applies to one patch decision.
+    ///
+    /// `patch-timeout-ms` is already validated against the provider budget when
+    /// the grant is written, but a hand-edited `grants.json` is not re-validated
+    /// on load: clamp here too, so the guest can never hold the request open
+    /// longer than the provider call it belongs to could run.
+    pub fn effective_patch_timeout_ms(&self, provider_timeout_seconds: Option<u64>) -> u64 {
+        self.patch_timeout_ms
+            .min(provider_patch_timeout_max_ms(provider_timeout_seconds))
+            .max(1)
+    }
+}
+
+/// The policy a sandboxed host enforces for one provider request, resolved from
+/// its `provider-request` grant.
+///
+/// The host keeps this as a snapshot beside the instance (not behind the
+/// per-call mutex), so the event fan-out can partition hosts without waiting
+/// for a busy guest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderRequestPolicy {
+    /// Deliver the redacted request event through the observe fan-out.
+    pub observe: bool,
+    /// Accept a patch from the provider gate. A patch-capable host is invoked
+    /// ONLY by the gate and never by the observe fan-out.
+    pub patch: bool,
+    /// Wall-clock deadline for the gate call.
+    pub patch_timeout: std::time::Duration,
+}
+
+/// Resolve the enforcement snapshot for one plugin's `provider-request` grant.
+///
+/// `None` means neither observation nor patching is authorized: the guest is
+/// never called for a provider request at all. The snapshot is computed once at
+/// load and stored beside the instance, so the fan-out can partition hosts
+/// without taking the per-call guest mutex.
+pub fn resolve_provider_request_policy(grants: &Grants) -> Option<ProviderRequestPolicy> {
+    let grant = grants.provider_request.as_ref()?;
+    let observe = grant.observe == ObserveMode::Requests;
+    if !observe && !grant.patch {
+        return None;
+    }
+    let provider_timeout = grants
+        .provider
+        .as_ref()
+        .map(ProviderGrant::effective_timeout_seconds);
+    Some(ProviderRequestPolicy {
+        observe,
+        patch: grant.patch,
+        patch_timeout: std::time::Duration::from_millis(
+            grant.effective_patch_timeout_ms(provider_timeout),
+        ),
+    })
 }
 
 fn provider_patch_timeout_max_ms(provider_timeout_seconds: Option<u64>) -> u64 {

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use kiqi_agent::events::{AgentEmitter, AgentEvent};
 use kiqi_plugin_sdk::{EventTag, StablePluginEvent, StbString};
+use serde_json::Value;
 
 use crate::host_free_string;
 use crate::registry::RegistrySnapshot;
@@ -343,6 +344,12 @@ pub fn dispatch_to_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEve
     // the native path does not act on `CLAIMED` either (only the routing
     // dispatchers do).
     let _ = crate::compiled::dispatch_observe(event);
+    dispatch_native_handlers(snapshot, event);
+}
+
+/// Native (cdylib) half of [`dispatch_to_handlers`], including the one free of
+/// the event's strings.
+fn dispatch_native_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEvent) {
     // Staleness guard: a stale registry (swapped-out session) does nothing.
     if !crate::registry::assert_active(snapshot.active_flag()) {
         return;
@@ -417,6 +424,48 @@ pub fn dispatch_to_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEve
     }
     // Host frees the event's strings exactly once after the fan-out.
     free_dispatched_event(event);
+}
+
+/// Dispatch one `before-provider-request` turn: observe pass + provider gate.
+///
+/// Two payloads are needed because delivery is graded per host:
+///
+/// * `rich` carries everything a granted sandboxed host may receive (including
+///   header values); the wasm host strips what its `provider-request` grant
+///   does not allow, per guest.
+/// * `redacted` is the source-redacted form (`headerNames` only) handed to
+///   legacy cdylib handlers, which have no grant model and must never see a
+///   credential value.
+///
+/// The observe pass invokes only observe-only sandboxed hosts (a patch-capable
+/// host is skipped by the sink), and the gate pass invokes only patch-capable
+/// hosts. Each host is therefore called at most once per request. Returns the
+/// validated patch to apply, if any.
+pub fn dispatch_before_provider_request(
+    snapshot: &RegistrySnapshot,
+    redacted: &str,
+    rich: &str,
+) -> Option<Value> {
+    let observed = StablePluginEvent::data(
+        EventTag::BeforeProviderRequest,
+        StbString::from_string(rich.to_string()),
+    );
+    let _ = crate::compiled::dispatch_observe(&observed);
+    free_dispatched_event(&observed);
+
+    let native = StablePluginEvent::data(
+        EventTag::BeforeProviderRequest,
+        StbString::from_string(redacted.to_string()),
+    );
+    dispatch_native_handlers(snapshot, &native);
+
+    let gate = StablePluginEvent::data(
+        EventTag::BeforeProviderRequest,
+        StbString::from_string(rich.to_string()),
+    );
+    let patch = crate::compiled::dispatch_provider_gate(&gate);
+    free_dispatched_event(&gate);
+    patch
 }
 
 /// Build + dispatch a generic `data` event (JSON payload) to the tag's
