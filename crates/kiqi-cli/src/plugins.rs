@@ -4,6 +4,9 @@
 //! there is no ABI to version and no `unsafe` at the boundary. The `cdylib`
 //! channel (`kiqi-extensions`) is untouched and keeps serving `ki dev`.
 
+use std::path::{Path, PathBuf};
+
+use kiqi_plugin::grants::{Grants, ResourcesGrant, RESOURCES_KIND_PROMPTS, RESOURCES_KIND_SKILLS};
 use kiqi_plugin::{HostCaps, Plugin};
 
 /// Host capabilities backed by the real runtime-action host.
@@ -1316,6 +1319,491 @@ fn missing_sidecar_warning(unverified: &[String]) -> String {
         unverified.len(),
         unverified.join(", ")
     )
+}
+
+// ---------------------------------------------------------------------------
+// Package resources (`resources.json` + `resources/`)
+// ---------------------------------------------------------------------------
+
+/// A wasm package's resource convention: `<package>/resources.json` declares
+/// what the package contributes, `<package>/resources/` holds it, and
+/// `<package>/resources.sha256` records one digest per installed file.
+///
+/// This replaces the cdylib `resources_discover` channel, which handed bare
+/// host paths to loaders that accept absolute paths and follow symlinks. A
+/// wasm guest cannot see the host filesystem, so the host owns the bytes,
+/// verifies them, and only then hands directories to the skill/prompt loaders.
+///
+/// **Ordering is load-bearing:** [`crate::resource_dirs`] dedupes
+/// first-wins-by-name, and both discovery points (session startup and
+/// `/reload`) append these directories **last**. A built-in or project
+/// resource therefore always wins a name collision; a future reorder must not
+/// let a plugin shadow it. The collision still surfaces as a
+/// `ResourceDiagnostic`.
+///
+/// **`/reload` note:** the resolver re-reads `grants.json` and the package
+/// manifest from disk, but it does not re-instantiate wasm hosts
+/// (`compiled_plugin_hosts` is a `OnceLock`), so a newly installed plugin's
+/// tools still need a restart. Its resource directories are re-read.
+pub const PACKAGE_RESOURCES_MANIFEST: &str = "resources.json";
+/// The per-file digest manifest written by `ki insmod`.
+pub const PACKAGE_RESOURCES_DIGESTS: &str = "resources.sha256";
+/// The directory holding a package's resource tree.
+pub const PACKAGE_RESOURCES_DIR: &str = "resources";
+
+/// A package's resource tree, read and checked but not yet written.
+///
+/// Bytes are held in memory on purpose: the manifest caps them (at most the
+/// grant maximum), and keeping them means install has nothing half-copied to
+/// clean up if validation fails.
+#[derive(Debug)]
+pub(crate) struct PreparedPackageResources {
+    policy: ResourcesGrant,
+    manifest: Vec<u8>,
+    /// `(path relative to resources/, bytes)`, sorted by path.
+    files: Vec<(String, Vec<u8>)>,
+}
+
+impl PreparedPackageResources {
+    /// The policy the manifest declares — what install records as the grant.
+    pub(crate) fn policy(&self) -> &ResourcesGrant {
+        &self.policy
+    }
+}
+
+/// The verified resource directories one package contributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedPackageResources {
+    pub skills: Vec<PathBuf>,
+    pub prompts: Vec<PathBuf>,
+}
+
+/// Every granted package's resource directories, plus the diagnostics for
+/// packages that were skipped.
+///
+/// Directories are returned in plugin-id order; callers append them **after**
+/// the static/explicit dirs (first-wins-by-name).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginResourceDirs {
+    pub skills: Vec<PathBuf>,
+    pub prompts: Vec<PathBuf>,
+    pub diagnostics: Vec<String>,
+}
+
+impl PluginResourceDirs {
+    /// True when `path` is one of the plugin-contributed resource paths. Used
+    /// to make a plugin-versus-built-in collision visible without `--verbose`.
+    pub fn contains_path(&self, path: &str) -> bool {
+        let path = Path::new(path);
+        self.skills
+            .iter()
+            .chain(self.prompts.iter())
+            .any(|dir| path.starts_with(dir))
+    }
+}
+
+fn resources_root(package_dir: &Path) -> PathBuf {
+    package_dir.join(PACKAGE_RESOURCES_DIR)
+}
+
+/// Whether a package ships a resource manifest (a symlink does not count; it
+/// is rejected when the package is read).
+pub(crate) fn has_package_resources(package_dir: &Path) -> bool {
+    let path = package_dir.join(PACKAGE_RESOURCES_MANIFEST);
+    std::fs::symlink_metadata(&path)
+        .map(|meta| meta.is_file() && !meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Metadata for `path`, rejecting symlinks outright.
+///
+/// The cdylib channel's weakness was following a link out of the package; a
+/// resource package may not contain one at any depth.
+fn checked_metadata(path: &Path) -> Result<std::fs::Metadata, String> {
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("read {}: {error}", path.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("{} is a symlink (refused)", path.display()));
+    }
+    Ok(meta)
+}
+
+/// Read and validate a package's `resources.json`.
+///
+/// `Ok(None)` means the package does not use the resource convention. The
+/// manifest is the *package's declaration*; the grant stays the user's
+/// authorization, and [`resolve_package_resources`] honours the intersection.
+pub(crate) fn load_package_resources_manifest(
+    package_dir: &Path,
+) -> Result<Option<ResourcesGrant>, String> {
+    let path = package_dir.join(PACKAGE_RESOURCES_MANIFEST);
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(format!("{} is a symlink (refused)", path.display()));
+    }
+    if !meta.is_file() {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("read {}: {error}", path.display()))?;
+    let policy: ResourcesGrant =
+        serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    // Unknown kinds and out-of-range caps are install errors, never a silently
+    // narrowed grant.
+    policy.validate()?;
+    Ok(Some(policy))
+}
+
+/// Read every file under `root`, rejecting symlinks and non-regular entries.
+///
+/// Returned paths are relative to `root` with `/` separators; the caller maps
+/// them to package-relative `resources/<path>`.
+fn read_resource_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let meta = checked_metadata(root)?;
+    if !meta.is_dir() {
+        return Err(format!("{} is not a directory", root.display()));
+    }
+    let mut out = Vec::new();
+    read_resource_dir(root, "", &mut out)?;
+    Ok(out)
+}
+
+fn read_resource_dir(
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)
+        .map_err(|error| format!("read {}: {error}", dir.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read {}: {error}", dir.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let meta = checked_metadata(&path)?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| format!("{}: non-UTF-8 file name", path.display()))?;
+        let relative = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if meta.is_dir() {
+            read_resource_dir(&path, &relative, out)?;
+        } else if meta.is_file() {
+            let bytes = std::fs::read(&path)
+                .map_err(|error| format!("read {}: {error}", path.display()))?;
+            out.push((relative, bytes));
+        } else {
+            return Err(format!("{} is not a regular file", path.display()));
+        }
+    }
+    Ok(())
+}
+
+/// Read and validate a package's `resources.json` and `resources/` tree.
+///
+/// Nothing is written; `ki insmod` calls [`write_package_resources`] only after
+/// the component itself has been copied, so a rejected manifest/kind/symlink
+/// installs nothing.
+pub(crate) fn prepare_package_resources(
+    source_dir: &Path,
+) -> Result<Option<PreparedPackageResources>, String> {
+    let Some(policy) = load_package_resources_manifest(source_dir)? else {
+        return Ok(None);
+    };
+    let root = resources_root(source_dir);
+    let files = read_resource_files(&root).map_err(|error| {
+        format!(
+            "{} declares resources but {}/ is unusable: {error}",
+            PACKAGE_RESOURCES_MANIFEST, PACKAGE_RESOURCES_DIR
+        )
+    })?;
+    let items = files.len() as u64;
+    if items > policy.max_items as u64 {
+        return Err(format!(
+            "resources contribute {items} file(s), over the declared max-items {}",
+            policy.max_items
+        ));
+    }
+    let bytes: u64 = files.iter().map(|(_, content)| content.len() as u64).sum();
+    if bytes > policy.max_bytes {
+        return Err(format!(
+            "resources contribute {bytes} bytes, over the declared max-bytes {}",
+            policy.max_bytes
+        ));
+    }
+    let manifest = std::fs::read(source_dir.join(PACKAGE_RESOURCES_MANIFEST))
+        .map_err(|error| format!("read {}: {error}", PACKAGE_RESOURCES_MANIFEST))?;
+    Ok(Some(PreparedPackageResources {
+        policy,
+        manifest,
+        files,
+    }))
+}
+
+/// Write a prepared package beside an installed `plugin.wasm`, replacing any
+/// previous tree, and record one digest per file in `resources.sha256`.
+pub(crate) fn write_package_resources(
+    dest_package: &Path,
+    prepared: &PreparedPackageResources,
+) -> Result<(), String> {
+    let root = resources_root(dest_package);
+    remove_any(&root)?;
+    std::fs::create_dir_all(&root)
+        .map_err(|error| format!("create {}: {error}", root.display()))?;
+    for (relative, bytes) in &prepared.files {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("create {}: {error}", parent.display()))?;
+        }
+        std::fs::write(&path, bytes)
+            .map_err(|error| format!("write {}: {error}", path.display()))?;
+    }
+    let manifest_path = dest_package.join(PACKAGE_RESOURCES_MANIFEST);
+    std::fs::write(&manifest_path, &prepared.manifest)
+        .map_err(|error| format!("write {}: {error}", manifest_path.display()))?;
+
+    // Include the manifest itself: a hand-edited kinds/caps declaration after
+    // install must fail the same digest check as a hand-edited skill.
+    let mut entries: Vec<(String, String)> = Vec::with_capacity(prepared.files.len() + 1);
+    entries.push((
+        PACKAGE_RESOURCES_MANIFEST.to_string(),
+        crate::plugin_cli::sha256_hex(&prepared.manifest),
+    ));
+    for (relative, bytes) in &prepared.files {
+        entries.push((
+            format!("{PACKAGE_RESOURCES_DIR}/{relative}"),
+            crate::plugin_cli::sha256_hex(bytes),
+        ));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut text = String::new();
+    for (path, hex) in entries {
+        text.push_str(&format!("{hex}  {path}\n"));
+    }
+    let digest_path = dest_package.join(PACKAGE_RESOURCES_DIGESTS);
+    std::fs::write(&digest_path, text)
+        .map_err(|error| format!("write {}: {error}", digest_path.display()))
+}
+
+fn remove_any(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::remove_file(path)
+            .map_err(|error| format!("remove {}: {error}", path.display())),
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path)
+            .map_err(|error| format!("remove {}: {error}", path.display())),
+        Ok(_) => std::fs::remove_file(path)
+            .map_err(|error| format!("remove {}: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("read {}: {error}", path.display())),
+    }
+}
+
+/// Normalise a digest-manifest path, rejecting absolute paths and `..`.
+fn safe_relative_path(relative: &str) -> Result<String, String> {
+    let path = Path::new(relative);
+    if path.is_absolute() {
+        return Err(format!("`{relative}` is absolute"));
+    }
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                let part = part
+                    .to_str()
+                    .ok_or_else(|| format!("`{relative}` is not UTF-8"))?;
+                parts.push(part.to_string());
+            }
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(format!(
+                    "`{relative}` escapes the package (`..` is refused)"
+                ))
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(format!("`{relative}` is empty"));
+    }
+    Ok(parts.join("/"))
+}
+
+/// Read `resources.sha256` into `path -> hex digest`.
+fn read_digest_manifest(
+    package_dir: &Path,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let path = package_dir.join(PACKAGE_RESOURCES_DIGESTS);
+    let meta = checked_metadata(&path).map_err(|error| {
+        format!("{error} (reinstall with `ki insmod` to record resource digests)")
+    })?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("read {}: {error}", path.display()))?;
+    let mut digests = std::collections::HashMap::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let hex = parts.next().unwrap_or_default().trim();
+        let relative = parts.next().unwrap_or_default().trim_start();
+        if hex.len() != 64 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Err(format!("{}:{}: invalid digest", path.display(), index + 1));
+        }
+        if relative.is_empty() {
+            return Err(format!("{}:{}: missing path", path.display(), index + 1));
+        }
+        let relative = safe_relative_path(relative)
+            .map_err(|error| format!("{}:{}: {error}", path.display(), index + 1))?;
+        if digests
+            .insert(relative.clone(), hex.to_ascii_lowercase())
+            .is_some()
+        {
+            return Err(format!(
+                "{}:{}: duplicate path `{relative}`",
+                path.display(),
+                index + 1
+            ));
+        }
+    }
+    Ok(digests)
+}
+
+fn expect_digest(
+    digests: &std::collections::HashMap<String, String>,
+    relative: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let Some(recorded) = digests.get(relative) else {
+        return Err(format!(
+            "{PACKAGE_RESOURCES_DIGESTS} has no digest for `{relative}`"
+        ));
+    };
+    let actual = crate::plugin_cli::sha256_hex(bytes);
+    if recorded != &actual {
+        return Err(format!(
+            "digest mismatch for `{relative}`: recorded {recorded}, file is {actual}"
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve one package's granted kinds to verified, package-relative
+/// directories.
+///
+/// Checks, in order: the grant and manifest are valid, the tree has no
+/// symlinks, per-file digests match `resources.sha256`, the item/byte caps hold
+/// (the tighter of grant and manifest), and every granted-and-declared kind has
+/// a directory. Any failure drops the whole package — fail closed, never a
+/// partially trusted tree.
+pub fn resolve_package_resources(
+    package_dir: &Path,
+    grant: &ResourcesGrant,
+) -> Result<ResolvedPackageResources, String> {
+    grant.validate()?;
+    let Some(manifest) = load_package_resources_manifest(package_dir)? else {
+        return Err(format!(
+            "{} has no {PACKAGE_RESOURCES_MANIFEST}",
+            package_dir.display()
+        ));
+    };
+    let root = resources_root(package_dir);
+    let files = read_resource_files(&root)?;
+
+    let items = files.len() as u64;
+    let bytes: u64 = files.iter().map(|(_, content)| content.len() as u64).sum();
+    let max_items = u64::from(grant.max_items.min(manifest.max_items));
+    let max_bytes = grant.max_bytes.min(manifest.max_bytes);
+    if items > max_items {
+        return Err(format!(
+            "resources contribute {items} file(s), over the granted max-items {max_items}"
+        ));
+    }
+    if bytes > max_bytes {
+        return Err(format!(
+            "resources contribute {bytes} bytes, over the granted max-bytes {max_bytes}"
+        ));
+    }
+
+    let digests = read_digest_manifest(package_dir)?;
+    let manifest_path = package_dir.join(PACKAGE_RESOURCES_MANIFEST);
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .map_err(|error| format!("read {}: {error}", manifest_path.display()))?;
+    let mut expected: std::collections::HashSet<String> = std::collections::HashSet::new();
+    expected.insert(PACKAGE_RESOURCES_MANIFEST.to_string());
+    expect_digest(&digests, PACKAGE_RESOURCES_MANIFEST, &manifest_bytes)?;
+    for (relative, content) in &files {
+        let key = format!("{PACKAGE_RESOURCES_DIR}/{relative}");
+        expect_digest(&digests, &key, content)?;
+        expected.insert(key);
+    }
+    if let Some(extra) = digests.keys().find(|key| !expected.contains(*key)) {
+        return Err(format!(
+            "{PACKAGE_RESOURCES_DIGESTS} lists `{extra}`, which the package does not contain"
+        ));
+    }
+
+    let mut resolved = ResolvedPackageResources::default();
+    for kind in &grant.kinds {
+        // The grant may enable a kind the package does not ship; the package's
+        // declaration decides what exists, the grant decides what is loaded.
+        if !manifest.kinds.iter().any(|declared| declared == kind) {
+            continue;
+        }
+        let dir = root.join(kind);
+        let meta = checked_metadata(&dir).map_err(|error| {
+            format!("manifest declares `{kind}` but resources/{kind} is unusable: {error}")
+        })?;
+        if !meta.is_dir() {
+            return Err(format!(
+                "manifest declares `{kind}` but {} is not a directory",
+                dir.display()
+            ));
+        }
+        match kind.as_str() {
+            RESOURCES_KIND_SKILLS => resolved.skills.push(dir),
+            RESOURCES_KIND_PROMPTS => resolved.prompts.push(dir),
+            // `ResourcesGrant::validate` already rejected anything else.
+            _ => {}
+        }
+    }
+    Ok(resolved)
+}
+
+/// Resolve every installed, granted package under `root/plugins/`.
+pub fn granted_package_resource_dirs(root: &Path) -> PluginResourceDirs {
+    let mut dirs = PluginResourceDirs::default();
+    for id in kiqi_plugin::grants::installed_plugins_at(root) {
+        let package = kiqi_plugin::grants::plugin_dir_at(root, &id);
+        // A resources-only directory is not a plugin; only a package with a
+        // component participates.
+        if !package.join("plugin.wasm").is_file() {
+            continue;
+        }
+        let grants = Grants::load_for_at(root, &id);
+        let Some(grant) = grants.resources.as_ref() else {
+            continue;
+        };
+        match resolve_package_resources(&package, grant) {
+            Ok(resolved) => {
+                dirs.skills.extend(resolved.skills);
+                dirs.prompts.extend(resolved.prompts);
+            }
+            Err(error) => dirs.diagnostics.push(format!("plugin `{id}`: {error}")),
+        }
+    }
+    dirs
 }
 
 #[cfg(test)]
@@ -3172,5 +3660,214 @@ mod tests {
             ui_dialog.take_pending().is_some(),
             "the plugin's dialog reached the session mailbox"
         );
+    }
+    /// Build a tiny package fixture on disk: `plugin.wasm` (the resolver does
+    /// not parse it), `resources.json`, and the given resource files.
+    fn write_package_fixture(package: &std::path::Path, manifest: &str, files: &[(&str, &str)]) {
+        std::fs::create_dir_all(package.join(PACKAGE_RESOURCES_DIR)).unwrap();
+        std::fs::write(package.join("plugin.wasm"), b"\\0asm").unwrap();
+        std::fs::write(package.join(PACKAGE_RESOURCES_MANIFEST), manifest).unwrap();
+        for (relative, body) in files {
+            let path = package.join(PACKAGE_RESOURCES_DIR).join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+    }
+
+    /// The resource package round trip: the install writer records digests, the
+    /// resolver verifies them, and the loaders see plugin dirs LAST so a
+    /// built-in resource wins a name collision.
+    #[tokio::test]
+    async fn package_resources_round_trip_install_resolve_discover() {
+        let agent = tempfile::tempdir().unwrap();
+        let package = agent.path().join("plugins/demo");
+
+        let source = tempfile::tempdir().unwrap();
+        write_package_fixture(
+            source.path(),
+            r#"{"kinds":["skills","prompts"],"max-items":8,"max-bytes":4096}"#,
+            &[
+                (
+                    "skills/demo/SKILL.md",
+                    "---\nname: demo-skill\ndescription: plugin copy\n---\nplugin body\n",
+                ),
+                ("prompts/demo.md", "plugin prompt\n"),
+            ],
+        );
+
+        // The install half: the same two calls `ki insmod` makes.
+        let prepared = prepare_package_resources(source.path())
+            .unwrap()
+            .expect("the fixture ships resources.json");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("plugin.wasm"), b"\\0asm").unwrap();
+        write_package_resources(&package, &prepared).unwrap();
+        assert!(package.join(PACKAGE_RESOURCES_DIGESTS).is_file());
+        assert_eq!(
+            std::fs::read_to_string(package.join(PACKAGE_RESOURCES_DIGESTS))
+                .unwrap()
+                .lines()
+                .count(),
+            3,
+            "resources.json plus two resource files"
+        );
+
+        // The grant half: install records the manifest's policy.
+        let mut grants = Grants::default();
+        grants.grant_resources(prepared.policy().clone()).unwrap();
+        Grants::save_for_at(agent.path(), "demo", &grants).unwrap();
+
+        // The resolver half.
+        let dirs = granted_package_resource_dirs(agent.path());
+        assert!(dirs.diagnostics.is_empty(), "{:?}", dirs.diagnostics);
+        assert_eq!(dirs.skills, vec![package.join("resources/skills")]);
+        assert_eq!(dirs.prompts, vec![package.join("resources/prompts")]);
+
+        // Discovery order: built-in first, plugin last → first-wins keeps the
+        // built-in, and the collision names the plugin copy as the loser.
+        let builtin = source.path().join("builtin-skills");
+        std::fs::create_dir_all(builtin.join("demo-skill")).unwrap();
+        std::fs::write(
+            builtin.join("demo-skill/SKILL.md"),
+            "---\nname: demo-skill\ndescription: built-in\n---\nbuilt-in body\n",
+        )
+        .unwrap();
+        let env: std::sync::Arc<dyn kiqi_tools::ExecutionEnv> = std::sync::Arc::new(
+            kiqi_tools::OsExecutionEnv::with_cwd(source.path().to_path_buf()),
+        );
+        let result = crate::resource_dirs::load_skills_with_precedence(
+            &env,
+            &[builtin.clone(), dirs.skills[0].clone()],
+        )
+        .await;
+        assert_eq!(result.skills.len(), 1, "{:?}", result.diagnostics);
+        assert!(
+            result.skills[0].file_path.contains("builtin-skills"),
+            "the built-in must win: {}",
+            result.skills[0].file_path
+        );
+        assert!(
+            result
+                .resource_diagnostics
+                .iter()
+                .any(|diagnostic| matches!(
+                    diagnostic,
+                    kiqi_harness::diagnostics::ResourceDiagnostic::Collision(collision)
+                        if collision.loser_path.contains("plugins/demo")
+                )),
+            "a collision must name the plugin copy as the loser: {:?}",
+            result.resource_diagnostics
+        );
+    }
+
+    /// A bare `{}` manifest means both kinds with the default caps, exactly as
+    /// the grant's bare `true` does.
+    #[test]
+    fn package_resources_manifest_defaults_to_both_kinds() {
+        let package = tempfile::tempdir().unwrap();
+        write_package_fixture(package.path(), "{}", &[("skills/a/SKILL.md", "x")]);
+        let policy = load_package_resources_manifest(package.path())
+            .unwrap()
+            .expect("manifest");
+        assert_eq!(
+            policy.kinds,
+            vec![
+                RESOURCES_KIND_SKILLS.to_string(),
+                RESOURCES_KIND_PROMPTS.to_string()
+            ]
+        );
+        assert_eq!(
+            policy.max_items,
+            kiqi_plugin::grants::RESOURCES_MAX_ITEMS_DEFAULT
+        );
+        assert_eq!(
+            policy.max_bytes,
+            kiqi_plugin::grants::RESOURCES_MAX_BYTES_DEFAULT
+        );
+    }
+
+    /// Unknown kinds are an install-time error, never a silently narrowed set.
+    #[test]
+    fn package_resources_reject_unknown_kinds() {
+        let package = tempfile::tempdir().unwrap();
+        write_package_fixture(package.path(), r#"{"kinds":["themes"]}"#, &[]);
+        let error = prepare_package_resources(package.path()).unwrap_err();
+        assert!(error.contains("themes"), "{error}");
+    }
+
+    /// A symlink anywhere in the tree is refused, both at install and at
+    /// resolution.
+    #[cfg(unix)]
+    #[test]
+    fn package_resources_reject_symlinks() {
+        let package = tempfile::tempdir().unwrap();
+        write_package_fixture(package.path(), r#"{"kinds":["skills"]}"#, &[]);
+        std::fs::create_dir_all(package.path().join("resources/skills")).unwrap();
+        let outside = package.path().join("outside.md");
+        std::fs::write(&outside, "outside\n").unwrap();
+        std::os::unix::fs::symlink(&outside, package.path().join("resources/skills/link.md"))
+            .unwrap();
+
+        let install_error = prepare_package_resources(package.path()).unwrap_err();
+        assert!(install_error.contains("symlink"), "{install_error}");
+
+        let resolve_error =
+            resolve_package_resources(package.path(), &ResourcesGrant::default()).unwrap_err();
+        assert!(resolve_error.contains("symlink"), "{resolve_error}");
+    }
+
+    /// A `..` entry in the digest manifest cannot reach outside the package.
+    #[test]
+    fn package_resources_reject_parent_dir_entries() {
+        let package = tempfile::tempdir().unwrap();
+        write_package_fixture(
+            package.path(),
+            r#"{"kinds":["skills"]}"#,
+            &[("skills/a.md", "a")],
+        );
+        let manifest =
+            std::fs::read_to_string(package.path().join(PACKAGE_RESOURCES_MANIFEST)).unwrap();
+        let skill = "a";
+        let digest = crate::plugin_cli::sha256_hex(skill.as_bytes());
+        let manifest_digest = crate::plugin_cli::sha256_hex(manifest.as_bytes());
+        let mut digests = String::new();
+        digests.push_str(&format!(
+            "{manifest_digest}  {PACKAGE_RESOURCES_MANIFEST}\n"
+        ));
+        digests.push_str(&format!("{digest}  resources/skills/a.md\n"));
+        digests.push_str(&format!("{digest}  ../escape.md\n"));
+        std::fs::write(package.path().join(PACKAGE_RESOURCES_DIGESTS), digests).unwrap();
+
+        let error =
+            resolve_package_resources(package.path(), &ResourcesGrant::default()).unwrap_err();
+        assert!(error.contains("escapes"), "{error}");
+    }
+
+    /// A tampered resource fails the recorded digest rather than loading.
+    #[test]
+    fn package_resources_reject_digest_mismatch() {
+        let package = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        write_package_fixture(
+            source.path(),
+            r#"{"kinds":["skills"]}"#,
+            &[(
+                "skills/a/SKILL.md",
+                "---\nname: a\ndescription: a\n---\nbody\n",
+            )],
+        );
+        let prepared = prepare_package_resources(source.path()).unwrap().unwrap();
+        std::fs::create_dir_all(package.path()).unwrap();
+        std::fs::write(package.path().join("plugin.wasm"), b"\\0asm").unwrap();
+        write_package_resources(package.path(), &prepared).unwrap();
+        std::fs::write(
+            package.path().join("resources/skills/a/SKILL.md"),
+            "tampered",
+        )
+        .unwrap();
+
+        let error =
+            resolve_package_resources(package.path(), &ResourcesGrant::default()).unwrap_err();
+        assert!(error.contains("digest mismatch"), "{error}");
     }
 }

@@ -616,6 +616,22 @@ pub async fn build_with_selection(
     // `.ki/` dir drops in and works). Full trust gating is deferred.
     let agent_dir = crate::config::agent_dir().ok();
 
+    // ---- Package resources (wasm `resources.json` + `resources/`) ----
+    // The host verifies each package (kinds, caps, digests, no symlinks) and
+    // yields dirs only for granted plugins. They are appended AFTER every
+    // static/explicit/discovered path below: the loaders dedupe
+    // first-wins-by-name, so a built-in or project resource always wins and a
+    // plugin cannot shadow it. A collision still surfaces as a
+    // `ResourceDiagnostic`. `--no-skills`/`--no-prompt-templates` gate the two
+    // channels independently, exactly as they gate the static dirs.
+    let plugin_resources = agent_dir
+        .as_deref()
+        .map(crate::plugins::granted_package_resource_dirs)
+        .unwrap_or_default();
+    for diagnostic in &plugin_resources.diagnostics {
+        eprintln!("warning: plugin resources: {diagnostic}");
+    }
+
     // ---- B5b: extension resources_discover ----
     // If any plugin registered a `resources_discover` handler, fan the event out
     // (reason "startup") and collect skill/prompt/theme paths. These plugin-
@@ -650,6 +666,8 @@ pub async fn build_with_selection(
         };
         dirs.extend(args.skill.iter().cloned());
         dirs.extend(discovered.skill_paths.iter().map(PathBuf::from));
+        // LAST: first-wins-by-name means a built-in/project skill wins.
+        dirs.extend(plugin_resources.skills.iter().cloned());
         let result = load_skills_with_precedence(&env_dyn, &dirs).await;
         skills = result.skills;
         skill_diags = result.diagnostics;
@@ -669,6 +687,8 @@ pub async fn build_with_selection(
         };
         dirs.extend(args.prompt_template.iter().cloned());
         dirs.extend(discovered.prompt_paths.iter().map(PathBuf::from));
+        // LAST: first-wins-by-name means a built-in/project prompt wins.
+        dirs.extend(plugin_resources.prompts.iter().cloned());
         let result = load_prompt_templates_with_precedence(&env_dyn, &dirs).await;
         prompt_templates = result.prompt_templates;
         prompt_diags = result.diagnostics;
@@ -702,6 +722,22 @@ pub async fn build_with_selection(
         format_project_context(&files)
     };
 
+    // A plugin cannot shadow a built-in, but the attempt is worth saying out
+    // loud: these collisions are not behind `--verbose` like the rest.
+    for diagnostic in &resource_diags {
+        if let kiqi_harness::diagnostics::ResourceDiagnostic::Collision(collision) = diagnostic {
+            if plugin_resources.contains_path(&collision.loser_path) {
+                eprintln!(
+                    "warning: {} name \"{}\" collision: keeping {} (shadowed {})",
+                    collision.resource_type.as_str(),
+                    collision.name,
+                    collision.winner_path,
+                    collision.loser_path
+                );
+            }
+        }
+    }
+
     // Surface resource-discovery diagnostics as startup warnings (verbose-only).
     if args.verbose {
         for d in &skill_diags {
@@ -720,9 +756,13 @@ pub async fn build_with_selection(
                 d.message
             );
         }
-        // Structured collisions: make the winner/loser explicit.
+        // Structured collisions: make the winner/loser explicit. Plugin
+        // collisions were already printed above (visible without `--verbose`).
         for d in &resource_diags {
             if let kiqi_harness::diagnostics::ResourceDiagnostic::Collision(c) = d {
+                if plugin_resources.contains_path(&c.loser_path) {
+                    continue;
+                }
                 eprintln!(
                     "warning: {} name \"{}\" collision: keeping {} (shadowed {})",
                     c.resource_type.as_str(),
@@ -1624,6 +1664,14 @@ where
     let env = Arc::new(kiqi_tools::OsExecutionEnv::with_cwd(ctx.cwd.clone()));
     let env_dyn: Arc<dyn kiqi_tools::ExecutionEnv> = env.clone();
 
+    // Package resources are re-read here (grants + manifest + digests). That
+    // does not re-instantiate wasm hosts (`compiled_plugin_hosts` is a
+    // `OnceLock`), so a newly installed plugin's tools still need a restart;
+    // its resource dirs are picked up. Appended LAST below, same as startup.
+    let plugin_resources = crate::config::agent_dir()
+        .map(|root| crate::plugins::granted_package_resource_dirs(&root))
+        .unwrap_or_default();
+
     let mut skills: Vec<kiqi_harness::types::Skill> = Vec::new();
     let mut skill_diags: Vec<kiqi_harness::skills::SkillDiagnostic> = Vec::new();
     let mut resource_diags: Vec<kiqi_harness::diagnostics::ResourceDiagnostic> = Vec::new();
@@ -1632,13 +1680,13 @@ where
         // that host is swapped as part of a future full JS reload, preserve
         // the paths it contributed at startup across `/reload`.
         let js_paths: &[PathBuf] = &[];
-        let package_paths: &[PathBuf] = &[];
+        let package_paths: &[PathBuf] = &plugin_resources.skills;
         let dirs = append_reload_resource_paths(
             skill_base_dirs,
             &effective_args.skill,
             &discovered.skill_paths,
             js_paths,
-            &package_paths,
+            package_paths,
         );
         let result = load_skills_with_precedence(&env_dyn, &dirs).await;
         skills = result.skills;
@@ -1651,13 +1699,13 @@ where
         Vec::new();
     if !effective_args.no_prompt_templates {
         let js_paths: &[PathBuf] = &[];
-        let package_paths: &[PathBuf] = &[];
+        let package_paths: &[PathBuf] = &plugin_resources.prompts;
         let dirs = append_reload_resource_paths(
             prompt_base_dirs,
             &effective_args.prompt_template,
             &discovered.prompt_paths,
             js_paths,
-            &package_paths,
+            package_paths,
         );
         let result = load_prompt_templates_with_precedence(&env_dyn, &dirs).await;
         prompt_templates = result.prompt_templates;
@@ -1683,7 +1731,14 @@ where
     let context_block = format_project_context(&context_files);
 
     let mut details: Vec<String> = Vec::new();
-    if !skill_diags.is_empty() || !prompt_diags.is_empty() || !resource_diags.is_empty() {
+    for diagnostic in &plugin_resources.diagnostics {
+        details.push(format!("warning: plugin resources: {diagnostic}"));
+    }
+    if !skill_diags.is_empty()
+        || !prompt_diags.is_empty()
+        || !resource_diags.is_empty()
+        || !plugin_resources.diagnostics.is_empty()
+    {
         warnings = true;
         // Collect formatted diagnostics for the caller to surface in its UI
         // instead of writing to stderr directly: the TUI owns the terminal,

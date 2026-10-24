@@ -461,6 +461,23 @@ fn declared_capabilities(_wasm: &Path) -> Result<Vec<String>, String> {
     Err("this build has no wasm plugin tier (`plugin-wasm` is disabled)".to_string())
 }
 
+/// [`declared_capabilities`] plus the package conventions.
+///
+/// `resources` has no component interface: a package declares it by shipping
+/// `resources.json` beside `plugin.wasm`. The installer must see it in the
+/// consent prompt and the "not granted" summary, so the manifest is scanned
+/// here (the component scan alone can never report it).
+fn declared_capabilities_in(wasm: &Path, package_dir: &Path) -> Result<Vec<String>, String> {
+    let mut caps = declared_capabilities(wasm)?;
+    if crate::plugins::has_package_resources(package_dir)
+        && !caps.iter().any(|cap| cap == "resources")
+    {
+        caps.push("resources".to_string());
+        caps.sort();
+    }
+    Ok(caps)
+}
+
 #[cfg(feature = "plugin-wasm")]
 fn capability_is_enforced(name: &str) -> bool {
     kiqi_plugin_host::capability_is_enforced(name)
@@ -1561,6 +1578,25 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
         eprintln!("error: {} is not a file", wasm.display());
         return 2;
     }
+    // A package's resources live beside the crate's component, not beside the
+    // artifact cargo reports: `--build` passes the guest crate dir so its
+    // `resources.json`/`resources/` is what gets installed.
+    let resource_source: PathBuf = match &build_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => wasm
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+    };
+    // Validate the manifest, kinds, caps and every file before anything is
+    // copied, so a rejected package installs nothing.
+    let prepared_resources = match crate::plugins::prepare_package_resources(&resource_source) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return 1;
+        }
+    };
 
     let id = id.unwrap_or_else(|| {
         wasm.file_stem()
@@ -1572,7 +1608,7 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
         eprintln!("error: {error}");
         return 2;
     }
-    let declared = match declared_capabilities(wasm) {
+    let declared = match declared_capabilities_in(wasm, &resource_source) {
         Ok(caps) => caps,
         Err(error) => {
             eprintln!("error: {error}");
@@ -1632,6 +1668,15 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
         }
     }
 
+    // Copy the verified resource tree beside plugin.wasm and record one
+    // digest per file. The manifest itself is copied and digested too.
+    if let Some(prepared) = &prepared_resources {
+        if let Err(error) = crate::plugins::write_package_resources(&dir, prepared) {
+            eprintln!("error: install resources for {}: {error}", dir.display());
+            return 1;
+        }
+    }
+
     // Install-time provider discovery: bounded, grant-less, and advisory. The
     // GRANT stays the catalog authority; a guest that cannot answer is a
     // diagnostic, not an install failure (`--yes`/fail-closed rules still
@@ -1659,6 +1704,16 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
     // Only capabilities this plugin declares that are not already granted need a
     // decision, so an update that does not grow the set never re-prompts.
     let mut grants = Grants::load_for_at(&root, &id);
+    // The resources grant is recorded from the verified package manifest, not
+    // from an import scan: `resources.json` is the declaration, install has
+    // just checked kinds/caps/digests, and a bare `{}` manifest therefore
+    // means the documented defaults (both kinds). `--yes` still cannot invent
+    // a policy for the five policy-shaped keys; this one is package metadata.
+    let mut grants_changed = false;
+    if let Some(prepared) = &prepared_resources {
+        grants.resources = Some(prepared.policy().clone());
+        grants_changed = true;
+    }
     let already = grants.granted();
     let new_caps: Vec<&String> = declared
         .iter()
@@ -1706,12 +1761,18 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
                 }
             }
             if !granted_now.is_empty() {
-                if let Err(error) = Grants::save_for_at(&root, &id, &grants) {
-                    eprintln!("error: {error}");
-                    return 1;
-                }
+                grants_changed = true;
             }
         }
+    }
+    if grants_changed {
+        if let Err(error) = Grants::save_for_at(&root, &id, &grants) {
+            eprintln!("error: {error}");
+            return 1;
+        }
+    }
+    if prepared_resources.is_some() && !granted_now.iter().any(|cap| cap == "resources") {
+        granted_now.push("resources".to_string());
     }
     if !explicit_caps.is_empty() {
         eprintln!(
@@ -2668,6 +2729,102 @@ mod tests {
         assert!(
             !text.contains("sk-live-super-secret"),
             "the credential value must never be printed:\n{text}"
+        );
+    }
+    /// `ki insmod` copies a package's `resources/` beside `plugin.wasm`,
+    /// records one digest per file, and records the manifest's policy as the
+    /// `resources` grant (the manifest is the authorization basis).
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn install_copies_package_resources_and_records_the_grant() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let wasm = build_guest(&workspace.join("plugins/wasm/kiqi-conformance-guest"))
+            .expect("build the conformance guest");
+
+        let source = tempfile::tempdir().unwrap();
+        std::fs::copy(&wasm, source.path().join("plugin.wasm")).unwrap();
+        std::fs::create_dir_all(source.path().join("resources/skills/demo")).unwrap();
+        std::fs::write(
+            source.path().join("resources.json"),
+            r#"{"kinds":["skills"],"max-items":4,"max-bytes":4096}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            source.path().join("resources/skills/demo/SKILL.md"),
+            "---\nname: demo\ndescription: demo\n---\nbody\n",
+        )
+        .unwrap();
+
+        let agent = tempfile::tempdir().unwrap();
+        let root = agent.path();
+        let code = install_into(
+            &[
+                source.path().join("plugin.wasm").display().to_string(),
+                "--id".into(),
+                "res".into(),
+                "--yes".into(),
+                "--host".into(),
+                "127.0.0.1".into(),
+                "--command".into(),
+                "echo".into(),
+            ],
+            Some(root),
+        );
+        assert_eq!(code, 0);
+
+        let package = root.join("plugins/res");
+        assert!(package.join("resources/skills/demo/SKILL.md").is_file());
+        assert!(package.join("resources.json").is_file());
+        let digests = std::fs::read_to_string(package.join("resources.sha256")).unwrap();
+        assert_eq!(
+            digests.lines().count(),
+            2,
+            "manifest + one resource: {digests}"
+        );
+
+        let grants = Grants::load_for_at(root, "res");
+        let resources = grants.resources.as_ref().expect("resources recorded");
+        assert_eq!(resources.kinds, vec!["skills"]);
+        assert_eq!(resources.max_items, 4);
+        assert_eq!(resources.max_bytes, 4096);
+
+        let resolved = crate::plugins::resolve_package_resources(&package, resources)
+            .expect("the install output resolves");
+        assert_eq!(resolved.skills, vec![package.join("resources/skills")]);
+        assert!(resolved.prompts.is_empty(), "only skills was granted");
+
+        // Integrity: tampering after install drops the whole package.
+        std::fs::write(package.join("resources/skills/demo/SKILL.md"), "tampered").unwrap();
+        assert!(crate::plugins::resolve_package_resources(&package, resources).is_err());
+    }
+
+    /// An unknown resource kind aborts the install before the component is
+    /// copied, so nothing half-installed is left behind.
+    #[test]
+    fn install_rejects_unknown_resource_kinds_before_copying() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("plugin.wasm"), b"\0asm").unwrap();
+        std::fs::write(
+            source.path().join("resources.json"),
+            r#"{"kinds":["themes"]}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(source.path().join("resources/themes")).unwrap();
+
+        let agent = tempfile::tempdir().unwrap();
+        let root = agent.path();
+        let code = install_into(
+            &[
+                source.path().join("plugin.wasm").display().to_string(),
+                "--id".into(),
+                "bad".into(),
+            ],
+            Some(root),
+        );
+        assert_eq!(code, 1);
+        assert!(
+            !root.join("plugins/bad/plugin.wasm").exists(),
+            "a rejected resource package installs nothing"
         );
     }
 }
