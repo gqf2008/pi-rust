@@ -439,29 +439,38 @@ wasm 插件不注册槽位，改为**导出接口 + 授权 key**：能力是否�
 
 - 导出 `list-providers()`（自己声明能驱动哪些 IdP）与 `action(provider-id, action)`；
 - 导入 `oauth-http` 只有 `token-request` 与 `revoke`：表单键白名单、`client_secret` 直接拒绝，
-  返回只有 `stored(status) | failed(string)`，原始 token 响应体从不回传；
+  grant_type 对应的 flow 与每个 scope 都在计费/HTTP 前按 grant 校验；返回只有
+  `stored(status) | failed(string)`，原始 token 响应体从不回传；
 - 端点、`client-id`、scope 全部来自 grant；`action.begin(string)` 只携带 PKCE
   `code_challenge`（设备码流传空串），授权 URL 由宿主构造，guest 返回的 `url` 被忽略；
 - token 存到命名空间 key `plugin:<install-id>:<provider-id>`；`ki auth refresh` /
   `ki auth logout` 是纯宿主操作（refresh token 直达 IdP，logout 先 revoke 再删 key）；
-- **0.8.0 边界**：存储的插件 token 尚未被模型请求路径消费（`stored_api_key` 只匹配
-  `ApiKey`），本轮恢复的是 `ki auth` 的能力对等。
+- 凭据绑定签发 profile 指纹（provider-id、client-id、各端点 origin）；指纹缺失或不匹配时
+  refresh/logout/revoke 拒绝把旧 token 发往新 IdP。logout 只有显式 `--force-local` 才在不发
+  远端请求的情况下删除本地 OAuth 项；删除按类型判断，绝不移除 `ApiKey`；
+- **边界**：内建 provider 的 `stored_api_key` 仍只匹配 `ApiKey`，不会自动采用 OAuth entry；
+  wasm provider 则可在显式 `--credential-from` 后使用 OAuth access token（§6.41）。
 
 ### 12.2 Provider：grant 是唯一书目
 
-- 导出 `list-providers()`（静态元数据，用于安装期发现与加载时交叉核对）与
-  `request(request-json)`；grant 的 `models` 是唯一目录权威，实际书目取交集；
+- 导出 `list-providers()`（安装期发现与交叉核对的建议性元数据）与 `request(request-json)`；
+  CLI catalog 直接来自 grant 的 `models`，guest 不能增加未授权模型；请求 model 也必须在 grant 里；
+- `WasmProvider` 已接入 resolve 与 `/model`：每次 resolve 有自己的 slot，首次 `stream_simple`
+  才编译/实例化专用 `ProviderHost`；每次请求都重读 grant，revoke 后下一次请求直接拒绝，profile
+  改变则重建实例；
 - 宿主用 grant 覆盖返回消息上的 `provider`/`model`/`api`，guest 不能冒充别的模型；
 - 流式用 `provider-stream.emit`/`emit-batch`：delta 带 `kind`（text/thinking/tool-call）、
-  `phase`（start/delta/end）与 `content-index`，只在 provider 调用栈上有效；
+  `phase`（start/delta/end）与 `content-index`，只在 provider 调用栈上有效；聚合上限为
+  16,384 deltas / 1,024 blocks / 16 MiB，CLI 另有容量 256 的实时队列，溢出即取消并失败；
 - `provider-http.open/read/close` 是**请求过滤器**：必须同时匹配 grant 的
-  scheme/host/path-prefix/methods，否则 `denied` 且不建立连接；重定向拒绝，guest 提供的
-  认证/框架头被剥离，凭据只由宿主注入；
+  scheme/host/path-prefix/methods，否则 `denied` 且不建立连接；原始路径的 `%2F`、编码 dot、
+  dot segment 与重复 `/` 都拒绝，重定向拒绝，guest 的认证/框架头被剥离，凭据只由宿主注入；
+  句柄按调用回收；
 - 凭据在 grant 里只是不透明句柄：`--credential-from auth-json:<pid>` 由宿主解析，
   `{source, provider, display, fingerprint}` 写入 `plugins/<id>/credentials.json`（0600，
-  在 fs jail 之外），`ki plugin show` 只展示指纹前缀；
-- **0.8.0 落地边界**：宿主侧 `provider-http` 仍是 deny 桩，`WasmProvider` 适配器未接线；
-  grant 可写、guest 可被发现，但 provider 请求还发不出去（§6.41）。
+  在 fs jail 之外），`ki plugin show` 只展示指纹前缀；每次请求重新读取值并校验指纹，改变即拒绝；
+- 宿主墙钟覆盖 WASI 阻塞，CLI 用 `select!` 同时等宿主结果与 delta；超时后不再等遗留 guest
+  sender 关闭，立即以错误终止流。
 
 ### 12.3 Render：只做 markdown 定稿转换
 
@@ -469,8 +478,9 @@ wasm 插件不注册槽位，改为**导出接口 + 授权 key**：能力是否�
   纯文本到文本；没有消息 / entry renderer 的 wasm 等价物；
 - 跑在 deny-all 实例上（独立 Engine/Store，没有 session/ui/exec），流式期间不调用，
   每条定稿消息恰好调用一次；
-- 超时默认 2000 ms（上限 10 s），输出默认 1 MiB（上限 8 MiB）；宿主先剥 ANSI、控制字符判
-  硬错误、再按 UTF-8 边界截断；任何失败都保留原文并记一条诊断。
+- 超时默认 2000 ms（上限 10 s），实例化也有 fuel/epoch/墙钟上限；transform 由墙钟等待独立
+  worker，超时 detach 而非 join，epoch 负责纯 CPU 自旋。输出默认 1 MiB（上限 8 MiB）；宿主先剥
+  ANSI、控制字符判硬错误、再按 UTF-8 边界截断；任何失败都保留原文并记一条诊断。
 
 ### 12.4 Resources：包约定，不是注册
 

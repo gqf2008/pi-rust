@@ -50,20 +50,46 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
   Behaviour changes worth knowing before upgrading: OAuth tokens never cross the wasm
   boundary (the host performs the token-endpoint HTTP and stores
-  `plugin:<install-id>:<provider-id>`; a guest sees only `oauth-credential-status`);
-  provider requests run on a dedicated instance with a call-scoped, grant-filtered
-  HTTP import that refuses unmatched requests and redirects; markdown rendering is
-  finalize-only on a deny-all instance; and the `before-provider-request` observation
-  is redacted unless `provider-request --observe` is granted (`apiKey` becomes
-  `apiKeyPresent`, header values and messages are dropped by default).
+  `plugin:<install-id>:<provider-id>`; a guest sees only `oauth-credential-status`).
+  Stored tokens are bound to a fingerprint of the provider id, client id and endpoint
+  origins, so refresh/logout/revoke refuse a changed issuing profile. Logout requires
+  the explicit `--force-local` path to delete locally after a mismatch, and typed
+  deletion never removes an `ApiKey`. Auth-store mutations hold a process mutex and
+  `auth.json.lock` across their locked re-read and atomic replace.
 
-  Boundaries, stated rather than implied: the provider runtime is not wired yet —
-  `provider-http` is still a deny stub and the `WasmProvider` adapter is unwritten, so
-  a provider grant can be written and a guest discovered, but no model request leaves
-  the host. A stored plugin OAuth token is not yet consumed by the model request path
-  (`stored_api_key` matches `ApiKey` only), so this release reaches parity with
-  `ki auth`, not OAuth model calls. The cdylib OAuth/provider/renderer/resources
-  registrations are superseded; their code is removed in a follow-up.
+  The provider runtime is wired end to end. `WasmProvider` joins resolve and `/model`,
+  instantiates its dedicated `ProviderHost` lazily on the first request, and revalidates
+  the grant on every request, so revocation stops the next call. `provider-http`
+  enforces the endpoint before connecting, rejects encoded separators/dots, dot
+  segments and redirects, strips guest credential/framing headers, injects only the
+  host-held credential after a fresh fingerprint check, and reaps per-call handles.
+  `provider-stream` is restricted to provider calls and bounded at 16,384 deltas,
+  1,024 blocks and 16 MiB; the CLI's 256-entry live queue cancels on overflow, while
+  its `select!` forwards a host timeout as a terminal stream error without waiting for
+  an abandoned guest sender.
+
+  Markdown rendering is finalize-only on a deny-all instance. Both instantiation and
+  transformation are bounded; transformation uses a detached worker and a wall-clock
+  deadline (epoch interruption still covers pure-CPU spins). The
+  `before-provider-request` observation is redacted unless `provider-request --observe`
+  is granted (`apiKey` becomes `apiKeyPresent`, messages are dropped by default). Even
+  with `--headers values`, only `traceparent`, `tracestate`, `x-request-id`,
+  `x-correlation-id` and `x-trace` values cross the ABI. The Observe partition applies
+  only to this event, and
+  each patch gate uses a dedicated instance so a guest parked in a host import cannot
+  starve shared probes or tool calls.
+
+  Consent and residual-risk behavior is explicit: a resources manifest never grants
+  `resources`, including on reinstall or with `--yes`; use `ki plugin grant`. Granting
+  `oauth`/`provider` alongside existing `exec`/`fs`/`net-sockets` emits the implemented
+  O17 warning but does not refuse the grant.
+
+  Boundaries, stated rather than implied: built-in providers still resolve stored API
+  keys only (`stored_api_key` does not automatically consume an OAuth entry), whereas a
+  wasm provider can use an OAuth access token through an explicit, fingerprint-checked
+  `--credential-from` grant. The cdylib OAuth/provider/renderer/resources registrations
+  are superseded but their P6 deletion is still pending. The process-level compiled
+  event sink used by legacy plugins also remains last-writer-wins across session builds.
 
 - **MCP notices can suppress a session's own collab echoes.** Collab entries
   now carry the writing session (from `KI_AGENT_ID`), and the client keeps the
