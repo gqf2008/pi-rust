@@ -39,6 +39,7 @@ pub(super) fn start_session_cron(
     state: &Arc<TuiState>,
     tx: &mpsc::UnboundedSender<TuiMessage>,
     tui: &Arc<TuiAltScreen>,
+    dedup: Arc<crate::cron::CronDedup>,
 ) -> Option<SessionCron> {
     if !project_trusted || !crate::cron::config_path(cwd).is_file() {
         return None;
@@ -58,8 +59,14 @@ pub(super) fn start_session_cron(
     let trust_cwd = cwd.to_path_buf();
     let trust: crate::cron::CronTrust =
         Arc::new(move || crate::session::resolve_project_trust(&trust_args, &trust_cwd));
-    let handle =
-        crate::cron::start_if_configured(cwd, inject, log, Arc::clone(&shutting_down), trust)?;
+    let handle = crate::cron::start_if_configured(
+        cwd,
+        inject,
+        log,
+        Arc::clone(&shutting_down),
+        trust,
+        dedup,
+    )?;
     Some(SessionCron {
         handle,
         shutting_down,

@@ -457,8 +457,9 @@ impl Schedule {
 
     /// 严格晚于 `after` 的下一个到期时刻（分钟粒度、本地时间）。
     ///
-    /// 不存在的本地时间（夏令时跳过的那一小时）会被跳过；二义时刻取较早者。
-    /// 约 9 年内无解时返回 `None`。
+    /// 不存在的本地时间（夏令时跳过的那一小时）会被跳过；二义时刻取严格
+    /// 晚于 `after` 的偏移（秋季回拨后可能需要取较晚者）。约 9 年内无解时
+    /// 返回 `None`。
     pub fn next_due(&self, after: DateTime<Local>) -> Option<DateTime<Local>> {
         let start =
             after.naive_local().with_second(0)?.with_nanosecond(0)? + ChronoDuration::minutes(1);
@@ -483,8 +484,24 @@ impl Schedule {
                 let Some(naive) = date.and_hms_opt(hour, minute, 0) else {
                     continue;
                 };
-                if let Some(local) = Local.from_local_datetime(&naive).earliest() {
-                    return Some(local);
+                use chrono::LocalResult;
+                let local = match Local.from_local_datetime(&naive) {
+                    LocalResult::Single(local) => Some(local),
+                    LocalResult::Ambiguous(first, second) => {
+                        let earlier = first.min(second);
+                        let later = first.max(second);
+                        if earlier > after {
+                            Some(earlier)
+                        } else if later > after {
+                            Some(later)
+                        } else {
+                            None
+                        }
+                    }
+                    LocalResult::None => None,
+                };
+                if local.is_some_and(|local| local > after) {
+                    return local;
                 }
             }
         }
@@ -642,7 +659,16 @@ pub trait CronSink: Send + Sync + 'static {
     fn diagnostic(&self, _message: &str) {}
 }
 
-/// 调度核心：持有已加载任务、去重集合与配置 mtime。
+/// 会话共享的触发去重状态。
+///
+/// 每个任务只记录已触发的最大分钟序号，而不是按当前墙钟清理短期集合。
+/// 因而 `/reload` 重建调度核心、墙钟向前跳再回拨，都不会重复触发旧分钟。
+#[derive(Default)]
+pub struct CronDedup {
+    last_fired_minute: Mutex<HashMap<String, i64>>,
+}
+
+/// 调度核心：持有已加载任务、会话共享的去重状态与配置 mtime。
 ///
 /// 线程版 [`CronHandle`] 只是“取当前时间 → [`CronCore::reload_if_changed`] →
 /// [`CronCore::tick`] → 睡到下一个检查点”的循环；测试可以直接用固定时钟调
@@ -650,18 +676,23 @@ pub trait CronSink: Send + Sync + 'static {
 pub struct CronCore {
     config_path: PathBuf,
     jobs: Vec<CronJob>,
-    /// `(任务名, 分钟序号)`：保证同一分钟最多触发一次。
-    fired: HashSet<(String, i64)>,
+    /// `(任务名, 已触发最大分钟序号)`：跨调度器代际共享。
+    dedup: Arc<CronDedup>,
     last_mtime: Option<SystemTime>,
     loaded: bool,
 }
 
 impl CronCore {
     pub fn new(config_path: PathBuf) -> Self {
+        Self::with_dedup(config_path, Arc::new(CronDedup::default()))
+    }
+
+    /// 用会话共享的去重状态构造；`/reload` 的新一代必须传入旧状态。
+    pub fn with_dedup(config_path: PathBuf, dedup: Arc<CronDedup>) -> Self {
         Self {
             config_path,
             jobs: Vec::new(),
-            fired: HashSet::new(),
+            dedup,
             last_mtime: None,
             loaded: false,
         }
@@ -708,17 +739,21 @@ impl CronCore {
     /// 返回 `now` 这一分钟应当触发的任务（每个任务最多一次）。
     pub fn tick(&mut self, now: DateTime<Local>) -> Vec<CronJob> {
         let key = minute_key(now);
-        // 只保留最近两分钟的记录：长期运行也不会无限增长。
-        self.fired.retain(|(_, minute)| *minute >= key - 2);
-
+        let mut last_fired = self.dedup.last_fired_minute.lock().unwrap();
         let mut due = Vec::new();
         for job in &self.jobs {
             if !job.enabled || !job.schedule.is_due(now) {
                 continue;
             }
-            if self.fired.insert((job.name.clone(), key)) {
-                due.push(job.clone());
+            // 高水位同时覆盖同分钟去重和墙钟回拨：只允许更大的 epoch 触发。
+            if last_fired
+                .get(&job.name)
+                .is_some_and(|previous| *previous >= key)
+            {
+                continue;
             }
+            last_fired.insert(job.name.clone(), key);
+            due.push(job.clone());
         }
         due
     }
@@ -765,7 +800,14 @@ impl CronHandle {
         sink: Arc<dyn CronSink>,
         clock: Arc<dyn CronClock>,
     ) -> Self {
-        Self::start_with_clock_and_trust(cwd, sink, clock, Arc::new(|| true), None)
+        Self::start_with_clock_and_trust(
+            cwd,
+            sink,
+            clock,
+            Arc::new(|| true),
+            None,
+            Arc::new(CronDedup::default()),
+        )
     }
 
     fn start_with_clock_and_trust(
@@ -774,11 +816,12 @@ impl CronHandle {
         clock: Arc<dyn CronClock>,
         trust: CronTrust,
         workers: Option<Arc<CronWorkerState>>,
+        dedup: Arc<CronDedup>,
     ) -> Self {
         let config_path = config_path(cwd.as_ref());
         let (stop, stop_rx) = mpsc::channel();
         let thread = thread::spawn(move || {
-            let mut core = CronCore::new(config_path);
+            let mut core = CronCore::with_dedup(config_path, dedup);
             loop {
                 // 信任检查必须先于配置读取。运行中撤销信任时，这个线程在下一次
                 // 轮询退出；不再读取项目配置，也不再触发任何项目任务。
@@ -1370,6 +1413,7 @@ pub fn start_if_configured(
     log: CronLog,
     shutting_down: Arc<AtomicBool>,
     trust: CronTrust,
+    dedup: Arc<CronDedup>,
 ) -> Option<CronHandle> {
     start_if_configured_with_clock(
         cwd,
@@ -1378,6 +1422,7 @@ pub fn start_if_configured(
         shutting_down,
         Arc::new(SystemClock),
         trust,
+        dedup,
     )
 }
 
@@ -1388,6 +1433,7 @@ fn start_if_configured_with_clock(
     shutting_down: Arc<AtomicBool>,
     clock: Arc<dyn CronClock>,
     trust: CronTrust,
+    dedup: Arc<CronDedup>,
 ) -> Option<CronHandle> {
     // 不做“先检查文件、稍后再检查信任”：不受信任时连元数据都不读取。
     if !trust() || !config_path(cwd).is_file() {
@@ -1407,6 +1453,7 @@ fn start_if_configured_with_clock(
         clock,
         trust,
         Some(workers),
+        dedup,
     ))
 }
 
@@ -1454,6 +1501,53 @@ mod tests {
                 .unwrap()
         ));
         assert!(!s.is_due(local(2026, 10, 24, 9, 6)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn next_due_after_dst_fold_uses_the_later_offset() {
+        // Local 的时区是进程全局状态；放进子进程设置 TZ，避免干扰并行测试。
+        const CHILD: &str = "KI_CRON_DST_FOLD_CHILD";
+        const TEST_NAME: &str = "cron::tests::next_due_after_dst_fold_uses_the_later_offset";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([TEST_NAME, "--exact"])
+                .env(CHILD, "1")
+                .env("TZ", "America/New_York")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "DST 子测试失败\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let (first, second) = match Local.with_ymd_and_hms(2026, 11, 1, 1, 30, 0) {
+            chrono::LocalResult::Ambiguous(first, second) => (first, second),
+            other => panic!("America/New_York 秋季回拨应产生二义时刻: {other:?}"),
+        };
+        let earlier = first.min(second);
+        let later = first.max(second);
+        let schedule = schedule("45 1 * * *");
+        let after_first = schedule.next_due(earlier).unwrap();
+        let after_second = schedule.next_due(later).unwrap();
+
+        assert!(after_first > earlier);
+        assert!(
+            after_second > later,
+            "回拨后的下一次触发必须严格晚于 after，不能返回更早偏移"
+        );
+        let expected = NaiveDate::from_ymd_opt(2026, 11, 1)
+            .unwrap()
+            .and_hms_opt(1, 45, 0)
+            .unwrap();
+        assert_eq!(after_first.naive_local(), expected);
+        assert_eq!(after_second.naive_local(), expected);
+        assert_eq!(after_first.offset(), earlier.offset());
+        assert_eq!(after_second.offset(), later.offset());
     }
 
     #[test]
@@ -1678,6 +1772,29 @@ mod tests {
         assert_eq!(core.tick(next_minute).len(), 1);
         let fired = core.tick(now + ChronoDuration::minutes(2));
         assert_eq!(fired[0].action, JobAction::Prompt("ping".to_string()));
+    }
+
+    #[test]
+    fn core_does_not_refire_after_clock_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            r#"[{"name": "tick", "schedule": "* * * * *", "prompt": "ping"}]"#,
+        );
+        let mut core = CronCore::for_cwd(dir.path());
+        core.reload_if_changed().unwrap();
+        let first = local(2026, 10, 24, 9, 5);
+
+        assert_eq!(core.tick(first).len(), 1);
+        assert_eq!(core.tick(first + ChronoDuration::minutes(5)).len(), 1);
+        assert!(
+            core.tick(first).is_empty(),
+            "墙钟向前跳再回拨不得重发已经触发的分钟"
+        );
+        assert!(
+            core.tick(first + ChronoDuration::minutes(4)).is_empty(),
+            "回拨到高水位之前的任何分钟都不得重发"
+        );
     }
 
     #[test]
@@ -2123,6 +2240,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             clock,
             Arc::new(|| false),
+            Arc::new(CronDedup::default()),
         );
 
         assert!(
@@ -2158,6 +2276,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             clock,
             Arc::new(|| true),
+            Arc::new(CronDedup::default()),
         )
         .expect("受信任且配置存在时必须启动调度器");
 
@@ -2170,6 +2289,53 @@ trusted"
                 .to_string()]
         );
         handle.stop();
+    }
+
+    #[test]
+    fn reload_in_the_same_minute_does_not_fire_a_job_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            r#"[{"name":"tick","schedule":"* * * * *","prompt":"ping"}]"#,
+        );
+        let mock = MockInject::new();
+        let (log, _lines) = recording_log();
+        let clock = Arc::new(MockClock {
+            current: Mutex::new(local(2026, 10, 24, 9, 5)),
+        });
+        let dedup = Arc::new(CronDedup::default());
+        let first = start_if_configured_with_clock(
+            dir.path(),
+            mock.clone(),
+            log.clone(),
+            Arc::new(AtomicBool::new(false)),
+            clock.clone(),
+            Arc::new(|| true),
+            Arc::clone(&dedup),
+        )
+        .unwrap();
+        assert_eq!(wait_for_injections(&mock, 1).len(), 1);
+        first.stop();
+
+        // 与 /reload 一样重建调度核心，但沿用会话级去重状态。
+        let second = start_if_configured_with_clock(
+            dir.path(),
+            mock.clone(),
+            log,
+            Arc::new(AtomicBool::new(false)),
+            clock,
+            Arc::new(|| true),
+            dedup,
+        )
+        .unwrap();
+        std::thread::sleep(StdDuration::from_millis(1200));
+        second.stop();
+        assert_eq!(
+            mock.texts().len(),
+            1,
+            "/reload 后同一分钟不得再次触发: {:?}",
+            mock.texts()
+        );
     }
 
     #[cfg(unix)]
@@ -2211,6 +2377,7 @@ trusted"
             Arc::new(AtomicBool::new(false)),
             clock.clone(),
             Arc::new(|| true),
+            Arc::new(CronDedup::default()),
         )
         .unwrap();
         wait_for_pids(1);
@@ -2225,6 +2392,7 @@ trusted"
             Arc::new(AtomicBool::new(false)),
             clock,
             Arc::new(|| true),
+            Arc::new(CronDedup::default()),
         )
         .unwrap();
         let pids = wait_for_pids(2);
@@ -2273,6 +2441,7 @@ trusted"
             Arc::new(AtomicBool::new(false)),
             clock.clone(),
             trust,
+            Arc::new(CronDedup::default()),
         )
         .expect("撤销前项目受信任，调度器应启动");
         assert_eq!(wait_for_injections(&mock, 1).len(), 1);
@@ -2313,6 +2482,7 @@ trusted"
             log,
             Arc::new(AtomicBool::new(false)),
             Arc::new(|| true),
+            Arc::new(CronDedup::default()),
         );
         assert!(started.is_none(), "没有 .ki/cron.json 就不该启动调度线程");
     }

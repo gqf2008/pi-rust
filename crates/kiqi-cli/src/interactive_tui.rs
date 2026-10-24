@@ -1336,10 +1336,19 @@ pub async fn interactive_tui(
         selection_end: std::sync::Mutex::new(None),
     });
 
-    // 会话内定时任务：仅当 `.ki/cron.json` 存在时启动。句柄在这里持有，
-    // 主循环结束时 stop()（下方 Shutdown 段），`/reload` 时先停后重建。
-    let mut session_cron =
-        start_session_cron(&cwd, project_trusted, args, &lane, &state, &tx, &tui);
+    // 会话内定时任务：仅当 `.ki/cron.json` 存在时启动。去重状态独立于
+    // 调度器代际，在 `/reload` 先停后重建时继续复用，避免同分钟重触发。
+    let cron_dedup = Arc::new(crate::cron::CronDedup::default());
+    let mut session_cron = start_session_cron(
+        &cwd,
+        project_trusted,
+        args,
+        &lane,
+        &state,
+        &tx,
+        &tui,
+        Arc::clone(&cron_dedup),
+    );
 
     let _compaction_watcher = harness.watch({
         let state = Arc::clone(&state);
@@ -3426,8 +3435,16 @@ pub async fn interactive_tui(
                 // 信任可能在会话中由 `/trust` 或外部修改；重建前必须重新判定，
                 // 不能沿用启动时的 `project_trusted` 快照。
                 let cron_project_trusted = crate::session::resolve_project_trust(args, &cwd);
-                session_cron =
-                    start_session_cron(&cwd, cron_project_trusted, args, &lane, &state, &tx, &tui);
+                session_cron = start_session_cron(
+                    &cwd,
+                    cron_project_trusted,
+                    args,
+                    &lane,
+                    &state,
+                    &tx,
+                    &tui,
+                    Arc::clone(&cron_dedup),
+                );
                 tui.request_render(false);
             }
             None => break,
