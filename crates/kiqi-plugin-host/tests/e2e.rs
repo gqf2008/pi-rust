@@ -544,6 +544,12 @@ fn langfuse_subset_builds_a_trace_and_flushes_it_over_net_http() {
         net_http: Some(NetHttpGrant {
             hosts: vec!["127.0.0.1".into()],
         }),
+        // Observation is deny-by-default: without this the generation span
+        // below would never be created.
+        provider_request: Some(kiqi_plugin::grants::ProviderRequestGrant {
+            observe: kiqi_plugin::grants::ObserveMode::Requests,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let plugin = WasmPlugin::load_with_grants("kiqi-langfuse", &wasm, grants).expect("load");
@@ -609,6 +615,77 @@ fn langfuse_subset_builds_a_trace_and_flushes_it_over_net_http() {
     assert!(body.contains("LLM Call"), "generation span: {body}");
     assert!(body.contains("sess-1"), "session id: {body}");
     assert!(body.contains("test-model"), "model: {body}");
+}
+
+/// The same fixture, same turn, but no `provider-request` grant: the host must
+/// not call the guest for `BeforeProviderRequest`, so no generation span exists.
+/// This is the delivery half of the graded payload; the field stripping is
+/// covered by the unit tests in the crate.
+#[test]
+fn provider_observation_is_not_delivered_without_a_grant() {
+    let wasm = langfuse_wasm();
+    let (base_url, server) = spawn_capturing_server();
+    let grants = Grants {
+        net_http: Some(NetHttpGrant {
+            hosts: vec!["127.0.0.1".into()],
+        }),
+        ..Default::default()
+    };
+    let plugin = WasmPlugin::load_with_grants("kiqi-langfuse", &wasm, grants).expect("load");
+
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let configured = plugin
+        .call(
+            "langfuse_config",
+            &serde_json::json!({
+                "baseUrl": base_url,
+                "publicKey": "pk-lf-test",
+                "secretKey": "sk-lf-test",
+            }),
+            &caps,
+            &RecordingSink {
+                blocks: Mutex::new(Vec::new()),
+            },
+        )
+        .expect("configure");
+    assert!(!configured.is_error, "{configured:?}");
+
+    let dispatch = |tag, payload| {
+        plugin.on_event(&Event::new(tag, payload), &caps);
+    };
+    dispatch(EventTag::SessionStart, serde_json::Value::Null);
+    dispatch(
+        EventTag::BeforeAgentStart,
+        serde_json::json!({
+            "prompt": "hello",
+            "sessionId": "sess-deny",
+            "host": { "name": "kiqi", "version": "9" },
+        }),
+    );
+    dispatch(
+        EventTag::BeforeProviderRequest,
+        serde_json::json!({ "model": "ungranted-model" }),
+    );
+    dispatch(
+        EventTag::MessageEnd,
+        serde_json::json!({
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "hi there" }],
+        }),
+    );
+    dispatch(EventTag::SessionShutdown, serde_json::Value::Null);
+
+    let body = server.join().unwrap();
+    assert!(body.contains("Conversational Turn"), "root span: {body}");
+    assert!(
+        !body.contains("LLM Call"),
+        "an ungranted guest must not see the request: {body}"
+    );
+    assert!(
+        !body.contains("ungranted-model"),
+        "the payload must not reach the guest: {body}"
+    );
 }
 
 /// A `UiApi` that records what the guest asked for and answers dialogs.

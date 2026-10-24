@@ -32,6 +32,7 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Mutex;
 
+use kiqi_plugin::grants::{HeadersMode, MessagesMode, ObserveMode};
 use kiqi_plugin::{
     Block, CommandSpec, Event, EventAction, FlagSpec, HostCaps, Plugin as PluginTrait, PluginError,
     Progress, ProgressSink, ShortcutSpec, ToolOutcome, ToolSpec, Verdict,
@@ -1982,7 +1983,19 @@ impl WasmPlugin {
         let Some(inner) = guard.as_mut() else {
             return EventAction::Continue;
         };
-        let wit = to_wit_event(event);
+        // Provider observation is deny-by-default and field-graded per guest:
+        // the payload is cut down to what *this* plugin's provider-request
+        // grant allows, and an ungranted guest is never called at all. The
+        // grants live in the store (that is why this happens here and not in
+        // kiqi-extensions, which cannot see them).
+        let wit = if event.tag == kiqi_plugin::EventTag::BeforeProviderRequest {
+            match graded_provider_request(event, &inner.store.data().grants) {
+                Some(wit) => wit,
+                None => return EventAction::Continue,
+            }
+        } else {
+            to_wit_event(event)
+        };
         let _context = install_context(None, caps);
         let result = inner
             .guest
@@ -2311,6 +2324,56 @@ fn to_wit_tool_call(event: &Event) -> ToolCall {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "null".to_string()),
     }
+}
+
+/// The `BeforeProviderRequest` payload as one guest is allowed to see it.
+///
+/// `None` means the event is not delivered to this guest:
+///
+/// * no `provider-request` grant — the grant is the only authorization for
+///   observation, so a merely-loaded plugin sees nothing;
+/// * `observe` is not `requests` — a grant that was recorded without the
+///   observe switch still delivers nothing.
+///
+/// What crosses the boundary is graded by the same grant:
+///
+/// * `messages` only with `messages = full`. Without it the payload still
+///   carries `messageCount`, which tells an observer the size of the turn
+///   without handing over the conversation;
+/// * header values only with `headers = values`; otherwise any value-bearing
+///   key is removed and `headerNames` remains. The `kiqi-extensions` bridge
+///   currently emits names only (credentials are redacted at the source), so
+///   `values` has nothing extra to add until that bridge carries values; the
+///   strip here is what keeps a future bridge from leaking them by default.
+///
+/// `BeforeProviderHeaders` and `AfterProviderResponse` keep their current
+/// semantics in this phase (deferred: they are not grant-gated yet).
+fn graded_provider_request(event: &Event, grants: &Grants) -> Option<WitEvent> {
+    let grant = grants.provider_request.as_ref()?;
+    if grant.observe != ObserveMode::Requests {
+        return None;
+    }
+    let mut payload = event.payload.clone();
+    // Count before removing: `messageCount` must survive `messages`, and a
+    // payload without messages is a zero-message request.
+    let message_count = payload
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "messageCount".to_string(),
+            serde_json::Value::from(message_count),
+        );
+        if grant.messages != MessagesMode::Full {
+            object.remove("messages");
+        }
+        if grant.headers != HeadersMode::Values {
+            object.remove("headers");
+            object.remove("headerValues");
+        }
+    }
+    Some(WitEvent::BeforeProviderRequest(payload.to_string()))
 }
 
 fn to_wit_event(event: &Event) -> WitEvent {
@@ -2746,5 +2809,97 @@ mod tests {
         .unwrap();
 
         assert_eq!(discover_providers(&wasm), Discovery::default());
+    }
+
+    /// The provider-request grant is the delivery switch: absent, or recorded
+    /// without `observe = requests`, means the guest is not called at all.
+    #[test]
+    fn provider_observation_is_denied_without_an_observe_grant() {
+        let event = Event::new(
+            kiqi_plugin::EventTag::BeforeProviderRequest,
+            serde_json::json!({ "model": "m", "messages": [{ "role": "user" }] }),
+        );
+
+        let mut grants = Grants::default();
+        assert!(graded_provider_request(&event, &grants).is_none());
+
+        grants.provider_request = Some(kiqi_plugin::grants::ProviderRequestGrant::default());
+        assert!(
+            graded_provider_request(&event, &grants).is_none(),
+            "a grant with observe = none delivers nothing"
+        );
+    }
+
+    /// `messages` is opt-in; the default replaces it with `messageCount`, and
+    /// `headers = names` keeps values out even if a future bridge sends them.
+    #[test]
+    fn provider_observation_strips_messages_and_header_values() {
+        let event = Event::new(
+            kiqi_plugin::EventTag::BeforeProviderRequest,
+            serde_json::json!({
+                "model": "m",
+                "apiKeyPresent": true,
+                "headerNames": ["authorization"],
+                "headerValues": { "authorization": "secret" },
+                "messages": [{ "role": "user" }, { "role": "assistant" }],
+            }),
+        );
+        let mut grants = Grants::default();
+        grants.provider_request = Some(kiqi_plugin::grants::ProviderRequestGrant {
+            observe: ObserveMode::Requests,
+            ..kiqi_plugin::grants::ProviderRequestGrant::default()
+        });
+
+        let Some(WitEvent::BeforeProviderRequest(payload)) =
+            graded_provider_request(&event, &grants)
+        else {
+            panic!("the observe grant must deliver");
+        };
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["messageCount"], 2);
+        assert!(payload.get("messages").is_none(), "messages are opt-in");
+        assert!(payload.get("headerValues").is_none(), "values are opt-in");
+        assert_eq!(payload["headerNames"][0], "authorization");
+        assert_eq!(payload["model"], "m");
+        assert_eq!(payload["apiKeyPresent"], true);
+
+        // Both explicit opt-ins deliver the full view.
+        grants.provider_request = Some(kiqi_plugin::grants::ProviderRequestGrant {
+            observe: ObserveMode::Requests,
+            messages: MessagesMode::Full,
+            headers: HeadersMode::Values,
+            ..kiqi_plugin::grants::ProviderRequestGrant::default()
+        });
+        let Some(WitEvent::BeforeProviderRequest(payload)) =
+            graded_provider_request(&event, &grants)
+        else {
+            panic!("the observe grant must deliver");
+        };
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["headerValues"]["authorization"], "secret");
+        assert_eq!(payload["messageCount"], 2);
+    }
+
+    /// A payload without messages still reports a zero count rather than
+    /// omitting the field.
+    #[test]
+    fn provider_observation_always_reports_a_message_count() {
+        let event = Event::new(
+            kiqi_plugin::EventTag::BeforeProviderRequest,
+            serde_json::json!({ "model": "m" }),
+        );
+        let mut grants = Grants::default();
+        grants.provider_request = Some(kiqi_plugin::grants::ProviderRequestGrant {
+            observe: ObserveMode::Requests,
+            ..kiqi_plugin::grants::ProviderRequestGrant::default()
+        });
+        let Some(WitEvent::BeforeProviderRequest(payload)) =
+            graded_provider_request(&event, &grants)
+        else {
+            panic!("the observe grant must deliver");
+        };
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["messageCount"], 0);
     }
 }
