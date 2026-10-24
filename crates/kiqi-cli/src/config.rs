@@ -375,6 +375,78 @@ pub fn read_oauth_token(provider_id: &str) -> Result<Option<Credential>, ConfigE
     })
 }
 
+/// The auth-store key one plugin's OAuth credential lives under.
+///
+/// The `plugin:` prefix *is* the isolation: a plugin provider id can never be a
+/// bare provider id (`anthropic`), so a plugin can never replace a
+/// user-owned credential, while re-login of the same namespaced key overwrites
+/// exactly that plugin's entry.
+pub fn plugin_credential_key(install_id: &str, provider_id: &str) -> String {
+    format!("plugin:{install_id}:{provider_id}")
+}
+
+/// Store a plugin's OAuth token under `plugin:<install-id>:<provider-id>`.
+///
+/// This is the only write path for a guest-originated token. It deliberately
+/// does more than [`upsert_credential`]: an existing `ApiKey` at the namespaced
+/// key is refused (that entry did not come from this path), while an existing
+/// OAuth value is overwritten, which is what re-login of the same plugin
+/// provider needs.
+pub fn upsert_plugin_oauth_token(
+    install_id: &str,
+    provider_id: &str,
+    access: String,
+    refresh: String,
+    expires: i64,
+) -> Result<(), ConfigError> {
+    let key = plugin_credential_key(install_id, provider_id);
+    let mut store = read_auth()?;
+    if matches!(store.get(&key), Some(Credential::ApiKey { .. })) {
+        return Err(ConfigError::Write {
+            path: auth_path()?,
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing to replace the non-OAuth credential at `{key}`"),
+            ),
+        });
+    }
+    store.insert(
+        key,
+        Credential::Oauth {
+            access,
+            refresh,
+            expires,
+        },
+    );
+    write_auth(&store)
+}
+
+/// Read one plugin's namespaced OAuth credential.
+pub fn read_plugin_oauth_token(
+    install_id: &str,
+    provider_id: &str,
+) -> Result<Option<Credential>, ConfigError> {
+    let key = plugin_credential_key(install_id, provider_id);
+    Ok(match read_auth()?.get(&key) {
+        Some(Credential::Oauth {
+            access,
+            refresh,
+            expires,
+        }) => Some(Credential::Oauth {
+            access: access.clone(),
+            refresh: refresh.clone(),
+            expires: *expires,
+        }),
+        _ => None,
+    })
+}
+
+/// Remove one plugin's namespaced OAuth credential, leaving every bare
+/// provider entry (and every other plugin's entry) untouched.
+pub fn delete_plugin_oauth_token(install_id: &str, provider_id: &str) -> Result<bool, ConfigError> {
+    delete_credential(&plugin_credential_key(install_id, provider_id))
+}
+
 /// Remove `provider_id` from the store. Returns `true` if a credential was
 /// present (and is now gone), `false` if it was already absent. Always rewrites
 /// the file when the provider existed (so `auth logout` reflects the new state
@@ -1229,6 +1301,86 @@ mod tests {
                 if access == "access" && refresh == "refresh" && expires == 123
         ));
         assert!(read_oauth_token("other").unwrap().is_none());
+    }
+
+    #[test]
+    fn plugin_oauth_tokens_are_namespaced_and_never_clobber_bare_entries() {
+        let _cfg = TempConfig::new();
+        upsert_credential(
+            "anthropic",
+            Credential::ApiKey {
+                key: Some("sk-user".into()),
+                env: None,
+            },
+        )
+        .unwrap();
+
+        upsert_plugin_oauth_token("install-1", "anthropic", "at".into(), "rt".into(), 99).unwrap();
+
+        let store = read_auth().unwrap();
+        assert_eq!(
+            plugin_credential_key("install-1", "anthropic"),
+            "plugin:install-1:anthropic"
+        );
+        assert!(matches!(
+            store.get("plugin:install-1:anthropic"),
+            Some(Credential::Oauth { access, refresh, expires })
+                if access == "at" && refresh == "rt" && *expires == 99
+        ));
+        // The user's bare entry is byte-for-byte untouched.
+        assert!(matches!(
+            store.get("anthropic"),
+            Some(Credential::ApiKey { key, .. }) if key.as_deref() == Some("sk-user")
+        ));
+
+        // Re-login of the SAME plugin provider overwrites only its namespaced
+        // entry, and a bare re-key still works through the ordinary path.
+        upsert_plugin_oauth_token("install-1", "anthropic", "at2".into(), "rt2".into(), 100)
+            .unwrap();
+        assert!(matches!(
+            read_plugin_oauth_token("install-1", "anthropic").unwrap(),
+            Some(Credential::Oauth { access, refresh, expires })
+                if access == "at2" && refresh == "rt2" && expires == 100
+        ));
+        upsert_credential(
+            "anthropic",
+            Credential::ApiKey {
+                key: Some("sk-user-2".into()),
+                env: None,
+            },
+        )
+        .unwrap();
+        let store = read_auth().unwrap();
+        assert!(matches!(
+            store.get("anthropic"),
+            Some(Credential::ApiKey { key, .. }) if key.as_deref() == Some("sk-user-2")
+        ));
+
+        assert!(delete_plugin_oauth_token("install-1", "anthropic").unwrap());
+        let store = read_auth().unwrap();
+        assert!(store.get("plugin:install-1:anthropic").is_none());
+        assert!(store.get("anthropic").is_some(), "bare entry survives");
+    }
+
+    #[test]
+    fn a_plugin_oauth_write_refuses_a_non_oauth_entry_at_its_namespaced_key() {
+        let _cfg = TempConfig::new();
+        upsert_credential(
+            "plugin:install-1:anthropic",
+            Credential::ApiKey {
+                key: Some("not-an-oauth-token".into()),
+                env: None,
+            },
+        )
+        .unwrap();
+        let error =
+            upsert_plugin_oauth_token("install-1", "anthropic", "at".into(), "rt".into(), 0)
+                .unwrap_err();
+        assert!(error.to_string().contains("refusing to replace"), "{error}");
+        assert!(matches!(
+            read_auth().unwrap().get("plugin:install-1:anthropic"),
+            Some(Credential::ApiKey { key, .. }) if key.as_deref() == Some("not-an-oauth-token")
+        ));
     }
 
     #[test]

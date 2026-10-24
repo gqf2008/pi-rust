@@ -404,6 +404,10 @@ pub struct OAuthProviderProfile {
     pub flows: Vec<OAuthFlow>,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
+    /// Where the host performs the device-authorization request. Required for a
+    /// profile that grants `device-code`, optional otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_authorization_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation_endpoint: Option<String>,
     pub client_id: String,
@@ -486,6 +490,24 @@ impl OAuthGrant {
                     &format!("oauth provider `{}` {field}", profile.id),
                     endpoint,
                 )?;
+            }
+            if let Some(endpoint) = &profile.device_authorization_endpoint {
+                validate_https_endpoint(
+                    &format!(
+                        "oauth provider `{}` device-authorization-endpoint",
+                        profile.id
+                    ),
+                    endpoint,
+                )?;
+            }
+            if profile.flows.contains(&OAuthFlow::DeviceCode)
+                && profile.device_authorization_endpoint.is_none()
+            {
+                return Err(format!(
+                    "oauth provider `{}` grants device-code but has no \
+                     `device-authorization-endpoint`",
+                    profile.id
+                ));
             }
             if let Some(endpoint) = &profile.revocation_endpoint {
                 validate_https_endpoint(
@@ -2161,6 +2183,10 @@ mod tests {
             "https://id.acme.test/authorize"
         );
         assert_eq!(profile["token-endpoint"], "https://id.acme.test/token");
+        assert_eq!(
+            profile["device-authorization-endpoint"],
+            "https://id.acme.test/device"
+        );
         assert_eq!(profile["supports-pkce"], true);
         assert_eq!(profile["flows"][0], "device-code");
         assert!(
@@ -2205,6 +2231,13 @@ mod tests {
         let mut no_flow = valid_oauth_grant();
         no_flow.providers[0].flows.clear();
         assert!(grants.grant_oauth(no_flow).is_err());
+
+        let mut no_device_endpoint = valid_oauth_grant();
+        no_device_endpoint.providers[0].device_authorization_endpoint = None;
+        assert!(
+            grants.grant_oauth(no_device_endpoint).is_err(),
+            "device-code needs a device-authorization-endpoint"
+        );
 
         let mut zero_budget = valid_oauth_grant();
         zero_budget.timeout_seconds = 0;
@@ -2617,6 +2650,7 @@ mod tests {
                 flows: vec![OAuthFlow::DeviceCode, OAuthFlow::AuthorizationCode],
                 authorization_endpoint: "https://id.acme.test/authorize".to_string(),
                 token_endpoint: "https://id.acme.test/token".to_string(),
+                device_authorization_endpoint: Some("https://id.acme.test/device".to_string()),
                 revocation_endpoint: Some("https://id.acme.test/revoke".to_string()),
                 client_id: "client-123".to_string(),
                 supports_pkce: true,

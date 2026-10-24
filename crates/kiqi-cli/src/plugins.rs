@@ -1439,6 +1439,63 @@ fn digest_gate(wasm: &std::path::Path) -> Result<Option<&'static str>, String> {
     }
 }
 
+/// The `auth.json` half of host-attributed OAuth.
+///
+/// The host crate cannot depend on `kiqi-cli`, so this adapter is installed when
+/// the CLI constructs a wasm plugin. It is the only way a guest exchange reaches
+/// disk, and it always goes through the namespaced writer — a plugin token lands
+/// on `plugin:<install-id>:<provider-id>`, never on a bare provider id.
+#[cfg(feature = "plugin-wasm")]
+#[derive(Debug, Default)]
+struct ConfigCredentialSink;
+
+#[cfg(feature = "plugin-wasm")]
+impl kiqi_plugin_host::PluginCredentialSink for ConfigCredentialSink {
+    fn store_plugin_oauth(
+        &self,
+        install_id: &str,
+        provider_id: &str,
+        access: &str,
+        refresh: &str,
+        expires: i64,
+    ) -> Result<(), String> {
+        crate::config::upsert_plugin_oauth_token(
+            install_id,
+            provider_id,
+            access.to_string(),
+            refresh.to_string(),
+            expires,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn read_plugin_oauth(
+        &self,
+        install_id: &str,
+        provider_id: &str,
+    ) -> Result<Option<kiqi_plugin_host::StoredOAuthToken>, String> {
+        match crate::config::read_plugin_oauth_token(install_id, provider_id)
+            .map_err(|error| error.to_string())?
+        {
+            Some(crate::config::Credential::Oauth {
+                access,
+                refresh,
+                expires,
+            }) => Ok(Some(kiqi_plugin_host::StoredOAuthToken {
+                access,
+                refresh,
+                expires,
+            })),
+            _ => Ok(None),
+        }
+    }
+
+    fn delete_plugin_oauth(&self, install_id: &str, provider_id: &str) -> Result<bool, String> {
+        crate::config::delete_plugin_oauth_token(install_id, provider_id)
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// Discover `plugins/<id>/plugin.wasm` under `plugins_dir` and load each behind
 /// the same [`Plugin`] seam as the compiled-in ones.
 ///
@@ -1480,7 +1537,16 @@ pub fn load_wasm_hosts(plugins_dir: &std::path::Path) -> Vec<PluginHost> {
                 continue;
             }
         };
-        match kiqi_plugin_host::WasmPlugin::load(&id, &wasm) {
+        let options = kiqi_plugin_host::Options {
+            credential_sink: Some(std::sync::Arc::new(ConfigCredentialSink)),
+            ..Default::default()
+        };
+        match kiqi_plugin_host::WasmPlugin::load_with_options(
+            &id,
+            &wasm,
+            kiqi_plugin::grants::Grants::load_for(&id),
+            options,
+        ) {
             Ok(plugin) => {
                 // Only a plugin that actually made it into `hosts` may be
                 // called "loaded unverified": a failed load is reported by the

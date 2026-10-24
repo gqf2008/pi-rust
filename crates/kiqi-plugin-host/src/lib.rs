@@ -46,10 +46,16 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::kiqi::plugin::types::{
     CapabilityError, ContentBlock, Event as WitEvent, EventAction as WitEventAction, InputEvent,
-    InputKind, LogLevel, OauthTokenOutcome, OtherEvent, ProgressBlock, ProviderDelta as WitDelta,
-    ToolCall, ToolResult, ToolResultEvent, Verdict as WitVerdict,
+    InputKind, LogLevel, OauthCredentialStatus, OauthTokenOutcome, OtherEvent, ProgressBlock,
+    ProviderDelta as WitDelta, ToolCall, ToolResult, ToolResultEvent, Verdict as WitVerdict,
 };
 use crate::Plugin as World;
+
+pub mod oauth;
+pub use oauth::{
+    default_transport, DeviceAuthorization, HttpOAuthTransport, HttpResponse, OAuthRequestBudget,
+    OAuthTokens, OAuthTransport, PluginCredentialSink, StoredOAuthToken,
+};
 
 mod provider_patch;
 pub use provider_patch::{
@@ -580,6 +586,30 @@ struct HostState {
     next_proc: u32,
     /// The guest's linear-memory cap, read by the store's limiter.
     limits: wasmtime::StoreLimits,
+    /// Host-attributed OAuth: the flow budget plus the injected transport and
+    /// credential sink. `grants.oauth` still decides *which* provider may be
+    /// driven; this only carries the machinery and the allow-list's counters.
+    oauth: OAuthState,
+}
+
+/// The OAuth machinery one instance carries.
+///
+/// The budget lives per instance so a flow cannot outlive the plugin that
+/// started it, and `sink` is the only route from a guest exchange to disk.
+struct OAuthState {
+    budget: OAuthRequestBudget,
+    transport: Option<std::sync::Arc<dyn OAuthTransport>>,
+    sink: Option<std::sync::Arc<dyn PluginCredentialSink>>,
+}
+
+impl Default for OAuthState {
+    fn default() -> Self {
+        Self {
+            budget: OAuthRequestBudget::default(),
+            transport: None,
+            sink: None,
+        }
+    }
 }
 
 impl WasiView for HostState {
@@ -667,18 +697,18 @@ impl crate::kiqi::plugin::provider_stream::Host for HostState {
     fn emit_batch(&mut self, _deltas: Vec<WitDelta>) {}
 }
 
-/// Host-attributed OAuth endpoints. Deny-by-default: the `oauth` grant is not
-/// wired yet, so every call is refused.
+/// Host-attributed OAuth endpoints. Deny-by-default: a provider id is reachable
+/// only when the `oauth` grant names exactly that profile.
 impl crate::kiqi::plugin::oauth_http::Host for HostState {
     fn token_request(
         &mut self,
-        _provider_id: String,
-        _form: String,
+        provider_id: String,
+        form: String,
     ) -> Result<OauthTokenOutcome, CapabilityError> {
-        Err(denied())
+        self.oauth_token_request(&provider_id, &form)
     }
-    fn revoke(&mut self, _provider_id: String) -> Result<(), CapabilityError> {
-        Err(denied())
+    fn revoke(&mut self, provider_id: String) -> Result<(), CapabilityError> {
+        self.oauth_revoke(&provider_id)
     }
 }
 
@@ -892,6 +922,177 @@ impl crate::kiqi::plugin::net_http::Host for HostState {
 }
 
 impl HostState {
+    /// The exact granted profile, or a policy refusal.
+    ///
+    /// Provider ids are matched exactly: there is no wildcard, no prefix and no
+    /// case folding, because the grant is what stops one plugin from driving
+    /// another plugin's IdP profile.
+    fn oauth_profile(
+        &self,
+        provider_id: &str,
+    ) -> Result<kiqi_plugin::grants::OAuthProviderProfile, CapabilityError> {
+        let grant = self
+            .grants
+            .oauth
+            .as_ref()
+            .ok_or_else(|| CapabilityError::Denied("oauth is not granted".to_string()))?;
+        grant
+            .providers
+            .iter()
+            .find(|profile| profile.id == provider_id)
+            .cloned()
+            .ok_or_else(|| {
+                CapabilityError::Denied(format!("oauth provider `{provider_id}` is not granted"))
+            })
+    }
+
+    /// The install id inside the namespaced credential key.
+    fn oauth_install_id(&self) -> Result<String, CapabilityError> {
+        self.plugin_id.clone().ok_or_else(|| {
+            CapabilityError::Denied("this plugin instance has no install id".to_string())
+        })
+    }
+
+    fn oauth_transport(&self) -> std::sync::Arc<dyn OAuthTransport> {
+        self.oauth
+            .transport
+            .clone()
+            .unwrap_or_else(oauth::default_transport)
+    }
+
+    /// `oauth-http.token-request`: exchange an authorization code, or poll a
+    /// device code the host itself issued.
+    ///
+    /// Grant/form violations are `denied`. A transport, HTTP or parse failure is
+    /// `failed(...)` with a message that never contains the response body. A
+    /// success returns only the expiry the guest is allowed to see.
+    fn oauth_token_request(
+        &mut self,
+        provider_id: &str,
+        form: &str,
+    ) -> Result<OauthTokenOutcome, CapabilityError> {
+        let profile = self.oauth_profile(provider_id)?;
+        let install_id = self.oauth_install_id()?;
+        let mut form = oauth::parse_token_form(form).map_err(CapabilityError::Denied)?;
+        let endpoint =
+            oauth::granted_endpoint(&profile.token_endpoint).map_err(CapabilityError::Failed)?;
+        // The client id is the grant's, never the guest's.
+        form.push(("client_id".to_string(), profile.client_id.clone()));
+        let transport = self.oauth_transport();
+        let timeout = {
+            self.oauth
+                .budget
+                .charge()
+                .map_err(CapabilityError::Failed)?;
+            self.oauth.budget.request_timeout()
+        };
+        let response = transport
+            .post_form(endpoint.as_str(), &form, timeout)
+            .map_err(CapabilityError::Failed)?;
+        if !(200..300).contains(&response.status) {
+            // A 3xx is a request to a host the grant never named. Never follow
+            // it, and say which host was refused when it parses.
+            if (300..400).contains(&response.status) {
+                let host = response
+                    .location
+                    .as_deref()
+                    .and_then(|location| reqwest::Url::parse(location).ok())
+                    .and_then(|url| url.host_str().map(str::to_string));
+                return Ok(OauthTokenOutcome::Failed(match host {
+                    Some(host) => format!(
+                        "token endpoint redirected to `{host}`; redirects to another host are refused"
+                    ),
+                    None => "token endpoint returned a redirect; redirects are refused".to_string(),
+                }));
+            }
+            return Ok(OauthTokenOutcome::Failed(format!(
+                "token endpoint returned HTTP {}",
+                response.status
+            )));
+        }
+        let tokens = match oauth::parse_token_response(&response.body, unix_now()) {
+            Ok(tokens) => tokens,
+            Err(error) => return Ok(OauthTokenOutcome::Failed(error)),
+        };
+        let Some(sink) = self.oauth.sink.clone() else {
+            // No sink means no disk path: say so instead of pretending success.
+            return Ok(OauthTokenOutcome::Failed(
+                "OAuth credential store is not configured".to_string(),
+            ));
+        };
+        if let Err(error) = sink.store_plugin_oauth(
+            &install_id,
+            provider_id,
+            &tokens.access,
+            &tokens.refresh,
+            tokens.expires,
+        ) {
+            return Ok(OauthTokenOutcome::Failed(format!(
+                "credential store: {error}"
+            )));
+        }
+        // The flow is complete; a later re-login starts a fresh budget.
+        self.oauth.budget.reset();
+        Ok(OauthTokenOutcome::Stored(OauthCredentialStatus {
+            expires_at: tokens.expires,
+        }))
+    }
+
+    /// `oauth-http.revoke`: revoke the token the host stored, then drop it.
+    ///
+    /// Host-only in effect: the guest can ask for the revocation, but never
+    /// sees or supplies the token.
+    fn oauth_revoke(&mut self, provider_id: &str) -> Result<(), CapabilityError> {
+        let profile = self.oauth_profile(provider_id)?;
+        let install_id = self.oauth_install_id()?;
+        let endpoint_text = profile.revocation_endpoint.as_deref().ok_or_else(|| {
+            CapabilityError::Failed(format!(
+                "oauth provider `{provider_id}` has no revocation-endpoint"
+            ))
+        })?;
+        let endpoint = oauth::granted_endpoint(endpoint_text).map_err(CapabilityError::Failed)?;
+        let sink = self.oauth.sink.clone().ok_or_else(|| {
+            CapabilityError::Failed("OAuth credential store is not configured".to_string())
+        })?;
+        let stored = sink
+            .read_plugin_oauth(&install_id, provider_id)
+            .map_err(CapabilityError::Failed)?
+            .ok_or_else(|| {
+                CapabilityError::Failed("no stored OAuth credential for this provider".to_string())
+            })?;
+        let (hint, value) = if stored.refresh.is_empty() {
+            ("access_token", stored.access)
+        } else {
+            ("refresh_token", stored.refresh)
+        };
+        let transport = self.oauth_transport();
+        let timeout = {
+            self.oauth
+                .budget
+                .charge()
+                .map_err(CapabilityError::Failed)?;
+            self.oauth.budget.request_timeout()
+        };
+        let form = vec![
+            ("token".to_string(), value),
+            ("token_type_hint".to_string(), hint.to_string()),
+            ("client_id".to_string(), profile.client_id.clone()),
+        ];
+        let response = transport
+            .post_form(endpoint.as_str(), &form, timeout)
+            .map_err(CapabilityError::Failed)?;
+        if !(200..300).contains(&response.status) {
+            return Err(CapabilityError::Failed(format!(
+                "revocation endpoint returned HTTP {}",
+                response.status
+            )));
+        }
+        sink.delete_plugin_oauth(&install_id, provider_id)
+            .map_err(CapabilityError::Failed)?;
+        self.oauth.budget.reset();
+        Ok(())
+    }
+
     /// Resolve a guest-supplied relative path inside the fs grant's scope, or
     /// explain why it may not: `plugin-data` jails to the plugin's own data
     /// directory, `project` to the project tree (same scope `exec`/`proc`
@@ -1893,6 +2094,14 @@ pub struct Options {
     /// at call time — the right answer for `ki`, which never chdirs — while
     /// tests and embedders that relocate set it explicitly.
     pub project_dir: Option<std::path::PathBuf>,
+    /// Where a completed OAuth exchange writes its token. The host crate cannot
+    /// depend on `kiqi-cli`, so the CLI installs this when it constructs the
+    /// instance. `None` means a granted exchange returns `failed` rather than
+    /// writing anywhere — the safe default for embedders and tests.
+    pub credential_sink: Option<std::sync::Arc<dyn PluginCredentialSink>>,
+    /// The HTTP seam for `oauth-http`. `None` uses the real transport; tests
+    /// inject a fake so policy and bounds are asserted without a network.
+    pub oauth_transport: Option<std::sync::Arc<dyn OAuthTransport>>,
 }
 
 /// The default linear-memory cap for a guest: 256 MiB, which is far above what
@@ -1998,6 +2207,15 @@ impl WasmPlugin {
         // Resolve the provider-request policy before the grants move into the
         // store: the fan-out needs it without locking the guest.
         let provider_request = resolve_provider_request_policy(&grants);
+        let oauth = OAuthState {
+            budget: grants
+                .oauth
+                .as_ref()
+                .map(OAuthRequestBudget::for_grant)
+                .unwrap_or_default(),
+            transport: options.oauth_transport.clone(),
+            sink: options.credential_sink.clone(),
+        };
         let fs_root = wasm.parent().map(|dir| dir.join("data"));
         let limits = wasmtime::StoreLimitsBuilder::new()
             .memory_size(options.max_memory_bytes.unwrap_or(DEFAULT_MAX_MEMORY_BYTES))
@@ -2017,6 +2235,7 @@ impl WasmPlugin {
                 procs: std::collections::HashMap::new(),
                 next_proc: 1,
                 limits,
+                oauth,
             },
         );
         // The cap only matters if the store consults it.
@@ -3123,6 +3342,7 @@ impl RenderHost {
             procs: std::collections::HashMap::new(),
             next_proc: 1,
             limits,
+            oauth: OAuthState::default(),
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|state| &mut state.limits);
@@ -3345,6 +3565,14 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> String {
     text[..end].to_string()
 }
 
+/// Unix epoch seconds, saturating at 0 for a clock before 1970.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3368,6 +3596,7 @@ mod tests {
             procs: std::collections::HashMap::new(),
             next_proc: 1,
             limits: wasmtime::StoreLimitsBuilder::new().build(),
+            oauth: OAuthState::default(),
         }
     }
 
@@ -3839,6 +4068,315 @@ mod tests {
         };
         let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(payload["messageCount"], 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // oauth-http
+    // -----------------------------------------------------------------------
+
+    use crate::kiqi::plugin::oauth_http::Host as _;
+    use kiqi_plugin::grants::{OAuthFlow, OAuthGrant, OAuthProviderProfile};
+
+    fn oauth_profile() -> OAuthProviderProfile {
+        OAuthProviderProfile {
+            id: "acme".to_string(),
+            display_name: "Acme".to_string(),
+            scopes: vec!["openid".to_string()],
+            flows: vec![OAuthFlow::AuthorizationCode, OAuthFlow::DeviceCode],
+            authorization_endpoint: "https://id.acme.test/authorize".to_string(),
+            token_endpoint: "https://id.acme.test/token".to_string(),
+            device_authorization_endpoint: Some("https://id.acme.test/device".to_string()),
+            revocation_endpoint: Some("https://id.acme.test/revoke".to_string()),
+            client_id: "client-123".to_string(),
+            supports_pkce: true,
+        }
+    }
+
+    fn oauth_grants(profile: OAuthProviderProfile) -> Grants {
+        Grants {
+            oauth: Some(OAuthGrant {
+                providers: vec![profile],
+                timeout_seconds: 60,
+                max_requests: 5,
+            }),
+            ..Grants::default()
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingSink {
+        stored: Mutex<Vec<(String, String, String, String, i64)>>,
+        token: Mutex<Option<StoredOAuthToken>>,
+        deleted: Mutex<Vec<(String, String)>>,
+    }
+
+    impl PluginCredentialSink for RecordingSink {
+        fn store_plugin_oauth(
+            &self,
+            install_id: &str,
+            provider_id: &str,
+            access: &str,
+            refresh: &str,
+            expires: i64,
+        ) -> Result<(), String> {
+            self.stored.lock().unwrap().push((
+                install_id.to_string(),
+                provider_id.to_string(),
+                access.to_string(),
+                refresh.to_string(),
+                expires,
+            ));
+            *self.token.lock().unwrap() = Some(StoredOAuthToken {
+                access: access.to_string(),
+                refresh: refresh.to_string(),
+                expires,
+            });
+            Ok(())
+        }
+
+        fn read_plugin_oauth(
+            &self,
+            _install_id: &str,
+            _provider_id: &str,
+        ) -> Result<Option<StoredOAuthToken>, String> {
+            Ok(self.token.lock().unwrap().clone())
+        }
+
+        fn delete_plugin_oauth(&self, install_id: &str, provider_id: &str) -> Result<bool, String> {
+            self.deleted
+                .lock()
+                .unwrap()
+                .push((install_id.to_string(), provider_id.to_string()));
+            Ok(true)
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct ScriptedTransport {
+        responses: Mutex<Vec<HttpResponse>>,
+        requests: Mutex<Vec<(String, Vec<(String, String)>)>>,
+    }
+
+    impl ScriptedTransport {
+        fn with(responses: Vec<HttpResponse>) -> Self {
+            Self {
+                responses: Mutex::new(responses),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<(String, Vec<(String, String)>)> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl OAuthTransport for ScriptedTransport {
+        fn post_form(
+            &self,
+            url: &str,
+            form: &[(String, String)],
+            _timeout: std::time::Duration,
+        ) -> Result<HttpResponse, String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((url.to_string(), form.to_vec()));
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                return Err("no scripted response".to_string());
+            }
+            Ok(responses.remove(0))
+        }
+    }
+
+    fn oauth_state(
+        grants: Grants,
+        transport: std::sync::Arc<dyn OAuthTransport>,
+        sink: std::sync::Arc<dyn PluginCredentialSink>,
+    ) -> HostState {
+        HostState {
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+            grants,
+            fs_root: None,
+            project_dir: None,
+            plugin_id: Some("install-1".to_string()),
+            declared_flags: std::sync::Arc::new(std::collections::BTreeSet::new()),
+            sockets: std::collections::HashMap::new(),
+            next_socket: 1,
+            procs: std::collections::HashMap::new(),
+            next_proc: 1,
+            limits: wasmtime::StoreLimitsBuilder::new().build(),
+            oauth: OAuthState {
+                budget: OAuthRequestBudget::new(60, 5),
+                transport: Some(transport),
+                sink: Some(sink),
+            },
+        }
+    }
+
+    #[test]
+    fn oauth_http_denies_every_provider_without_a_grant_or_with_the_wrong_id() {
+        let transport = std::sync::Arc::new(ScriptedTransport::default());
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let mut state = oauth_state(Grants::default(), transport.clone(), sink);
+
+        let error = state
+            .token_request("acme".to_string(), "{}".to_string())
+            .unwrap_err();
+        assert!(
+            matches!(&error, CapabilityError::Denied(message) if message.contains("not granted")),
+            "{error:?}"
+        );
+
+        let transport = std::sync::Arc::new(ScriptedTransport::default());
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let mut state = oauth_state(oauth_grants(oauth_profile()), transport.clone(), sink);
+        let error = state
+            .token_request("other".to_string(), "{}".to_string())
+            .unwrap_err();
+        assert!(
+            matches!(&error, CapabilityError::Denied(message) if message.contains("not granted")),
+            "{error:?}"
+        );
+        assert!(transport.requests().is_empty());
+    }
+
+    #[test]
+    fn oauth_http_form_allow_list_refuses_the_secret_and_unknown_keys() {
+        let transport = std::sync::Arc::new(ScriptedTransport::default());
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let mut state = oauth_state(oauth_grants(oauth_profile()), transport.clone(), sink);
+
+        let error = state
+            .token_request(
+                "acme".to_string(),
+                r#"{"grant_type":"authorization_code","client_secret":"shh"}"#.to_string(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, CapabilityError::Denied(message) if message.contains("client_secret")),
+            "{error:?}"
+        );
+
+        let error = state
+            .token_request("acme".to_string(), r#"{"token":"stolen"}"#.to_string())
+            .unwrap_err();
+        assert!(
+            matches!(&error, CapabilityError::Denied(message) if message.contains("not allowed")),
+            "{error:?}"
+        );
+
+        // Policy refusals never reach the network.
+        assert!(transport.requests().is_empty());
+    }
+
+    #[test]
+    fn oauth_http_stores_under_the_install_and_provider_ids_and_hides_the_token() {
+        let transport = std::sync::Arc::new(ScriptedTransport::with(vec![HttpResponse {
+            status: 200,
+            location: None,
+            body: r#"{"access_token":"at-secret","refresh_token":"rt-secret","expires_in":120}"#
+                .to_string(),
+        }]));
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let mut state = oauth_state(
+            oauth_grants(oauth_profile()),
+            transport.clone(),
+            sink.clone(),
+        );
+
+        let outcome = state
+            .token_request(
+                "acme".to_string(),
+                r#"{"grant_type":"authorization_code","code":"abc","code_verifier":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","redirect_uri":"https://app.test/cb"}"#
+                    .to_string(),
+            )
+            .unwrap();
+        match outcome {
+            OauthTokenOutcome::Stored(status) => assert!(status.expires_at > 0),
+            other => panic!("expected stored, got {other:?}"),
+        }
+        // The outcome the guest sees carries no token material.
+        assert!(!format!("{outcome:?}").contains("secret"));
+
+        let stored = sink.stored.lock().unwrap().clone();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].0, "install-1");
+        assert_eq!(stored[0].1, "acme");
+        assert_eq!(stored[0].2, "at-secret");
+        assert_eq!(stored[0].3, "rt-secret");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "https://id.acme.test/token");
+        let form = &requests[0].1;
+        assert!(form
+            .iter()
+            .any(|(key, value)| key == "client_id" && value == "client-123"));
+        assert!(!form.iter().any(|(key, _)| key == "client_secret"));
+    }
+
+    #[test]
+    fn oauth_http_refuses_a_redirect_to_another_host() {
+        let transport = std::sync::Arc::new(ScriptedTransport::with(vec![HttpResponse {
+            status: 302,
+            location: Some("https://evil.example/token".to_string()),
+            body: String::new(),
+        }]));
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let mut state = oauth_state(
+            oauth_grants(oauth_profile()),
+            transport.clone(),
+            sink.clone(),
+        );
+
+        let outcome = state
+            .token_request("acme".to_string(), r#"{"code":"abc"}"#.to_string())
+            .unwrap();
+        match outcome {
+            OauthTokenOutcome::Failed(message) => {
+                assert!(message.contains("evil.example"), "{message}");
+                assert!(message.contains("refused"), "{message}");
+            }
+            other => panic!("expected failed, got {other:?}"),
+        }
+        assert!(sink.stored.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn oauth_http_revoke_uses_the_stored_token_and_deletes_it() {
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        *sink.token.lock().unwrap() = Some(StoredOAuthToken {
+            access: "at-secret".to_string(),
+            refresh: "rt-secret".to_string(),
+            expires: 0,
+        });
+        let transport = std::sync::Arc::new(ScriptedTransport::with(vec![HttpResponse {
+            status: 200,
+            location: None,
+            body: String::new(),
+        }]));
+        let mut state = oauth_state(
+            oauth_grants(oauth_profile()),
+            transport.clone(),
+            sink.clone(),
+        );
+
+        state.revoke("acme".to_string()).unwrap();
+        let requests = transport.requests();
+        assert_eq!(requests[0].0, "https://id.acme.test/revoke");
+        let form = &requests[0].1;
+        assert!(form
+            .iter()
+            .any(|(key, value)| key == "token" && value == "rt-secret"));
+        assert!(form
+            .iter()
+            .any(|(key, value)| key == "token_type_hint" && value == "refresh_token"));
+        assert_eq!(
+            sink.deleted.lock().unwrap().clone(),
+            vec![("install-1".to_string(), "acme".to_string())]
+        );
     }
 }
 

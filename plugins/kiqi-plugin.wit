@@ -523,11 +523,14 @@ interface oauth-api {
 interface oauth-http {
     use types.{capability-error, oauth-token-outcome};
 
-    /// Exchange an authorization code. The host performs the token-endpoint
-    /// POST, accepts only `grant_type`/`code`/`code_verifier`/`redirect_uri`/
-    /// `scope` in `form` (client id comes from the grant, a client secret is
-    /// refused), parses the standard OAuth response and stores access+refresh
-    /// under the namespaced key. The raw token body is never returned.
+    /// Exchange an authorization code (or poll a device code the host issued).
+    /// The host performs the token-endpoint POST. `form` is a JSON object of
+    /// string values; the only accepted keys are `grant_type`, `code`,
+    /// `code_verifier`, `redirect_uri`, `scope` and `device_code`. The client id
+    /// comes from the grant and `client_id`/`client_secret` in `form` are
+    /// refused. The host parses the standard OAuth response and stores
+    /// access+refresh under `plugin:<install-id>:<provider-id>`. The raw token
+    /// body is never returned.
     token-request: func(provider-id: string, form: string) -> result<oauth-token-outcome, capability-error>;
 
     /// Revoke the token the host stored for this provider. Host-only.

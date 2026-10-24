@@ -2470,6 +2470,7 @@ mod tests {
   "flows": ["authorization-code", "device-code"],
   "authorization-endpoint": "https://auth.example.com/authorize",
   "token-endpoint": "https://auth.example.com/token",
+  "device-authorization-endpoint": "https://auth.example.com/device",
   "client-id": "client-123",
   "supports-pkce": true
 }"#,
