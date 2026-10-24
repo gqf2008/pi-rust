@@ -161,14 +161,23 @@ impl ProviderHooks for ExtensionProviderHooks {
             }
         }
 
+        // 凭据脱敏（卡：0.8.0 能力补齐，P0）：观测者只拿到「有没有 key」与
+        // header **名字**，不再拿到 apiKey 与 header **值**（`authorization` /
+        // `x-api-key` 就在其中）。`messages` 保留——真实生成输入是 langfuse
+        // 这类观测者的唯一用途。
+        let header_names: Vec<String> = opts
+            .headers
+            .as_ref()
+            .map(|h| h.keys().cloned().collect())
+            .unwrap_or_default();
         let request = serde_json::json!({
             "model": model.id,
             "provider": model.provider,
             "baseUrl": model.base_url,
             "reasoning": model.reasoning,
-            "apiKey": opts.api_key,
+            "apiKeyPresent": opts.api_key.as_deref().is_some_and(|key| !key.is_empty()),
             "timeoutMs": opts.timeout.map(|d| d.as_millis() as u64),
-            "headers": opts.headers,
+            "headerNames": header_names,
             "metadata": opts.metadata,
             "maxTokens": opts.max_tokens,
             "temperature": opts.temperature,
@@ -183,7 +192,13 @@ impl ProviderHooks for ExtensionProviderHooks {
             EventTag::BeforeProviderRequest,
             &request.to_string(),
         );
-        let headers = serde_json::json!({ "headers": opts.headers });
+        let headers = serde_json::json!({
+            "headerNames": opts
+                .headers
+                .as_ref()
+                .map(|h| h.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        });
         dispatch_data_event(
             &self.snapshot,
             EventTag::BeforeProviderHeaders,
