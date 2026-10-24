@@ -1,9 +1,15 @@
 //! `.ki/cron.json` 定时任务：配置解析、cron 表达式与宿主侧调度核心。
 //!
-//! 本模块只做三件事：把 `.ki/cron.json` 解析成 [`CronJob`]、把 5 字段 cron
+//! 本模块负责三件事：把 `.ki/cron.json` 解析成 [`CronJob`]、把 5 字段 cron
 //! 表达式（以及 `@hourly` 等宏）解析成 [`Schedule`]、用一个可注入时钟的
-//! [`CronCore`] 判断“这一分钟该不该触发”。真正把提示词交给 agent、或执行
-//! 命令，由调用方实现 [`CronSink`] 完成——本模块不碰任何执行器。
+//! [`CronCore`] 判断“这一分钟该不该触发”。此外还提供宿主侧的
+//! [`SessionCronSink`]：它把到点任务拼成注入文本，命令任务走平台 shell 执行，
+//! 再交给调用方提供的 [`CronInject`] 通道。
+//!
+//! **只在交互式会话里调度。** 无头模式（`-p`/`--print`、`--mode json`、
+//! `--server`、ACP serve）不创建 [`SessionCronSink`]，也不启动 [`CronHandle`]：
+//! 定时任务的产品语义是“会话打开时才跳动”，无头进程没有可以接收提示词的
+//! TUI 通道。
 //!
 //! 产品约定：
 //!
@@ -18,12 +24,14 @@
 
 use std::collections::HashSet;
 use std::fmt;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone, Timelike,
@@ -805,6 +813,350 @@ impl Drop for CronHandle {
     }
 }
 
+// ===========================================================================
+// 宿主侧注入：任务 → 文本 → agent
+// ===========================================================================
+
+/// 命令任务在内存里保留的最大输出字节数（64 KiB）。
+pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// 输出被截断时追加的显式标记。
+pub const TRUNCATION_MARKER: &str = "\n…（输出超过 64 KiB，已截断）";
+
+/// 命令执行结果。`text` 已把 stdout 与 stderr 合并。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandOutput {
+    /// 子进程退出码。被信号终止或超时强杀时为 `None`。
+    pub exit_code: Option<i32>,
+    /// 合并后的输出（可能已被 [`TRUNCATION_MARKER`] 截断）。
+    pub text: String,
+    /// 是否因超过 [`MAX_OUTPUT_BYTES`] 被截断。
+    pub truncated: bool,
+    /// 是否因超时被强杀。
+    pub timed_out: bool,
+}
+
+/// prompt 任务的注入文本：一行标记 + 原文（不加解释、不改写）。
+pub fn prompt_injection_text(name: &str, prompt: &str) -> String {
+    format!("⏰ cron:{name} 到点触发\n{prompt}")
+}
+
+/// command 任务的注入文本：一行带退出码的标记 + 空行 + 输出。
+///
+/// 空输出渲染成 `(无输出)`，避免注入一条只有标题的消息让人误以为命令没跑。
+pub fn command_injection_text(name: &str, output: &CommandOutput) -> String {
+    let code = output.exit_code.unwrap_or(-1);
+    let body = if output.text.is_empty() {
+        "(无输出)"
+    } else {
+        output.text.as_str()
+    };
+    format!("⏰ cron:{name} 命令输出（退出码 {code}）\n\n{body}")
+}
+
+/// 平台 shell：Unix `sh -c`，Windows `cmd /C`（不弹控制台窗口）。
+#[cfg(unix)]
+fn shell_command(command: &str) -> Command {
+    let mut process = Command::new("sh");
+    process.arg("-c").arg(command);
+    process
+}
+
+#[cfg(windows)]
+fn shell_command(command: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut process = Command::new("cmd");
+    process.arg("/C").arg(command).creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    process
+}
+
+/// 命令轮询间隔：足够及时地发现超时，又不至于忙等。
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// 把用户命令包成“整个脚本的 stderr 都并入 stdout”。
+///
+/// 不能简单地在末尾追加 `2>&1`——那只会重定向最后一条简单命令。
+/// Unix 用 shell 自己的 `exec 2>&1`，Windows 用括号分组。
+#[cfg(unix)]
+fn shell_wrapped(command: &str) -> String {
+    format!("exec 2>&1; {command}")
+}
+
+#[cfg(windows)]
+fn shell_wrapped(command: &str) -> String {
+    format!("( {command} ) 2>&1")
+}
+
+/// 在 `cwd` 里用平台 shell 跑一条命令，合并 stdout+stderr，最多保留 64 KiB。
+///
+/// 超时会在到期时强杀子进程（`kill`）。stderr 通过 shell 重定向并入 stdout，
+/// 这样两路输出的相对顺序由 shell 决定，跨平台一致。
+pub fn run_job_command(cwd: &Path, command: &str, timeout_secs: u64) -> io::Result<CommandOutput> {
+    let merged = shell_wrapped(command);
+    let mut process = shell_command(&merged);
+    process
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // Unix：让 shell 成为新进程组的组长，超时时可以连同它派生的子进程一起杀掉。
+    // 否则只杀 shell，孙子进程仍握着 stdout 管道，读线程会一直等到它们退出。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
+
+    let mut child = process.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "stdout 未接管"))?;
+
+    // 读线程必须与等待并行：管道写满后子进程会阻塞，超时检测就永远等不到。
+    let reader = thread::spawn(move || read_capped(stdout));
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                timed_out = true;
+                kill_process_tree(&mut child);
+                break child.wait()?;
+            }
+            None => thread::sleep(COMMAND_POLL_INTERVAL),
+        }
+    };
+
+    let (bytes, truncated) = reader.join().unwrap_or_default();
+    let mut text = decode_capped_output(&bytes, truncated).replace("\r\n", "\n");
+    if truncated {
+        text.push_str(TRUNCATION_MARKER);
+    }
+    Ok(CommandOutput {
+        exit_code: status.code(),
+        text,
+        truncated,
+        timed_out,
+    })
+}
+
+/// 超时强杀：优先杀掉整个进程组，再兜底杀直接子进程。
+#[cfg(unix)]
+fn kill_process_tree(child: &mut std::process::Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // 负 PID 表示进程组；`kill` 是 POSIX 必备工具，免去新增 libc 依赖。
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(format!("-{pid}"))
+            .status();
+    }
+    let _ = child.kill();
+}
+
+#[cfg(windows)]
+fn kill_process_tree(child: &mut std::process::Child) {
+    // Windows 没有进程组信号；`taskkill /T` 才会连带子进程。
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &child.id().to_string()])
+        .status();
+    let _ = child.kill();
+}
+
+/// 读完 `reader`，只保留前 [`MAX_OUTPUT_BYTES`] 字节；超出后继续读空丢弃，
+/// 以便子进程不会因为管道写满而卡死。
+fn read_capped(mut reader: impl Read) -> (Vec<u8>, bool) {
+    let mut kept = Vec::with_capacity(MAX_OUTPUT_BYTES.min(8 * 1024));
+    let mut truncated = false;
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                let room = MAX_OUTPUT_BYTES.saturating_sub(kept.len());
+                let take = room.min(read);
+                kept.extend_from_slice(&chunk[..take]);
+                if take < read {
+                    truncated = true;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    (kept, truncated)
+}
+
+/// 截断点可能落在多字节 UTF-8 字符中间；截断时退到最后一个完整字符。
+fn decode_capped_output(bytes: &[u8], truncated: bool) -> String {
+    if truncated {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => text.to_string(),
+            Err(error) => String::from_utf8_lossy(&bytes[..error.valid_up_to()]).into_owned(),
+        }
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+/// 把一条完整消息交给 agent 的通道。
+///
+/// 生产实现是 TUI 的 `TuiCronInject`（在途回合走 `lane.steer`，空闲回合走
+/// 主循环的 `UserInput` 等价路径）；测试用收集文本的 mock 断言精确内容。
+pub trait CronInject: Send + Sync + 'static {
+    /// 注入一条 user 消息。`Err` 表示通道此刻不可用（例如 TUI 已关闭）。
+    fn inject(&self, text: String) -> Result<(), String>;
+}
+
+/// 诊断日志出口。TUI 下写 `<agent_dir>/logs/ki.log`；测试里收集到内存。
+pub type CronLog = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// 宿主侧 [`CronSink`]：拼接注入文本、执行命令、处理并发与关闭竞态。
+pub struct SessionCronSink {
+    /// 会话工作目录：命令的 cwd，也是 `.ki/cron.json` 的根。
+    cwd: PathBuf,
+    inject: Arc<dyn CronInject>,
+    log: CronLog,
+    /// 正在执行命令的任务名。同名任务的上一轮还活着时跳过本次触发。
+    running: Arc<Mutex<HashSet<String>>>,
+    shutting_down: Arc<AtomicBool>,
+}
+
+impl SessionCronSink {
+    pub fn new(
+        cwd: PathBuf,
+        inject: Arc<dyn CronInject>,
+        log: CronLog,
+        shutting_down: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            cwd,
+            inject,
+            log,
+            running: Arc::new(Mutex::new(HashSet::new())),
+            shutting_down,
+        }
+    }
+
+    fn deliver(&self, text: String) {
+        if let Err(error) = self.inject.inject(text) {
+            (self.log)(&format!("cron: 注入失败：{error}"));
+        }
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
+    }
+
+    /// 启动一条命令任务。`fire` 本身不阻塞调度线程：命令在自己的线程里跑完
+    /// 再把输出注入，因此同一分钟里排队的其他任务不会被一条慢命令拖住。
+    fn fire_command(&self, name: &str, command: &str, timeout_secs: u64) {
+        {
+            let mut running = self.running.lock().unwrap();
+            if !running.insert(name.to_string()) {
+                drop(running);
+                (self.log)(&format!(
+                    "cron: 任务 `{name}` 上一次命令仍在运行，本次触发跳过"
+                ));
+                return;
+            }
+        }
+
+        let cwd = self.cwd.clone();
+        let name = name.to_string();
+        let command = command.to_string();
+        let inject = Arc::clone(&self.inject);
+        let log = Arc::clone(&self.log);
+        let running = Arc::clone(&self.running);
+        let shutting_down = Arc::clone(&self.shutting_down);
+
+        let thread_name = name.clone();
+        let worker_name = name.clone();
+        let spawned = thread::Builder::new()
+            .name(format!("ki-cron-{thread_name}"))
+            .spawn(move || {
+                let result = run_job_command(&cwd, &command, timeout_secs);
+                running.lock().unwrap().remove(&worker_name);
+
+                if shutting_down.load(Ordering::SeqCst) {
+                    log(&format!(
+                        "cron: 会话已关闭，丢弃任务 `{worker_name}` 的命令输出"
+                    ));
+                    return;
+                }
+                match result {
+                    Ok(output) => {
+                        if output.timed_out {
+                            log(&format!(
+                                "cron: 任务 `{worker_name}` 的命令超时（{timeout_secs}s），已终止"
+                            ));
+                        }
+                        let text = command_injection_text(&worker_name, &output);
+                        if let Err(error) = inject.inject(text) {
+                            log(&format!("cron: 注入失败：{error}"));
+                        }
+                    }
+                    Err(error) => log(&format!(
+                        "cron: 任务 `{worker_name}` 的命令无法执行：{error}"
+                    )),
+                }
+            });
+
+        if let Err(error) = spawned {
+            self.running.lock().unwrap().remove(name.as_str());
+            (self.log)(&format!("cron: 无法为任务 `{name}` 启动命令线程：{error}"));
+        }
+    }
+}
+
+impl CronSink for SessionCronSink {
+    fn fire(&self, job: &CronJob) {
+        if self.is_shutting_down() {
+            (self.log)(&format!(
+                "cron: 会话正在关闭，丢弃任务 `{}` 的本次触发",
+                job.name
+            ));
+            return;
+        }
+        match &job.action {
+            JobAction::Prompt(prompt) => {
+                self.deliver(prompt_injection_text(&job.name, prompt));
+            }
+            JobAction::Command(command) => {
+                self.fire_command(&job.name, command, job.timeout_secs);
+            }
+        }
+    }
+
+    fn diagnostic(&self, message: &str) {
+        (self.log)(&format!("cron: {message}"));
+    }
+}
+
+/// 配置文件存在时启动调度线程；`None` 表示这个会话没有定时任务，什么都不启动。
+///
+/// 只在交互式会话里调用（见模块文档）。启动后配置文件的增删改由线程按 mtime
+/// 自行重载，不需要调用方再介入。
+pub fn start_if_configured(
+    cwd: &Path,
+    inject: Arc<dyn CronInject>,
+    log: CronLog,
+    shutting_down: Arc<AtomicBool>,
+) -> Option<CronHandle> {
+    if !config_path(cwd).is_file() {
+        return None;
+    }
+    let sink = Arc::new(SessionCronSink::new(
+        cwd.to_path_buf(),
+        inject,
+        log,
+        shutting_down,
+    ));
+    Some(CronHandle::start(cwd, sink))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1190,5 +1542,301 @@ mod tests {
         assert!(rx.recv_timeout(StdDuration::from_millis(1200)).is_err());
         handle.stop();
         assert!(sink.diagnostics.lock().unwrap().is_empty());
+    }
+
+    // =======================================================================
+    // 宿主侧注入（STEP 2）
+    // =======================================================================
+
+    struct MockInject {
+        texts: Mutex<Vec<String>>,
+    }
+
+    impl MockInject {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                texts: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn texts(&self) -> Vec<String> {
+            self.texts.lock().unwrap().clone()
+        }
+    }
+
+    impl CronInject for MockInject {
+        fn inject(&self, text: String) -> Result<(), String> {
+            self.texts.lock().unwrap().push(text);
+            Ok(())
+        }
+    }
+
+    fn recording_log() -> (CronLog, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&lines);
+        let log: CronLog = Arc::new(move |message: &str| {
+            sink.lock().unwrap().push(message.to_string());
+        });
+        (log, lines)
+    }
+
+    fn synthetic_job(name: &str, action: JobAction, timeout_secs: u64) -> CronJob {
+        CronJob {
+            name: name.to_string(),
+            schedule: schedule("* * * * *"),
+            action,
+            enabled: true,
+            timeout_secs,
+        }
+    }
+
+    fn sink_for(
+        cwd: &Path,
+        inject: Arc<MockInject>,
+        log: CronLog,
+        shutting_down: Arc<AtomicBool>,
+    ) -> SessionCronSink {
+        SessionCronSink::new(cwd.to_path_buf(), inject, log, shutting_down)
+    }
+
+    fn wait_for_injections(mock: &Arc<MockInject>, count: usize) -> Vec<String> {
+        for _ in 0..250 {
+            let texts = mock.texts();
+            if texts.len() >= count {
+                return texts;
+            }
+            std::thread::sleep(StdDuration::from_millis(20));
+        }
+        panic!("等待注入超时，已有 {:?}", mock.texts());
+    }
+
+    #[test]
+    fn prompt_injection_text_is_exact() {
+        assert_eq!(
+            prompt_injection_text("digest", "总结今天的变更"),
+            "⏰ cron:digest 到点触发\n总结今天的变更"
+        );
+    }
+
+    #[test]
+    fn command_injection_text_is_exact() {
+        let output = CommandOutput {
+            exit_code: Some(2),
+            text: "boom\n".to_string(),
+            truncated: false,
+            timed_out: false,
+        };
+        assert_eq!(
+            command_injection_text("build", &output),
+            "⏰ cron:build 命令输出（退出码 2）\n\nboom\n"
+        );
+
+        let empty = CommandOutput {
+            exit_code: None,
+            text: String::new(),
+            truncated: false,
+            timed_out: false,
+        };
+        assert_eq!(
+            command_injection_text("build", &empty),
+            "⏰ cron:build 命令输出（退出码 -1）\n\n(无输出)"
+        );
+    }
+
+    #[test]
+    fn sink_injects_a_prompt_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock = MockInject::new();
+        let (log, lines) = recording_log();
+        let sink = sink_for(
+            dir.path(),
+            Arc::clone(&mock),
+            log,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        sink.fire(&synthetic_job(
+            "digest",
+            JobAction::Prompt("总结今天的变更".to_string()),
+            60,
+        ));
+
+        assert_eq!(
+            mock.texts(),
+            vec!["⏰ cron:digest 到点触发\n总结今天的变更".to_string()]
+        );
+        assert!(lines.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sink_injects_command_output_after_it_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock = MockInject::new();
+        let (log, _lines) = recording_log();
+        let sink = sink_for(
+            dir.path(),
+            Arc::clone(&mock),
+            log,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        sink.fire(&synthetic_job(
+            "build",
+            JobAction::Command("printf 'out'; printf 'err' >&2".to_string()),
+            10,
+        ));
+
+        // 两路输出都进了同一条注入消息。
+        let texts = wait_for_injections(&mock, 1);
+        assert_eq!(
+            texts,
+            vec!["⏰ cron:build 命令输出（退出码 0）\n\nouterr".to_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_fire_is_skipped_while_the_previous_run_is_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock = MockInject::new();
+        let (log, lines) = recording_log();
+        let sink = sink_for(
+            dir.path(),
+            Arc::clone(&mock),
+            log,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let job = synthetic_job(
+            "slow",
+            JobAction::Command("sleep 0.4; printf done".to_string()),
+            10,
+        );
+
+        sink.fire(&job);
+        sink.fire(&job);
+
+        let texts = wait_for_injections(&mock, 1);
+        assert_eq!(texts.len(), 1, "同名命令不并发：{texts:?}");
+        assert!(texts[0].contains("done"));
+        assert!(
+            lines
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("仍在运行") && line.contains("跳过")),
+            "{:?}",
+            lines.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_fire_during_shutdown_is_dropped_with_a_log_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock = MockInject::new();
+        let (log, lines) = recording_log();
+        let sink = sink_for(
+            dir.path(),
+            Arc::clone(&mock),
+            log,
+            Arc::new(AtomicBool::new(true)),
+        );
+
+        sink.fire(&synthetic_job(
+            "digest",
+            JobAction::Prompt("x".to_string()),
+            60,
+        ));
+
+        assert!(mock.texts().is_empty());
+        assert!(
+            lines
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("会话正在关闭") && line.contains("digest")),
+            "{:?}",
+            lines.lock().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_output_is_capped_and_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        // 70 KiB 的 'a'，超过 64 KiB 上限。
+        let output =
+            run_job_command(dir.path(), "head -c 70000 /dev/zero | tr '\\0' a", 10).unwrap();
+        assert!(output.truncated);
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(
+            output.text.len(),
+            MAX_OUTPUT_BYTES + TRUNCATION_MARKER.len(),
+            "只保留前 64 KiB，再加显式标记"
+        );
+        assert!(output.text.ends_with(TRUNCATION_MARKER));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_kills_the_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let output = run_job_command(dir.path(), "sleep 5", 1).unwrap();
+        assert!(output.timed_out);
+        assert!(output.exit_code.is_none(), "被强杀时没有正常退出码");
+        assert!(
+            started.elapsed() < StdDuration::from_secs(4),
+            "必须在超时后立刻返回，实际 {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_runs_in_the_session_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = run_job_command(dir.path(), "pwd -P", 10).unwrap();
+        let expected = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(std::fs::canonicalize(output.text.trim()).unwrap(), expected);
+    }
+
+    #[test]
+    fn start_if_configured_starts_nothing_without_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mock = MockInject::new();
+        let (log, _lines) = recording_log();
+        let started = start_if_configured(dir.path(), mock, log, Arc::new(AtomicBool::new(false)));
+        assert!(started.is_none(), "没有 .ki/cron.json 就不该启动调度线程");
+    }
+
+    #[test]
+    fn stopping_the_handle_joins_the_scheduler_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(
+            dir.path(),
+            r#"[{"name": "boot", "schedule": "* * * * *", "prompt": "hi"}]"#,
+        );
+
+        let (tx, rx) = mpsc::channel();
+        let sink = Arc::new(ChannelSink {
+            jobs: tx,
+            diagnostics: Mutex::new(Vec::new()),
+        });
+        let clock = Arc::new(MockClock {
+            current: Mutex::new(local(2026, 10, 24, 9, 5)),
+        });
+
+        let handle = CronHandle::start_with_clock(dir.path(), sink.clone(), clock);
+        rx.recv_timeout(StdDuration::from_secs(5))
+            .expect("启动后应立即触发到期任务");
+
+        handle.stop();
+        // stop() 已经 join 了线程；线程持有的 sink Arc 已释放。
+        assert_eq!(
+            Arc::strong_count(&sink),
+            1,
+            "调度线程必须已经退出，不再持有 sink"
+        );
     }
 }

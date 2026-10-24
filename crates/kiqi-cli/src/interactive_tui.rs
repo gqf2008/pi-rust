@@ -39,6 +39,8 @@ mod sessions;
 use sessions::*;
 mod run;
 use run::*;
+mod cron;
+use cron::*;
 pub(crate) mod events;
 use events::*;
 mod selectors;
@@ -722,6 +724,11 @@ enum TuiMessage {
     /// a run. The batch's detailed notice entry is already in the transcript;
     /// this is the short external-signal trigger built by `signal_wake`.
     SignalWake(String),
+    /// A `.ki/cron.json` job fired while the session was idle. The text is
+    /// already the final injected user message (`⏰ cron:<name> …`). Delivered
+    /// through the main loop so it starts a run exactly like an editor submit;
+    /// a fire that lands during a run is steered instead (see `cron.rs`).
+    CronInject(String),
 }
 
 /// Terminal result of a user-initiated `!command` shell run.
@@ -1328,6 +1335,10 @@ pub async fn interactive_tui(
         selection_start: std::sync::Mutex::new(None),
         selection_end: std::sync::Mutex::new(None),
     });
+
+    // 会话内定时任务：仅当 `.ki/cron.json` 存在时启动。句柄在这里持有，
+    // 主循环结束时 stop()（下方 Shutdown 段），`/reload` 时先停后重建。
+    let mut session_cron = start_session_cron(&cwd, &lane, &state, &tx, &tui);
 
     let _compaction_watcher = harness.watch({
         let state = Arc::clone(&state);
@@ -2936,6 +2947,33 @@ pub async fn interactive_tui(
                 )
                 .await;
             }
+            Some(TuiMessage::CronInject(prompt)) => {
+                // 定时任务不是用户出场：不清编辑器，也不重置 signal 链。
+                if !state.try_start_working() {
+                    // 投递时还空闲、主循环处理时已经跑起来了：按普通用户消息
+                    // 的语义排队（steer），绝不取消在途回合。
+                    let message = user_message_with_images(&prompt, Vec::new());
+                    if let Err(error) = lane.steer(message).await {
+                        diagnostic_log(&format!("cron: 注入失败（排队）：{error}"));
+                    } else {
+                        refresh_pending_messages(&state, &lane).await;
+                    }
+                    tui.request_render(false);
+                    continue;
+                }
+                add_user_message(&chat_container, &prompt);
+                tui.request_render(false);
+                run_prompt_streaming(
+                    &lane,
+                    &prompt,
+                    false,
+                    &tui,
+                    &state,
+                    drain_handle.is_some(),
+                    Vec::new(),
+                )
+                .await;
+            }
             Some(TuiMessage::McpInput) => {
                 // MUI input: drain at the same kind of boundary as terminal
                 // input, but never while a run is active. If a non-run command
@@ -3327,6 +3365,11 @@ pub async fn interactive_tui(
                 tui.request_render(false);
             }
             Some(TuiMessage::ReloadExtensions) => {
+                // 会话级调度器跟着 reload 一起换代：先停掉旧线程（在途命令的
+                // 输出会被丢弃并记日志），reload 完成后再按磁盘上的配置重建。
+                if let Some(cron) = session_cron.take() {
+                    cron.stop();
+                }
                 // B5d: drive the shared reload routine on the async runtime,
                 // then surface the outcome. `reload_context` was passed into
                 // `interactive_tui` and is the same `Arc<ReloadContext>` the
@@ -3379,6 +3422,7 @@ pub async fn interactive_tui(
                 } else {
                     add_note_message(&chat_container, &outcome.summary);
                 }
+                session_cron = start_session_cron(&cwd, &lane, &state, &tx, &tui);
                 tui.request_render(false);
             }
             None => break,
@@ -3400,6 +3444,10 @@ pub async fn interactive_tui(
         handle.abort();
     }
     mui_handle.abort();
+    // 会话结束：先标记关闭再 join 调度线程；在途命令的输出会被丢弃并记日志。
+    if let Some(cron) = session_cron.take() {
+        cron.stop();
+    }
     // Drop the reload bridge: clearing the mailbox closes the signal channel,
     // the drain task's `recv` returns `None`, and the task exits. (Aborting is
     // redundant — the recv terminates — but cheap + makes shutdown explicit.)
