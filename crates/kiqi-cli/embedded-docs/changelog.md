@@ -13,6 +13,14 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
+- **Session-scoped scheduled jobs.** `.ki/cron.json` in the session working directory can
+  hold `prompt` or `command` jobs on a 5-field cron schedule (plus `@hourly`/`@daily`/
+  `@weekly`/`@monthly`). They tick only while an interactive session is open and are
+  delivered to the agent as an injected user message (`⏰ cron:<name> …`); missed minutes
+  are skipped rather than backfilled, and a command job never overlaps itself. Commands
+  run through the platform shell in the session cwd with merged stdout/stderr, a 60 s
+  default timeout (max 600 s) and a 64 KiB output cap. Host-side only: no plugin ABI or
+  WIT change.
 - **Spawned MCP servers are told the session id.** A stdio server used to be
   started with a scrubbed environment, so it could never answer "whose write was
   this?" — `walgit mcp` reads its own `KI_AGENT_ID` to publish
