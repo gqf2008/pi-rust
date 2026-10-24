@@ -66,6 +66,9 @@ pub struct StoredOAuthToken {
     pub access: String,
     pub refresh: String,
     pub expires: i64,
+    /// Digest of the provider profile that issued this credential. Legacy
+    /// entries have no binding and must not be sent to a current grant's IdP.
+    pub profile_fingerprint: Option<String>,
 }
 
 impl fmt::Debug for StoredOAuthToken {
@@ -74,8 +77,56 @@ impl fmt::Debug for StoredOAuthToken {
             .field("access", &"<redacted>")
             .field("refresh", &"<redacted>")
             .field("expires", &self.expires)
+            .field("profile_fingerprint", &self.profile_fingerprint)
             .finish()
     }
+}
+
+/// Bind a stored credential to the IdP profile that issued it.
+///
+/// Paths, scopes and flow preferences are deliberately excluded: changing
+/// those does not change where a live token would be sent. Every endpoint host
+/// (including an optional revocation host), the provider id and the client id
+/// are included, so re-granting another IdP cannot replay the old credential.
+pub fn oauth_profile_fingerprint(profile: &OAuthProviderProfile) -> Result<String, String> {
+    fn origin(endpoint: &str) -> Result<String, String> {
+        Ok(granted_endpoint(endpoint)?.origin().ascii_serialization())
+    }
+
+    let endpoints = serde_json::json!({
+        "authorization": origin(&profile.authorization_endpoint)?,
+        "token": origin(&profile.token_endpoint)?,
+        "device-authorization": profile.device_authorization_endpoint.as_deref().map(origin).transpose()?,
+        "revocation": profile.revocation_endpoint.as_deref().map(origin).transpose()?,
+    });
+    let material = serde_json::to_vec(&serde_json::json!({
+        "provider-id": profile.id,
+        "client-id": profile.client_id,
+        "endpoint-hosts": endpoints,
+    }))
+    .map_err(|error| format!("could not fingerprint OAuth profile: {error}"))?;
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(&material);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Refuse before a stored token can leave the process under a different grant.
+pub fn ensure_oauth_profile_matches(
+    profile: &OAuthProviderProfile,
+    token: &StoredOAuthToken,
+) -> Result<(), String> {
+    let actual = token.profile_fingerprint.as_deref().ok_or_else(|| {
+        "stored OAuth credential has no issuing-profile binding; refusing to send it to the current endpoint"
+            .to_string()
+    })?;
+    let expected = oauth_profile_fingerprint(profile)?;
+    if actual != expected {
+        return Err(
+            "stored OAuth credential is bound to a different issuing profile; refusing to send it to the current endpoint"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Where a plugin's own OAuth credential goes.
@@ -96,6 +147,7 @@ pub trait PluginCredentialSink: fmt::Debug + Send + Sync {
         access: &str,
         refresh: &str,
         expires: i64,
+        profile_fingerprint: &str,
     ) -> Result<(), String>;
 
     fn read_plugin_oauth(
@@ -677,6 +729,7 @@ pub fn revoke_stored_token(
     budget: &mut OAuthRequestBudget,
     transport: &dyn OAuthTransport,
 ) -> Result<(), String> {
+    ensure_oauth_profile_matches(profile, token)?;
     let endpoint_text = profile
         .revocation_endpoint
         .as_deref()
@@ -1013,14 +1066,39 @@ mod tests {
     }
 
     #[test]
+    fn profile_fingerprint_binds_provider_client_and_endpoint_hosts() {
+        let original = device_profile();
+        let fingerprint = oauth_profile_fingerprint(&original).unwrap();
+        assert_eq!(fingerprint, oauth_profile_fingerprint(&original).unwrap());
+
+        let mut changed = original.clone();
+        changed.id = "other".to_string();
+        assert_ne!(fingerprint, oauth_profile_fingerprint(&changed).unwrap());
+        let mut changed = original.clone();
+        changed.client_id = "other-client".to_string();
+        assert_ne!(fingerprint, oauth_profile_fingerprint(&changed).unwrap());
+        let mut changed = original.clone();
+        changed.token_endpoint = "https://id.other.test/token".to_string();
+        assert_ne!(fingerprint, oauth_profile_fingerprint(&changed).unwrap());
+        let mut changed = original;
+        changed.token_endpoint = "https://id.acme.test/another-token-path".to_string();
+        assert_eq!(
+            fingerprint,
+            oauth_profile_fingerprint(&changed).unwrap(),
+            "a path-only grant edit does not change the token's issuer"
+        );
+    }
+
+    #[test]
     fn revoke_prefers_the_refresh_token_and_requires_a_2xx() {
+        let mut profile = device_profile();
+        profile.revocation_endpoint = Some("https://id.acme.test/revoke".to_string());
         let token = StoredOAuthToken {
             access: "at".to_string(),
             refresh: "rt".to_string(),
             expires: 0,
+            profile_fingerprint: Some(oauth_profile_fingerprint(&profile).unwrap()),
         };
-        let mut profile = device_profile();
-        profile.revocation_endpoint = Some("https://id.acme.test/revoke".to_string());
         let transport = QueueTransport::with(vec![HttpResponse {
             status: 200,
             location: None,
@@ -1049,11 +1127,33 @@ mod tests {
     }
 
     #[test]
+    fn revoke_refuses_a_changed_profile_before_the_network() {
+        let original = device_profile();
+        let mut changed = original.clone();
+        changed.token_endpoint = "https://id.other.test/token".to_string();
+        changed.revocation_endpoint = Some("https://id.other.test/revoke".to_string());
+        let token = StoredOAuthToken {
+            access: "at-secret".to_string(),
+            refresh: "rt-secret".to_string(),
+            expires: 0,
+            profile_fingerprint: Some(oauth_profile_fingerprint(&original).unwrap()),
+        };
+        let transport = QueueTransport::default();
+        let mut budget = OAuthRequestBudget::new(60, 4);
+        let error = revoke_stored_token(&changed, &token, &mut budget, &transport).unwrap_err();
+        assert!(error.contains("different issuing profile"), "{error}");
+        assert!(!error.contains("at-secret"));
+        assert!(!error.contains("rt-secret"));
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn revoke_without_a_revocation_endpoint_says_so() {
         let token = StoredOAuthToken {
             access: "at".to_string(),
             refresh: String::new(),
             expires: 0,
+            profile_fingerprint: Some(oauth_profile_fingerprint(&device_profile()).unwrap()),
         };
         let transport = QueueTransport::default();
         let mut budget = OAuthRequestBudget::new(60, 4);

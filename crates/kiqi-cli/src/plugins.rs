@@ -1464,6 +1464,7 @@ impl kiqi_plugin_host::PluginCredentialSink for ConfigCredentialSink {
         access: &str,
         refresh: &str,
         expires: i64,
+        profile_fingerprint: &str,
     ) -> Result<(), String> {
         crate::config::upsert_plugin_oauth_token(
             install_id,
@@ -1471,6 +1472,7 @@ impl kiqi_plugin_host::PluginCredentialSink for ConfigCredentialSink {
             access.to_string(),
             refresh.to_string(),
             expires,
+            profile_fingerprint.to_string(),
         )
         .map_err(|error| error.to_string())
     }
@@ -1487,10 +1489,12 @@ impl kiqi_plugin_host::PluginCredentialSink for ConfigCredentialSink {
                 access,
                 refresh,
                 expires,
+                profile_fingerprint,
             }) => Ok(Some(kiqi_plugin_host::StoredOAuthToken {
                 access,
                 refresh,
                 expires,
+                profile_fingerprint,
             })),
             _ => Ok(None),
         }

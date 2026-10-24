@@ -996,10 +996,12 @@ fn revoke_oauth_credentials_with(
                 access,
                 refresh,
                 expires,
+                profile_fingerprint,
             })) => Some(kiqi_plugin_host::StoredOAuthToken {
                 access,
                 refresh,
                 expires,
+                profile_fingerprint,
             }),
             Ok(_) => None,
             Err(error) => {
@@ -3164,6 +3166,22 @@ mod tests {
     struct FailingTransport;
 
     #[cfg(feature = "plugin-wasm")]
+    fn stored_profile_fingerprint(root: &Path, install_id: &str, provider_id: &str) -> String {
+        let grants = Grants::load_for_at(root, install_id);
+        let profile = grants
+            .oauth
+            .as_ref()
+            .and_then(|grant| {
+                grant
+                    .providers
+                    .iter()
+                    .find(|profile| profile.id == provider_id)
+            })
+            .expect("granted OAuth profile");
+        kiqi_plugin_host::oauth_profile_fingerprint(profile).unwrap()
+    }
+
+    #[cfg(feature = "plugin-wasm")]
     impl kiqi_plugin_host::OAuthTransport for FailingTransport {
         fn post_form(
             &self,
@@ -3207,6 +3225,7 @@ mod tests {
                 access: "at-secret".to_string(),
                 refresh: "rt-secret".to_string(),
                 expires: 123,
+                profile_fingerprint: Some(stored_profile_fingerprint(root, "acme", "acme")),
             },
         );
         crate::config::write_auth_at(root, &store).unwrap();
@@ -3272,6 +3291,7 @@ mod tests {
                 access: "at-secret".to_string(),
                 refresh: "rt-secret".to_string(),
                 expires: 123,
+                profile_fingerprint: Some(stored_profile_fingerprint(root, "acme", "acme")),
             },
         );
         crate::config::write_auth_at(root, &store).unwrap();
@@ -3319,6 +3339,7 @@ mod tests {
                     access: access.to_string(),
                     refresh: "rt".to_string(),
                     expires: 1,
+                    profile_fingerprint: None,
                 },
             );
         }
@@ -3440,6 +3461,7 @@ mod tests {
                 access: "at-secret".to_string(),
                 refresh: "rt-secret".to_string(),
                 expires: 123,
+                profile_fingerprint: None,
             },
         );
         store.insert(

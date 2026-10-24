@@ -22,9 +22,9 @@ use kiqi_plugin::grants::{
 };
 use kiqi_plugin::{OAuthAction, OAuthResponse};
 use kiqi_plugin_host::{
-    exchange_authorization_code, poll_device_token, refresh_stored_token,
-    request_device_authorization, revoke_stored_token, OAuthRequestBudget, OAuthTransport,
-    StoredOAuthToken,
+    ensure_oauth_profile_matches, exchange_authorization_code, oauth_profile_fingerprint,
+    poll_device_token, refresh_stored_token, request_device_authorization, revoke_stored_token,
+    OAuthRequestBudget, OAuthTransport, StoredOAuthToken,
 };
 
 use crate::config::Credential;
@@ -234,6 +234,7 @@ pub fn login(
         tokens.access,
         refresh,
         tokens.expires,
+        oauth_profile_fingerprint(profile)?,
     )
     .map_err(|error| format!("could not save OAuth credentials: {error}"))?;
     Ok(tokens.expires)
@@ -253,6 +254,7 @@ pub fn refresh(
 ) -> Result<i64, String> {
     let stored = read_stored(install_id, &profile.id)?
         .ok_or_else(|| format!("no stored OAuth credentials for `{}`", profile.id))?;
+    ensure_oauth_profile_matches(profile, &stored)?;
     let mut budget = OAuthRequestBudget::for_grant(grant);
     let tokens = refresh_stored_token(profile, &stored.refresh, &mut budget, transport, now)?;
     let refresh = if tokens.refresh.is_empty() {
@@ -266,6 +268,7 @@ pub fn refresh(
         tokens.access,
         refresh,
         tokens.expires,
+        oauth_profile_fingerprint(profile)?,
     )
     .map_err(|error| format!("could not save refreshed OAuth credentials: {error}"))?;
     Ok(tokens.expires)
@@ -276,16 +279,29 @@ pub fn refresh(
 /// **Host-only**: the token is read from the namespaced key and revoked at the
 /// IdP; only then is that key deleted. A failed revocation keeps the local
 /// credential (the same discipline the cdylib path uses), and a bare
-/// `auth.json` entry is never touched.
+/// `auth.json` entry is never touched. If the grant's issuing profile changed,
+/// remote revocation is refused; only an explicit `--force-local` confirmation
+/// may delete the local entry, and that path makes no request.
 pub fn logout(
     install_id: &str,
     profile: &OAuthProviderProfile,
     grant: &OAuthGrant,
     transport: &dyn OAuthTransport,
+    mismatched_profile_local_delete_confirmed: bool,
 ) -> Result<bool, String> {
     let Some(stored) = read_stored(install_id, &profile.id)? else {
         return Ok(false);
     };
+    if let Err(error) = ensure_oauth_profile_matches(profile, &stored) {
+        if !mismatched_profile_local_delete_confirmed {
+            return Err(format!(
+                "{error}; local credentials were kept; rerun `ki auth logout --provider {} --force-local` to delete locally without remote revocation",
+                profile.id
+            ));
+        }
+        return crate::config::delete_plugin_oauth_token(install_id, &profile.id)
+            .map_err(|delete_error| format!("could not remove credentials: {delete_error}"));
+    }
     if profile.revocation_endpoint.is_some() {
         let mut budget = OAuthRequestBudget::for_grant(grant);
         revoke_stored_token(profile, &stored, &mut budget, transport)
@@ -304,10 +320,12 @@ fn read_stored(install_id: &str, provider_id: &str) -> Result<Option<StoredOAuth
             access,
             refresh,
             expires,
+            profile_fingerprint,
         }) => Ok(Some(StoredOAuthToken {
             access,
             refresh,
             expires,
+            profile_fingerprint,
         })),
         Some(_) => Err(format!(
             "the entry at `plugin:{install_id}:{provider_id}` is not an OAuth credential"
@@ -657,6 +675,7 @@ mod tests {
                 access,
                 refresh,
                 expires,
+                ..
             }) => Some((access, refresh, expires)),
             _ => None,
         }
@@ -817,18 +836,19 @@ mod tests {
     #[test]
     fn refresh_is_host_only_and_preserves_an_absent_refresh_token() {
         let _agent = TempAgent::new();
+        let server = scripted_server(vec![(200, r#"{"access_token":"at-2","expires_in":60}"#)]);
+        let profile = profile(server.addr.port(), vec![OAuthFlow::DeviceCode]);
+        let grant = grant(profile.clone());
+        let transport = LocalTransport { addr: server.addr };
         crate::config::upsert_plugin_oauth_token(
             "install-1",
             "acme",
             "at-1".to_string(),
             "rt-1".to_string(),
             0,
+            oauth_profile_fingerprint(&profile).unwrap(),
         )
         .unwrap();
-        let server = scripted_server(vec![(200, r#"{"access_token":"at-2","expires_in":60}"#)]);
-        let profile = profile(server.addr.port(), vec![OAuthFlow::DeviceCode]);
-        let grant = grant(profile.clone());
-        let transport = LocalTransport { addr: server.addr };
 
         let expires = refresh("install-1", &profile, &grant, &transport, 100).expect("refresh");
         assert_eq!(expires, 160);
@@ -845,6 +865,68 @@ mod tests {
     }
 
     #[test]
+    fn refresh_refuses_a_changed_profile_without_sending_the_old_token() {
+        let _agent = TempAgent::new();
+        let original = profile(1, vec![OAuthFlow::DeviceCode]);
+        crate::config::upsert_plugin_oauth_token(
+            "install-1",
+            "acme",
+            "at-secret".to_string(),
+            "rt-secret".to_string(),
+            0,
+            oauth_profile_fingerprint(&original).unwrap(),
+        )
+        .unwrap();
+        let server = scripted_server(vec![(200, r#"{"access_token":"at-new"}"#)]);
+        let changed = profile(server.addr.port(), vec![OAuthFlow::DeviceCode]);
+        let grant = grant(changed.clone());
+        let transport = LocalTransport { addr: server.addr };
+
+        let error = refresh("install-1", &changed, &grant, &transport, 100).unwrap_err();
+        assert!(error.contains("different issuing profile"), "{error}");
+        assert!(!error.contains("at-secret"));
+        assert!(!error.contains("rt-secret"));
+        assert!(server.requests.lock().unwrap().is_empty());
+        assert_eq!(
+            stored("install-1", "acme"),
+            Some(("at-secret".to_string(), "rt-secret".to_string(), 0))
+        );
+    }
+
+    #[test]
+    fn logout_profile_mismatch_requires_explicit_local_delete_confirmation() {
+        let _agent = TempAgent::new();
+        let original = profile(1, vec![OAuthFlow::DeviceCode]);
+        crate::config::upsert_plugin_oauth_token(
+            "install-1",
+            "acme",
+            "at-secret".to_string(),
+            "rt-secret".to_string(),
+            0,
+            oauth_profile_fingerprint(&original).unwrap(),
+        )
+        .unwrap();
+        let server = scripted_server(vec![(200, "")]);
+        let changed = profile(server.addr.port(), vec![OAuthFlow::DeviceCode]);
+        let grant = grant(changed.clone());
+        let transport = LocalTransport { addr: server.addr };
+
+        let error = logout("install-1", &changed, &grant, &transport, false).unwrap_err();
+        assert!(error.contains("--force-local"), "{error}");
+        assert!(!error.contains("at-secret"));
+        assert!(!error.contains("rt-secret"));
+        assert!(server.requests.lock().unwrap().is_empty());
+        assert!(stored("install-1", "acme").is_some());
+
+        assert!(logout("install-1", &changed, &grant, &transport, true).unwrap());
+        assert!(stored("install-1", "acme").is_none());
+        assert!(
+            server.requests.lock().unwrap().is_empty(),
+            "the confirmed local path must not replay the token either"
+        );
+    }
+
+    #[test]
     fn logout_revokes_then_deletes_only_the_namespaced_key() {
         let _agent = TempAgent::new();
         crate::config::upsert_credential(
@@ -855,21 +937,21 @@ mod tests {
             },
         )
         .unwrap();
+        let server = scripted_server(vec![(200, "")]);
+        let profile = profile(server.addr.port(), vec![OAuthFlow::DeviceCode]);
+        let grant = grant(profile.clone());
+        let transport = LocalTransport { addr: server.addr };
         crate::config::upsert_plugin_oauth_token(
             "install-1",
             "acme",
             "at-1".to_string(),
             "rt-1".to_string(),
             0,
+            oauth_profile_fingerprint(&profile).unwrap(),
         )
         .unwrap();
 
-        let server = scripted_server(vec![(200, "")]);
-        let profile = profile(server.addr.port(), vec![OAuthFlow::DeviceCode]);
-        let grant = grant(profile.clone());
-        let transport = LocalTransport { addr: server.addr };
-
-        assert!(logout("install-1", &profile, &grant, &transport).expect("logout"));
+        assert!(logout("install-1", &profile, &grant, &transport, false).expect("logout"));
         assert!(stored("install-1", "acme").is_none());
         assert!(matches!(
             bare_key("anthropic"),
@@ -896,7 +978,7 @@ mod tests {
         let transport = LocalTransport {
             addr: listener.local_addr().unwrap(),
         };
-        assert!(!logout("install-1", &profile, &grant, &transport).unwrap());
+        assert!(!logout("install-1", &profile, &grant, &transport, false).unwrap());
     }
 
     // -----------------------------------------------------------------------

@@ -56,7 +56,8 @@ use crate::Plugin as World;
 
 pub mod oauth;
 pub use oauth::{
-    default_transport, exchange_authorization_code, poll_device_token, refresh_stored_token,
+    default_transport, ensure_oauth_profile_matches, exchange_authorization_code,
+    oauth_profile_fingerprint, poll_device_token, refresh_stored_token,
     request_device_authorization, revoke_stored_token, DeviceAuthorization, HttpOAuthTransport,
     HttpResponse, OAuthRequestBudget, OAuthTokens, OAuthTransport, PluginCredentialSink,
     StoredOAuthToken,
@@ -1259,6 +1260,8 @@ impl HostState {
     ) -> Result<OauthTokenOutcome, CapabilityError> {
         let profile = self.oauth_profile(provider_id)?;
         let install_id = self.oauth_install_id()?;
+        let profile_fingerprint =
+            oauth::oauth_profile_fingerprint(&profile).map_err(CapabilityError::Failed)?;
         let mut form = oauth::parse_token_form(form).map_err(CapabilityError::Denied)?;
         let endpoint =
             oauth::granted_endpoint(&profile.token_endpoint).map_err(CapabilityError::Failed)?;
@@ -1312,6 +1315,7 @@ impl HostState {
             &tokens.access,
             &tokens.refresh,
             tokens.expires,
+            &profile_fingerprint,
         ) {
             return Ok(OauthTokenOutcome::Failed(format!(
                 "credential store: {error}"
@@ -1346,6 +1350,7 @@ impl HostState {
             .ok_or_else(|| {
                 CapabilityError::Failed("no stored OAuth credential for this provider".to_string())
             })?;
+        oauth::ensure_oauth_profile_matches(&profile, &stored).map_err(CapabilityError::Denied)?;
         let (hint, value) = if stored.refresh.is_empty() {
             ("access_token", stored.access)
         } else {
@@ -4733,7 +4738,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct RecordingSink {
-        stored: Mutex<Vec<(String, String, String, String, i64)>>,
+        stored: Mutex<Vec<(String, String, String, String, i64, String)>>,
         token: Mutex<Option<StoredOAuthToken>>,
         deleted: Mutex<Vec<(String, String)>>,
     }
@@ -4746,6 +4751,7 @@ mod tests {
             access: &str,
             refresh: &str,
             expires: i64,
+            profile_fingerprint: &str,
         ) -> Result<(), String> {
             self.stored.lock().unwrap().push((
                 install_id.to_string(),
@@ -4753,11 +4759,13 @@ mod tests {
                 access.to_string(),
                 refresh.to_string(),
                 expires,
+                profile_fingerprint.to_string(),
             ));
             *self.token.lock().unwrap() = Some(StoredOAuthToken {
                 access: access.to_string(),
                 refresh: refresh.to_string(),
                 expires,
+                profile_fingerprint: Some(profile_fingerprint.to_string()),
             });
             Ok(())
         }
@@ -4936,6 +4944,10 @@ mod tests {
         assert_eq!(stored[0].1, "acme");
         assert_eq!(stored[0].2, "at-secret");
         assert_eq!(stored[0].3, "rt-secret");
+        assert_eq!(
+            stored[0].5,
+            oauth_profile_fingerprint(&oauth_profile()).unwrap()
+        );
 
         let requests = transport.requests();
         assert_eq!(requests.len(), 1);
@@ -4981,6 +4993,7 @@ mod tests {
             access: "at-secret".to_string(),
             refresh: "rt-secret".to_string(),
             expires: 0,
+            profile_fingerprint: Some(oauth_profile_fingerprint(&oauth_profile()).unwrap()),
         });
         let transport = std::sync::Arc::new(ScriptedTransport::with(vec![HttpResponse {
             status: 200,
@@ -5007,6 +5020,32 @@ mod tests {
             sink.deleted.lock().unwrap().clone(),
             vec![("install-1".to_string(), "acme".to_string())]
         );
+    }
+
+    #[test]
+    fn oauth_http_revoke_refuses_a_changed_profile_without_a_request_or_delete() {
+        let original = oauth_profile();
+        let mut changed = original.clone();
+        changed.token_endpoint = "https://id.other.test/token".to_string();
+        changed.revocation_endpoint = Some("https://id.other.test/revoke".to_string());
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        *sink.token.lock().unwrap() = Some(StoredOAuthToken {
+            access: "at-secret".to_string(),
+            refresh: "rt-secret".to_string(),
+            expires: 0,
+            profile_fingerprint: Some(oauth_profile_fingerprint(&original).unwrap()),
+        });
+        let transport = std::sync::Arc::new(ScriptedTransport::default());
+        let mut state = oauth_state(oauth_grants(changed), transport.clone(), sink.clone());
+
+        let error = state.revoke("acme".to_string()).unwrap_err();
+        assert!(matches!(error, CapabilityError::Denied(_)), "{error:?}");
+        assert!(format!("{error:?}").contains("different issuing profile"));
+        assert!(!format!("{error:?}").contains("at-secret"));
+        assert!(!format!("{error:?}").contains("rt-secret"));
+        assert!(transport.requests().is_empty());
+        assert!(sink.deleted.lock().unwrap().is_empty());
+        assert!(sink.token.lock().unwrap().is_some());
     }
 }
 

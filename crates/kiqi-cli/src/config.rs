@@ -303,6 +303,9 @@ pub enum Credential {
         /// Unix epoch seconds. `0` means no known expiry.
         #[serde(default)]
         expires: i64,
+        /// Set only for plugin credentials: the IdP profile that issued them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_fingerprint: Option<String>,
     },
 }
 
@@ -365,6 +368,7 @@ pub fn upsert_oauth_token(
             access,
             refresh,
             expires,
+            profile_fingerprint: None,
         },
     )
 }
@@ -376,10 +380,12 @@ pub fn read_oauth_token(provider_id: &str) -> Result<Option<Credential>, ConfigE
             access,
             refresh,
             expires,
+            ..
         }) => Some(Credential::Oauth {
             access: access.clone(),
             refresh: refresh.clone(),
             expires: *expires,
+            profile_fingerprint: None,
         }),
         _ => None,
     })
@@ -408,6 +414,7 @@ pub fn upsert_plugin_oauth_token(
     access: String,
     refresh: String,
     expires: i64,
+    profile_fingerprint: String,
 ) -> Result<(), ConfigError> {
     let key = plugin_credential_key(install_id, provider_id);
     let mut store = read_auth()?;
@@ -426,6 +433,7 @@ pub fn upsert_plugin_oauth_token(
             access,
             refresh,
             expires,
+            profile_fingerprint: Some(profile_fingerprint),
         },
     );
     write_auth(&store)
@@ -442,10 +450,12 @@ pub fn read_plugin_oauth_token(
             access,
             refresh,
             expires,
+            profile_fingerprint,
         }) => Some(Credential::Oauth {
             access: access.clone(),
             refresh: refresh.clone(),
             expires: *expires,
+            profile_fingerprint: profile_fingerprint.clone(),
         }),
         _ => None,
     })
@@ -1353,7 +1363,7 @@ mod tests {
         upsert_oauth_token("acme", "access".into(), "refresh".into(), 123).unwrap();
         assert!(matches!(
             read_oauth_token("acme").unwrap(),
-            Some(Credential::Oauth { access, refresh, expires })
+            Some(Credential::Oauth { access, refresh, expires, .. })
                 if access == "access" && refresh == "refresh" && expires == 123
         ));
         assert!(read_oauth_token("other").unwrap().is_none());
@@ -1371,7 +1381,15 @@ mod tests {
         )
         .unwrap();
 
-        upsert_plugin_oauth_token("install-1", "anthropic", "at".into(), "rt".into(), 99).unwrap();
+        upsert_plugin_oauth_token(
+            "install-1",
+            "anthropic",
+            "at".into(),
+            "rt".into(),
+            99,
+            "fingerprint-1".into(),
+        )
+        .unwrap();
 
         let store = read_auth().unwrap();
         assert_eq!(
@@ -1380,7 +1398,7 @@ mod tests {
         );
         assert!(matches!(
             store.get("plugin:install-1:anthropic"),
-            Some(Credential::Oauth { access, refresh, expires })
+            Some(Credential::Oauth { access, refresh, expires, .. })
                 if access == "at" && refresh == "rt" && *expires == 99
         ));
         // The user's bare entry is byte-for-byte untouched.
@@ -1391,12 +1409,20 @@ mod tests {
 
         // Re-login of the SAME plugin provider overwrites only its namespaced
         // entry, and a bare re-key still works through the ordinary path.
-        upsert_plugin_oauth_token("install-1", "anthropic", "at2".into(), "rt2".into(), 100)
-            .unwrap();
+        upsert_plugin_oauth_token(
+            "install-1",
+            "anthropic",
+            "at2".into(),
+            "rt2".into(),
+            100,
+            "fingerprint-1".into(),
+        )
+        .unwrap();
         assert!(matches!(
             read_plugin_oauth_token("install-1", "anthropic").unwrap(),
-            Some(Credential::Oauth { access, refresh, expires })
+            Some(Credential::Oauth { access, refresh, expires, profile_fingerprint })
                 if access == "at2" && refresh == "rt2" && expires == 100
+                    && profile_fingerprint.as_deref() == Some("fingerprint-1")
         ));
         upsert_credential(
             "anthropic",
@@ -1429,9 +1455,15 @@ mod tests {
             },
         )
         .unwrap();
-        let error =
-            upsert_plugin_oauth_token("install-1", "anthropic", "at".into(), "rt".into(), 0)
-                .unwrap_err();
+        let error = upsert_plugin_oauth_token(
+            "install-1",
+            "anthropic",
+            "at".into(),
+            "rt".into(),
+            0,
+            "fingerprint-1".into(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("refusing to replace"), "{error}");
         assert!(matches!(
             read_auth().unwrap().get("plugin:install-1:anthropic"),

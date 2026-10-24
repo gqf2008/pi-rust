@@ -204,6 +204,7 @@ async fn run_refresh(
         access,
         refresh,
         expires,
+        ..
     }) = config::read_oauth_token(provider).ok().flatten()
     else {
         eprintln!("error: no stored OAuth credentials for \"{provider}\"");
@@ -264,6 +265,7 @@ async fn run_logout(
                 &found.profile,
                 &found.grant,
                 &*transport,
+                args.iter().any(|arg| arg == "--force-local"),
             ) {
                 Ok(true) => {
                     println!(
@@ -671,6 +673,8 @@ Subcommands:
 Options:
   --provider <id>   Provider id (default: anthropic)
   --json            (check only) Emit a {{ready, provider, source}} JSON object
+  --force-local     (logout only) After an issuing-profile mismatch, delete the
+                    local credential without sending it to the current IdP
 
 Environment:
   ANTHROPIC_API_KEY      Fallback API key (x-api-key) when no stored credential.
@@ -925,6 +929,7 @@ mod tests {
             "at".to_string(),
             "rt".to_string(),
             0,
+            "test-profile-fingerprint".to_string(),
         )
         .unwrap();
         assert!(matches!(
