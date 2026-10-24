@@ -30,6 +30,41 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **BREAKING (wasm ABI 0.8.0): every installed guest must be rebuilt.** The package
+  version *is* the ABI version, so a 0.7.1 component fails instantiation. Two existing
+  signatures changed — `run-command` returns `command-result` and
+  `session-read.cli-flag` returns `option<flag-value>` (a bare `--foo` is now `bare`,
+  no longer a dropped JSON bool) — and two closed variants gained a case
+  (`event.input`, `event-action.patch`). All 12 in-repo guests are rebuilt in this
+  release; no third-party wasm ecosystem exists to migrate. The world also gains the
+  exports `oauth-api`, `provider-api` and `render-api`, which every guest must
+  implement (`kiqi_plugin_guest::deny_contribution_exports!` supplies empty/denied
+  stubs), and the imports `oauth-http`, `provider-stream` and `provider-http`.
+
+  Five capabilities arrive **deny-by-default**, each carrying its policy in the grant:
+  `oauth`, `provider`, `render`, `resources` and `provider-request`. None is
+  auto-granted by `--yes` (`AUTO_GRANT_EXEMPT`): an install lists them and stops, and
+  the user grants explicitly with `ki plugin grant <id> <capability> …`. A missing
+  grants file still grants nothing, and a hand-edited file fails closed — a key that
+  fails validation is dropped while the others survive.
+
+  Behaviour changes worth knowing before upgrading: OAuth tokens never cross the wasm
+  boundary (the host performs the token-endpoint HTTP and stores
+  `plugin:<install-id>:<provider-id>`; a guest sees only `oauth-credential-status`);
+  provider requests run on a dedicated instance with a call-scoped, grant-filtered
+  HTTP import that refuses unmatched requests and redirects; markdown rendering is
+  finalize-only on a deny-all instance; and the `before-provider-request` observation
+  is redacted unless `provider-request --observe` is granted (`apiKey` becomes
+  `apiKeyPresent`, header values and messages are dropped by default).
+
+  Boundaries, stated rather than implied: the provider runtime is not wired yet —
+  `provider-http` is still a deny stub and the `WasmProvider` adapter is unwritten, so
+  a provider grant can be written and a guest discovered, but no model request leaves
+  the host. A stored plugin OAuth token is not yet consumed by the model request path
+  (`stored_api_key` matches `ApiKey` only), so this release reaches parity with
+  `ki auth`, not OAuth model calls. The cdylib OAuth/provider/renderer/resources
+  registrations are superseded; their code is removed in a follow-up.
+
 - **MCP notices can suppress a session's own collab echoes.** Collab entries
   now carry the writing session (from `KI_AGENT_ID`), and the client keeps the
   *raw* session list a notification reports (`_meta.sessions`) to compare it at

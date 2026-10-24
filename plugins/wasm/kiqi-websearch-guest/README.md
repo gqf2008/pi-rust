@@ -63,6 +63,8 @@ Both hosts are required for the tool to work fully:
   guest alongside it refuses the guest's tool (the designed takeover guard,
   not a bug). The guest is for installs without the compiled plugin.
 
+ABI 0.8.0: a rebuild must also implement `continue_command` and the `oauth-api` / `provider-api` / `render-api` contribution exports; this crate fills the latter three with `kiqi_plugin_guest::deny_contribution_exports!(…)`.
+
 ## Build
 
 ```bash

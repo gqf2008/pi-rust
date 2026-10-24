@@ -14,7 +14,7 @@ State lives in `<project>/.ki/goals.json` in the compiled shape
 (`{"active": …|null, "archived": […]}`) — the exact file and shape the compiled
 `kiqi-orchestrator` reads, so an active goal started here turns the compiled
 orchestration guidance on just as the compiled `kiqi-goal` would. (Before `fs`
-gained a scope — a grant-model change, not an ABI one; the ABI stays 0.7.1 —
+gained a scope — a grant-model change, not an ABI one —
 the guest kept a `{ "<project>": Goals }` map in its own data directory and
 this coupling was broken; §"Differences" records the one-time migration.)
 
@@ -105,6 +105,8 @@ Stated, not hidden:
 
 The budget arithmetic, action dispatch, command grammar, fingerprint dedupe and
 rendering are the compile-time logic, kept in the guest.
+
+ABI 0.8.0: a rebuild must also implement `continue_command` and the `oauth-api` / `provider-api` / `render-api` contribution exports; this crate fills the latter three with `kiqi_plugin_guest::deny_contribution_exports!(…)`.
 
 ## Build
 

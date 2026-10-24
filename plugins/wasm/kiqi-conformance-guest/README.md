@@ -4,6 +4,8 @@ A minimal kiqi **wasm plugin** used as the conformance fixture for the wasm
 tier. It is not a real plugin — it exercises the ABI surfaces the host must get
 right (tools, streaming progress, logging, a denied capability).
 
+ABI 0.8.0: `continue_command` and the `oauth-api` / `provider-api` / `render-api` exports are mandatory on every guest; this fixture implements all of them by hand to exercise the surfaces.
+
 Build:
 
 ```sh

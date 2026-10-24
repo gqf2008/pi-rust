@@ -1,6 +1,6 @@
 # kiqi-subagents-guest
 
-`kiqi-subagents` ported to the kiqi wasm ABI (`kiqi:plugin@0.7.1`). It registers
+`kiqi-subagents` ported to the kiqi wasm ABI (`kiqi:plugin@0.8.0`). It registers
 one tool, `delegate_task`, which validates its arguments and returns a bounded,
 non-recursive **delegation envelope** — a JSON description of the work a host
 might schedule. It imports **no capability**: the whole behaviour is argument
@@ -69,6 +69,8 @@ Stated, not hidden:
    still passes the two string values through `serde_json` for correct escaping.
    The output is identical to the compile-time plugin; the difference is *why*
    it is stable.
+
+ABI 0.8.0: a rebuild must also implement `continue_command` and the `oauth-api` / `provider-api` / `render-api` contribution exports; this crate fills the latter three with `kiqi_plugin_guest::deny_contribution_exports!(…)`.
 
 ## Build
 

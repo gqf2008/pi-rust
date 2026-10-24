@@ -1,6 +1,6 @@
 # kiqi-orchestrator-guest
 
-`kiqi-orchestrator` ported to the kiqi wasm ABI (0.7.1): the same three tools
+`kiqi-orchestrator` ported to the kiqi wasm ABI (0.8.0): the same three tools
 (`subagent` / `plan` / `dispatch`) and the orchestration guidance, with the
 process plumbing on `proc` and one-command `init`-style work on `exec` only
 where the acceptance checks need it (`test -f`, `sh -c`).
@@ -78,3 +78,5 @@ back), the plan's dependency gating is asserted across two dispatches,
 `waitSeconds: 0` refusal, session-switch clearing, and the deny path without
 the grant. A live run with the real `ki` follows the repo's detect-and-return
 pattern.
+
+ABI 0.8.0: a rebuild must also implement `continue_command` and the `oauth-api` / `provider-api` / `render-api` contribution exports; this crate fills the latter three with `kiqi_plugin_guest::deny_contribution_exports!(…)`.

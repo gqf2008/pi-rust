@@ -1,6 +1,6 @@
 # kiqi-codegraph-guest
 
-`kiqi-codegraph` ported to the kiqi wasm ABI (`kiqi:plugin@0.7.0`). The same
+`kiqi-codegraph` ported to the kiqi wasm ABI (`kiqi:plugin@0.8.0`). The same
 eight `codegraph_*` tools, with the process plumbing replaced by the two
 capabilities that fit it:
 
@@ -64,6 +64,8 @@ grant stops) and — when a real `codegraph` is on `PATH` — a live session
 is absent, rather than pretending the protocol path was covered).
 
 There are no unit tests here: guest crates only link for `wasm32-wasip2`.
+
+ABI 0.8.0: a rebuild must also implement `continue_command` and the `oauth-api` / `provider-api` / `render-api` contribution exports; this crate fills the latter three with `kiqi_plugin_guest::deny_contribution_exports!(…)`.
 
 ## Build
 

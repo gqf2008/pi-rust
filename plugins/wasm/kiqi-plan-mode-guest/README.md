@@ -29,6 +29,8 @@ The logic (which tools survive, what `/plan` prints, how the outline is parsed)
 lives in `kiqi-plan-mode-core`, the same crate the compile-time plugin uses. Only
 the `PlanHost` adapter differs: `HostCaps` there, the WIT imports here.
 
+ABI 0.8.0: a rebuild must also implement `continue_command` and the `oauth-api` / `provider-api` / `render-api` contribution exports; this crate fills the latter three with `kiqi_plugin_guest::deny_contribution_exports!(…)`.
+
 ## Build
 
 ```bash
