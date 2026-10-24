@@ -1,6 +1,6 @@
 //! Host-side backend for **wasm plugins** (the component model tier).
 //!
-//! Binds `plugins/kiqi-plugin.wit` (ABI 0.7.1) with wasmtime's `bindgen!` and
+//! Binds `plugins/kiqi-plugin.wit` (ABI 0.8.0) with wasmtime's `bindgen!` and
 //! hosts a plugin component behind the same [`kiqi_plugin::Plugin`] seam the
 //! compiled-in plugins implement.
 //!
@@ -605,8 +605,14 @@ impl crate::kiqi::plugin::session_read::Host for HostState {
     fn thinking_level(&mut self) -> String {
         with_session(|session| session.thinking_level()).unwrap_or_default()
     }
-    fn cli_flag(&mut self, name: String) -> Option<String> {
-        with_session(|session| session.cli_flag(&name)).flatten()
+    fn cli_flag(&mut self, name: String) -> Option<crate::kiqi::plugin::types::FlagValue> {
+        use crate::kiqi::plugin::types::FlagValue as Wit;
+        with_session(|session| session.cli_flag(&name))
+            .flatten()
+            .map(|value| match value {
+                kiqi_plugin::FlagValue::Bare => Wit::Bare,
+                kiqi_plugin::FlagValue::Text(text) => Wit::Text(text),
+            })
     }
     fn session_branch(&mut self) -> String {
         with_session(|session| session.session_branch().to_string())
@@ -2085,7 +2091,7 @@ impl PluginTrait for WasmPlugin {
         name: &str,
         arguments: &str,
         caps: &HostCaps<'_>,
-    ) -> Result<String, PluginError> {
+    ) -> Result<kiqi_plugin::CommandResult, PluginError> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let Some(inner) = guard.as_mut() else {
             return Err(PluginError::Failed(format!("{} is unloaded", self.id)));
@@ -2100,7 +2106,7 @@ impl PluginTrait for WasmPlugin {
         // A `proc` handle lives for this call and nothing beyond it.
         inner.store.data_mut().reap_procs();
         match result {
-            Ok(Ok(text)) => Ok(text),
+            Ok(Ok(result)) => Ok(to_command_result(result)),
             Ok(Err(error)) => Err(map_plugin_error(error)),
             Err(trap) => Err(PluginError::Failed(format!(
                 "{}: command `{name}` trapped: {trap}",
@@ -2293,6 +2299,32 @@ fn map_plugin_error(error: crate::kiqi::plugin::types::PluginError) -> PluginErr
         Wit::InvalidArguments(detail) => PluginError::InvalidArguments(detail),
         Wit::Denied(detail) => PluginError::Denied(detail),
         Wit::Failed(detail) => PluginError::Failed(detail),
+    }
+}
+
+fn to_command_result(
+    result: crate::kiqi::plugin::types::CommandResult,
+) -> kiqi_plugin::CommandResult {
+    use crate::kiqi::plugin::types::CommandResultBody as Wit;
+    let body = match result.body {
+        Wit::Message(text) => kiqi_plugin::CommandResultBody::Message(text),
+        Wit::Selector(spec) => {
+            kiqi_plugin::CommandResultBody::Selector(kiqi_plugin::SelectorSpec {
+                title: spec.title,
+                items: spec.items,
+            })
+        }
+        Wit::Editor(spec) => kiqi_plugin::CommandResultBody::Editor(kiqi_plugin::EditorSpec {
+            initial_text: spec.initial_text,
+        }),
+        Wit::Prompt(spec) => kiqi_plugin::CommandResultBody::Prompt(kiqi_plugin::PromptSpec {
+            title: spec.title,
+            placeholder: spec.placeholder,
+        }),
+    };
+    kiqi_plugin::CommandResult {
+        flow_id: result.flow_id,
+        body,
     }
 }
 

@@ -265,14 +265,17 @@ impl Guest for TodoPlugin {
         }]
     }
 
-    fn run_command(name: String, _arguments: String) -> Result<String, types::PluginError> {
+    fn run_command(name: String, _arguments: String) -> Result<types::CommandResult, types::PluginError> {
         if name != COMMAND {
             return Err(types::PluginError::UnknownTool(name));
         }
-        Ok(render(
-            &state().lock().unwrap_or_else(|p| p.into_inner()),
-            true,
-        ))
+        Ok(types::CommandResult {
+            flow_id: String::new(),
+            body: types::CommandResultBody::Message(render(
+                &state().lock().unwrap_or_else(|p| p.into_inner()),
+                true,
+            )),
+        })
     }
 
     fn list_flags() -> Vec<types::FlagSpec> {

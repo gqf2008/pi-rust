@@ -128,12 +128,16 @@ impl kiqi_plugin::SessionRead for ActionCaps {
         .unwrap_or_default()
     }
 
-    fn cli_flag(&self, name: &str) -> Option<String> {
+    fn cli_flag(&self, name: &str) -> Option<kiqi_plugin::FlagValue> {
         let host = self.host.clone();
         let args = serde_json::json!({ "name": name });
         self.drive("get_cli_flag", async move { host.get_cli_flag(args).await })
             .ok()
-            .and_then(|value| value.get("value")?.as_str().map(str::to_string))
+            .and_then(|value| match value.get("value")? {
+                serde_json::Value::Bool(true) => Some(kiqi_plugin::FlagValue::Bare),
+                serde_json::Value::String(text) => Some(kiqi_plugin::FlagValue::Text(text.clone())),
+                _ => None,
+            })
     }
 
     fn session_branch(&self) -> serde_json::Value {
@@ -956,7 +960,7 @@ impl PluginHost {
         name: &str,
         arguments: &str,
         caps: &HostCaps<'_>,
-    ) -> Result<String, kiqi_plugin::PluginError> {
+    ) -> Result<kiqi_plugin::CommandResult, kiqi_plugin::PluginError> {
         self.guard_result("command", || self.plugin.run_command(name, arguments, caps))
     }
 
@@ -2309,7 +2313,10 @@ mod tests {
         );
         assert_eq!(caps_host.thinking_level(), "medium");
         assert_eq!(caps_host.system_prompt(), "you are kiqi");
-        assert_eq!(caps_host.cli_flag("verbose").as_deref(), Some("2"));
+        assert_eq!(
+            caps_host.cli_flag("verbose"),
+            Some(kiqi_plugin::FlagValue::Text("2".to_string()))
+        );
         assert_eq!(caps_host.cli_flag("missing"), None);
 
         // The mutating capabilities must hand the host the documented args,
@@ -2436,8 +2443,11 @@ mod tests {
             };
             let refused = plan_host.run_command("plan", "start", &stripped).unwrap();
             assert!(
-                refused.contains("Unable"),
-                "without SessionControl plan mode cannot start: {refused}"
+                matches!(
+                    &refused.body,
+                    kiqi_plugin::CommandResultBody::Message(text) if text.contains("Unable")
+                ),
+                "without SessionControl plan mode cannot start: {refused:?}"
             );
         }
 
@@ -3191,8 +3201,10 @@ mod tests {
             _name: &str,
             args: &str,
             _caps: &HostCaps<'_>,
-        ) -> Result<String, kiqi_plugin::PluginError> {
-            Ok(format!("surface ran {args}"))
+        ) -> Result<kiqi_plugin::CommandResult, kiqi_plugin::PluginError> {
+            Ok(kiqi_plugin::CommandResult::message(format!(
+                "surface ran {args}"
+            )))
         }
 
         fn shortcuts(&self) -> Vec<kiqi_plugin::ShortcutSpec> {
@@ -3466,10 +3478,13 @@ mod tests {
         };
 
         // `/command` reaches the plugin and its text comes back.
-        let text = host
+        let result = host
             .run_command("conformance", "", &caps.caps())
             .expect("the conformance command runs");
-        assert_eq!(text, "conformance command ran");
+        assert_eq!(
+            result.body,
+            kiqi_plugin::CommandResultBody::Message("conformance command ran".to_string())
+        );
 
         // `f8` is routed only because the component declared it.
         assert_eq!(shortcut_hosts(&[host.clone()], "f8").len(), 1);

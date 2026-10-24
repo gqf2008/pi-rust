@@ -885,8 +885,14 @@ impl SlashCommand for CompiledCommand {
         let caps = crate::plugins::compiled_caps();
         let name = self.name.trim_start_matches('/');
         match self.host.run_command(name, args, &caps.caps()) {
-            Ok(text) if !text.trim().is_empty() => add_note_message(&ctx.chat, &text),
-            Ok(_) => {}
+            Ok(result) => match result.body {
+                kiqi_plugin::CommandResultBody::Message(text) if !text.trim().is_empty() => {
+                    add_note_message(&ctx.chat, &text)
+                }
+                // Selector/editor/prompt flows have no host handling yet; a
+                // command that only wants to say something uses `Message`.
+                _ => {}
+            },
             Err(error) => add_error_message(&ctx.chat, &format!("/{name} failed: {error}")),
         }
         ctx.tui.request_render(false);

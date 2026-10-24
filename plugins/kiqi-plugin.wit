@@ -356,12 +356,12 @@ interface log {
 
 /// Read-only session state.
 interface session-read {
-    use types.{session-info};
+    use types.{flag-value, session-info};
     info: func() -> session-info;
     active-tools: func() -> list<string>;
     system-prompt: func() -> string;
     thinking-level: func() -> string;
-    cli-flag: func(name: string) -> option<string>;
+    cli-flag: func(name: string) -> option<flag-value>;
     session-branch: func() -> string;
 }
 
@@ -580,7 +580,7 @@ interface render-api {
 
 /// What a plugin contributes to the runtime.
 interface plugin-api {
-    use types.{command-spec, event, event-action, flag-spec, plugin-error, shortcut-spec, tool-result, tool-spec, verdict};
+    use types.{command-result, command-spec, event, event-action, flag-spec, plugin-error, shortcut-spec, tool-result, tool-spec, verdict};
 
     /// Stable identity: log prefix, config key, root of tool names. Mirrors
     /// `kiqi_plugin::Plugin::id`. The host cross-checks it against the directory
@@ -594,7 +594,7 @@ interface plugin-api {
     call-tool: func(name: string, arguments: string) -> result<tool-result, plugin-error>;
 
     list-commands: func() -> list<command-spec>;
-    run-command: func(name: string, arguments: string) -> result<string, plugin-error>;
+    run-command: func(name: string, arguments: string) -> result<command-result, plugin-error>;
     list-flags: func() -> list<flag-spec>;
     list-shortcuts: func() -> list<shortcut-spec>;
 

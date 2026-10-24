@@ -66,7 +66,7 @@ impl Guest for Webfetch {
         Vec::new()
     }
 
-    fn run_command(_name: String, _arguments: String) -> Result<String, types::PluginError> {
+    fn run_command(_name: String, _arguments: String) -> Result<types::CommandResult, types::PluginError> {
         Err(types::PluginError::UnknownTool(_name))
     }
 

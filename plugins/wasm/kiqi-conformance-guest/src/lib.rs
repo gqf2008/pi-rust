@@ -403,11 +403,14 @@ impl Guest for Conformance {
         }]
     }
 
-    fn run_command(name: String, _arguments: String) -> Result<String, types::PluginError> {
+    fn run_command(name: String, _arguments: String) -> Result<types::CommandResult, types::PluginError> {
         if name != COMMAND {
             return Err(types::PluginError::UnknownTool(name));
         }
-        Ok("conformance command ran".to_string())
+        Ok(types::CommandResult {
+            flow_id: String::new(),
+            body: types::CommandResultBody::Message("conformance command ran".to_string()),
+        })
     }
 
     fn list_flags() -> Vec<types::FlagSpec> {

@@ -586,14 +586,17 @@ impl Guest for AskUserPlugin {
         }]
     }
 
-    fn run_command(name: String, arguments: String) -> Result<String, types::PluginError> {
+    fn run_command(name: String, arguments: String) -> Result<types::CommandResult, types::PluginError> {
         if name != TOOL {
             return Err(types::PluginError::UnknownTool(name));
         }
         let params: Value =
             serde_json::from_str(&arguments).unwrap_or(json!({ "question": arguments }));
         let plan = ask(&params).map_err(types::PluginError::InvalidArguments)?;
-        Ok(plan_display_text(&plan))
+        Ok(types::CommandResult {
+            flow_id: String::new(),
+            body: types::CommandResultBody::Message(plan_display_text(&plan)),
+        })
     }
 
     fn list_flags() -> Vec<types::FlagSpec> {

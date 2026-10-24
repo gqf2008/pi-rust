@@ -1168,11 +1168,14 @@ impl Guest for GoalPlugin {
         }]
     }
 
-    fn run_command(name: String, arguments: String) -> Result<String, types::PluginError> {
+    fn run_command(name: String, arguments: String) -> Result<types::CommandResult, types::PluginError> {
         if name != COMMAND {
             return Err(types::PluginError::UnknownTool(name));
         }
-        Ok(run_command(&WasmHost, &arguments))
+        Ok(types::CommandResult {
+            flow_id: String::new(),
+            body: types::CommandResultBody::Message(run_command(&WasmHost, &arguments)),
+        })
     }
 
     fn list_flags() -> Vec<types::FlagSpec> {

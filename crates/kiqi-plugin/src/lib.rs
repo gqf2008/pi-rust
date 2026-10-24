@@ -121,6 +121,65 @@ pub struct CommandSpec {
     pub description: String,
 }
 
+/// A selector the host should show, mirroring the wasm `selector-spec`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectorSpec {
+    pub title: String,
+    pub items: Vec<String>,
+}
+
+/// An editor the host should open, mirroring the wasm `editor-spec`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorSpec {
+    pub initial_text: String,
+}
+
+/// A prompt the host should show, mirroring the wasm `prompt-spec`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptSpec {
+    pub title: String,
+    pub placeholder: String,
+}
+
+/// What a command wants the host to do after it returns.
+///
+/// Mirrors the wasm `command-result-body` variant. Only [`Message`] has host
+/// handling today; the other variants are carried so a guest can return them
+/// without the ABI lying about what it accepts.
+///
+/// [`Message`]: CommandResultBody::Message
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandResultBody {
+    /// Text to show the user.
+    Message(String),
+    /// Ask the user to pick one of `items`.
+    Selector(SelectorSpec),
+    /// Open an editor seeded with `initial_text`.
+    Editor(EditorSpec),
+    /// Ask the user for a line of text.
+    Prompt(PromptSpec),
+}
+
+/// A command's outcome.
+///
+/// Mirrors the wasm `command-result`: `flow_id` tags selector/editor/prompt
+/// continuations so a stale reply cannot be delivered to a later flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandResult {
+    pub flow_id: String,
+    pub body: CommandResultBody,
+}
+
+impl CommandResult {
+    /// The shape every command returns today: text for the user, no flow.
+    pub fn message(text: impl Into<String>) -> Self {
+        Self {
+            flow_id: String::new(),
+            body: CommandResultBody::Message(text.into()),
+        }
+    }
+}
+
 /// A CLI flag the plugin claims.
 ///
 /// Registration is a **declaration**, not a callable: the host records that the
@@ -131,6 +190,18 @@ pub struct CommandSpec {
 pub struct FlagSpec {
     pub name: String,
     pub description: String,
+}
+
+/// A CLI flag's value, as read through [`SessionRead::cli_flag`].
+///
+/// Mirrors the wasm `flag-value` variant: `Bare` is a boolean switch present
+/// without a value, `Text` carries the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlagValue {
+    /// Present without a value (e.g. `--verbose`).
+    Bare,
+    /// Present with a value (e.g. `--level 2`).
+    Text(String),
 }
 
 /// A keyboard shortcut the plugin claims (e.g. `f8`).
@@ -389,7 +460,7 @@ pub trait SessionRead: Send + Sync {
     fn active_tools(&self) -> Vec<String>;
     fn system_prompt(&self) -> String;
     fn thinking_level(&self) -> String;
-    fn cli_flag(&self, name: &str) -> Option<String>;
+    fn cli_flag(&self, name: &str) -> Option<FlagValue>;
     fn session_branch(&self) -> Value;
 
     /// The session id, when the host knows it. Defaults to `None`, so an
@@ -557,13 +628,16 @@ pub trait Plugin: Send + Sync + 'static {
         Vec::new()
     }
 
-    /// Run one of [`Plugin::commands`]. The returned text is shown to the user.
+    /// Run one of [`Plugin::commands`].
+    ///
+    /// The result says what the host should show or do next; today that is
+    /// [`CommandResultBody::Message`].
     fn run_command(
         &self,
         _name: &str,
         _arguments: &str,
         _caps: &HostCaps<'_>,
-    ) -> Result<String, PluginError> {
+    ) -> Result<CommandResult, PluginError> {
         Err(PluginError::Failed(
             "this plugin declares no commands".into(),
         ))

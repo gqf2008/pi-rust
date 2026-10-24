@@ -67,7 +67,7 @@ impl Guest for Subagents {
         Vec::new()
     }
 
-    fn run_command(name: String, _arguments: String) -> Result<String, types::PluginError> {
+    fn run_command(name: String, _arguments: String) -> Result<types::CommandResult, types::PluginError> {
         Err(types::PluginError::UnknownTool(name))
     }
 

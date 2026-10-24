@@ -117,7 +117,7 @@ impl kiqi_plugin::SessionRead for FixedSession {
     fn thinking_level(&self) -> String {
         String::new()
     }
-    fn cli_flag(&self, _name: &str) -> Option<String> {
+    fn cli_flag(&self, _name: &str) -> Option<kiqi_plugin::FlagValue> {
         None
     }
     fn session_branch(&self) -> serde_json::Value {
@@ -296,7 +296,7 @@ impl kiqi_plugin::SessionRead for SwappingSession {
     fn thinking_level(&self) -> String {
         String::new()
     }
-    fn cli_flag(&self, _name: &str) -> Option<String> {
+    fn cli_flag(&self, _name: &str) -> Option<kiqi_plugin::FlagValue> {
         None
     }
     fn session_branch(&self) -> serde_json::Value {
@@ -754,8 +754,8 @@ fn conformance_surface_is_reachable() {
     // commands, flags, shortcuts
     assert_eq!(plugin.commands()[0].name, "conformance");
     assert_eq!(
-        plugin.run_command("conformance", "", &caps).unwrap(),
-        "conformance command ran"
+        plugin.run_command("conformance", "", &caps).unwrap().body,
+        kiqi_plugin::CommandResultBody::Message("conformance command ran".to_string())
     );
     assert_eq!(plugin.flags()[0].name, "conformance-flag");
     assert_eq!(plugin.shortcuts()[0].key, "f8");
@@ -2921,7 +2921,7 @@ impl kiqi_plugin::SessionRead for PlanSessionHost {
     fn thinking_level(&self) -> String {
         String::new()
     }
-    fn cli_flag(&self, _name: &str) -> Option<String> {
+    fn cli_flag(&self, _name: &str) -> Option<kiqi_plugin::FlagValue> {
         None
     }
     fn session_branch(&self) -> serde_json::Value {
@@ -3047,6 +3047,9 @@ fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
     let status = plugin
         .run_command("plan", "show", &caps)
         .expect("plan show");
+    let kiqi_plugin::CommandResultBody::Message(status) = status.body else {
+        panic!("plan show returns a message");
+    };
     assert!(status.contains("Do the thing"), "got {status}");
 }
 
@@ -3397,7 +3400,7 @@ impl kiqi_plugin::SessionRead for ToolFaceSession {
     fn thinking_level(&self) -> String {
         String::new()
     }
-    fn cli_flag(&self, _name: &str) -> Option<String> {
+    fn cli_flag(&self, _name: &str) -> Option<kiqi_plugin::FlagValue> {
         None
     }
     fn session_branch(&self) -> serde_json::Value {
@@ -3658,6 +3661,9 @@ fn goal_guest_charges_the_turn_budget_from_the_project_file() {
     let status = plugin
         .run_command("goal", "status", &caps)
         .expect("goal status");
+    let kiqi_plugin::CommandResultBody::Message(status) = status.body else {
+        panic!("goal status returns a message");
+    };
     assert!(status.contains("Ship the goal port"), "got {status}");
 }
 

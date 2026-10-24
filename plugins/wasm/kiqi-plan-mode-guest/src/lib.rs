@@ -119,16 +119,20 @@ impl Guest for PlanMode {
         }]
     }
 
-    fn run_command(name: String, arguments: String) -> Result<String, types::PluginError> {
+    fn run_command(name: String, arguments: String) -> Result<types::CommandResult, types::PluginError> {
         if name != COMMAND {
             return Err(types::PluginError::UnknownTool(name));
         }
         let output = run_command(&WasmHost, &arguments);
-        Ok(output
+        let text = output
             .get("text")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .unwrap_or_else(|| output.to_string()))
+            .unwrap_or_else(|| output.to_string());
+        Ok(types::CommandResult {
+            flow_id: String::new(),
+            body: types::CommandResultBody::Message(text),
+        })
     }
 
     fn list_flags() -> Vec<types::FlagSpec> {

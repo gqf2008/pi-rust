@@ -1,6 +1,6 @@
 //! Guest SDK for writing **kiqi wasm plugins**.
 //!
-//! Wraps [`wit_bindgen::generate!`] over `plugins/kiqi-plugin.wit` (ABI 0.7.1)
+//! Wraps [`wit_bindgen::generate!`] over `plugins/kiqi-plugin.wit` (ABI 0.8.0)
 //! so a plugin crate only has to implement the generated `Guest` trait and call
 //! [`bindings::export!`]:
 //!
