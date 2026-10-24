@@ -21,6 +21,12 @@
 //! - **Ordering**: the turn drains the event stream until the terminal
 //!   `AgentEnd` (bounded) before responding, so the response never overtakes
 //!   the last `session/update` — both serialize through the outgoing actor.
+//! - **会话路由**：[`ServerShared::live`] 按 [`SessionId`] 保存多个
+//!   [`LiveSession`]；`session/new` / `session/load` 插入，`prompt` / `cancel`
+//!   按 id 路由，`session/close` 先从表中移除再取消回合并释放资源。未知或
+//!   已关闭的 id 保持 invalid-params 错误；每个会话至多一个活跃回合，但
+//!   一个会话的回合不阻塞其他会话创建或运行。`initialize` 的协议协商与
+//!   客户端能力快照属于连接，会话状态仍由各自的 [`LiveSession`] 持有。
 
 mod diag;
 mod dialogs;
