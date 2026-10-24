@@ -1522,6 +1522,16 @@ pub struct WasmPlugin {
 }
 
 impl WasmPlugin {
+    /// 宿主侧 guest 调用诊断汇（卡：0.8.0 能力补齐，P0）。
+    ///
+    /// 元数据/观测类入口原先用 `Err(_) => Vec::new()` / `result.ok()` 把 trap 吞掉，
+    /// 于是一个**坏掉的 guest** 与一个**什么都没声明的 guest** 在宿主侧完全同形：
+    /// 安装/展示/事件扇出全都静默少一块，用户没有任何线索。这里统一走 tracing，
+    /// 与 `kiqi-extensions` 既有诊断口径一致。
+    fn report_guest_error(&self, op: &str, error: impl std::fmt::Display) {
+        tracing::warn!(plugin = %self.id, op, %error, "guest call failed");
+    }
+
     /// Load and instantiate a component with the grants the user recorded for
     /// this plugin id (a missing `grants.json` grants nothing). `init` is called
     /// before returning.
@@ -1717,7 +1727,10 @@ impl PluginTrait for WasmPlugin {
                     description: spec.description,
                 })
                 .collect(),
-            Err(_) => Vec::new(),
+            Err(e) => {
+                self.report_guest_error("list-commands", &e);
+                Vec::new()
+            }
         }
     }
 
@@ -1767,7 +1780,10 @@ impl PluginTrait for WasmPlugin {
                     description: spec.description,
                 })
                 .collect(),
-            Err(_) => Vec::new(),
+            Err(e) => {
+                self.report_guest_error("list-flags", &e);
+                Vec::new()
+            }
         }
     }
 
@@ -1788,7 +1804,10 @@ impl PluginTrait for WasmPlugin {
                     description: spec.description,
                 })
                 .collect(),
-            Err(_) => Vec::new(),
+            Err(e) => {
+                self.report_guest_error("list-shortcuts", &e);
+                Vec::new()
+            }
         }
     }
 
@@ -1807,7 +1826,13 @@ impl PluginTrait for WasmPlugin {
         clear_context();
         // A `proc` handle lives for this call and nothing beyond it.
         inner.store.data_mut().reap_procs();
-        result.ok().flatten()
+        match result {
+            Ok(value) => value,
+            Err(e) => {
+                self.report_guest_error("before-agent-start", &e);
+                None
+            }
+        }
     }
 
     fn probe_points(&self) -> Vec<String> {
@@ -1819,7 +1844,13 @@ impl PluginTrait for WasmPlugin {
         let points = guest.call_list_probe_points(&mut inner.store);
         // Spawning in a metadata call is legal; nothing survives it either.
         inner.store.data_mut().reap_procs();
-        points.unwrap_or_default()
+        match points {
+            Ok(points) => points,
+            Err(e) => {
+                self.report_guest_error("list-probe-points", &e);
+                Vec::new()
+            }
+        }
     }
 
     fn probe(&self, point: &str, payload: &serde_json::Value, caps: &HostCaps<'_>) -> Verdict {

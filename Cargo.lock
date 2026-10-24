@@ -2249,6 +2249,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tracing",
  "wasmparser 0.259.0",
  "wasmtime",
  "wasmtime-wasi",
