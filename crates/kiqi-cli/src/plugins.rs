@@ -4311,6 +4311,161 @@ mod tests {
         );
     }
 
+    /// A guest parked in a synchronous host import is invisible to epoch
+    /// interruption. Its abandoned gate worker must not retain the shared
+    /// instance: probes, tools, and a fresh gate all stay bounded meanwhile.
+    #[cfg(feature = "plugin-wasm")]
+    #[test]
+    fn provider_gate_parked_in_host_import_does_not_block_shared_instance() {
+        #[derive(Default)]
+        struct ParkingUi {
+            state: std::sync::Mutex<(bool, bool)>,
+            wake: std::sync::Condvar,
+        }
+
+        impl ParkingUi {
+            fn wait_entered(&self) -> bool {
+                let state = self.state.lock().unwrap();
+                let (state, _) = self
+                    .wake
+                    .wait_timeout_while(state, std::time::Duration::from_secs(2), |state| !state.0)
+                    .unwrap();
+                state.0
+            }
+
+            fn release(&self) {
+                let mut state = self.state.lock().unwrap();
+                state.1 = true;
+                self.wake.notify_all();
+            }
+        }
+
+        impl kiqi_plugin::UiApi for ParkingUi {
+            fn dialog(
+                &self,
+                _: &serde_json::Value,
+            ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+                let mut state = self.state.lock().unwrap();
+                state.0 = true;
+                self.wake.notify_all();
+                while !state.1 {
+                    state = self.wake.wait(state).unwrap();
+                }
+                Ok(serde_json::Value::Null)
+            }
+
+            fn set_status(&self, _: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+                Ok(())
+            }
+
+            fn set_editor_text(
+                &self,
+                _: &serde_json::Value,
+            ) -> Result<(), kiqi_plugin::PluginError> {
+                Ok(())
+            }
+
+            fn component(
+                &self,
+                _: &str,
+                _: &serde_json::Value,
+            ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+                Err(kiqi_plugin::PluginError::Failed(
+                    "no components here".into(),
+                ))
+            }
+        }
+
+        let wasm = build_guest("kiqi-conformance-guest");
+        let grants = kiqi_plugin::grants::Grants {
+            provider_request: Some(kiqi_plugin::grants::ProviderRequestGrant {
+                observe: kiqi_plugin::grants::ObserveMode::Requests,
+                patch: true,
+                patch_timeout_ms: 100,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants("conformance", &wasm, grants)
+            .expect("load the conformance guest");
+        let host = std::sync::Arc::new(PluginHost::new("conformance", Box::new(plugin)));
+        let ui = std::sync::Arc::new(ParkingUi::default());
+        let caps = OwnedCaps {
+            session: None,
+            control: None,
+            inject: None,
+            ui: Some(ui.clone()),
+            log: std::sync::Arc::new(Silent),
+        };
+
+        let patch = dispatch_provider_gate(
+            &[host.clone()],
+            &caps,
+            kiqi_plugin::EventTag::BeforeProviderRequest,
+            serde_json::json!({ "model": "m", "gatePark": true }),
+        );
+        assert!(patch.is_none(), "the parked gate must time out unpatched");
+        assert!(ui.wait_entered(), "the guest must be parked in ui.dialog");
+
+        let probe_host = host.clone();
+        let probe_caps = caps.clone();
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let verdict = probe_tool_call_with(
+                &[probe_host],
+                &probe_caps,
+                "c1",
+                "bash",
+                &serde_json::json!({ "block": true }),
+            );
+            let _ = probe_tx.send(verdict);
+        });
+        let probe = probe_rx.recv_timeout(std::time::Duration::from_secs(2));
+
+        let tool_host = host.clone();
+        let tool_caps = caps.clone();
+        let (tool_tx, tool_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = tool_host.call_tool(
+                "conformance",
+                &serde_json::json!({}),
+                &tool_caps.caps(),
+                &NoProgress,
+            );
+            let _ = tool_tx.send(outcome);
+        });
+        let tool = tool_rx.recv_timeout(std::time::Duration::from_secs(2));
+
+        // The next gate must instantiate independently rather than queue
+        // behind the abandoned guest.
+        let next_patch = dispatch_provider_gate(
+            &[host],
+            &caps,
+            kiqi_plugin::EventTag::BeforeProviderRequest,
+            serde_json::json!({
+                "model": "m",
+                "gatePatch": { "maxTokens": 16 },
+            }),
+        );
+
+        // Always release the parked import before asserting, so a regression
+        // fails at the bounded receives instead of leaking a wedged test thread.
+        ui.release();
+        assert_eq!(
+            probe.expect("a parked gate must not hold the probe instance lock"),
+            Some(kiqi_plugin::Verdict::Block {
+                reason: "conformance blocks this".into()
+            })
+        );
+        tool.expect("a parked gate must not hold the tool instance lock")
+            .expect("the shared tool instance must still answer");
+        assert_eq!(
+            next_patch,
+            Some(serde_json::json!({ "maxTokens": 16 })),
+            "the next gate must use a fresh instance"
+        );
+    }
+
     /// The same wiring, driven through a real wasm component: the conformance
     /// guest declares every non-tool surface, so this proves the session-level
     /// paths reach a sandboxed plugin, not just a compiled one.

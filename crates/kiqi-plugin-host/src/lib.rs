@@ -2801,20 +2801,30 @@ impl WasmPlugin {
         if !policy.patch {
             return Ok(None);
         }
-        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(inner) = guard.as_mut() else {
-            return Ok(None);
-        };
+        // A gate call never borrows the shared tool/event instance. Epoch
+        // interruption cannot stop a guest parked in a blocking host import;
+        // using `self.inner` here would let the abandoned gate worker keep
+        // that mutex forever and wedge every later probe and tool call. A
+        // fresh store also gives the next gate a clean instance after the
+        // caller's wall-clock deadline abandons this one. Component
+        // instantiation is cheap next to a provider request; compilation is
+        // still reused through `self.component`.
+        let mut inner =
+            match Self::instantiate(&self.id, &self.engine, &self.component, &self.recipe) {
+                Ok(inner) => inner,
+                Err(error) => {
+                    self.report_guest_error("provider-gate-instantiate", &error);
+                    return Ok(None);
+                }
+            };
         // Gate delivery ignores the observe switch: a patch-only grant must
         // still see the request it is patching.
         let Some(wit) = graded_provider_request(event, &inner.store.data().grants, true) else {
             return Ok(None);
         };
-        // The gate is the one plugin call with a wall-clock budget. Give the
-        // guest an epoch deadline so a spinning guest traps and the worker
-        // releases the instance mutex; the caller's `recv_timeout` alone would
-        // leave the abandoned worker holding that mutex forever, wedging every
-        // later call on this plugin.
+        // Keep epoch interruption as the second line of defence for a spinning
+        // guest. The caller's wall-clock wait handles host imports, which do
+        // not consume epoch ticks; neither path can retain the shared mutex.
         inner
             .store
             .set_epoch_deadline(epoch_ticks(policy.patch_timeout));
@@ -2836,24 +2846,10 @@ impl WasmPlugin {
                 .map(|grant| grant.effective_timeout_seconds().saturating_mul(1000));
             (grants.provider_request.clone(), budget)
         };
-        // An epoch trap poisons the component instance: wasmtime then refuses
-        // to enter it again ("cannot enter component instance"), which would
-        // take the plugin's tools, probes and commands down with the timed-out
-        // gate. Rebuild from the retained engine/component so only this one
-        // call is lost.
-        if result.is_err() {
-            match Self::instantiate(&self.id, &self.engine, &self.component, &self.recipe) {
-                Ok(fresh) => *guard = Some(fresh),
-                Err(error) => {
-                    *guard = None;
-                    tracing::warn!(
-                        plugin = %self.id,
-                        %error,
-                        "cannot re-instantiate after a provider-gate trap; plugin unloaded"
-                    );
-                }
-            }
-        }
+        // The dedicated instance is dropped on every return. In particular,
+        // an epoch-trapped instance is poisoned and must never be entered
+        // again; a guest abandoned in a host import remains owned by its
+        // worker and is dropped there if it ever returns.
         match result {
             Ok(WitEventAction::Patch(patch)) => {
                 let Some(grant) = grant else {

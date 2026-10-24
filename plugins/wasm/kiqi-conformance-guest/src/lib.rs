@@ -558,6 +558,17 @@ impl Guest for Conformance {
                     }
                 }
                 if value
+                    .get("gatePark")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    // Park inside a synchronous host import. Epoch ticks only
+                    // interrupt guest execution, so the host's wall-clock
+                    // deadline must abandon this call without locking the
+                    // shared tool/probe instance behind it.
+                    let _ = ui::dialog(r#"{"kind":"gate-park"}"#);
+                }
+                if value
                     .get("gateSpin")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false)
