@@ -129,17 +129,41 @@ type MarkdownTransformer = Arc<dyn Fn(&str) -> String + Send + Sync>;
 fn build_markdown_transformer(
     snapshot: Option<std::sync::Arc<kiqi_extensions::RegistrySnapshot>>,
 ) -> Option<MarkdownTransformer> {
-    let snapshot = snapshot?;
-    // Pre-check: if no markdown renderers are registered, return None so the
-    // component uses the identity path (no per-delta closure call). The
-    // renderers list is a per-call `renderers_of` clone; snapshotting it once
-    // here keeps the closure cheap on the hot path.
-    let renderers = snapshot.renderers_of(kiqi_extensions::RegisteredRendererKind::Markdown);
-    if renderers.is_empty() {
+    // Pre-check: if nothing can transform, return None so the component uses
+    // the identity path (no closure allocation, no cache lookup). The renderers
+    // list is a per-call `renderers_of` clone; snapshotting it once here keeps
+    // the closure cheap on the hot path.
+    let cdylib = snapshot.and_then(|snapshot| {
+        let renderers = snapshot.renderers_of(kiqi_extensions::RegisteredRendererKind::Markdown);
+        (!renderers.is_empty()).then_some((snapshot, renderers))
+    });
+    // Wasm renderers hold a `render` grant. The chain runs them after the
+    // cdylib tier, in install-directory order. `None` means "no granted
+    // renderer", in which case the guest is never loaded or called.
+    #[cfg(feature = "plugin-wasm")]
+    let wasm = {
+        let transformer = crate::plugins::WasmRenderTransformer::load();
+        (!transformer.is_empty()).then(|| std::sync::Arc::new(transformer))
+    };
+    #[cfg(not(feature = "plugin-wasm"))]
+    let wasm: Option<()> = None;
+
+    if cdylib.is_none() && wasm.is_none() {
         return None;
     }
     Some(Arc::new(move |raw: &str| -> String {
-        transform_markdown_chain(&snapshot, &renderers, raw)
+        let mut current = raw.to_string();
+        if let Some((snapshot, renderers)) = &cdylib {
+            current = transform_markdown_chain(snapshot, renderers, &current);
+        }
+        #[cfg(feature = "plugin-wasm")]
+        if let Some(wasm) = &wasm {
+            // Finalize-only by construction: the component never consults the
+            // transformer while streaming, so this is one call per finalized
+            // message (plus cache hits for unchanged rebuilds).
+            current = wasm.transform(&current);
+        }
+        current
     }))
 }
 

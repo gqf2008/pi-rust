@@ -26,15 +26,14 @@ pub mod bindings {
     });
 }
 
-/// Implement the 0.8.0 contribution exports — OAuth, provider and render — as
-/// empty/denied stubs.
+/// Implement the `oauth-api` and `provider-api` contribution exports as
+/// empty/denied stubs, leaving `render-api` to the crate.
 ///
-/// The component model makes every export in `world plugin` mandatory, so even
-/// a plugin that contributes none of these faces has to implement their
-/// traits. Denying here matches the host: a face the plugin never declared is
-/// never called, and calling it anyway fails closed.
+/// Useful for a guest that actually contributes a markdown renderer (the
+/// conformance fixture does): the component model still requires the other two
+/// faces, but only the render trait may be implemented by hand.
 #[macro_export]
-macro_rules! deny_contribution_exports {
+macro_rules! deny_oauth_and_provider_exports {
     ($plugin:ty) => {
         impl $crate::bindings::exports::kiqi::plugin::oauth_api::Guest for $plugin {
             fn list_providers(
@@ -76,6 +75,20 @@ macro_rules! deny_contribution_exports {
                 )
             }
         }
+    };
+}
+
+/// Implement all three 0.8.0 contribution exports — OAuth, provider and render
+/// — as empty/denied stubs.
+///
+/// The component model makes every export in `world plugin` mandatory, so even
+/// a plugin that contributes none of these faces has to implement their
+/// traits. Denying here matches the host: a face the plugin never declared is
+/// never called, and calling it anyway fails closed.
+#[macro_export]
+macro_rules! deny_contribution_exports {
+    ($plugin:ty) => {
+        $crate::deny_oauth_and_provider_exports!($plugin);
 
         impl $crate::bindings::exports::kiqi::plugin::render_api::Guest for $plugin {
             fn transform_markdown(

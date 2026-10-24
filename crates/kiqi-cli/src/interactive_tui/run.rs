@@ -129,10 +129,12 @@ pub(super) fn reconcile_streamed_assistant_completion(
     let component = current_assistant.lock().unwrap().take();
 
     if let Some(component) = component {
-        if let Some(blocks) = final_blocks.as_deref() {
-            component.update_blocks(blocks);
+        match final_blocks.as_deref() {
+            // `finalize` clears the streaming flag before its single rebuild,
+            // so the markdown transformer runs on the final blocks only.
+            Some(blocks) => component.finalize(blocks),
+            None => component.set_streaming(false),
         }
-        component.set_streaming(false);
     }
 
     if let Some(text) = final_text.filter(|text| !text.is_empty()) {

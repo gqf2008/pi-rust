@@ -3796,3 +3796,93 @@ fn goal_guest_denies_without_fs_and_injection_is_optional() {
         text_of(&started)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Markdown render (`render-api`)
+//
+// The render instance is deliberately not a tool instance: deny-all grants,
+// no host call context, and a fresh thread per call. These tests pin that from
+// the guest side, where it matters.
+// ---------------------------------------------------------------------------
+
+use kiqi_plugin_host::{RenderGrant, RenderHost, RENDER_KIND_MARKDOWN};
+
+fn render_grant(max_output_bytes: u64) -> RenderGrant {
+    RenderGrant {
+        kinds: vec![RENDER_KIND_MARKDOWN.to_string()],
+        timeout_ms: 2_000,
+        max_output_bytes,
+    }
+}
+
+#[test]
+fn render_host_transforms_sanitizes_caps_and_passes_failures_through() {
+    let wasm = fixture_wasm();
+    let host = RenderHost::new("conformance", &wasm, &render_grant(16)).expect("render host");
+
+    assert_eq!(host.transform_markdown("hello").unwrap(), "[render] hello");
+    // ANSI is stripped host-side: the TUI styles markdown itself.
+    assert_eq!(host.transform_markdown("strip:red").unwrap(), "red");
+    // A remaining C0 control is a hard failure, and the caller keeps the input.
+    assert!(host.transform_markdown("control:x").is_err());
+    assert_eq!(
+        host.transform_markdown_or_original("control:x"),
+        "control:x"
+    );
+    // The byte cap truncates rather than failing.
+    assert_eq!(host.transform_markdown("cap:").unwrap(), "x".repeat(16));
+    // A guest `Err` is one diagnostic and the original text survives.
+    assert!(host.transform_markdown("fail:").is_err());
+    assert_eq!(host.transform_markdown_or_original("fail:"), "fail:");
+}
+
+#[test]
+fn deny_all_render_instance_cannot_reach_ui_session_or_exec() {
+    let wasm = fixture_wasm();
+    let host = RenderHost::new("conformance", &wasm, &render_grant(4096)).expect("render host");
+
+    // The fixture asks for each capability from inside `transform-markdown`.
+    // The render store carries `Grants::default()` and never installs a call
+    // context, so ui/exec are denied and the session is empty.
+    assert_eq!(host.transform_markdown("ui:").unwrap(), "ui-denied=true");
+    assert_eq!(
+        host.transform_markdown("session:").unwrap(),
+        "session-id=",
+        "a session id means the render instance saw host call context"
+    );
+    assert_eq!(
+        host.transform_markdown("exec:").unwrap(),
+        "exec-denied=true"
+    );
+}
+
+#[test]
+fn render_host_enforces_the_guest_deadline() {
+    let wasm = fixture_wasm();
+    let grant = RenderGrant {
+        kinds: vec![RENDER_KIND_MARKDOWN.to_string()],
+        timeout_ms: 50,
+        max_output_bytes: 4096,
+    };
+    let host = RenderHost::new("conformance", &wasm, &grant).expect("render host");
+    let started = std::time::Instant::now();
+    let error = host
+        .transform_markdown("spin:")
+        .expect_err("deadline must fire");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "the epoch deadline did not interrupt the guest: {error}"
+    );
+    // A trapped instance is disabled, not reused.
+    assert!(host.transform_markdown("hello").is_err());
+}
+
+#[test]
+fn render_host_is_not_created_without_a_markdown_grant() {
+    let wasm = fixture_wasm();
+    assert!(
+        RenderHost::load_with_grants("conformance", &wasm, &Grants::default())
+            .expect("deny-by-default is not an error")
+            .is_none()
+    );
+}

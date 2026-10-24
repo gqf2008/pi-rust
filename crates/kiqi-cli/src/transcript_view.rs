@@ -196,8 +196,9 @@ impl TranscriptView {
             }
             UiEvent::AssistantEnd { blocks } => {
                 if let Some(comp) = self.current_assistant.lock().unwrap().take() {
-                    comp.update_blocks(blocks);
-                    comp.set_streaming(false);
+                    // Finalize in one step: the transformer must see the final
+                    // blocks exactly once, never the last delta.
+                    comp.finalize(blocks);
                 }
             }
             UiEvent::ToolStart { id, name, args } => self.tool_start(id, name, args, width),
@@ -284,8 +285,7 @@ impl TranscriptView {
     /// Finalize the assistant panel with an authoritative final block list.
     pub fn finalize_assistant_blocks(&self, blocks: &[AssistantBlock]) {
         if let Some(comp) = self.current_assistant.lock().unwrap().take() {
-            comp.update_blocks(blocks);
-            comp.set_streaming(false);
+            comp.finalize(blocks);
         }
     }
 

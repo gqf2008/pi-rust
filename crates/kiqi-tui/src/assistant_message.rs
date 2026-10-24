@@ -85,10 +85,10 @@ pub struct AssistantMessageComponent {
     /// a closure wrapping any plugin `register_markdown_transformer` handlers
     /// (called as a sync request/response across the cdylib FFI). `None` is the
     /// no-op identity transform, so this render crate gains **no** `kiqi-extensions`
-    /// dep — only a `Fn(&str) -> String` trait object. The transform fires on
-    /// every `rebuild_content` (i.e. once per streaming delta + once on
-    /// finalize), so the plugin always sees the latest full markdown; the FFI
-    /// call is cheap (a bare fn-pointer invocation + one JSON round-trip).
+    /// dep — only a `Fn(&str) -> String` trait object. The transform is
+    /// **finalize-only**: `transform_markdown` returns the raw text while
+    /// `is_streaming`, and exactly one rebuild (via `finalize` or the
+    /// true→false edge) applies it to the final blocks.
     markdown_transformer: Mutex<Option<Arc<dyn Fn(&str) -> String + Send + Sync>>>,
 }
 
@@ -119,31 +119,37 @@ impl AssistantMessageComponent {
     ///
     /// On a transform CHANGE, the last blocks are rebuilt so the new transform
     /// is reflected immediately (mirrors `set_hide_thinking`/`set_output_pad`).
+    /// While the message is streaming the rebuild is deferred: a transformer is
+    /// never consulted per delta, only on [`Self::finalize`] (or the
+    /// true→false edge of [`Self::set_streaming`]).
     pub fn set_markdown_transformer(
         &self,
         transformer: Option<Arc<dyn Fn(&str) -> String + Send + Sync>>,
     ) {
-        let blocks = {
-            let mut cur = self.markdown_transformer.lock().unwrap();
-            // `Arc<dyn Fn>` has no PartialEq, so we can't short-circuit on
-            // "unchanged" like the option setters. Always rebuild: the call is
-            // cheap and the rebuild only fires on an explicit set/swap.
-            *cur = transformer;
-            self.last_blocks.lock().unwrap().clone()
-        };
+        *self.markdown_transformer.lock().unwrap() = transformer;
+        if *self.is_streaming.lock().unwrap() {
+            return;
+        }
+        let blocks = self.last_blocks.lock().unwrap().clone();
         if !blocks.is_empty() {
             self.rebuild_content(&blocks);
         }
     }
 
-    /// Apply the installed transformer to a raw markdown string (identity when
-    /// none is installed). Both the text arm and the thinking arm of
-    /// `rebuild_content` route through here so a single install point covers
-    /// both. Thinking is treated like text — the spec transforms "assistant
-    /// markdown text" and thinking is rendered as markdown too; a plugin that
-    /// wants to skip thinking can inspect the input it receives (no flag is
-    /// carried in the `{"markdown": …}` envelope).
+    /// Apply the installed transformer to a raw markdown string.
+    ///
+    /// While the message is streaming this is the identity, so a delta costs
+    /// zero transformer calls (the finalize-only contract: the render path is
+    /// O(n) per message, not O(n²) over the stream). Both the text arm and the
+    /// thinking arm of `rebuild_content` route through here so a single install
+    /// point covers both. Thinking is treated like text — the spec transforms
+    /// "assistant markdown text" and thinking is rendered as markdown too; a
+    /// plugin that wants to skip thinking can inspect the input it receives (no
+    /// flag is carried in the `{"markdown": …}` envelope).
     fn transform_markdown(&self, raw: &str) -> String {
+        if *self.is_streaming.lock().unwrap() {
+            return raw.to_string();
+        }
         match self.markdown_transformer.lock().unwrap().clone() {
             Some(f) => f(raw),
             None => raw.to_string(),
@@ -380,10 +386,33 @@ impl AssistantMessageComponent {
     }
 
     /// Set streaming state.
+    ///
+    /// The true→false edge rebuilds the last blocks once, so a caller that only
+    /// finalizes (without an authoritative block list) still gets exactly one
+    /// transformer call. Repeated `false` calls are free.
     pub fn set_streaming(&self, streaming: bool) {
-        if let Ok(mut s) = self.is_streaming.lock() {
-            *s = streaming;
+        let was_streaming = {
+            let mut current = self.is_streaming.lock().unwrap();
+            let was = *current;
+            *current = streaming;
+            was
+        };
+        if was_streaming && !streaming {
+            let blocks = self.last_blocks.lock().unwrap().clone();
+            self.rebuild_content(&blocks);
         }
+    }
+
+    /// Finalize a streamed message with its authoritative block list.
+    ///
+    /// This is the single finalize-only transform point: the streaming flag is
+    /// cleared **before** the one rebuild, so the transformer runs exactly once
+    /// per finalized message regardless of how many `update_blocks` deltas
+    /// preceded it.
+    pub fn finalize(&self, blocks: &[AssistantBlock]) {
+        *self.is_streaming.lock().unwrap() = false;
+        *self.last_blocks.lock().unwrap() = blocks.to_vec();
+        self.rebuild_content(blocks);
     }
 }
 
@@ -626,6 +655,54 @@ mod tests {
         // Clear → identity.
         msg.set_markdown_transformer(None);
         assert!(strip_ansi(&msg.render(80).join("\n")).contains("hello"));
+    }
+
+    #[test]
+    fn test_markdown_transformer_is_finalize_only() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let msg = AssistantMessageComponent::default();
+        let transformer: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(move |raw: &str| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            format!("[{raw}]")
+        });
+        msg.set_markdown_transformer(Some(transformer));
+        msg.set_streaming(true);
+
+        // Any number of deltas: the transformer is not consulted.
+        for text in ["h", "he", "hel", "hell", "hello"] {
+            msg.update_blocks(&[AssistantBlock::Text(text.to_string())]);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "per-delta transform");
+
+        msg.finalize(&[AssistantBlock::Text("hello".to_string())]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "finalize transforms once");
+        assert!(strip_ansi(&msg.render(80).join("\n")).contains("[hello]"));
+    }
+
+    #[test]
+    fn test_set_streaming_false_edge_transforms_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let msg = AssistantMessageComponent::default();
+        let transformer: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(move |raw: &str| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            raw.to_uppercase()
+        });
+        msg.set_markdown_transformer(Some(transformer));
+        msg.set_streaming(true);
+        msg.update_blocks(&[AssistantBlock::Text("hello".to_string())]);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        msg.set_streaming(false);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // A repeated false is not a second edge.
+        msg.set_streaming(false);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

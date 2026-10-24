@@ -156,6 +156,7 @@ fn denied() -> CapabilityError {
 /// contract crate (`kiqi-plugin`).
 pub use kiqi_plugin::grants::{
     allows, ExecCwd, ExecGrant, FsGrant, Grants, NetHttpGrant, NetSocketsGrant, ProcGrant,
+    RenderGrant, RENDER_KIND_MARKDOWN, RENDER_MAX_OUTPUT_BYTES_MAX, RENDER_TIMEOUT_MS_MAX,
 };
 
 /// The user-grantable capabilities a component declares: the `kiqi:plugin/*`
@@ -2516,6 +2517,425 @@ fn to_wit_event(event: &Event) -> WitEvent {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Markdown render (`render-api`)
+// ---------------------------------------------------------------------------
+
+/// How often the process-wide render ticker advances every render engine's
+/// epoch. One tick is the deadline granularity: a grant's `timeout-ms` is
+/// rounded up to whole ticks.
+pub const RENDER_TICK_MS: u64 = 10;
+
+/// Advance every live render engine's epoch once per [`RENDER_TICK_MS`].
+///
+/// Epoch interruption is an **Engine** setting, so one shared ticker thread
+/// ticks every render engine instead of one thread per instance. A config with
+/// `epoch_interruption(true)` and no ticker would never fire; the ticker is
+/// therefore part of the render gate, not an optimization.
+struct RenderTicker {
+    engines: Mutex<Vec<std::sync::Weak<Engine>>>,
+}
+
+impl RenderTicker {
+    fn register(&self, engine: &std::sync::Arc<Engine>) {
+        let mut engines = self
+            .engines
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        engines.retain(|weak| weak.strong_count() > 0);
+        engines.push(std::sync::Arc::downgrade(engine));
+    }
+
+    fn tick(&self) {
+        let mut engines = self
+            .engines
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        engines.retain(|weak| match weak.upgrade() {
+            Some(engine) => {
+                engine.increment_epoch();
+                true
+            }
+            None => false,
+        });
+    }
+}
+
+static RENDER_TICKER: std::sync::OnceLock<Option<std::sync::Arc<RenderTicker>>> =
+    std::sync::OnceLock::new();
+
+/// The process-wide render ticker, started lazily.
+///
+/// `None` means the thread could not be spawned; [`RenderHost::new`] refuses to
+/// create an instance in that case, because a deadline that can never fire is
+/// worse than no renderer at all.
+fn render_ticker() -> Option<&'static std::sync::Arc<RenderTicker>> {
+    RENDER_TICKER
+        .get_or_init(|| {
+            let ticker = std::sync::Arc::new(RenderTicker {
+                engines: Mutex::new(Vec::new()),
+            });
+            let worker = std::sync::Arc::clone(&ticker);
+            let spawned = std::thread::Builder::new()
+                .name("kiqi-render-epoch".to_string())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(RENDER_TICK_MS));
+                    worker.tick();
+                });
+            match spawned {
+                Ok(_) => Some(ticker),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "cannot start the render epoch ticker; render plugins stay disabled"
+                    );
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+/// One instantiated markdown renderer.
+///
+/// Deliberately **not** a [`WasmPlugin`]: the render instance has its own
+/// [`Engine`] (epoch interruption enabled), its own [`Store`] whose
+/// [`Grants`] are `Grants::default()` (deny everything), and it never calls
+/// [`install_context`]. The guest call runs on a freshly spawned thread, whose
+/// thread-local [`CURRENT`] starts empty — so `session-read`, `ui` and `exec`
+/// are unreachable even though those imports are not grant-gated. The host
+/// owns sanitization, the output cap and the deadline; the guest is a pure
+/// text-to-text function by contract.
+pub struct RenderHost {
+    id: String,
+    /// Kept alive for the instance's lifetime: the ticker holds only a
+    /// `Weak<Engine>`, so dropping our `Arc` would stop every epoch tick and a
+    /// guest loop would run forever.
+    #[allow(dead_code)]
+    engine: std::sync::Arc<Engine>,
+    #[allow(dead_code)]
+    component: Component,
+    timeout: std::time::Duration,
+    max_output_bytes: usize,
+    inner: Mutex<Option<RenderInner>>,
+    /// Set after a trap/deadline: the instance is not reused for the rest of
+    /// the process (a trapped store may be mid-import, and the spec's answer to
+    /// a trap is "fall back to the raw markdown for the session").
+    disabled: std::sync::atomic::AtomicBool,
+}
+
+struct RenderInner {
+    store: Store<HostState>,
+    guest: World,
+}
+
+impl RenderHost {
+    /// The markdown half of a `render` grant, if this grant can drive one.
+    pub fn granted(grants: &Grants) -> Option<&RenderGrant> {
+        grants
+            .render
+            .as_ref()
+            .filter(|grant| grant.kinds.iter().any(|kind| kind == RENDER_KIND_MARKDOWN))
+    }
+
+    /// Load a renderer only when the grant actually authorizes `markdown`.
+    /// `Ok(None)` is the deny-by-default answer: an absent grant means the
+    /// guest is never instantiated, let alone called.
+    pub fn load_with_grants(
+        id: impl Into<String>,
+        wasm: &Path,
+        grants: &Grants,
+    ) -> Result<Option<Self>, PluginError> {
+        match Self::granted(grants) {
+            Some(grant) => Self::new(id, wasm, grant).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Instantiate the component on a deny-all store.
+    pub fn new(
+        id: impl Into<String>,
+        wasm: &Path,
+        grant: &RenderGrant,
+    ) -> Result<Self, PluginError> {
+        let id = id.into();
+        if !grant.kinds.iter().any(|kind| kind == RENDER_KIND_MARKDOWN) {
+            return Err(PluginError::Failed(format!(
+                "{id}: render grant does not include `{RENDER_KIND_MARKDOWN}`"
+            )));
+        }
+        // Last-resort clamps: the CLI validates at grant time, but a hand-edited
+        // `grants.json` is the only way in past it, and a renderer must still
+        // stay bounded.
+        let timeout_ms = grant.timeout_ms.clamp(1, RENDER_TIMEOUT_MS_MAX);
+        let max_output_bytes = grant.max_output_bytes.clamp(1, RENDER_MAX_OUTPUT_BYTES_MAX);
+        if timeout_ms != grant.timeout_ms || max_output_bytes != grant.max_output_bytes {
+            tracing::warn!(
+                plugin = %id,
+                "render grant budget is outside the host range; clamped to {timeout_ms}ms/\
+                 {max_output_bytes} bytes"
+            );
+        }
+
+        let ticker = render_ticker().ok_or_else(|| {
+            PluginError::Failed(format!("{id}: render epoch ticker is unavailable"))
+        })?;
+
+        let mut config = wasmtime_config(&Options::default());
+        config.epoch_interruption(true);
+        let engine = std::sync::Arc::new(
+            Engine::new(&config)
+                .map_err(|error| PluginError::Failed(format!("{id}: render engine: {error}")))?,
+        );
+        ticker.register(&engine);
+        let component = Component::from_file(&engine, wasm)
+            .map_err(|error| PluginError::Failed(format!("load {}: {error}", wasm.display())))?;
+
+        let mut linker = Linker::new(&engine);
+        World::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state)
+            .map_err(|error| PluginError::Failed(format!("link plugin interfaces: {error}")))?;
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+            .map_err(|error| PluginError::Failed(format!("link wasi: {error}")))?;
+
+        let limits = wasmtime::StoreLimitsBuilder::new()
+            .memory_size(DEFAULT_MAX_MEMORY_BYTES)
+            .build();
+        let state = HostState {
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+            // Deny-all: a render instance holds no capability at all. It also
+            // never gets a `CallContext`, so the non-granted channels stay
+            // unreachable too.
+            grants: Grants::default(),
+            fs_root: None,
+            project_dir: None,
+            sockets: std::collections::HashMap::new(),
+            next_socket: 1,
+            procs: std::collections::HashMap::new(),
+            next_proc: 1,
+            limits,
+        };
+        let mut store = Store::new(&engine, state);
+        store.limiter(|state| &mut state.limits);
+        // The ticker starts as soon as the engine is registered, and an
+        // epoch-enabled store starts with deadline 0 — without this, the first
+        // tick interrupts instantiation itself. Each call installs its real
+        // deadline before entering the guest.
+        store.set_epoch_deadline(1_000_000_000); // ~115 days of ticks
+        let guest = World::instantiate(&mut store, &component, &linker).map_err(|error| {
+            PluginError::Failed(format!("instantiate {id} for render: {error}"))
+        })?;
+
+        Ok(Self {
+            id,
+            engine,
+            component,
+            timeout: std::time::Duration::from_millis(timeout_ms),
+            max_output_bytes: max_output_bytes as usize,
+            inner: Mutex::new(Some(RenderInner { store, guest })),
+            disabled: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// The id this renderer was loaded under (the install directory name).
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Transform one final markdown string.
+    ///
+    /// `Err` carries exactly one diagnostic and means "keep the original
+    /// text": a guest error, a trap, a deadline or a control character in the
+    /// answer. The caller never sees a partially sanitized value.
+    pub fn transform_markdown(&self, text: &str) -> Result<String, String> {
+        use std::sync::atomic::Ordering;
+        if self.disabled.load(Ordering::Acquire) {
+            return Err(format!(
+                "{}: render instance disabled after an earlier trap",
+                self.id
+            ));
+        }
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(inner) = guard.take() else {
+            return Err(format!("{}: render instance is gone", self.id));
+        };
+
+        // Round up to whole ticks; at least one tick.
+        let ticks = self
+            .timeout
+            .as_millis()
+            .div_ceil(RENDER_TICK_MS as u128)
+            .max(1) as u64;
+        let max_output_bytes = self.max_output_bytes;
+        let input = text.to_string();
+        let worker = std::thread::Builder::new()
+            .name("kiqi-plugin-render".to_string())
+            .spawn(move || {
+                let mut inner = inner;
+                // This thread was just spawned, so `CURRENT` is empty and no
+                // `CallContext` was ever installed: session/UI/exec return
+                // their deny/empty answers by construction.
+                inner.store.set_epoch_deadline(ticks);
+                debug_assert!(
+                    CURRENT.with(|slot| slot.borrow().is_none()),
+                    "a render call must run without a host call context"
+                );
+                let outcome = inner
+                    .guest
+                    .kiqi_plugin_render_api()
+                    .call_transform_markdown(&mut inner.store, &input);
+                (outcome, inner)
+            });
+        let handle = match worker {
+            Ok(handle) => handle,
+            Err(error) => {
+                // The instance was moved into the (failed) spawn; it is gone.
+                self.disabled
+                    .store(true, std::sync::atomic::Ordering::Release);
+                return Err(format!(
+                    "{}: cannot start the render thread: {error}",
+                    self.id
+                ));
+            }
+        };
+        let (outcome, inner) = match handle.join() {
+            Ok(pair) => pair,
+            Err(_) => {
+                self.disabled.store(true, Ordering::Release);
+                return Err(format!("{}: render thread panicked", self.id));
+            }
+        };
+        match outcome {
+            Ok(Ok(transformed)) => {
+                // A guest-level error keeps the instance: the guest returned
+                // normally and may answer the next message.
+                *guard = Some(inner);
+                sanitize_render_output(&transformed, max_output_bytes)
+                    .map_err(|diagnostic| format!("{}: {diagnostic}", self.id))
+            }
+            Ok(Err(error)) => {
+                *guard = Some(inner);
+                Err(format!("{}: transform-markdown failed: {error:?}", self.id))
+            }
+            Err(trap) => {
+                self.disabled.store(true, Ordering::Release);
+                // Drop the store: after a trap it must not be reused.
+                drop(inner);
+                Err(format!("{}: transform-markdown trapped: {trap}", self.id))
+            }
+        }
+    }
+
+    /// [`Self::transform_markdown`] with the host's fallback rule applied: any
+    /// failure returns the original text, after one diagnostic.
+    pub fn transform_markdown_or_original(&self, text: &str) -> String {
+        render_or_original(text, self.transform_markdown(text))
+    }
+}
+
+/// Apply a render result, falling back to the original on any failure.
+///
+/// This is the contract the CLI transformer relies on: a plugin can never make
+/// assistant output disappear or come back half-sanitized.
+pub fn render_or_original(original: &str, result: Result<String, String>) -> String {
+    match result {
+        Ok(transformed) => transformed,
+        Err(diagnostic) => {
+            tracing::warn!(%diagnostic, "markdown render skipped; using the original text");
+            original.to_string()
+        }
+    }
+}
+
+/// Sanitize a guest-returned markdown string and enforce the byte cap.
+///
+/// ANSI escape sequences are stripped (the TUI styles markdown itself; a guest
+/// must not smuggle its own colors), then any remaining C0/C1 control character
+/// other than newline/tab is a hard error. The cap truncates at a UTF-8
+/// boundary rather than splitting a character.
+pub fn sanitize_render_output(raw: &str, max_output_bytes: usize) -> Result<String, String> {
+    let stripped = strip_ansi_codes(raw);
+    if let Some((offset, character)) = stripped
+        .char_indices()
+        .find(|(_, character)| is_forbidden_control(*character))
+    {
+        return Err(format!(
+            "transformed markdown contains control character U+{:04X} at byte {offset}",
+            character as u32
+        ));
+    }
+    Ok(truncate_utf8(&stripped, max_output_bytes))
+}
+
+/// Strip CSI/OSC/two-byte ANSI escape sequences.
+fn strip_ansi_codes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '\u{1b}' {
+            out.push(character);
+            continue;
+        }
+        match chars.peek().copied() {
+            // CSI: parameter/intermediate bytes, then a final byte 0x40..=0x7E.
+            Some('[') => {
+                chars.next();
+                while let Some(next) = chars.next() {
+                    if ('\u{40}'..='\u{7e}').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            // OSC: terminated by BEL or ST (ESC \).
+            Some(']') => {
+                chars.next();
+                let mut previous = '\0';
+                while let Some(next) = chars.next() {
+                    if next == '\u{07}' || (previous == '\u{1b}' && next == '\\') {
+                        break;
+                    }
+                    previous = next;
+                }
+            }
+            // Any other escape: a two-byte sequence (e.g. ESC ( B is three; the
+            // third byte is consumed on the next iteration as ordinary text,
+            // which the control check then decides on).
+            Some(_) => {
+                chars.next();
+            }
+            // A dangling escape is not a sequence we can account for; keep it
+            // so the control-character check rejects it instead of silently
+            // dropping bytes.
+            None => out.push(character),
+        }
+    }
+    out
+}
+
+/// C0/C1 controls (and DEL) other than newline/tab are never layout-safe.
+fn is_forbidden_control(character: char) -> bool {
+    let code = character as u32;
+    if character == '\n' || character == '\t' {
+        return false;
+    }
+    code <= 0x1f || (0x7f..=0x9f).contains(&code)
+}
+
+/// Truncate to at most `max_bytes`, on a char boundary.
+fn truncate_utf8(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3008,5 +3428,67 @@ mod tests {
         };
         let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(payload["messageCount"], 0);
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_strips_ansi_and_keeps_newline_and_tab() {
+        let raw = "a\u{1b}[31mred\u{1b}[0m\tb\nc\u{1b}]0;title\u{07}d";
+        assert_eq!(sanitize_render_output(raw, 1024).unwrap(), "ared\tb\ncd");
+    }
+
+    #[test]
+    fn sanitize_rejects_c0_c1_and_del() {
+        for (name, raw) in [
+            ("nul", "bad\u{0}"),
+            ("bell", "bad\u{7}"),
+            ("escape", "bad\u{1b}"),
+            ("del", "bad\u{7f}"),
+            ("c1", "bad\u{85}"),
+            ("carriage-return", "bad\r"),
+        ] {
+            assert!(
+                sanitize_render_output(raw, 1024).is_err(),
+                "{name} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_truncates_at_a_char_boundary() {
+        // "é" is two bytes, so a 3-byte cap must not split it.
+        let out = sanitize_render_output("aéé", 3).unwrap();
+        assert_eq!(out, "aé");
+        assert!(out.len() <= 3);
+        assert_eq!(sanitize_render_output("short", 1024).unwrap(), "short");
+    }
+
+    #[test]
+    fn failure_passthrough_keeps_the_original_text() {
+        assert_eq!(
+            render_or_original("original", Err("guest trapped".to_string())),
+            "original"
+        );
+        assert_eq!(
+            render_or_original("original", Ok("transformed".to_string())),
+            "transformed"
+        );
+    }
+
+    #[test]
+    fn grant_gating_needs_a_markdown_render_grant() {
+        assert!(RenderHost::granted(&Grants::default()).is_none());
+        let mut grants = Grants::default();
+        grants.render = Some(RenderGrant {
+            kinds: vec!["something-else".to_string()],
+            ..RenderGrant::default()
+        });
+        assert!(RenderHost::granted(&grants).is_none());
+        grants.render = Some(RenderGrant::default());
+        assert!(RenderHost::granted(&grants).is_some());
     }
 }

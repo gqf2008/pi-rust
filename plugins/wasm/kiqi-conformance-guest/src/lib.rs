@@ -15,8 +15,9 @@
 //! The returned string reports the deny reason so the host test can assert it.
 
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
+use kiqi_plugin_guest::bindings::exports::kiqi::plugin::render_api::Guest as RenderGuest;
 use kiqi_plugin_guest::bindings::kiqi::plugin::{
-    exec, fs, log, net_http, net_sockets, proc, progress, types, ui,
+    exec, fs, log, net_http, net_sockets, proc, progress, session_read, types, ui,
 };
 
 const TOOL: &str = "conformance";
@@ -415,7 +416,10 @@ impl Guest for Conformance {
         }]
     }
 
-    fn run_command(name: String, _arguments: String) -> Result<types::CommandResult, types::PluginError> {
+    fn run_command(
+        name: String,
+        _arguments: String,
+    ) -> Result<types::CommandResult, types::PluginError> {
         if name != COMMAND {
             return Err(types::PluginError::UnknownTool(name));
         }
@@ -466,5 +470,54 @@ impl Guest for Conformance {
 
 kiqi_plugin_guest::bindings::export!(Conformance with_types_in kiqi_plugin_guest::bindings);
 
-// The 0.8.0 contribution exports are mandatory world exports; deny them all.
-kiqi_plugin_guest::deny_contribution_exports!(Conformance);
+// OAuth and provider are mandatory world exports; this fixture denies both and
+// contributes only the markdown renderer below.
+kiqi_plugin_guest::deny_oauth_and_provider_exports!(Conformance);
+
+/// Deterministic markdown renderer used by the host's render tests.
+///
+/// The prefixes let the host exercise every branch of its contract without a
+/// second fixture: ANSI stripping (`strip:`), control-character rejection
+/// (`control:`), the output cap (`cap:`), guest failure (`fail:`) and the
+/// deny-all instance (`ui:` / `session:` / `exec:`).
+impl RenderGuest for Conformance {
+    fn transform_markdown(markdown: String) -> Result<String, types::PluginError> {
+        if let Some(rest) = markdown.strip_prefix("strip:") {
+            return Ok(format!("\x1b[31m{rest}\x1b[0m"));
+        }
+        if let Some(rest) = markdown.strip_prefix("control:") {
+            return Ok(format!("{rest}\x01"));
+        }
+        if markdown.starts_with("cap:") {
+            return Ok("x".repeat(64));
+        }
+        if markdown.starts_with("fail:") {
+            return Err(types::PluginError::Failed(
+                "conformance render failed".to_string(),
+            ));
+        }
+        if markdown.starts_with("spin:") {
+            // The host's epoch deadline must interrupt this; a renderer that
+            // spins would otherwise hang the finalize path.
+            loop {
+                std::hint::black_box(0u64);
+            }
+        }
+        if markdown.starts_with("ui:") {
+            return Ok(format!(
+                "ui-denied={}",
+                ui::set_status("render", "x").is_err()
+            ));
+        }
+        if markdown.starts_with("session:") {
+            return Ok(format!("session-id={}", session_read::info().session_id));
+        }
+        if markdown.starts_with("exec:") {
+            return Ok(format!(
+                "exec-denied={}",
+                exec::run("echo", &["x".to_string()], None).is_err()
+            ));
+        }
+        Ok(format!("[render] {markdown}"))
+    }
+}

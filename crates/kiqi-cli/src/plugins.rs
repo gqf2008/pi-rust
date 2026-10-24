@@ -1326,6 +1326,128 @@ fn missing_sidecar_warning(unverified: &[String]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Granted markdown renderers (`render-api`)
+// ---------------------------------------------------------------------------
+
+/// The per-plugin cache bound: final message texts are kept so a rebuild that
+/// changes nothing (a thinking toggle, a `/reload` of the cdylib tier) does not
+/// call the guest again. It is a convenience cache, not state, so clearing it
+/// on overflow is fine and keeps a long session from growing without bound.
+#[cfg(feature = "plugin-wasm")]
+const RENDER_CACHE_MAX_ENTRIES: usize = 128;
+
+/// Finalize-only markdown transformation backed by granted wasm plugins.
+///
+/// Each plugin is a [`kiqi_plugin_host::RenderHost`]: its own deny-all store,
+/// its own engine, called only when the message is finalized. This type adds
+/// the scheduling and the `(plugin id, text hash)` cache on top. A plugin whose
+/// grant is absent is never loaded, and a transform failure keeps the previous
+/// text (the render path must never break assistant output).
+#[cfg(feature = "plugin-wasm")]
+pub struct WasmRenderTransformer {
+    hosts: Vec<(String, std::sync::Arc<kiqi_plugin_host::RenderHost>)>,
+    cache: std::sync::Mutex<std::collections::HashMap<(String, u64), String>>,
+}
+
+#[cfg(feature = "plugin-wasm")]
+impl WasmRenderTransformer {
+    /// Discover every installed component holding a `render` grant.
+    ///
+    /// Mirrors [`load_wasm_hosts`]: uninstalled directories are skipped, the
+    /// digest sidecar gates the bytes, and a failed load is reported rather
+    /// than taking the session down. A grant that does not include `markdown`
+    /// is skipped by `RenderHost::load_with_grants` (`Ok(None)`).
+    pub fn load() -> Self {
+        let mut hosts = Vec::new();
+        if let Some(root) = kiqi_plugin::grants::agent_dir() {
+            let plugins_dir = root.join("plugins");
+            if let Ok(entries) = std::fs::read_dir(&plugins_dir) {
+                for entry in entries.flatten() {
+                    if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                        continue;
+                    }
+                    let Some(id) = entry.file_name().to_str().map(str::to_string) else {
+                        continue;
+                    };
+                    if kiqi_plugin::grants::is_uninstalled_dir_name(&id) {
+                        continue;
+                    }
+                    let wasm = entry.path().join("plugin.wasm");
+                    if !wasm.is_file() {
+                        continue;
+                    }
+                    if let Err(error) = digest_gate(&wasm) {
+                        eprintln!("plugin `{id}`: {error}");
+                        continue;
+                    }
+                    let grants = Grants::load_for_at(&root, &id);
+                    match kiqi_plugin_host::RenderHost::load_with_grants(&id, &wasm, &grants) {
+                        Ok(Some(host)) => hosts.push((id, std::sync::Arc::new(host))),
+                        Ok(None) => {}
+                        Err(error) => eprintln!("plugin `{id}`: {error}"),
+                    }
+                }
+            }
+        }
+        // Stable order (the install directory name) so a chain is reproducible.
+        hosts.sort_by(|left, right| left.0.cmp(&right.0));
+        Self {
+            hosts,
+            cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hosts.is_empty()
+    }
+
+    /// Run the granted markdown chains over `raw`, in plugin-id order.
+    pub fn transform(&self, raw: &str) -> String {
+        if self.hosts.is_empty() {
+            return raw.to_string();
+        }
+        let mut current = raw.to_string();
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if cache.len() >= RENDER_CACHE_MAX_ENTRIES {
+            cache.clear();
+        }
+        for (id, host) in &self.hosts {
+            let key = (id.clone(), hash_render_text(&current));
+            if let Some(hit) = cache.get(&key) {
+                current = hit.clone();
+                continue;
+            }
+            match host.transform_markdown(&current) {
+                Ok(transformed) => {
+                    cache.insert(key, transformed.clone());
+                    current = transformed;
+                }
+                Err(diagnostic) => {
+                    // One diagnostic; the guest's answer is discarded and the
+                    // previous text continues down the chain.
+                    eprintln!("plugin `{id}`: render: {diagnostic}");
+                }
+            }
+        }
+        current
+    }
+}
+
+/// Cache key for one `(plugin, text)` pair. A hash collision only costs a
+/// repeated guest call, never a wrong answer, because the text is not stored
+/// under an adversarial key.
+#[cfg(feature = "plugin-wasm")]
+fn hash_render_text(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+// ---------------------------------------------------------------------------
 // Package resources (`resources.json` + `resources/`)
 // ---------------------------------------------------------------------------
 
