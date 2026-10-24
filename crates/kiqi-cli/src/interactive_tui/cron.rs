@@ -22,7 +22,7 @@ pub(super) struct SessionCron {
 }
 
 impl SessionCron {
-    /// 先标记关闭（让在途命令的输出被丢弃并记一行日志），再 join 调度线程。
+    /// 先标记关闭，再停调度线程，并由句柄取消且 join 全部在途命令。
     pub(super) fn stop(self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         self.handle.stop();

@@ -3366,8 +3366,8 @@ pub async fn interactive_tui(
                 tui.request_render(false);
             }
             Some(TuiMessage::ReloadExtensions) => {
-                // 会话级调度器跟着 reload 一起换代：先停掉旧线程（在途命令的
-                // 输出会被丢弃并记日志），reload 完成后再按磁盘上的配置重建。
+                // 会话级调度器跟着 reload 一起换代：先停旧线程，取消并 join
+                // 在途命令；全部 worker 回收后才能重建，杜绝新旧两代重叠。
                 if let Some(cron) = session_cron.take() {
                     cron.stop();
                 }
@@ -3449,7 +3449,7 @@ pub async fn interactive_tui(
         handle.abort();
     }
     mui_handle.abort();
-    // 会话结束：先标记关闭再 join 调度线程；在途命令的输出会被丢弃并记日志。
+    // 会话结束：先标记关闭，再停调度线程并取消、join 全部在途命令。
     if let Some(cron) = session_cron.take() {
         cron.stop();
     }

@@ -24,12 +24,12 @@
 //! 日期语义沿用 Vixie cron：日（day-of-month）与星期（day-of-week）都受限
 //! 时取“或”，否则取“与”。星期 0 与 7 都表示周日。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -750,6 +750,7 @@ fn minute_key(now: DateTime<Local>) -> i64 {
 pub struct CronHandle {
     stop: Sender<()>,
     thread: Option<JoinHandle<()>>,
+    workers: Option<Arc<CronWorkerState>>,
 }
 
 impl CronHandle {
@@ -764,7 +765,7 @@ impl CronHandle {
         sink: Arc<dyn CronSink>,
         clock: Arc<dyn CronClock>,
     ) -> Self {
-        Self::start_with_clock_and_trust(cwd, sink, clock, Arc::new(|| true))
+        Self::start_with_clock_and_trust(cwd, sink, clock, Arc::new(|| true), None)
     }
 
     fn start_with_clock_and_trust(
@@ -772,6 +773,7 @@ impl CronHandle {
         sink: Arc<dyn CronSink>,
         clock: Arc<dyn CronClock>,
         trust: CronTrust,
+        workers: Option<Arc<CronWorkerState>>,
     ) -> Self {
         let config_path = config_path(cwd.as_ref());
         let (stop, stop_rx) = mpsc::channel();
@@ -811,6 +813,7 @@ impl CronHandle {
         Self {
             stop,
             thread: Some(thread),
+            workers,
         }
     }
 
@@ -823,6 +826,11 @@ impl CronHandle {
         let _ = self.stop.send(());
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+        }
+        // 先停调度线程，保证不会再创建 worker；再取消并 join 全部在途命令。
+        // /reload 只有在这里返回后才会创建下一代，因此新 running 集不会放人重叠。
+        if let Some(workers) = &self.workers {
+            workers.cancel_and_join();
         }
     }
 }
@@ -907,11 +915,129 @@ fn shell_wrapped(command: &str) -> String {
     format!("( {command} ) 2>&1")
 }
 
+/// 持有整个命令进程树的句柄。直接 shell 退出后，进程组/job 仍然有效，
+/// 因而看门狗可以继续终止持有合并管道的后代。
+#[cfg(unix)]
+struct ProcessTree {
+    pgid: nix::unistd::Pid,
+}
+
+#[cfg(unix)]
+impl ProcessTree {
+    fn prepare(command: &mut Command) {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    fn attach(child: &std::process::Child) -> io::Result<Self> {
+        let pgid = i32::try_from(child.id())
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "进程组 ID 超出范围"))?;
+        Ok(Self {
+            pgid: nix::unistd::Pid::from_raw(pgid),
+        })
+    }
+
+    fn kill(&self) {
+        let _ = nix::sys::signal::killpg(self.pgid, nix::sys::signal::Signal::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+struct ProcessTree(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+impl ProcessTree {
+    fn prepare(command: &mut Command) {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+        // 在 shell 创建任何后代之前挂起，先加入 job 再恢复主线程。
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+    }
+
+    fn attach(child: &std::process::Child) -> io::Result<Self> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::System::JobObjects::*;
+        // SAFETY: 返回的 job 由 OwnedHandle 接管；子进程句柄在调用期间有效。
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let tree = Self(OwnedHandle::from_raw_handle(job));
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const _,
+                std::mem::size_of_val(&limits) as u32,
+            ) == 0
+                || AssignProcessToJobObject(job, child.as_raw_handle()) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            resume_child(child.id())?;
+            Ok(tree)
+        }
+    }
+
+    fn kill(&self) {
+        use std::os::windows::io::AsRawHandle;
+        // SAFETY: self 在调用期间持有有效 job 句柄。
+        unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0.as_raw_handle(), 1);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn resume_child(pid: u32) -> io::Result<()> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+    // SAFETY: 快照与线程句柄均由 OwnedHandle 关闭，枚举缓冲区已初始化。
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let snapshot = OwnedHandle::from_raw_handle(snapshot);
+        let mut entry: THREADENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of_val(&entry) as u32;
+        let mut found = Thread32First(snapshot.as_raw_handle(), &mut entry);
+        while found != 0 {
+            if entry.th32OwnerProcessID == pid {
+                let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                if thread.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                let thread = OwnedHandle::from_raw_handle(thread);
+                if ResumeThread(thread.as_raw_handle()) == u32::MAX {
+                    return Err(io::Error::last_os_error());
+                }
+                return Ok(());
+            }
+            found = Thread32Next(snapshot.as_raw_handle(), &mut entry);
+        }
+        Err(io::Error::new(io::ErrorKind::Other, "找不到 shell 主线程"))
+    }
+}
+
 /// 在 `cwd` 里用平台 shell 跑一条命令，合并 stdout+stderr，最多保留 64 KiB。
 ///
-/// 超时会在到期时强杀子进程（`kill`）。stderr 通过 shell 重定向并入 stdout，
+/// 超时会在到期时强杀整个进程树。stderr 通过 shell 重定向并入 stdout，
 /// 这样两路输出的相对顺序由 shell 决定，跨平台一致。
 pub fn run_job_command(cwd: &Path, command: &str, timeout_secs: u64) -> io::Result<CommandOutput> {
+    run_job_command_cancellable(cwd, command, timeout_secs, None)
+}
+
+fn run_job_command_cancellable(
+    cwd: &Path,
+    command: &str,
+    timeout_secs: u64,
+    cancel: Option<&AtomicBool>,
+) -> io::Result<CommandOutput> {
     let merged = shell_wrapped(command);
     let mut process = shell_command(&merged);
     process
@@ -919,36 +1045,53 @@ pub fn run_job_command(cwd: &Path, command: &str, timeout_secs: u64) -> io::Resu
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    // Unix：让 shell 成为新进程组的组长，超时时可以连同它派生的子进程一起杀掉。
-    // 否则只杀 shell，孙子进程仍握着 stdout 管道，读线程会一直等到它们退出。
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        process.process_group(0);
-    }
+    ProcessTree::prepare(&mut process);
 
     let mut child = process.spawn()?;
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "stdout 未接管"))?;
+    let process_tree = match ProcessTree::attach(&child) {
+        Ok(tree) => tree,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
 
     // 读线程必须与等待并行：管道写满后子进程会阻塞，超时检测就永远等不到。
     let reader = thread::spawn(move || read_capped(stdout));
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut status = None;
+    let mut terminated = false;
     let mut timed_out = false;
-    let status = loop {
-        match child.try_wait()? {
-            Some(status) => break status,
-            None if Instant::now() >= deadline => {
-                timed_out = true;
-                kill_process_tree(&mut child);
-                break child.wait()?;
-            }
-            None => thread::sleep(COMMAND_POLL_INTERVAL),
+    let mut cancelled = false;
+    // shell 退出不等于命令结束：后代可能仍持有合并管道。必须同时等到
+    // 直接子进程已回收且 reader 到 EOF，deadline 在此之前一直有效。
+    while status.is_none() || !reader.is_finished() {
+        if status.is_none() {
+            status = child.try_wait()?;
         }
-    };
+        let cancel_requested = cancel.is_some_and(|flag| flag.load(Ordering::SeqCst));
+        if !terminated && (cancel_requested || Instant::now() >= deadline) {
+            terminated = true;
+            cancelled = cancel_requested;
+            timed_out = !cancel_requested;
+            kill_process_tree(&process_tree, &mut child);
+            if status.is_none() {
+                status = Some(child.wait()?);
+            }
+            continue;
+        }
+        if status.is_some() && reader.is_finished() {
+            break;
+        }
+        thread::sleep(COMMAND_POLL_INTERVAL);
+    }
+    let status = status.expect("退出状态必须在读完后已经取得");
 
     let (bytes, truncated) = reader.join().unwrap_or_default();
     let mut text = decode_capped_output(&bytes, truncated).replace("\r\n", "\n");
@@ -956,32 +1099,20 @@ pub fn run_job_command(cwd: &Path, command: &str, timeout_secs: u64) -> io::Resu
         text.push_str(TRUNCATION_MARKER);
     }
     Ok(CommandOutput {
-        exit_code: status.code(),
+        exit_code: if timed_out || cancelled {
+            None
+        } else {
+            status.code()
+        },
         text,
         truncated,
         timed_out,
     })
 }
 
-/// 超时强杀：优先杀掉整个进程组，再兜底杀直接子进程。
-#[cfg(unix)]
-fn kill_process_tree(child: &mut std::process::Child) {
-    if let Ok(pid) = i32::try_from(child.id()) {
-        // 负 PID 表示进程组；`kill` 是 POSIX 必备工具，免去新增 libc 依赖。
-        let _ = Command::new("kill")
-            .arg("-KILL")
-            .arg(format!("-{pid}"))
-            .status();
-    }
-    let _ = child.kill();
-}
-
-#[cfg(windows)]
-fn kill_process_tree(child: &mut std::process::Child) {
-    // Windows 没有进程组信号；`taskkill /T` 才会连带子进程。
-    let _ = Command::new("taskkill")
-        .args(["/T", "/F", "/PID", &child.id().to_string()])
-        .status();
+/// 超时或会话停止时杀掉保留的进程树，再兜底杀直接子进程。
+fn kill_process_tree(tree: &ProcessTree, child: &mut std::process::Child) {
+    tree.kill();
     let _ = child.kill();
 }
 
@@ -1037,14 +1168,52 @@ pub type CronLog = Arc<dyn Fn(&str) + Send + Sync>;
 /// 因而 `/trust no` 或外部修改信任存储都能停止后续触发。
 pub type CronTrust = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// 一代调度器拥有的命令执行状态。句柄停止时会取消并回收全部 worker，
+/// 所以下一代可以安全地从空注册表开始，不会与旧命令重叠。
+#[derive(Default)]
+struct CronWorkerState {
+    /// 正在执行命令的任务名。同名任务的上一轮还活着时跳过本次触发。
+    running: Mutex<HashSet<String>>,
+    workers: Mutex<HashMap<u64, JoinHandle<()>>>,
+    next_worker_id: AtomicU64,
+    cancelled: AtomicBool,
+}
+
+impl CronWorkerState {
+    fn reap_finished(&self) {
+        let finished = {
+            let mut workers = self.workers.lock().unwrap();
+            let ids: Vec<u64> = workers
+                .iter()
+                .filter(|(_, worker)| worker.is_finished())
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| workers.remove(&id))
+                .collect::<Vec<_>>()
+        };
+        for worker in finished {
+            let _ = worker.join();
+        }
+    }
+
+    fn cancel_and_join(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        let workers = std::mem::take(&mut *self.workers.lock().unwrap());
+        for (_, worker) in workers {
+            let _ = worker.join();
+        }
+        self.running.lock().unwrap().clear();
+    }
+}
+
 /// 宿主侧 [`CronSink`]：拼接注入文本、执行命令、处理并发与关闭竞态。
 pub struct SessionCronSink {
     /// 会话工作目录：命令的 cwd，也是 `.ki/cron.json` 的根。
     cwd: PathBuf,
     inject: Arc<dyn CronInject>,
     log: CronLog,
-    /// 正在执行命令的任务名。同名任务的上一轮还活着时跳过本次触发。
-    running: Arc<Mutex<HashSet<String>>>,
+    workers: Arc<CronWorkerState>,
     shutting_down: Arc<AtomicBool>,
 }
 
@@ -1055,11 +1224,27 @@ impl SessionCronSink {
         log: CronLog,
         shutting_down: Arc<AtomicBool>,
     ) -> Self {
+        Self::with_workers(
+            cwd,
+            inject,
+            log,
+            shutting_down,
+            Arc::new(CronWorkerState::default()),
+        )
+    }
+
+    fn with_workers(
+        cwd: PathBuf,
+        inject: Arc<dyn CronInject>,
+        log: CronLog,
+        shutting_down: Arc<AtomicBool>,
+        workers: Arc<CronWorkerState>,
+    ) -> Self {
         Self {
             cwd,
             inject,
             log,
-            running: Arc::new(Mutex::new(HashSet::new())),
+            workers,
             shutting_down,
         }
     }
@@ -1077,8 +1262,9 @@ impl SessionCronSink {
     /// 启动一条命令任务。`fire` 本身不阻塞调度线程：命令在自己的线程里跑完
     /// 再把输出注入，因此同一分钟里排队的其他任务不会被一条慢命令拖住。
     fn fire_command(&self, name: &str, command: &str, timeout_secs: u64) {
+        self.workers.reap_finished();
         {
-            let mut running = self.running.lock().unwrap();
+            let mut running = self.workers.running.lock().unwrap();
             if !running.insert(name.to_string()) {
                 drop(running);
                 (self.log)(&format!(
@@ -1093,7 +1279,7 @@ impl SessionCronSink {
         let command = command.to_string();
         let inject = Arc::clone(&self.inject);
         let log = Arc::clone(&self.log);
-        let running = Arc::clone(&self.running);
+        let workers = Arc::clone(&self.workers);
         let shutting_down = Arc::clone(&self.shutting_down);
 
         let thread_name = name.clone();
@@ -1101,8 +1287,13 @@ impl SessionCronSink {
         let spawned = thread::Builder::new()
             .name(format!("ki-cron-{thread_name}"))
             .spawn(move || {
-                let result = run_job_command(&cwd, &command, timeout_secs);
-                running.lock().unwrap().remove(&worker_name);
+                let result = run_job_command_cancellable(
+                    &cwd,
+                    &command,
+                    timeout_secs,
+                    Some(&workers.cancelled),
+                );
+                workers.running.lock().unwrap().remove(&worker_name);
 
                 if shutting_down.load(Ordering::SeqCst) {
                     log(&format!(
@@ -1128,9 +1319,19 @@ impl SessionCronSink {
                 }
             });
 
-        if let Err(error) = spawned {
-            self.running.lock().unwrap().remove(name.as_str());
-            (self.log)(&format!("cron: 无法为任务 `{name}` 启动命令线程：{error}"));
+        match spawned {
+            Ok(worker) => {
+                let worker_id = self.workers.next_worker_id.fetch_add(1, Ordering::Relaxed);
+                self.workers
+                    .workers
+                    .lock()
+                    .unwrap()
+                    .insert(worker_id, worker);
+            }
+            Err(error) => {
+                self.workers.running.lock().unwrap().remove(name.as_str());
+                (self.log)(&format!("cron: 无法为任务 `{name}` 启动命令线程：{error}"));
+            }
         }
     }
 }
@@ -1192,14 +1393,20 @@ fn start_if_configured_with_clock(
     if !trust() || !config_path(cwd).is_file() {
         return None;
     }
-    let sink = Arc::new(SessionCronSink::new(
+    let workers = Arc::new(CronWorkerState::default());
+    let sink = Arc::new(SessionCronSink::with_workers(
         cwd.to_path_buf(),
         inject,
         log,
         shutting_down,
+        Arc::clone(&workers),
     ));
     Some(CronHandle::start_with_clock_and_trust(
-        cwd, sink, clock, trust,
+        cwd,
+        sink,
+        clock,
+        trust,
+        Some(workers),
     ))
 }
 
@@ -1840,6 +2047,50 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn command_timeout_outlives_shell_and_kills_its_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let leader_path = dir.path().join("leader-pid");
+        let marker = dir.path().join("descendant-survived");
+        let command = format!(
+            "printf '%s' $$ > '{}'; (sleep 5; printf survived > '{}') &",
+            leader_path.display(),
+            marker.display()
+        );
+
+        let started = Instant::now();
+        let output = run_job_command(dir.path(), &command, 1).unwrap();
+        let pgid: i32 = std::fs::read_to_string(leader_path)
+            .unwrap()
+            .parse()
+            .unwrap();
+        struct GroupGuard(i32);
+        impl Drop for GroupGuard {
+            fn drop(&mut self) {
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(self.0),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+        }
+        let _guard = GroupGuard(pgid);
+
+        assert!(output.timed_out, "后台后代仍持有管道时也必须超时");
+        assert!(output.exit_code.is_none());
+        assert!(
+            started.elapsed() < StdDuration::from_secs(4),
+            "不能等后台后代自行退出，实际 {:?}",
+            started.elapsed()
+        );
+        assert!(!marker.exists(), "超时必须杀掉后台后代");
+        assert_eq!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(-pgid), None),
+            Err(nix::errno::Errno::ESRCH),
+            "超时后整个进程组都应消失"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn command_runs_in_the_session_cwd() {
         let dir = tempfile::tempdir().unwrap();
         let output = run_job_command(dir.path(), "pwd -P", 10).unwrap();
@@ -1919,6 +2170,83 @@ trusted"
                 .to_string()]
         );
         handle.stop();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reload_during_a_long_command_never_overlaps_the_next_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let pids_path = dir.path().join("shell-pids");
+        let command = format!("printf '%s\\n' $$ >> '{}'; sleep 30", pids_path.display());
+        write_config(
+            dir.path(),
+            &serde_json::json!([{
+                "name": "reload",
+                "schedule": "* * * * *",
+                "command": command,
+            }])
+            .to_string(),
+        );
+        let wait_for_pids = |count: usize| {
+            for _ in 0..250 {
+                if let Ok(raw) = std::fs::read_to_string(&pids_path) {
+                    let pids: Vec<i32> = raw.lines().map(|line| line.parse().unwrap()).collect();
+                    if pids.len() >= count {
+                        return pids;
+                    }
+                }
+                std::thread::sleep(StdDuration::from_millis(20));
+            }
+            panic!("等待第 {count} 个 shell 启动超时");
+        };
+        let mock = MockInject::new();
+        let (log, _lines) = recording_log();
+        let clock = Arc::new(MockClock {
+            current: Mutex::new(local(2026, 10, 24, 9, 5)),
+        });
+        let first = start_if_configured_with_clock(
+            dir.path(),
+            mock.clone(),
+            log.clone(),
+            Arc::new(AtomicBool::new(false)),
+            clock.clone(),
+            Arc::new(|| true),
+        )
+        .unwrap();
+        wait_for_pids(1);
+
+        // /reload 先停旧代，再用下一分钟启动新代。
+        first.stop();
+        *clock.current.lock().unwrap() = local(2026, 10, 24, 9, 6);
+        let second = start_if_configured_with_clock(
+            dir.path(),
+            mock,
+            log,
+            Arc::new(AtomicBool::new(false)),
+            clock,
+            Arc::new(|| true),
+        )
+        .unwrap();
+        let pids = wait_for_pids(2);
+        struct GroupsGuard(Vec<i32>);
+        impl Drop for GroupsGuard {
+            fn drop(&mut self) {
+                for pid in &self.0 {
+                    let _ = nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(*pid),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+            }
+        }
+        let _guard = GroupsGuard(pids.clone());
+
+        let alive = |pid| nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+        assert!(
+            !(alive(pids[0]) && alive(pids[1])),
+            "/reload 后旧命令必须已取消并 join，不能与新一代并发"
+        );
+        second.stop();
     }
 
     #[test]
