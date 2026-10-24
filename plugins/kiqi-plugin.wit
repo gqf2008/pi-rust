@@ -1,6 +1,6 @@
 /// kiqi plugin ABI — wasm component model (WASI Preview 2 / WIT).
 ///
-/// **0.6.0.** The 0.1.0 draft never parsed: `other(kind: string,
+/// **0.8.0.** The 0.1.0 draft never parsed: `other(kind: string,
 /// payload: string)` used named variant fields, which WIT does not allow. Every
 /// version is checked with `wasm-tools component wit`.
 ///
@@ -20,8 +20,10 @@
 ///     `details` JSON), not a bare string — `details` is how a plugin carries
 ///     state that must survive fork/switch (`kiqi-todo`'s task list);
 ///   * `on-event` returns an **`event-action`** (`continue`/`claimed`) so a wasm
-///     plugin can claim an event like a native handler's `CLAIMED`; the enum
-///     stops there because this host has no channel for a rewritten payload.
+///     plugin can claim an event like a native handler's `CLAIMED`; `patch`
+///     carries a rewritten payload, but is honored ONLY for
+///     `before-provider-request` during a provider gate and is ignored for every
+///     other tag.
 ///
 /// The component model requires every import a component declares to be
 /// satisfied at instantiation, so the host always provides all interfaces:
@@ -31,7 +33,7 @@
 /// runtime grant check inside each implementation — there is no
 /// instantiation-time manifest rejection; `ki plugin install` is what lists
 /// declared capabilities and asks the user.
-package kiqi:plugin@0.7.1;
+package kiqi:plugin@0.8.0;
 
 /// Types shared across the host <-> plugin boundary.
 interface types {
@@ -148,6 +150,9 @@ interface types {
         message-end(string),
         tool-execution-start(tool-call),
         tool-execution-end(tool-result-event),
+        /// A raw keyboard input. `key` is the host's key name (letters as
+        /// lowercase ASCII, e.g. `a`, `enter`, `esc`).
+        input(input-event),
         other(other-event),
     }
 
@@ -159,9 +164,186 @@ interface types {
     }
 
     /// What a plugin decided to do about an event.
+    ///
+    /// `patch` carries a rewritten payload (JSON). It is honored ONLY for
+    /// `before-provider-request` during a provider gate; every other tag ignores
+    /// it. The host validates the patch and, when it violates the grant's
+    /// limits, rejects the WHOLE patch and proceeds unpatched.
     variant event-action {
         continue,
         claimed,
+        patch(string),
+    }
+
+    // ---- OAuth (0.8.0) ------------------------------------------------------
+
+    /// Which OAuth flow the grant profile enables for a provider.
+    enum oauth-flow {
+        authorization-code,
+        device-code,
+    }
+
+    /// A provider this guest declares it can drive. Endpoints, client id and
+    /// secrets stay host-side; the guest only sees this metadata.
+    record oauth-provider {
+        id: string,
+        display-name: string,
+        scopes: list<string>,
+        flows: list<oauth-flow>,
+        supports-pkce: bool,
+    }
+
+    /// What the user must do (or what the host already did) to continue the
+    /// flow. `url` is built by the host from the grant profile -- the guest
+    /// never supplies one.
+    record oauth-interaction {
+        title: string,
+        url: option<string>,
+        instructions: list<string>,
+        user-code: option<string>,
+    }
+
+    /// The credential the host stored for the granted provider. No token
+    /// material ever crosses this boundary. `expires-at` is a Unix timestamp in
+    /// seconds; `0` means no known expiry.
+    record oauth-credential-status {
+        expires-at: s64,
+    }
+
+    /// One step of an OAuth flow.
+    ///
+    /// `begin` carries the PKCE `code_challenge` (43 base64url characters) for
+    /// authorization-code, and an empty string for device-code.
+    variant oauth-action {
+        begin(string),
+        poll,
+        exchange(string),
+        cancel,
+    }
+
+    /// The guest-visible result of one flow step.
+    variant oauth-response {
+        interaction(oauth-interaction),
+        stored(oauth-credential-status),
+        authorization-pending,
+        slow-down,
+        denied(string),
+        error(string),
+    }
+
+    /// The result of an authorization-code exchange performed by the host.
+    variant oauth-token-outcome {
+        stored(oauth-credential-status),
+        failed(string),
+    }
+
+    // ---- Model providers (0.8.0) -------------------------------------------
+
+    /// One model a provider exposes.
+    record model-spec {
+        id: string,
+        name: string,
+        /// A typed `Api` variant name; `other` and `faux` are rejected by the
+        /// host at grant validation.
+        api: string,
+        base-url: string,
+        reasoning: bool,
+        input: list<string>,
+        context-window: u64,
+        max-tokens: u64,
+    }
+
+    /// A provider this guest offers. The `provider` grant is the sole catalog
+    /// authority; this list can only narrow it.
+    record provider-spec {
+        provider-id: string,
+        display-name: string,
+        models: list<model-spec>,
+    }
+
+    /// Which part of a model response a delta belongs to.
+    enum delta-kind {
+        text,
+        thinking,
+        tool-call,
+    }
+
+    enum delta-phase {
+        start,
+        delta,
+        end,
+    }
+
+    /// One streamed delta of a provider response. `content-index` keeps two
+    /// concurrent tool calls and two thinking/text streams apart. On `end` of a
+    /// `tool-call`, `text` is the complete `{id, name, arguments}` JSON.
+    record provider-delta {
+        kind: delta-kind,
+        phase: delta-phase,
+        content-index: u32,
+        text: string,
+    }
+
+    // ---- Input events (0.8.0) ----------------------------------------------
+
+    enum input-kind {
+        press,
+        repeat,
+        release,
+    }
+
+    /// A raw keyboard input forwarded to `on-event`.
+    record input-event {
+        key: string,
+        kind: input-kind,
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+    }
+
+    // ---- Command results and continuations (0.8.0) -------------------------
+
+    record selector-spec {
+        title: string,
+        items: list<string>,
+    }
+
+    record editor-spec {
+        initial-text: string,
+    }
+
+    record prompt-spec {
+        title: string,
+        placeholder: string,
+    }
+
+    /// What a command wants the host to do after it returns.
+    variant command-result-body {
+        message(string),
+        selector(selector-spec),
+        editor(editor-spec),
+        prompt(prompt-spec),
+    }
+
+    /// A command's outcome, tagged with the flow it belongs to so a stale
+    /// selector/editor/prompt reply cannot be delivered to a later flow.
+    record command-result {
+        flow-id: string,
+        body: command-result-body,
+    }
+
+    /// The user's answer to a selector/editor/prompt flow.
+    variant command-reply {
+        selected(string),
+        submitted(string),
+        cancelled,
+    }
+
+    /// A CLI flag as the calling plugin declared it. `bare` is a boolean flag
+    /// present without a value; `text` carries the value.
+    variant flag-value {
+        bare,
+        text(string),
     }
 }
 
@@ -313,6 +495,87 @@ interface proc {
 
     /// Kill the child's process group and close the handle. Idempotent.
     kill: func(handle: u32) -> result<_, capability-error>;
+}
+
+
+// ---- 0.8.0 interfaces (not yet reachable from `world plugin`) --------------
+
+/// OAuth login this guest can drive. An export: the guest is the flow
+/// controller (PKCE verifier, device polling quirks); the host owns endpoints,
+/// HTTP, credential storage and display. Grant key `oauth`, deny-by-default.
+interface oauth-api {
+    use types.{oauth-action, oauth-provider, oauth-response, plugin-error};
+
+    /// Which providers this guest declares it can drive. Used for install-time
+    /// discovery and as a load-time cross-check; the grant is the sole catalog
+    /// authority and may only narrow this list.
+    list-providers: func() -> list<oauth-provider>;
+
+    /// Advance one begin/poll/exchange/cancel step of the flow.
+    action: func(provider-id: string, action: oauth-action) -> result<oauth-response, plugin-error>;
+}
+
+/// Host-attributed OAuth endpoints, reachable ONLY for a provider named in the
+/// `oauth` grant; deny-by-default. Device authorization and polling are
+/// performed entirely host-side, so the device code never enters the sandbox
+/// and no token crosses the ABI.
+interface oauth-http {
+    use types.{capability-error, oauth-token-outcome};
+
+    /// Exchange an authorization code. The host performs the token-endpoint
+    /// POST, accepts only `grant_type`/`code`/`code_verifier`/`redirect_uri`/
+    /// `scope` in `form` (client id comes from the grant, a client secret is
+    /// refused), parses the standard OAuth response and stores access+refresh
+    /// under the namespaced key. The raw token body is never returned.
+    token-request: func(provider-id: string, form: string) -> result<oauth-token-outcome, capability-error>;
+
+    /// Revoke the token the host stored for this provider. Host-only.
+    revoke: func(provider-id: string) -> result<_, capability-error>;
+}
+
+/// Model providers this guest offers. An export: `list-providers` is static
+/// metadata (install-time discovery and load-time cross-check; the `provider`
+/// grant is the sole catalog authority), `request` serves one synchronous
+/// model request. Grant key `provider`, deny-by-default.
+interface provider-api {
+    use types.{plugin-error, provider-spec};
+
+    list-providers: func() -> list<provider-spec>;
+    request: func(request: string) -> result<string, plugin-error>;
+}
+
+/// Guest-to-host delta sink for a provider request, modeled on `progress`.
+/// Not separately grantable: valid only while a provider `request` call is on
+/// the stack.
+interface provider-stream {
+    use types.{provider-delta};
+
+    emit: func(delta: provider-delta);
+    emit-batch: func(deltas: list<provider-delta>);
+}
+
+/// Host-attributed streaming HTTP for provider requests. Strictly not a general
+/// HTTP client: it refuses any request that does not match the `provider`
+/// grant's exact scheme+host+path-prefix+method, injects a host-held credential
+/// only for such a request, strips guest-supplied auth/Host/framing headers,
+/// refuses redirects, enforces the grant's timeout and byte caps, and is scoped
+/// to the provider call (per-call handle table). Deny-by-default.
+interface provider-http {
+    use types.{capability-error};
+
+    open: func(request: string) -> result<u32, capability-error>;
+    /// `none` means EOF.
+    read: func(handle: u32, max-bytes: u64) -> result<option<list<u8>>, capability-error>;
+    close: func(handle: u32) -> result<_, capability-error>;
+}
+
+/// One pure text-to-text transformation of markdown. An export; the host owns
+/// theming, sanitization, scheduling, caching and the deny-all instance.
+/// Grant key `render`, deny-by-default.
+interface render-api {
+    use types.{plugin-error};
+
+    transform-markdown: func(markdown: string) -> result<string, plugin-error>;
 }
 
 /// What a plugin contributes to the runtime.

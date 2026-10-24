@@ -2007,6 +2007,10 @@ impl WasmPlugin {
         match result {
             Ok(WitEventAction::Continue) => EventAction::Continue,
             Ok(WitEventAction::Claimed) => EventAction::Claimed,
+            // The 0.8.0 variant exists in the ABI, but routing a patch to the
+            // provider gate is not wired yet, so honoring it is out of scope
+            // here. Refusing it (continue) is the fail-closed answer.
+            Ok(WitEventAction::Patch(_)) => EventAction::Continue,
             Err(trap) => {
                 eprintln!("[kiqi-plugin] {}: on-event trapped: {trap}", self.id);
                 EventAction::Continue
