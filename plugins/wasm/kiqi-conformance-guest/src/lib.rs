@@ -692,6 +692,7 @@ const PROVIDER_MODEL: &str = "conformance-model";
 /// field) can exercise streaming and cancellation end to end.
 const PROVIDER_STREAM_MODEL: &str = "conformance-stream";
 const PROVIDER_SLOW_MODEL: &str = "conformance-slow";
+const PROVIDER_PARK_MODEL: &str = "conformance-park";
 
 /// Wrap one answer in the assistant-message shape the host validates, with
 /// deliberately wrong identity fields: the host must overwrite them.
@@ -761,6 +762,7 @@ impl ProviderGuest for Conformance {
                 provider_model_spec(PROVIDER_MODEL),
                 provider_model_spec(PROVIDER_STREAM_MODEL),
                 provider_model_spec(PROVIDER_SLOW_MODEL),
+                provider_model_spec(PROVIDER_PARK_MODEL),
             ],
         }]
     }
@@ -815,6 +817,12 @@ impl ProviderGuest for Conformance {
             emit_delta(types::DeltaKind::Text, types::DeltaPhase::End, 0, "");
             return provider_reply("slow done".to_string());
         }
+        if model == PROVIDER_PARK_MODEL {
+            // Stay inside synchronous WASI longer than any test grant's wall
+            // clock. Epoch interruption cannot wake this host import.
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            return provider_reply("parked done".to_string());
+        }
         let mode = value
             .get("mode")
             .and_then(|mode| mode.as_str())
@@ -867,6 +875,14 @@ impl ProviderGuest for Conformance {
             // Delta before start: the host must reject the whole stream.
             emit_delta(types::DeltaKind::Text, types::DeltaPhase::Delta, 0, "x");
             return provider_reply("bad".to_string());
+        }
+        if mode == "stream-many-blocks" {
+            // One more than the host's default 1,024 distinct-block budget.
+            for index in 0..1_025u32 {
+                emit_delta(types::DeltaKind::Text, types::DeltaPhase::Start, index, "");
+                emit_delta(types::DeltaKind::Text, types::DeltaPhase::End, index, "");
+            }
+            return provider_reply("too many blocks".to_string());
         }
         if mode == "stale" {
             // No open in this call: handle 1 must not resolve.

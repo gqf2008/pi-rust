@@ -38,8 +38,10 @@ use kiqi_ai::{
 #[cfg(feature = "plugin-wasm")]
 use std::collections::HashMap;
 
+/// Default live-delta queue capacity. The guest thread uses `try_send`; a full
+/// queue cancels and fails the call rather than buffering without a bound.
 #[cfg(feature = "plugin-wasm")]
-use kiqi_plugin::CancelProbe as _;
+const PROVIDER_DELTA_CHANNEL_CAPACITY: usize = 256;
 
 /// The runtime handle for one granted plugin provider.
 pub struct WasmProvider {
@@ -262,26 +264,25 @@ async fn run_request(
 ) {
     use kiqi_plugin_host::ProviderDeltaEvent;
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProviderDeltaEvent>();
+    let (tx, mut rx) =
+        tokio::sync::mpsc::channel::<ProviderDeltaEvent>(PROVIDER_DELTA_CHANNEL_CAPACITY);
     let request_probe: Arc<dyn kiqi_plugin::CancelProbe> = probe.clone();
-    let blocking = tokio::task::spawn_blocking(move || {
+    let sink_local = local.clone();
+    let mut blocking = tokio::task::spawn_blocking(move || {
         let host = ensure_host(&slot)?;
         host.request_streaming(
             &request,
             Some(request_probe),
-            Box::new(move |event| {
-                // Unbounded: the guest thread must never block on rendering.
-                let _ = tx.send(event);
-            }),
+            Box::new(move |event| forward_delta(&tx, &sink_local, event)),
         )
     });
 
     let mut builder =
         PartialBuilder::new(api.clone(), provider.clone(), model_id.clone(), timestamp);
     let mut assembly_error: Option<String> = None;
-    while let Some(event) = rx.recv().await {
+    let mut apply_event = |event| {
         if assembly_error.is_some() {
-            continue;
+            return;
         }
         match builder.apply(event, producer) {
             Ok(true) => {}
@@ -294,12 +295,38 @@ async fn run_request(
                 local.cancel();
             }
         }
-    }
+    };
 
-    match blocking.await {
+    // The host can finish its wall-clock wait while an abandoned guest still
+    // owns the delta sender inside a synchronous host import. Observe that
+    // result concurrently with drainage; never make sender-drop the stream's
+    // completion signal. Bias toward completion so a live sender cannot
+    // starve the terminal result after the host deadline.
+    let blocking_result = loop {
+        tokio::select! {
+            biased;
+            result = &mut blocking => break result,
+            event = rx.recv() => match event {
+                Some(event) => apply_event(event),
+                None => break blocking.await,
+            },
+        }
+    };
+    // A successful host result is sent only after the worker has forwarded its
+    // final delta. Drain what was already queued before emitting Done. On an
+    // error, queued partials are irrelevant and the terminal error is emitted
+    // immediately; dropping rx also closes the abandoned worker's sender.
+    if matches!(&blocking_result, Ok(Ok(_))) {
+        while let Ok(event) = rx.try_recv() {
+            apply_event(event);
+        }
+    }
+    drop(rx);
+
+    match blocking_result {
         Ok(Ok(response)) => {
             if let Some(error) = assembly_error {
-                let reason = if probe.is_cancelled() {
+                let reason = if probe.caller.is_cancelled() {
                     ErrorReason::Aborted
                 } else {
                     ErrorReason::Error
@@ -333,7 +360,7 @@ async fn run_request(
             }
         }
         Ok(Err(error)) => {
-            let reason = if probe.is_cancelled() {
+            let reason = if probe.caller.is_cancelled() {
                 ErrorReason::Aborted
             } else {
                 ErrorReason::Error
@@ -352,6 +379,27 @@ async fn run_request(
             timestamp,
         ),
     }
+}
+
+/// Forward without blocking the guest thread. Queue overflow is a stream
+/// failure, not backpressure that an untrusted guest can use to stall the host.
+#[cfg(feature = "plugin-wasm")]
+fn forward_delta(
+    tx: &tokio::sync::mpsc::Sender<kiqi_plugin_host::ProviderDeltaEvent>,
+    local: &tokio_util::sync::CancellationToken,
+    event: kiqi_plugin_host::ProviderDeltaEvent,
+) -> Result<(), String> {
+    tx.try_send(event).map_err(|error| {
+        local.cancel();
+        match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                format!("live delta channel full (cap {PROVIDER_DELTA_CHANNEL_CAPACITY})")
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                "live delta channel closed".to_string()
+            }
+        }
+    })
 }
 
 /// Create (or reuse) the dedicated [`kiqi_plugin_host::ProviderHost`].
@@ -750,6 +798,14 @@ mod tests {
     /// Build the conformance guest and install it under `root/plugins/conformance`
     /// with a provider grant covering `models`.
     fn install_conformance_provider(root: &Path, models: &[&str]) -> PathBuf {
+        install_conformance_provider_with_timeout(root, models, 30)
+    }
+
+    fn install_conformance_provider_with_timeout(
+        root: &Path,
+        models: &[&str],
+        timeout_seconds: u64,
+    ) -> PathBuf {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let built =
             crate::plugin_cli::build_guest(&workspace.join("plugins/wasm/kiqi-conformance-guest"))
@@ -781,7 +837,7 @@ mod tests {
                 },
                 credential: None,
                 auth: None,
-                timeout_seconds: 30,
+                timeout_seconds,
                 max_response_bytes: PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
                 max_handles: PROVIDER_MAX_HANDLES_DEFAULT,
             }],
@@ -1013,6 +1069,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_host_timeout_terminates_a_stream_while_the_guest_is_parked() {
+        let _lock = HOST_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let wasm = install_conformance_provider_with_timeout(root.path(), &["conformance-park"], 1);
+        let provider = WasmProvider::new(
+            "conformance",
+            vec![conformance_model("conformance-park")],
+            wasm,
+            Some(root.path().to_path_buf()),
+        );
+        let model = conformance_model("conformance-park");
+        let mut stream = provider
+            .stream_simple(&model, &Context::default(), &SimpleStreamOptions::default())
+            .await;
+
+        let started = Instant::now();
+        let terminal = tokio::time::timeout(Duration::from_secs(8), async {
+            while let Some(event) = stream.next().await {
+                if matches!(
+                    event,
+                    AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
+                ) {
+                    return event;
+                }
+            }
+            panic!("the provider stream closed without a terminal event")
+        })
+        .await
+        .expect("the host deadline must terminate the CLI stream");
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "the terminal error must not wait for the parked guest: {:?}",
+            started.elapsed()
+        );
+        match terminal {
+            AssistantMessageEvent::Error { reason, error } => {
+                assert_eq!(reason, ErrorReason::Error);
+                assert!(
+                    error
+                        .error_message
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("deadline"),
+                    "{error:?}"
+                );
+            }
+            other => panic!("a parked guest must end in an error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn no_grant_means_the_guest_is_never_instantiated() {
         let _lock = HOST_TEST_LOCK
             .lock()
@@ -1132,6 +1241,22 @@ mod tests {
             other => panic!("revocation must fail closed: {other:?}"),
         }
         assert!(root.path().join("auth.json").is_file());
+    }
+
+    #[test]
+    fn live_delta_queue_overflow_cancels_and_fails() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let local = tokio_util::sync::CancellationToken::new();
+        let event = || kiqi_plugin_host::ProviderDeltaEvent {
+            kind: kiqi_plugin_host::DeltaKind::Text,
+            phase: kiqi_plugin_host::DeltaPhase::Delta,
+            content_index: 0,
+            text: "x".to_string(),
+        };
+        forward_delta(&tx, &local, event()).expect("first delta fits");
+        let error = forward_delta(&tx, &local, event()).expect_err("second delta overflows");
+        assert!(error.contains("full"), "{error}");
+        assert!(local.is_cancelled());
     }
 
     #[test]

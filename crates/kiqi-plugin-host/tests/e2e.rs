@@ -4930,6 +4930,26 @@ fn provider_stream_deltas_are_assembled_and_bad_order_fails() {
 }
 
 #[test]
+fn provider_stream_block_overflow_fails_and_disables_the_instance() {
+    let fixture = provider_fixture();
+    let transport = std::sync::Arc::new(FakeProviderTransport::new(200, b""));
+    let grants = provider_grants(30, vec![provider_model("conformance-model")]);
+    let host = provider_host(&fixture, &grants, transport);
+
+    let error = host
+        .request(&provider_request(
+            "stream-many-blocks",
+            serde_json::json!({}),
+        ))
+        .expect_err("the distinct-block cap must reject the stream");
+    assert!(error.contains("distinct blocks"), "{error}");
+    assert!(
+        host.is_disabled(),
+        "a stream-budget overflow must disable the instance"
+    );
+}
+
+#[test]
 fn a_spinning_provider_guest_is_interrupted_by_the_deadline() {
     let fixture = provider_fixture();
     let transport = std::sync::Arc::new(FakeProviderTransport::new(200, b""));

@@ -116,6 +116,16 @@ impl Log for ProviderLog {
 
 static PROVIDER_LOG: ProviderLog = ProviderLog;
 
+/// Maximum deltas accepted from one provider call, including starts and ends.
+/// Exceeding this budget fails the call and disables the instance.
+pub const PROVIDER_STREAM_MAX_DELTAS: usize = 16_384;
+/// Maximum distinct `(kind, content-index)` blocks retained for one call.
+/// Exceeding this budget fails the call and disables the instance.
+pub const PROVIDER_STREAM_MAX_BLOCKS: usize = 1_024;
+/// Maximum aggregate UTF-8 bytes carried by all deltas in one call.
+/// Exceeding this budget fails the call and disables the instance.
+pub const PROVIDER_STREAM_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 /// The delta assembler one provider call owns.
 ///
 /// The host validates order here rather than trusting the guest: a duplicate
@@ -130,11 +140,17 @@ pub(crate) struct DeltaAssembler {
     by_key: HashMap<(DeltaKind, u32), (usize, bool)>,
     /// `content-index -> kind`, so one index cannot label two blocks.
     index_kind: HashMap<u32, DeltaKind>,
+    delta_count: usize,
+    byte_count: usize,
     error: Option<String>,
+    /// Budget and live-delivery failures poison the instance, unlike ordinary
+    /// guest ordering errors, because its retained/queued state is untrusted.
+    overflowed: bool,
     /// Live mirror of accepted deltas. Only ever called on the guest's thread,
     /// and only for a delta the assembler accepted, so a subscriber never sees
-    /// a stream the host is about to reject.
-    sink: Option<Box<dyn FnMut(ProviderDeltaEvent) + Send>>,
+    /// a stream the host is about to reject. A bounded subscriber reports
+    /// overflow here instead of letting the guest buffer without limit.
+    sink: Option<Box<dyn FnMut(ProviderDeltaEvent) -> Result<(), String> + Send>>,
 }
 
 impl DeltaAssembler {
@@ -154,6 +170,22 @@ impl DeltaAssembler {
         };
         let index = delta.content_index;
         let text = delta.text;
+        if self.delta_count >= PROVIDER_STREAM_MAX_DELTAS {
+            self.fail_overflow(format!(
+                "delta count exceeds cap {PROVIDER_STREAM_MAX_DELTAS}"
+            ));
+            return;
+        }
+        let Some(byte_count) = self.byte_count.checked_add(text.len()) else {
+            self.fail_overflow("aggregate delta byte count overflowed".to_string());
+            return;
+        };
+        if byte_count > PROVIDER_STREAM_MAX_BYTES {
+            self.fail_overflow(format!(
+                "aggregate delta bytes exceed cap {PROVIDER_STREAM_MAX_BYTES}"
+            ));
+            return;
+        }
         match phase {
             DeltaPhase::Start => {
                 if self.by_key.contains_key(&(kind, index)) {
@@ -163,6 +195,12 @@ impl DeltaAssembler {
                 if let Some(existing) = self.index_kind.get(&index) {
                     self.fail(format!(
                         "content index {index} was already used for {existing:?}"
+                    ));
+                    return;
+                }
+                if self.segments.len() >= PROVIDER_STREAM_MAX_BLOCKS {
+                    self.fail_overflow(format!(
+                        "distinct blocks exceed cap {PROVIDER_STREAM_MAX_BLOCKS}"
                     ));
                     return;
                 }
@@ -199,13 +237,17 @@ impl DeltaAssembler {
                 self.by_key.insert((kind, index), (position, false));
             }
         }
+        self.delta_count += 1;
+        self.byte_count = byte_count;
         if let Some(sink) = &mut self.sink {
-            sink(ProviderDeltaEvent {
+            if let Err(error) = sink(ProviderDeltaEvent {
                 kind,
                 phase,
                 content_index: index,
                 text,
-            });
+            }) {
+                self.fail_overflow(error);
+            }
         }
     }
 
@@ -213,6 +255,11 @@ impl DeltaAssembler {
         if self.error.is_none() {
             self.error = Some(message);
         }
+    }
+
+    fn fail_overflow(&mut self, message: String) {
+        self.overflowed = true;
+        self.fail(message);
     }
 
     pub(crate) fn finish(self) -> Result<Vec<ProviderStreamSegment>, String> {
@@ -524,14 +571,17 @@ impl ProviderHost {
     /// [`Self::request_with_cancel`] plus a live delta sink.
     ///
     /// The sink runs on the provider worker thread and sees only deltas the
-    /// assembler accepted, in emission order. The assembled segments on the
-    /// returned [`ProviderResponse`] remain the end-of-call record; a caller
-    /// that renders live must still treat the final message as terminal.
+    /// assembler accepted, in emission order. Returning an error from the sink
+    /// fails the call and disables the instance, which lets bounded callers
+    /// turn queue overflow into cancellation rather than unlimited buffering.
+    /// The assembled segments on the returned [`ProviderResponse`] remain the
+    /// end-of-call record; a caller that renders live must still treat the
+    /// final message as terminal.
     pub fn request_streaming(
         &self,
         request: &str,
         cancel: Option<Arc<dyn CancelProbe>>,
-        sink: Box<dyn FnMut(ProviderDeltaEvent) + Send>,
+        sink: Box<dyn FnMut(ProviderDeltaEvent) -> Result<(), String> + Send>,
     ) -> Result<ProviderResponse, String> {
         self.request_with_cancel_and_sink(request, cancel, Some(sink))
     }
@@ -540,7 +590,7 @@ impl ProviderHost {
         &self,
         request: &str,
         cancel: Option<Arc<dyn CancelProbe>>,
-        sink: Option<Box<dyn FnMut(ProviderDeltaEvent) + Send>>,
+        sink: Option<Box<dyn FnMut(ProviderDeltaEvent) -> Result<(), String> + Send>>,
     ) -> Result<ProviderResponse, String> {
         if self.disabled.load(Ordering::Acquire) {
             return Err(format!(
@@ -616,8 +666,9 @@ impl ProviderHost {
                 crate::clear_context();
                 inner.store.data_mut().provider_call = None;
                 inner.store.data_mut().reap_call_scoped();
+                let overflowed = assembler.overflowed;
                 let assembled = assembler.finish();
-                let _ = tx.send((outcome, assembled, inner));
+                let _ = tx.send((outcome, assembled, inner, overflowed));
             });
         if let Err(error) = worker {
             self.disabled.store(true, Ordering::Release);
@@ -631,26 +682,35 @@ impl ProviderHost {
         // guest parked inside a host import, which epoch cannot interrupt.
         let wait = self.timeout + std::time::Duration::from_secs(2);
         match rx.recv_timeout(wait) {
-            Ok((outcome, assembled, inner)) => match outcome {
-                Ok(Ok(raw)) => {
-                    *guard = Some(inner);
-                    let segments = assembled?;
-                    let mut response = finalize_message(raw, &self.profile, &selected)?;
-                    response.segments = segments;
-                    Ok(response)
-                }
-                Ok(Err(error)) => {
-                    // A guest-level error is a normal refusal/answer: keep the
-                    // instance for the next request.
-                    *guard = Some(inner);
-                    Err(format!("{}: provider request failed: {error:?}", self.id))
-                }
-                Err(trap) => {
+            Ok((outcome, assembled, inner, overflowed)) => {
+                if overflowed {
                     self.disabled.store(true, Ordering::Release);
                     drop(inner);
-                    Err(format!("{}: provider request trapped: {trap}", self.id))
+                    return Err(assembled
+                        .err()
+                        .unwrap_or_else(|| "provider stream: stream budget exceeded".to_string()));
                 }
-            },
+                match outcome {
+                    Ok(Ok(raw)) => {
+                        *guard = Some(inner);
+                        let segments = assembled?;
+                        let mut response = finalize_message(raw, &self.profile, &selected)?;
+                        response.segments = segments;
+                        Ok(response)
+                    }
+                    Ok(Err(error)) => {
+                        // A guest-level error is a normal refusal/answer: keep the
+                        // instance for the next request.
+                        *guard = Some(inner);
+                        Err(format!("{}: provider request failed: {error:?}", self.id))
+                    }
+                    Err(trap) => {
+                        self.disabled.store(true, Ordering::Release);
+                        drop(inner);
+                        Err(format!("{}: provider request trapped: {trap}", self.id))
+                    }
+                }
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 self.disabled.store(true, Ordering::Release);
                 Err(format!(
@@ -854,6 +914,41 @@ mod tests {
         reused.push(delta(WitDeltaKind::Text, WitDeltaPhase::End, 0, ""));
         reused.push(delta(WitDeltaKind::Thinking, WitDeltaPhase::Start, 0, ""));
         assert!(reused.finish().unwrap_err().contains("already used"));
+    }
+
+    #[test]
+    fn delta_count_and_aggregate_bytes_have_hard_caps() {
+        let mut too_many = DeltaAssembler::default();
+        too_many.push(delta(WitDeltaKind::Text, WitDeltaPhase::Start, 0, ""));
+        for _ in 0..PROVIDER_STREAM_MAX_DELTAS {
+            too_many.push(delta(WitDeltaKind::Text, WitDeltaPhase::Delta, 0, ""));
+        }
+        let error = too_many.finish().unwrap_err();
+        assert!(error.contains("delta count"), "{error}");
+
+        let mut too_large = DeltaAssembler::default();
+        too_large.push(delta(
+            WitDeltaKind::Text,
+            WitDeltaPhase::Start,
+            0,
+            &"x".repeat(PROVIDER_STREAM_MAX_BYTES),
+        ));
+        too_large.push(delta(WitDeltaKind::Text, WitDeltaPhase::End, 0, "y"));
+        assert!(too_large.overflowed);
+        let error = too_large.finish().unwrap_err();
+        assert!(error.contains("aggregate delta bytes"), "{error}");
+    }
+
+    #[test]
+    fn live_sink_overflow_fails_the_stream() {
+        let mut assembler = DeltaAssembler {
+            sink: Some(Box::new(|_| Err("live delta channel full".to_string()))),
+            ..DeltaAssembler::default()
+        };
+        assembler.push(delta(WitDeltaKind::Text, WitDeltaPhase::Start, 0, ""));
+        assert!(assembler.overflowed);
+        let error = assembler.finish().unwrap_err();
+        assert!(error.contains("live delta channel full"), "{error}");
     }
 
     #[test]
