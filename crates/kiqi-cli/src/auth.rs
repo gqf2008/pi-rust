@@ -69,6 +69,19 @@ async fn run_login(
     snapshot: Option<&Arc<kiqi_extensions::RegistrySnapshot>>,
 ) -> i32 {
     let provider = parse_provider(args).unwrap_or(DEFAULT_PROVIDER_ID);
+    // A wasm plugin's granted provider wins over the cdylib registry when both
+    // exist for the same id (the cdylib tier is the legacy channel). The plugin
+    // is only loaded after the grant names it, so an ungranted provider never
+    // reaches a guest.
+    #[cfg(feature = "plugin-wasm")]
+    match crate::wasm_oauth::find_provider(provider) {
+        Ok(Some(found)) => return run_wasm_oauth_login(&found),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("error: {error}");
+            return EXIT_ERROR;
+        }
+    }
     if let Some(snapshot) = snapshot {
         if snapshot.oauth_provider(provider).is_some() {
             return run_oauth_login(provider, snapshot).await;
@@ -152,6 +165,37 @@ async fn run_refresh(
     snapshot: Option<&Arc<kiqi_extensions::RegistrySnapshot>>,
 ) -> i32 {
     let provider = parse_provider(args).unwrap_or(DEFAULT_PROVIDER_ID);
+    // Host-only for a wasm provider: the refresh token never enters a guest.
+    #[cfg(feature = "plugin-wasm")]
+    match crate::wasm_oauth::find_provider(provider) {
+        Ok(Some(found)) => {
+            let transport = kiqi_plugin_host::default_transport();
+            return match crate::wasm_oauth::refresh(
+                &found.install_id,
+                &found.profile,
+                &found.grant,
+                &*transport,
+                crate::wasm_oauth::unix_now(),
+            ) {
+                Ok(expires) => {
+                    println!("OAuth credentials refreshed for \"{provider}\".");
+                    if expires > 0 {
+                        println!("Access token expires at {expires} (Unix seconds).");
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    EXIT_ERROR
+                }
+            };
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("error: {error}");
+            return EXIT_ERROR;
+        }
+    }
     let Some(snapshot) = snapshot else {
         eprintln!("error: no OAuth extensions are loaded");
         return EXIT_ERROR;
@@ -209,6 +253,41 @@ async fn run_logout(
     snapshot: Option<&Arc<kiqi_extensions::RegistrySnapshot>>,
 ) -> i32 {
     let provider = parse_provider(args).unwrap_or(DEFAULT_PROVIDER_ID);
+    // Host-only for a wasm provider: revoke through the grant's endpoint, then
+    // delete exactly the namespaced key. A bare `auth.json` entry is untouched.
+    #[cfg(feature = "plugin-wasm")]
+    match crate::wasm_oauth::find_provider(provider) {
+        Ok(Some(found)) => {
+            let transport = kiqi_plugin_host::default_transport();
+            return match crate::wasm_oauth::logout(
+                &found.install_id,
+                &found.profile,
+                &found.grant,
+                &*transport,
+            ) {
+                Ok(true) => {
+                    println!(
+                        "Removed stored OAuth credentials for \"{provider}\" (plugin `{}`).",
+                        found.install_id
+                    );
+                    0
+                }
+                Ok(false) => {
+                    println!("No stored OAuth credential for \"{provider}\" (nothing to do).");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    EXIT_ERROR
+                }
+            };
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("error: {error}");
+            return EXIT_ERROR;
+        }
+    }
     if let Ok(Some(Credential::Oauth {
         access, refresh, ..
     })) = config::read_oauth_token(provider)
@@ -340,6 +419,84 @@ async fn run_oauth_login(provider: &str, snapshot: &Arc<kiqi_extensions::Registr
     }
 }
 
+/// Run `ki auth login` for a wasm provider.
+///
+/// The plugin is loaded only after the grant named the provider. Its
+/// `oauth-api.list-providers` narrows the grant, so an id the guest does not
+/// declare is refused here rather than silently driving a broken flow.
+#[cfg(feature = "plugin-wasm")]
+fn run_wasm_oauth_login(found: &crate::wasm_oauth::FoundProvider) -> i32 {
+    use kiqi_plugin::Plugin as _;
+
+    let plugin = match crate::wasm_oauth::load_guest(found) {
+        Ok(plugin) => plugin,
+        Err(error) => {
+            eprintln!("error: load plugin `{}`: {error}", found.install_id);
+            return EXIT_ERROR;
+        }
+    };
+    if !plugin
+        .oauth_providers()
+        .iter()
+        .any(|provider| provider.id == found.profile.id)
+    {
+        eprintln!(
+            "error: plugin `{}` was granted provider `{}` but does not declare it in \
+             oauth-api.list-providers",
+            found.install_id, found.profile.id
+        );
+        return EXIT_ERROR;
+    }
+
+    let transport = kiqi_plugin_host::default_transport();
+    let mut ui = StdinOAuthUi;
+    match crate::wasm_oauth::login(
+        &found.install_id,
+        &found.profile,
+        &found.grant,
+        &plugin,
+        &*transport,
+        crate::wasm_oauth::unix_now(),
+        &mut ui,
+    ) {
+        Ok(expires) => {
+            println!(
+                "OAuth credentials saved for \"{}\" (plugin `{}`).",
+                found.profile.id, found.install_id
+            );
+            if expires > 0 {
+                println!("Access token expires at {expires} (Unix seconds).");
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("error: OAuth login failed: {error}");
+            EXIT_ERROR
+        }
+    }
+}
+
+/// `ki auth`'s terminal surface for the wasm flow driver.
+#[cfg(feature = "plugin-wasm")]
+struct StdinOAuthUi;
+
+#[cfg(feature = "plugin-wasm")]
+impl crate::wasm_oauth::OAuthUi for StdinOAuthUi {
+    fn say(&mut self, text: &str) {
+        println!("{text}");
+    }
+
+    fn ask(&mut self, prompt: &str) -> Result<String, String> {
+        eprint!("{prompt}");
+        let _ = io::stderr().flush();
+        let mut line = String::new();
+        io::stdin()
+            .read_line(&mut line)
+            .map_err(|error| format!("could not read the terminal: {error}"))?;
+        Ok(line.trim().to_string())
+    }
+}
+
 fn parse_provider(args: &[String]) -> Option<&str> {
     let mut iter = args.iter();
     while let Some(a) = iter.next() {
@@ -358,6 +515,8 @@ fn parse_provider(args: &[String]) -> Option<&str> {
 enum CredentialSource {
     StoredApiKey,
     StoredOauth,
+    /// A wasm plugin's namespaced token (`plugin:<install-id>:<provider-id>`).
+    StoredPluginOauth,
     ModelsJson,
     EnvApiKey,
     EnvAuthTToken,
@@ -373,6 +532,7 @@ impl CredentialSource {
         match self {
             CredentialSource::StoredApiKey => "auth.json",
             CredentialSource::StoredOauth => "oauth",
+            CredentialSource::StoredPluginOauth => "plugin-oauth",
             CredentialSource::ModelsJson => "models.json",
             CredentialSource::EnvApiKey => "ANTHROPIC_API_KEY",
             CredentialSource::EnvAuthTToken => "ANTHROPIC_AUTH_TOKEN",
@@ -384,6 +544,7 @@ impl CredentialSource {
         match self {
             CredentialSource::StoredApiKey => Some("key in ~/.ki/auth.json"),
             CredentialSource::StoredOauth => Some("OAuth token in ~/.ki/auth.json"),
+            CredentialSource::StoredPluginOauth => Some("plugin OAuth token in ~/.ki/auth.json"),
             CredentialSource::ModelsJson => Some("apiKey in ~/.ki/agent/models.json"),
             CredentialSource::EnvApiKey => Some("ANTHROPIC_API_KEY env var"),
             CredentialSource::EnvAuthTToken => Some("ANTHROPIC_AUTH_TOKEN env var"),
@@ -422,6 +583,25 @@ fn detect_credential(provider: &str) -> CredentialSource {
                 return CredentialSource::StoredOauth;
             }
             _ => {}
+        }
+        // A wasm plugin's token lives under `plugin:<install-id>:<provider-id>`,
+        // never under the bare provider id, so `auth check` has to look for the
+        // namespaced shape explicitly.
+        let suffix = format!(":{provider}");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(i64::MAX);
+        if store.iter().any(|(key, credential)| {
+            key.starts_with("plugin:")
+                && key.ends_with(&suffix)
+                && matches!(
+                    credential,
+                    Credential::Oauth { access, expires, .. }
+                        if !access.is_empty() && (*expires == 0 || *expires > now)
+                )
+        }) {
+            return CredentialSource::StoredPluginOauth;
         }
     }
     let configured = config::load_models_config().ok().and_then(|models| {
@@ -498,11 +678,12 @@ Environment:
   OPENAI_API_KEY         Fallback bearer token for openai-completions.
 
 Notes:
-  `login --provider <id>` uses the registered OAuth extension when one exists;
-  otherwise it is a provider-neutral API-key compatibility prompt. The host
-  only handles standard interaction and credential responses for OAuth.
-  `refresh` and `logout` use extension actions. API-key providers may still
-  use ~/.ki/agent/models.json or environment variables.
+  `login --provider <id>` prefers a wasm plugin whose `oauth` grant names the
+  provider (the host runs the flow; no token enters the sandbox), then falls
+  back to a registered OAuth extension, then to the provider-neutral API-key
+  prompt. `refresh` and `logout` for a wasm provider are host-only and use the
+  namespaced key `plugin:<install-id>:<provider-id>`. API-key providers may
+  still use ~/.ki/agent/models.json or environment variables.
 ",
         name = crate::APP_NAME
     );
@@ -731,5 +912,31 @@ mod tests {
         );
         // A trailing flag with no value doesn't panic.
         assert_eq!(parse_provider(&["--provider".to_string()]), None);
+    }
+
+    /// A wasm plugin stores its token under `plugin:<install-id>:<provider-id>`,
+    /// never under the bare provider id. `auth check` must find that shape.
+    #[tokio::test]
+    async fn check_ready_with_plugin_namespaced_oauth_credential() {
+        let _cfg = TempConfig::new();
+        crate::config::upsert_plugin_oauth_token(
+            "install-1",
+            "acme",
+            "at".to_string(),
+            "rt".to_string(),
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            detect_credential("acme"),
+            CredentialSource::StoredPluginOauth
+        ));
+        let code = run_check(&["--provider".to_string(), "acme".to_string()]).await;
+        assert_eq!(code, 0);
+        // A different provider is not fooled by the namespaced entry.
+        assert!(matches!(
+            detect_credential("other"),
+            CredentialSource::CliFlagUnset
+        ));
     }
 }

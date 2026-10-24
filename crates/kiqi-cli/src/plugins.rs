@@ -1422,7 +1422,7 @@ pub fn load_hosts() -> Vec<PluginHost> {
 /// sidecar disagrees or cannot be read — the caller skips the plugin rather
 /// than running bytes the recorded expectation does not match.
 #[cfg(feature = "plugin-wasm")]
-fn digest_gate(wasm: &std::path::Path) -> Result<Option<&'static str>, String> {
+pub(crate) fn digest_gate(wasm: &std::path::Path) -> Result<Option<&'static str>, String> {
     use crate::plugin_cli::DigestStatus;
     match crate::plugin_cli::digest_status(wasm) {
         Ok(DigestStatus::Ok { .. }) => Ok(None),
@@ -1447,7 +1447,7 @@ fn digest_gate(wasm: &std::path::Path) -> Result<Option<&'static str>, String> {
 /// on `plugin:<install-id>:<provider-id>`, never on a bare provider id.
 #[cfg(feature = "plugin-wasm")]
 #[derive(Debug, Default)]
-struct ConfigCredentialSink;
+pub(crate) struct ConfigCredentialSink;
 
 #[cfg(feature = "plugin-wasm")]
 impl kiqi_plugin_host::PluginCredentialSink for ConfigCredentialSink {

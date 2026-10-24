@@ -78,6 +78,8 @@ pub mod trust;
 pub mod tui_hangup;
 pub mod tui_shell;
 pub mod updates;
+#[cfg(feature = "plugin-wasm")]
+pub mod wasm_oauth;
 
 /// Crate version, surfaced by `ki --version`. Mirrors the TS `VERSION` export
 /// (sourced from `package.json`; here from `env!("CARGO_PKG_VERSION")`).

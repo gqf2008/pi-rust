@@ -14,7 +14,9 @@
 //!
 //! The returned string reports the deny reason so the host test can assert it.
 
+use kiqi_plugin_guest::bindings::exports::kiqi::plugin::oauth_api::Guest as OAuthGuest;
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
+use kiqi_plugin_guest::bindings::exports::kiqi::plugin::provider_api::Guest as ProviderGuest;
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::render_api::Guest as RenderGuest;
 use kiqi_plugin_guest::bindings::kiqi::plugin::{
     exec, fs, log, net_http, net_sockets, proc, progress, session_read, types, ui,
@@ -588,9 +590,84 @@ impl Guest for Conformance {
 
 kiqi_plugin_guest::bindings::export!(Conformance with_types_in kiqi_plugin_guest::bindings);
 
-// OAuth and provider are mandatory world exports; this fixture denies both and
-// contributes only the markdown renderer below.
-kiqi_plugin_guest::deny_oauth_and_provider_exports!(Conformance);
+// OAuth and provider are mandatory world exports. The OAuth face is a fixture
+// the host e2e drives; the provider face denies, as an ungranted guest must.
+impl OAuthGuest for Conformance {
+    /// One static provider so the host can test its load-time cross-check. The
+    /// id is fixed; the host connects it to a grant by naming the same id.
+    fn list_providers() -> Vec<types::OauthProvider> {
+        vec![
+            types::OauthProvider {
+                id: "conformance-oauth".to_string(),
+                display_name: "Conformance OAuth".to_string(),
+                scopes: vec!["openid".to_string()],
+                flows: vec![types::OauthFlow::DeviceCode],
+                supports_pkce: true,
+            },
+            // Declared so the deadline test can name a granted id; `action`
+            // spins for it instead of returning an interaction.
+            types::OauthProvider {
+                id: "conformance-spin".to_string(),
+                display_name: "Conformance OAuth (slow)".to_string(),
+                scopes: Vec::new(),
+                flows: vec![types::OauthFlow::AuthorizationCode],
+                supports_pkce: false,
+            },
+        ]
+    }
+
+    /// Answer each flow step with a distinctive marker so the host test can
+    /// tell "the guest was called" from "the host denied before reaching it".
+    ///
+    /// `url` is guest-supplied on purpose: the host must ignore it and build
+    /// the authorization URL itself. `conformance-spin` exercises the host's
+    /// wall-clock deadline.
+    fn action(
+        provider_id: String,
+        action: types::OauthAction,
+    ) -> Result<types::OauthResponse, types::PluginError> {
+        if provider_id == "conformance-spin" {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while std::time::Instant::now() < deadline {
+                std::hint::black_box(0u64);
+            }
+        }
+        if provider_id != "conformance-oauth" && provider_id != "conformance-spin" {
+            return Ok(types::OauthResponse::Denied(format!(
+                "unknown provider `{provider_id}`"
+            )));
+        }
+        match action {
+            types::OauthAction::Begin(_) => {
+                Ok(types::OauthResponse::Interaction(types::OauthInteraction {
+                    title: "conformance oauth begin".to_string(),
+                    url: Some("https://guest.example/never-opened".to_string()),
+                    instructions: vec!["the host builds the URL".to_string()],
+                    user_code: None,
+                }))
+            }
+            types::OauthAction::Poll => Ok(types::OauthResponse::AuthorizationPending),
+            types::OauthAction::Exchange(code) => Ok(types::OauthResponse::Error(format!(
+                "conformance exchange `{code}`"
+            ))),
+            types::OauthAction::Cancel => {
+                Ok(types::OauthResponse::Denied("conformance cancelled".to_string()))
+            }
+        }
+    }
+}
+
+impl ProviderGuest for Conformance {
+    fn list_providers() -> Vec<types::ProviderSpec> {
+        Vec::new()
+    }
+
+    fn request(_request: String) -> Result<String, types::PluginError> {
+        Err(types::PluginError::Denied(
+            "provider requests are not granted".to_string(),
+        ))
+    }
+}
 
 /// Deterministic markdown renderer used by the host's render tests.
 ///

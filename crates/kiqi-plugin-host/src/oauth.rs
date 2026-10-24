@@ -593,6 +593,141 @@ pub fn default_transport() -> Arc<dyn OAuthTransport> {
     Arc::new(HttpOAuthTransport)
 }
 
+/// Exchange an authorization code the user pasted back.
+///
+/// **Host-only.** `ki auth login` calls this for the authorization-code flow;
+/// it is not reachable from a guest. The grant supplies the client id and token
+/// endpoint, the caller supplies only the code and (when the profile supports
+/// PKCE) the verifier. The host parses the standard response and returns the
+/// token pair; nothing token-bearing is ever handed back to a guest.
+pub fn exchange_authorization_code(
+    profile: &OAuthProviderProfile,
+    code: &str,
+    code_verifier: Option<&str>,
+    redirect_uri: &str,
+    budget: &mut OAuthRequestBudget,
+    transport: &dyn OAuthTransport,
+    now: i64,
+) -> Result<OAuthTokens, String> {
+    let url = granted_endpoint(&profile.token_endpoint)?;
+    let mut form: Vec<(String, String)> = vec![
+        ("grant_type".to_string(), "authorization_code".to_string()),
+        ("code".to_string(), code.to_string()),
+    ];
+    if let Some(verifier) = code_verifier {
+        validate_code_verifier(verifier)?;
+        form.push(("code_verifier".to_string(), verifier.to_string()));
+    }
+    if !redirect_uri.is_empty() {
+        form.push(("redirect_uri".to_string(), redirect_uri.to_string()));
+    }
+    if !profile.scopes.is_empty() {
+        form.push(("scope".to_string(), profile.scopes.join(" ")));
+    }
+    // The client id is the grant's, never the caller's.
+    form.push(("client_id".to_string(), profile.client_id.clone()));
+    budget.charge()?;
+    let response = transport.post_form(url.as_str(), &form, budget.request_timeout())?;
+    finish_token_response(&response, now)
+}
+
+/// Refresh a stored token at the grant's token endpoint.
+///
+/// **Host-only**, like [`exchange_authorization_code`]: `ki auth refresh` never
+/// hands the refresh token to a guest. A response that omits `refresh_token`
+/// leaves the caller's existing refresh value in place (the caller decides
+/// that; this function returns an empty string for the missing field).
+pub fn refresh_stored_token(
+    profile: &OAuthProviderProfile,
+    refresh: &str,
+    budget: &mut OAuthRequestBudget,
+    transport: &dyn OAuthTransport,
+    now: i64,
+) -> Result<OAuthTokens, String> {
+    if refresh.is_empty() {
+        return Err(format!(
+            "oauth provider `{}` has no stored refresh token",
+            profile.id
+        ));
+    }
+    let url = granted_endpoint(&profile.token_endpoint)?;
+    let mut form: Vec<(String, String)> = vec![
+        ("grant_type".to_string(), "refresh_token".to_string()),
+        ("refresh_token".to_string(), refresh.to_string()),
+    ];
+    if !profile.scopes.is_empty() {
+        form.push(("scope".to_string(), profile.scopes.join(" ")));
+    }
+    form.push(("client_id".to_string(), profile.client_id.clone()));
+    budget.charge()?;
+    let response = transport.post_form(url.as_str(), &form, budget.request_timeout())?;
+    finish_token_response(&response, now)
+}
+
+/// Revoke the token the host stored for a granted provider.
+///
+/// **Host-only**: `ki auth logout` calls this with the value it read from the
+/// namespaced store; a guest can only ask for the same operation through
+/// `oauth-http.revoke`, which never sees the token either. A profile without a
+/// `revocation-endpoint` cannot revoke, and says so rather than silently
+/// pretending the token is dead at the IdP.
+pub fn revoke_stored_token(
+    profile: &OAuthProviderProfile,
+    token: &StoredOAuthToken,
+    budget: &mut OAuthRequestBudget,
+    transport: &dyn OAuthTransport,
+) -> Result<(), String> {
+    let endpoint_text = profile
+        .revocation_endpoint
+        .as_deref()
+        .ok_or_else(|| format!("oauth provider `{}` has no revocation-endpoint", profile.id))?;
+    let endpoint = granted_endpoint(endpoint_text)?;
+    let (hint, value) = if token.refresh.is_empty() {
+        ("access_token", token.access.clone())
+    } else {
+        ("refresh_token", token.refresh.clone())
+    };
+    let form: Vec<(String, String)> = vec![
+        ("token".to_string(), value),
+        ("token_type_hint".to_string(), hint.to_string()),
+        ("client_id".to_string(), profile.client_id.clone()),
+    ];
+    budget.charge()?;
+    let response = transport.post_form(endpoint.as_str(), &form, budget.request_timeout())?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!(
+            "revocation endpoint returned HTTP {}",
+            response.status
+        ));
+    }
+    Ok(())
+}
+
+/// The shared half of the three host-side endpoints: validate the status, parse
+/// the standard response, and never echo the body on failure.
+fn finish_token_response(response: &HttpResponse, now: i64) -> Result<OAuthTokens, String> {
+    if !(200..300).contains(&response.status) {
+        if (300..400).contains(&response.status) {
+            let host = response
+                .location
+                .as_deref()
+                .and_then(|location| reqwest::Url::parse(location).ok())
+                .and_then(|url| url.host_str().map(str::to_string));
+            return Err(match host {
+                Some(host) => format!(
+                    "token endpoint redirected to `{host}`; redirects to another host are refused"
+                ),
+                None => "token endpoint returned a redirect; redirects are refused".to_string(),
+            });
+        }
+        if let Some(code) = oauth_error_code(&response.body) {
+            return Err(safe_oauth_error(&code));
+        }
+        return Err(format!("token endpoint returned HTTP {}", response.status));
+    }
+    parse_token_response(&response.body, now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -780,5 +915,150 @@ mod tests {
         let mut budget = OAuthRequestBudget::new(60, 5);
         let error = request_device_authorization(&profile, &mut budget, &transport, 0).unwrap_err();
         assert!(error.contains("device-code"), "{error}");
+    }
+
+    #[derive(Debug, Default)]
+    struct QueueTransport {
+        responses: std::sync::Mutex<Vec<HttpResponse>>,
+        requests: std::sync::Mutex<Vec<(String, Vec<(String, String)>)>>,
+    }
+
+    impl QueueTransport {
+        fn with(responses: Vec<HttpResponse>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses),
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl OAuthTransport for QueueTransport {
+        fn post_form(
+            &self,
+            url: &str,
+            form: &[(String, String)],
+            _timeout: Duration,
+        ) -> Result<HttpResponse, String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((url.to_string(), form.to_vec()));
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                return Err("no scripted response".to_string());
+            }
+            Ok(responses.remove(0))
+        }
+    }
+
+    fn token_response(body: &str) -> HttpResponse {
+        HttpResponse {
+            status: 200,
+            location: None,
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn authorization_code_exchange_uses_the_grant_and_parses_the_token() {
+        let transport = QueueTransport::with(vec![token_response(
+            r#"{"access_token":"at","refresh_token":"rt","expires_in":60}"#,
+        )]);
+        let mut budget = OAuthRequestBudget::new(60, 4);
+        let tokens = exchange_authorization_code(
+            &device_profile(),
+            "the-code",
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            "urn:ietf:wg:oauth:2.0:oob",
+            &mut budget,
+            &transport,
+            10,
+        )
+        .unwrap();
+        assert_eq!(tokens.access, "at");
+        assert_eq!(tokens.refresh, "rt");
+        assert_eq!(tokens.expires, 70);
+        let requests = transport.requests.lock().unwrap();
+        let form = &requests[0].1;
+        assert!(form
+            .iter()
+            .any(|(key, value)| key == "client_id" && value == "client-123"));
+        assert!(form
+            .iter()
+            .any(|(key, value)| key == "redirect_uri" && value == "urn:ietf:wg:oauth:2.0:oob"));
+        assert!(form.iter().any(|(key, _)| key == "code_verifier"));
+    }
+
+    #[test]
+    fn refresh_preserves_an_absent_refresh_token_for_the_caller() {
+        let transport = QueueTransport::with(vec![token_response(
+            r#"{"access_token":"at-2","expires_in":30}"#,
+        )]);
+        let mut budget = OAuthRequestBudget::new(60, 4);
+        let tokens =
+            refresh_stored_token(&device_profile(), "rt", &mut budget, &transport, 100).unwrap();
+        assert_eq!(tokens.access, "at-2");
+        assert!(tokens.refresh.is_empty(), "the caller keeps the old one");
+        assert_eq!(tokens.expires, 130);
+    }
+
+    #[test]
+    fn refresh_refuses_an_empty_refresh_token_without_a_request() {
+        let transport = QueueTransport::default();
+        let mut budget = OAuthRequestBudget::new(60, 4);
+        let error =
+            refresh_stored_token(&device_profile(), "", &mut budget, &transport, 0).unwrap_err();
+        assert!(error.contains("no stored refresh token"), "{error}");
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn revoke_prefers_the_refresh_token_and_requires_a_2xx() {
+        let token = StoredOAuthToken {
+            access: "at".to_string(),
+            refresh: "rt".to_string(),
+            expires: 0,
+        };
+        let mut profile = device_profile();
+        profile.revocation_endpoint = Some("https://id.acme.test/revoke".to_string());
+        let transport = QueueTransport::with(vec![HttpResponse {
+            status: 200,
+            location: None,
+            body: String::new(),
+        }]);
+        let mut budget = OAuthRequestBudget::new(60, 4);
+        revoke_stored_token(&profile, &token, &mut budget, &transport).unwrap();
+        let requests = transport.requests.lock().unwrap();
+        assert!(requests[0]
+            .1
+            .iter()
+            .any(|(key, value)| key == "token" && value == "rt"));
+        assert!(requests[0]
+            .1
+            .iter()
+            .any(|(key, value)| key == "token_type_hint" && value == "refresh_token"));
+
+        let transport = QueueTransport::with(vec![HttpResponse {
+            status: 500,
+            location: None,
+            body: r#"{"error":"invalid_token"}"#.to_string(),
+        }]);
+        let mut budget = OAuthRequestBudget::new(60, 4);
+        let error = revoke_stored_token(&profile, &token, &mut budget, &transport).unwrap_err();
+        assert!(error.contains("HTTP 500"), "{error}");
+    }
+
+    #[test]
+    fn revoke_without_a_revocation_endpoint_says_so() {
+        let token = StoredOAuthToken {
+            access: "at".to_string(),
+            refresh: String::new(),
+            expires: 0,
+        };
+        let transport = QueueTransport::default();
+        let mut budget = OAuthRequestBudget::new(60, 4);
+        let error =
+            revoke_stored_token(&device_profile(), &token, &mut budget, &transport).unwrap_err();
+        assert!(error.contains("no revocation-endpoint"), "{error}");
     }
 }

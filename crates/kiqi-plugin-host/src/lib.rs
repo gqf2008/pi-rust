@@ -36,8 +36,9 @@ use kiqi_plugin::grants::{
     resolve_provider_request_policy, HeadersMode, MessagesMode, ObserveMode, ProviderRequestPolicy,
 };
 use kiqi_plugin::{
-    Block, CommandSpec, Event, EventAction, FlagSpec, HostCaps, Plugin as PluginTrait, PluginError,
-    Progress, ProgressSink, ShortcutSpec, ToolOutcome, ToolSpec, Verdict,
+    Block, CommandSpec, Event, EventAction, FlagSpec, HostCaps, OAuthAction, OAuthCredentialStatus,
+    OAuthInteraction, OAuthProvider, OAuthResponse, Plugin as PluginTrait, PluginError, Progress,
+    ProgressSink, ShortcutSpec, ToolOutcome, ToolSpec, Verdict,
 };
 use serde_json::Value;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
@@ -46,15 +47,19 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::kiqi::plugin::types::{
     CapabilityError, ContentBlock, Event as WitEvent, EventAction as WitEventAction, InputEvent,
-    InputKind, LogLevel, OauthCredentialStatus, OauthTokenOutcome, OtherEvent, ProgressBlock,
-    ProviderDelta as WitDelta, ToolCall, ToolResult, ToolResultEvent, Verdict as WitVerdict,
+    InputKind, LogLevel, OauthAction as WitOauthAction, OauthCredentialStatus,
+    OauthProvider as WitOauthProvider, OauthResponse as WitOauthResponse, OauthTokenOutcome,
+    OtherEvent, ProgressBlock, ProviderDelta as WitDelta, ToolCall, ToolResult, ToolResultEvent,
+    Verdict as WitVerdict,
 };
 use crate::Plugin as World;
 
 pub mod oauth;
 pub use oauth::{
-    default_transport, DeviceAuthorization, HttpOAuthTransport, HttpResponse, OAuthRequestBudget,
-    OAuthTokens, OAuthTransport, PluginCredentialSink, StoredOAuthToken,
+    default_transport, exchange_authorization_code, poll_device_token, refresh_stored_token,
+    request_device_authorization, revoke_stored_token, DeviceAuthorization, HttpOAuthTransport,
+    HttpResponse, OAuthRequestBudget, OAuthTokens, OAuthTransport, PluginCredentialSink,
+    StoredOAuthToken,
 };
 
 mod provider_patch;
@@ -545,6 +550,122 @@ fn record_string(value: &wasmtime::component::Val, field: &str) -> Option<String
             wasmtime::component::Val::String(text) => Some(text.clone()),
             _ => None,
         })
+}
+
+/// The bounded load-time `oauth-api.list-providers` cross-check.
+///
+/// The call runs on its own thread so a guest that spins cannot hang
+/// `WasmPlugin::load`: the caller waits at most `timeout`. A trap or an
+/// over-cap answer is reported and treated as "no narrowing" (`None`); only a
+/// call that never returns loses the instance, which aborts the load. The
+/// grant stays the sole catalog authority — this can only take ids away.
+fn bounded_oauth_provider_ids(
+    mut store: Store<HostState>,
+    guest: World,
+    timeout: std::time::Duration,
+) -> Result<
+    (
+        Option<std::collections::BTreeSet<String>>,
+        Store<HostState>,
+        World,
+    ),
+    String,
+> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("kiqi-plugin-oauth-probe".to_string())
+        .spawn(move || {
+            let result = guest
+                .kiqi_plugin_oauth_api()
+                .call_list_providers(&mut store);
+            // The receiver may be gone on timeout; the store still drops here.
+            let _ = tx.send((result, store, guest));
+        });
+    if let Err(error) = spawned {
+        return Err(format!("cannot start the oauth probe thread: {error}"));
+    }
+    let (result, mut store, guest) = rx.recv_timeout(timeout).map_err(|_| {
+        format!(
+            "oauth list-providers did not finish within {}s",
+            timeout.as_secs()
+        )
+    })?;
+    store.data_mut().reap_procs();
+    let ids = match result {
+        Ok(providers) => match bounded_oauth_ids(providers) {
+            Ok(ids) => Some(ids),
+            Err(error) => {
+                tracing::warn!(%error, "oauth list-providers over cap; the grant is not narrowed");
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "oauth list-providers trapped; the grant is not narrowed");
+            None
+        }
+    };
+    Ok((ids, store, guest))
+}
+
+/// Apply the install-time discovery caps to a `list-providers` answer.
+fn bounded_oauth_ids(
+    providers: Vec<WitOauthProvider>,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    if providers.len() > DISCOVERY_MAX_ENTRIES {
+        return Err(format!(
+            "returned {} providers (cap {DISCOVERY_MAX_ENTRIES})",
+            providers.len()
+        ));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut bytes = 0usize;
+    for provider in providers {
+        if provider.id.len() > DISCOVERY_MAX_STRING_BYTES
+            || provider.display_name.len() > DISCOVERY_MAX_STRING_BYTES
+        {
+            return Err(format!(
+                "a provider id/display name is over {DISCOVERY_MAX_STRING_BYTES} bytes"
+            ));
+        }
+        bytes += provider.id.len() + provider.display_name.len();
+        if bytes > DISCOVERY_MAX_BYTES {
+            return Err(format!("provider list is over {DISCOVERY_MAX_BYTES} bytes"));
+        }
+        ids.insert(provider.id);
+    }
+    Ok(ids)
+}
+
+/// The plugin-side `oauth-action` → the WIT variant.
+fn to_wit_oauth_action(action: OAuthAction) -> WitOauthAction {
+    match action {
+        OAuthAction::Begin(challenge) => WitOauthAction::Begin(challenge),
+        OAuthAction::Poll => WitOauthAction::Poll,
+        OAuthAction::Exchange(code) => WitOauthAction::Exchange(code),
+        OAuthAction::Cancel => WitOauthAction::Cancel,
+    }
+}
+
+/// The WIT `oauth-response` → the plugin-side type (no token material exists on
+/// either side; only the expiry crosses).
+fn to_plugin_oauth_response(response: WitOauthResponse) -> OAuthResponse {
+    match response {
+        WitOauthResponse::Interaction(interaction) => {
+            OAuthResponse::Interaction(OAuthInteraction {
+                title: interaction.title,
+                url: interaction.url,
+                instructions: interaction.instructions,
+                user_code: interaction.user_code,
+            })
+        }
+        WitOauthResponse::Stored(status) => OAuthResponse::Stored(OAuthCredentialStatus {
+            expires_at: status.expires_at,
+        }),
+        WitOauthResponse::AuthorizationPending => OAuthResponse::AuthorizationPending,
+        WitOauthResponse::SlowDown => OAuthResponse::SlowDown,
+        WitOauthResponse::Denied(message) => OAuthResponse::Denied(message),
+        WitOauthResponse::Error(message) => OAuthResponse::Error(message),
+    }
 }
 
 /// State every instantiated component gets: WASI plus the resource table and
@@ -2152,6 +2273,15 @@ pub struct WasmPlugin {
     /// must never wait for a guest that is mid-call (`ask_user` holds that
     /// mutex while its dialog is open).
     provider_request: Option<ProviderRequestPolicy>,
+    /// The `oauth` grant's profiles, hoisted out of the store so the CLI can
+    /// ask which providers this host offers without waiting for a guest that is
+    /// mid-call. `None` means no `oauth` grant: the guest is never called.
+    oauth_grant: Option<kiqi_plugin::grants::OAuthGrant>,
+    /// Provider ids the guest declared through `oauth-api.list-providers` in
+    /// the bounded load-time cross-check. `None` means the cross-check could
+    /// not run (fail open to the grant, the sole catalog authority);
+    /// `Some(set)` narrows the grant's list to what the guest actually drives.
+    oauth_crosscheck: Option<std::collections::BTreeSet<String>>,
     inner: Mutex<Option<Inner>>,
 }
 
@@ -2207,6 +2337,10 @@ impl WasmPlugin {
         // Resolve the provider-request policy before the grants move into the
         // store: the fan-out needs it without locking the guest.
         let provider_request = resolve_provider_request_policy(&grants);
+        // Hoist the OAuth grant before it moves into the store: `oauth_providers`
+        // is read by `ki auth` and must not lock the guest. `None` is the
+        // deny-by-default state and means the guest is never called.
+        let oauth_grant = grants.oauth.clone();
         let oauth = OAuthState {
             budget: grants
                 .oauth
@@ -2285,6 +2419,22 @@ impl WasmPlugin {
         store.data_mut().reap_procs();
         store.data_mut().declared_flags = std::sync::Arc::new(declared_flags);
 
+        // A granted OAuth guest declares the providers it drives. The check is
+        // bounded (the install-time discovery budget) and advisory: the GRANT
+        // is the catalog authority, so a trap or an over-cap answer narrows
+        // nothing (`None`). Only a call that never returns aborts the load,
+        // because the instance is stuck in that thread.
+        let (oauth_crosscheck, store, guest) = if oauth_grant.is_some() {
+            match bounded_oauth_provider_ids(store, guest, DISCOVERY_WAIT) {
+                Ok((ids, store, guest)) => (ids, store, guest),
+                Err(error) => {
+                    return Err(PluginError::Failed(format!("{id}: {error}")));
+                }
+            }
+        } else {
+            (None, store, guest)
+        };
+
         Ok(Self {
             id,
             engine,
@@ -2294,6 +2444,8 @@ impl WasmPlugin {
                 ..DeclaredSurfaces::default()
             }),
             provider_request,
+            oauth_grant,
+            oauth_crosscheck,
             inner: Mutex::new(Some(Inner { store, guest })),
         })
     }
@@ -2832,6 +2984,128 @@ impl PluginTrait for WasmPlugin {
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         };
         self.dispatch_event(&mut guard, event, caps)
+    }
+
+    fn oauth_providers(&self) -> Vec<OAuthProvider> {
+        let Some(grant) = self.oauth_grant.as_ref() else {
+            // Deny-by-default: no grant, no provider. The guest is not asked.
+            return Vec::new();
+        };
+        grant
+            .providers
+            .iter()
+            .filter(|profile| {
+                // The load-time cross-check can only narrow the grant. `None`
+                // means it did not run, so the grant's list stands.
+                self.oauth_crosscheck
+                    .as_ref()
+                    .map_or(true, |ids| ids.contains(&profile.id))
+            })
+            .map(|profile| OAuthProvider {
+                id: profile.id.clone(),
+                display_name: profile.display_name.clone(),
+                scopes: profile.scopes.clone(),
+                flows: profile
+                    .flows
+                    .iter()
+                    .map(|flow| match flow {
+                        kiqi_plugin::grants::OAuthFlow::AuthorizationCode => {
+                            kiqi_plugin::OAuthFlow::AuthorizationCode
+                        }
+                        kiqi_plugin::grants::OAuthFlow::DeviceCode => {
+                            kiqi_plugin::OAuthFlow::DeviceCode
+                        }
+                    })
+                    .collect(),
+                supports_pkce: profile.supports_pkce,
+            })
+            .collect()
+    }
+
+    fn oauth_action(
+        &self,
+        provider_id: &str,
+        action: OAuthAction,
+    ) -> Result<OAuthResponse, PluginError> {
+        // Deny-by-default: the grant decides whether the guest is reached at
+        // all, and it must name exactly this provider.
+        let Some(grant) = self.oauth_grant.as_ref() else {
+            return Err(PluginError::Denied(format!(
+                "oauth is not granted for provider `{provider_id}`"
+            )));
+        };
+        if !grant
+            .providers
+            .iter()
+            .any(|profile| profile.id == provider_id)
+        {
+            return Err(PluginError::Denied(format!(
+                "oauth provider `{provider_id}` is not granted"
+            )));
+        }
+        // The load-time cross-check can only narrow: an id the guest did not
+        // declare in `list-providers` is never passed through. `None` means the
+        // check could not run, so the grant stands alone.
+        if let Some(ids) = self.oauth_crosscheck.as_ref() {
+            if !ids.contains(provider_id) {
+                return Err(PluginError::Denied(format!(
+                    "oauth provider `{provider_id}` is not declared by the guest"
+                )));
+            }
+        }
+        // One step runs on a plain thread with a wall-clock deadline derived
+        // from the grant. The extra second lets the host-side HTTP timeout
+        // inside the guest fire before we give up on the call.
+        let timeout = std::time::Duration::from_secs(grant.timeout_seconds.max(1))
+            + std::time::Duration::from_secs(1);
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(inner) = guard.take() else {
+            return Err(PluginError::Failed(format!("{} is unloaded", self.id)));
+        };
+        let pid = provider_id.to_string();
+        let wit_action = to_wit_oauth_action(action);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("kiqi-plugin-oauth".to_string())
+            .spawn(move || {
+                let mut inner = inner;
+                let result = inner.guest.kiqi_plugin_oauth_api().call_action(
+                    &mut inner.store,
+                    &pid,
+                    &wit_action,
+                );
+                // A `proc` handle lives for this call and nothing beyond it.
+                inner.store.data_mut().reap_procs();
+                // The receiver may be gone on timeout; the store still drops.
+                let _ = tx.send((result, inner));
+            });
+        if let Err(error) = spawned {
+            return Err(PluginError::Failed(format!(
+                "{}: cannot start the oauth thread: {error}",
+                self.id
+            )));
+        }
+        match rx.recv_timeout(timeout) {
+            Ok((result, inner)) => {
+                *guard = Some(inner);
+                match result {
+                    Ok(Ok(response)) => Ok(to_plugin_oauth_response(response)),
+                    Ok(Err(error)) => Err(map_plugin_error(error)),
+                    Err(trap) => {
+                        self.report_guest_error("oauth-action", &trap);
+                        Err(PluginError::Failed(format!(
+                            "{}: oauth action trapped: {trap}",
+                            self.id
+                        )))
+                    }
+                }
+            }
+            Err(_) => Err(PluginError::Failed(format!(
+                "{}: oauth action timed out after {}s",
+                self.id,
+                timeout.as_secs()
+            ))),
+        }
     }
 
     fn provider_request_policy(&self) -> Option<ProviderRequestPolicy> {

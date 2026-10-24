@@ -81,6 +81,13 @@ fn show(id: Option<&str>) -> i32 {
     if !disclosure.is_empty() {
         println!("\n{disclosure}");
     }
+    if grants.oauth.is_some() {
+        let store = crate::config::read_auth().unwrap_or_default();
+        let text = oauth_credentials_disclosure(id, &grants, &store);
+        if !text.is_empty() {
+            println!("\n{text}");
+        }
+    }
     print_digest(id);
     // Declarations, not grants: what the plugin claims it contributes. This is
     // the consumer for `flags`/`shortcuts`, whose runtime paths are
@@ -265,13 +272,25 @@ fn policy_disclosure(grants: &Grants, credentials: &CredentialSidecar) -> String
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
+            let scopes = if profile.scopes.is_empty() {
+                "(none)".to_string()
+            } else {
+                profile.scopes.join(" ")
+            };
             out.push_str(&format!(
-                "  {} ({}) token: {}; authorization: {}; flows: {}; pkce: {}\n",
+                "  {} ({}) token: {}; authorization: {}; device: {}; revocation: {}; \
+                 flows: {}; scopes: {}; pkce: {}\n",
                 profile.id,
                 display_name(&profile.display_name, &profile.id),
                 profile.token_endpoint,
                 profile.authorization_endpoint,
+                profile
+                    .device_authorization_endpoint
+                    .as_deref()
+                    .unwrap_or("(none)"),
+                profile.revocation_endpoint.as_deref().unwrap_or("(none)"),
                 flows,
+                scopes,
                 if profile.supports_pkce { "yes" } else { "no" },
             ));
         }
@@ -345,6 +364,37 @@ fn policy_disclosure(grants: &Grants, credentials: &CredentialSidecar) -> String
             if request.patch { "enabled" } else { "disabled" },
             request.patch_timeout_ms
         ));
+    }
+    out
+}
+
+/// The stored OAuth credential handles for a plugin's granted providers.
+///
+/// Only the namespaced key and its expiry are disclosed; the value stays in
+/// `auth.json` and is never printed, cached or passed to a guest.
+fn oauth_credentials_disclosure(
+    install_id: &str,
+    grants: &Grants,
+    store: &crate::config::AuthStore,
+) -> String {
+    let Some(oauth) = &grants.oauth else {
+        return String::new();
+    };
+    let mut out = String::from("oauth credentials:\n");
+    for profile in &oauth.providers {
+        let key = crate::config::plugin_credential_key(install_id, &profile.id);
+        let state = match store.get(&key) {
+            Some(crate::config::Credential::Oauth { expires, .. }) => {
+                if *expires == 0 {
+                    "stored (no known expiry)".to_string()
+                } else {
+                    format!("stored (expires {expires})")
+                }
+            }
+            Some(_) => "refused: a non-OAuth entry occupies this key".to_string(),
+            None => "absent".to_string(),
+        };
+        out.push_str(&format!("  {key}: {state}\n"));
     }
     out
 }
@@ -2827,5 +2877,71 @@ mod tests {
             !root.join("plugins/bad/plugin.wasm").exists(),
             "a rejected resource package installs nothing"
         );
+    }
+
+    /// `show` discloses the oauth profile (endpoints, flows, scopes, budget)
+    /// and the namespaced credential handle — never a token value.
+    #[test]
+    fn show_discloses_plugin_oauth_credentials_without_the_value() {
+        let mut grants = Grants::default();
+        grants
+            .grant_oauth(OAuthGrant {
+                providers: vec![OAuthProviderProfile {
+                    id: "acme".to_string(),
+                    display_name: "Acme".to_string(),
+                    scopes: vec!["read".to_string(), "write".to_string()],
+                    flows: vec![OAuthFlow::AuthorizationCode, OAuthFlow::DeviceCode],
+                    authorization_endpoint: "https://auth.example.com/authorize".to_string(),
+                    token_endpoint: "https://auth.example.com/token".to_string(),
+                    device_authorization_endpoint: Some(
+                        "https://auth.example.com/device".to_string(),
+                    ),
+                    revocation_endpoint: Some("https://auth.example.com/revoke".to_string()),
+                    client_id: "client-123".to_string(),
+                    supports_pkce: true,
+                }],
+                timeout_seconds: 45,
+                max_requests: 7,
+            })
+            .unwrap();
+
+        let policy = policy_disclosure(&grants, &CredentialSidecar::default());
+        for expected in [
+            "oauth policy:",
+            "acme",
+            "token: https://auth.example.com/token",
+            "authorization: https://auth.example.com/authorize",
+            "device: https://auth.example.com/device",
+            "revocation: https://auth.example.com/revoke",
+            "flows: authorization-code, device-code",
+            "scopes: read write",
+            "budget: 45s, 7 requests",
+        ] {
+            assert!(policy.contains(expected), "missing {expected}: {policy}");
+        }
+
+        let mut store = crate::config::AuthStore::new();
+        store.insert(
+            crate::config::plugin_credential_key("acme", "acme"),
+            crate::config::Credential::Oauth {
+                access: "at-secret".to_string(),
+                refresh: "rt-secret".to_string(),
+                expires: 123,
+            },
+        );
+        store.insert(
+            crate::config::plugin_credential_key("acme", "blocked"),
+            crate::config::Credential::ApiKey {
+                key: Some("sk-secret".to_string()),
+                env: None,
+            },
+        );
+        // Only `acme` is granted, so the blocked key is not in this disclosure.
+        let text = oauth_credentials_disclosure("acme", &grants, &store);
+        assert!(text.contains("plugin:acme:acme"), "{text}");
+        assert!(text.contains("stored (expires 123)"), "{text}");
+        assert!(!text.contains("at-secret"), "{text}");
+        assert!(!text.contains("rt-secret"), "{text}");
+        assert!(!text.contains("sk-secret"), "{text}");
     }
 }

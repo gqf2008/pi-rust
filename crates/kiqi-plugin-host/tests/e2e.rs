@@ -4204,3 +4204,158 @@ fn typed_input_events_reach_the_guest_and_can_be_claimed() {
     );
     assert_eq!(declined, EventAction::Continue);
 }
+
+// ---------------------------------------------------------------------------
+// oauth-api: the host wrapper (deny-by-default, cross-check, deadline)
+// ---------------------------------------------------------------------------
+
+/// A valid grant profile. The conformance guest declares the matching ids.
+fn oauth_profile(id: &str) -> kiqi_plugin::grants::OAuthProviderProfile {
+    kiqi_plugin::grants::OAuthProviderProfile {
+        id: id.to_string(),
+        display_name: "Conformance OAuth".to_string(),
+        scopes: vec!["openid".to_string()],
+        flows: vec![
+            kiqi_plugin::grants::OAuthFlow::AuthorizationCode,
+            kiqi_plugin::grants::OAuthFlow::DeviceCode,
+        ],
+        authorization_endpoint: "https://id.acme.test/authorize".to_string(),
+        token_endpoint: "https://id.acme.test/token".to_string(),
+        device_authorization_endpoint: Some("https://id.acme.test/device".to_string()),
+        revocation_endpoint: None,
+        client_id: "client-123".to_string(),
+        supports_pkce: true,
+    }
+}
+
+fn oauth_grant(
+    providers: Vec<kiqi_plugin::grants::OAuthProviderProfile>,
+) -> kiqi_plugin::grants::OAuthGrant {
+    kiqi_plugin::grants::OAuthGrant {
+        providers,
+        timeout_seconds: 60,
+        max_requests: 5,
+    }
+}
+
+/// Without an `oauth` grant the wrapper refuses before touching the guest. The
+/// guest's `begin` answer is a distinctive interaction, so its absence proves
+/// the guest was never reached.
+#[test]
+fn oauth_action_without_a_grant_never_calls_the_guest() {
+    let wasm = fixture_wasm();
+    let plugin =
+        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+
+    assert!(plugin.oauth_providers().is_empty(), "no grant, no catalog");
+
+    let error = plugin
+        .oauth_action(
+            "conformance-oauth",
+            kiqi_plugin::OAuthAction::Begin(String::new()),
+        )
+        .expect_err("no grant means no guest call");
+    let message = error.to_string();
+    assert!(message.contains("not granted"), "{message}");
+    assert!(
+        !message.contains("conformance oauth begin"),
+        "the guest must not be reached: {message}"
+    );
+}
+
+/// A granted provider reaches the guest, and the host keeps the grant in
+/// charge: an id the guest never declared is refused even when granted.
+#[test]
+fn oauth_action_reaches_a_granted_guest_and_narrows_by_declaration() {
+    let wasm = fixture_wasm();
+    let mut grants = Grants::default();
+    grants
+        .grant_oauth(oauth_grant(vec![oauth_profile("conformance-oauth")]))
+        .expect("valid grant");
+    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, grants).expect("load");
+
+    let declared = plugin.oauth_providers();
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared[0].id, "conformance-oauth");
+
+    match plugin
+        .oauth_action(
+            "conformance-oauth",
+            kiqi_plugin::OAuthAction::Begin("challenge".to_string()),
+        )
+        .expect("the guest answers")
+    {
+        kiqi_plugin::OAuthResponse::Interaction(interaction) => {
+            assert_eq!(interaction.title, "conformance oauth begin");
+            // The guest may put a URL in the response, but it is data only:
+            // `ki auth` builds the URL from the grant and never opens this one.
+            assert_eq!(
+                interaction.url.as_deref(),
+                Some("https://guest.example/never-opened")
+            );
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+/// The load-time `list-providers` cross-check can only narrow the grant: an id
+/// the guest does not declare is neither offered nor reachable.
+#[test]
+fn oauth_providers_are_narrowed_by_the_guest_list() {
+    let wasm = fixture_wasm();
+    let mut grants = Grants::default();
+    grants
+        .grant_oauth(oauth_grant(vec![
+            oauth_profile("conformance-oauth"),
+            oauth_profile("ghost"),
+        ]))
+        .expect("valid grant");
+    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, grants).expect("load");
+
+    let ids: Vec<String> = plugin
+        .oauth_providers()
+        .into_iter()
+        .map(|provider| provider.id)
+        .collect();
+    assert_eq!(ids, vec!["conformance-oauth"]);
+
+    // The guest never declared `ghost`, so the wrapper refuses without a call.
+    let error = plugin
+        .oauth_action("ghost", kiqi_plugin::OAuthAction::Poll)
+        .expect_err("not declared");
+    assert!(error.to_string().contains("not declared"), "{error}");
+}
+
+/// A guest that never returns is bounded by the grant's wall clock. The fixture
+/// spins for three seconds, so a one-second grant must give up first.
+#[test]
+fn oauth_action_times_out_on_a_spinning_guest() {
+    let wasm = fixture_wasm();
+    let mut grants = Grants::default();
+    grants
+        .grant_oauth(kiqi_plugin::grants::OAuthGrant {
+            providers: vec![oauth_profile("conformance-spin")],
+            timeout_seconds: 1,
+            max_requests: 2,
+        })
+        .expect("valid grant");
+    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, grants).expect("load");
+
+    let started = std::time::Instant::now();
+    let error = plugin
+        .oauth_action(
+            "conformance-spin",
+            kiqi_plugin::OAuthAction::Begin(String::new()),
+        )
+        .expect_err("the deadline must fire");
+    let elapsed = started.elapsed();
+    assert!(error.to_string().contains("timed out"), "{error}");
+    assert!(
+        elapsed >= std::time::Duration::from_secs(1),
+        "returned before the deadline: {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(4),
+        "the deadline must bound the call: {elapsed:?}"
+    );
+}
