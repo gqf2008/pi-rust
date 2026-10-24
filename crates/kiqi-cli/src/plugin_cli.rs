@@ -3247,6 +3247,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn revoke_oauth_preserves_a_non_oauth_namespaced_credential() {
+        let agent = tempfile::tempdir().unwrap();
+        let fixtures = tempfile::tempdir().unwrap();
+        let root = agent.path();
+        let (_, profile) = write_provider_fixtures(root, fixtures.path());
+        assert_eq!(
+            grant_into(
+                &[
+                    "acme".into(),
+                    "oauth".into(),
+                    "--provider".into(),
+                    "acme".into(),
+                    "--profile".into(),
+                    profile.display().to_string(),
+                ],
+                Some(root)
+            ),
+            0
+        );
+        let key = crate::config::plugin_credential_key("acme", "acme");
+        let mut store = crate::config::read_auth_at(root).unwrap();
+        store.insert(
+            key.clone(),
+            crate::config::Credential::ApiKey {
+                key: Some("sk-user".to_string()),
+                env: None,
+            },
+        );
+        crate::config::write_auth_at(root, &store).unwrap();
+
+        assert_eq!(revoke_into(&["acme".into(), "oauth".into()], Some(root)), 0);
+        assert!(Grants::load_for_at(root, "acme").oauth.is_none());
+        assert!(matches!(
+            crate::config::read_auth_at(root).unwrap().get(&key),
+            Some(crate::config::Credential::ApiKey { key, .. })
+                if key.as_deref() == Some("sk-user")
+        ));
+    }
+
     /// A failed IdP revocation still removes the local credential, and the
     /// failure is reported rather than swallowed.
     #[cfg(feature = "plugin-wasm")]
@@ -3317,10 +3357,10 @@ mod tests {
         );
     }
 
-    /// `uninstall` deletes every `plugin:<install>:` credential and nothing
-    /// else, so no live token is stranded once the grant that named it is gone.
+    /// `uninstall` deletes every `plugin:<install>:` OAuth credential and
+    /// nothing else, so no live token is stranded once its grant is gone.
     #[test]
-    fn uninstall_removes_every_namespaced_credential() {
+    fn uninstall_removes_every_namespaced_oauth_credential() {
         let agent = tempfile::tempdir().unwrap();
         let root = agent.path();
         std::fs::create_dir_all(root.join("plugins/foo")).unwrap();
@@ -3352,6 +3392,30 @@ mod tests {
         assert!(!after.contains_key("plugin:foo:other"), "{after:?}");
         assert!(after.contains_key("plugin:bar:acme"), "{after:?}");
         assert!(after.contains_key("anthropic"), "{after:?}");
+    }
+
+    #[test]
+    fn uninstall_preserves_a_non_oauth_namespaced_credential() {
+        let agent = tempfile::tempdir().unwrap();
+        let root = agent.path();
+        std::fs::create_dir_all(root.join("plugins/foo")).unwrap();
+        let key = crate::config::plugin_credential_key("foo", "acme");
+        let mut store = crate::config::AuthStore::new();
+        store.insert(
+            key.clone(),
+            crate::config::Credential::ApiKey {
+                key: Some("sk-user".to_string()),
+                env: None,
+            },
+        );
+        crate::config::write_auth_at(root, &store).unwrap();
+
+        assert_eq!(uninstall_into(&["foo".into()], Some(root)), 0);
+        assert!(matches!(
+            crate::config::read_auth_at(root).unwrap().get(&key),
+            Some(crate::config::Credential::ApiKey { key, .. })
+                if key.as_deref() == Some("sk-user")
+        ));
     }
 
     /// Granting `oauth`/`provider` to a plugin that already holds exec (or fs,

@@ -19,11 +19,10 @@
 //!
 //! # Concurrency
 //!
-//! v1 is a single-process CLI, so we use **atomic rename** instead of upstream's
-//! `proper-lockfile`: write a sibling temp file, `fs::rename` over the target,
-//! then `chmod 0o600` on Unix (Windows chmod is a no-op, matching Node).
-//! Concurrent `ki auth login` from two shells could lose one update — that's
-//! accepted and documented; adding a file lock is deferred.
+//! Auth-store mutations hold a process-wide mutex and the stable sidecar lock
+//! `auth.json.lock` from their read through the atomic rename. The mutex
+//! coordinates threads; the OS lock coordinates separate CLI processes. Atomic
+//! rename still makes each published snapshot complete for unlocked readers.
 //!
 //! # Config-value expansion
 //!
@@ -313,6 +312,10 @@ pub enum Credential {
 /// `Record<providerId, Credential>`.
 pub type AuthStore = BTreeMap<String, Credential>;
 
+/// Serialize every auth-store read-modify-write in this process. The sidecar
+/// OS lock acquired below extends the same exclusion to other processes.
+static AUTH_MUTATION_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Read the auth store. Missing file ⇒ empty store (not an error). Malformed
 /// JSON ⇒ `ConfigError::Json` (we do not silently swallow a corrupt auth file).
 pub fn read_auth() -> Result<AuthStore, ConfigError> {
@@ -339,19 +342,69 @@ pub fn write_auth(store: &AuthStore) -> Result<(), ConfigError> {
 
 /// [`write_auth`] against an explicit agent directory.
 pub fn write_auth_at(root: &Path, store: &AuthStore) -> Result<(), ConfigError> {
+    with_auth_mutation_lock(root, || write_auth_at_locked(root, store))
+}
+
+/// The write half of an auth mutation. The caller must hold the lock acquired
+/// by [`with_auth_mutation_lock`] so no newer snapshot can be overwritten.
+fn write_auth_at_locked(root: &Path, store: &AuthStore) -> Result<(), ConfigError> {
     let path = root.join("auth.json");
-    ensure_dir(root)?;
     let json = serde_json::to_string_pretty(store).unwrap();
     atomic_write(&path, json.as_bytes())?;
     set_owner_only(&path);
     Ok(())
 }
 
+/// Hold both the in-process and cross-process auth locks around one complete
+/// mutation. In particular, the closure must re-read the current store rather
+/// than publishing a snapshot captured before the lock was acquired.
+fn with_auth_mutation_lock<T>(
+    root: &Path,
+    mutation: impl FnOnce() -> Result<T, ConfigError>,
+) -> Result<T, ConfigError> {
+    let _process_guard = AUTH_MUTATION_MUTEX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ensure_dir(root)?;
+    let lock_path = root.join("auth.json.lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options
+        .open(&lock_path)
+        .map_err(|source| ConfigError::Write {
+            path: lock_path.clone(),
+            source,
+        })?;
+    set_owner_only(&lock_path);
+    fs2::FileExt::lock_exclusive(&file).map_err(|source| ConfigError::Write {
+        path: lock_path.clone(),
+        source,
+    })?;
+
+    let result = mutation();
+    let unlocked = fs2::FileExt::unlock(&file).map_err(|source| ConfigError::Write {
+        path: lock_path,
+        source,
+    });
+    match result {
+        Err(error) => Err(error),
+        Ok(value) => {
+            unlocked?;
+            Ok(value)
+        }
+    }
+}
+
 /// Read-modify-write: upsert a credential for `provider_id`.
 pub fn upsert_credential(provider_id: &str, cred: Credential) -> Result<(), ConfigError> {
-    let mut store = read_auth()?;
-    store.insert(provider_id.to_string(), cred);
-    write_auth(&store)
+    let root = agent_dir()?;
+    with_auth_mutation_lock(&root, || {
+        let mut store = read_auth_at(&root)?;
+        store.insert(provider_id.to_string(), cred);
+        write_auth_at_locked(&root, &store)
+    })
 }
 
 /// Store an OAuth token under exactly one provider id using the atomic auth
@@ -417,26 +470,29 @@ pub fn upsert_plugin_oauth_token(
     profile_fingerprint: String,
 ) -> Result<(), ConfigError> {
     let key = plugin_credential_key(install_id, provider_id);
-    let mut store = read_auth()?;
-    if matches!(store.get(&key), Some(Credential::ApiKey { .. })) {
-        return Err(ConfigError::Write {
-            path: auth_path()?,
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("refusing to replace the non-OAuth credential at `{key}`"),
-            ),
-        });
-    }
-    store.insert(
-        key,
-        Credential::Oauth {
-            access,
-            refresh,
-            expires,
-            profile_fingerprint: Some(profile_fingerprint),
-        },
-    );
-    write_auth(&store)
+    let root = agent_dir()?;
+    with_auth_mutation_lock(&root, || {
+        let mut store = read_auth_at(&root)?;
+        if matches!(store.get(&key), Some(Credential::ApiKey { .. })) {
+            return Err(ConfigError::Write {
+                path: root.join("auth.json"),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("refusing to replace the non-OAuth credential at `{key}`"),
+                ),
+            });
+        }
+        store.insert(
+            key,
+            Credential::Oauth {
+                access,
+                refresh,
+                expires,
+                profile_fingerprint: Some(profile_fingerprint),
+            },
+        );
+        write_auth_at_locked(&root, &store)
+    })
 }
 
 /// Read one plugin's namespaced OAuth credential.
@@ -476,7 +532,7 @@ pub fn read_plugin_oauth_token_at(
 /// Remove one plugin's namespaced OAuth credential, leaving every bare
 /// provider entry (and every other plugin's entry) untouched.
 pub fn delete_plugin_oauth_token(install_id: &str, provider_id: &str) -> Result<bool, ConfigError> {
-    delete_credential(&plugin_credential_key(install_id, provider_id))
+    delete_plugin_oauth_token_at(&agent_dir()?, install_id, provider_id)
 }
 
 /// [`delete_plugin_oauth_token`] against an explicit agent directory.
@@ -485,27 +541,42 @@ pub fn delete_plugin_oauth_token_at(
     install_id: &str,
     provider_id: &str,
 ) -> Result<bool, ConfigError> {
-    delete_credential_at(root, &plugin_credential_key(install_id, provider_id))
+    let key = plugin_credential_key(install_id, provider_id);
+    with_auth_mutation_lock(root, || {
+        let mut store = read_auth_at(root)?;
+        if !matches!(store.get(&key), Some(Credential::Oauth { .. })) {
+            return Ok(false);
+        }
+        store.remove(&key);
+        write_auth_at_locked(root, &store)?;
+        Ok(true)
+    })
 }
 
-/// Remove every `plugin:<install-id>:*` credential, returning how many entries
-/// went away. Bare provider keys and other plugins' entries are untouched.
+/// Remove every OAuth credential under `plugin:<install-id>:*`, returning how
+/// many entries went away. Non-OAuth entries, bare provider keys, and other
+/// plugins' entries are preserved.
 pub fn delete_plugin_credentials_at(root: &Path, install_id: &str) -> Result<usize, ConfigError> {
     let prefix = format!("plugin:{install_id}:");
-    let mut store = read_auth_at(root)?;
-    let keys: Vec<String> = store
-        .keys()
-        .filter(|key| key.starts_with(&prefix))
-        .cloned()
-        .collect();
-    if keys.is_empty() {
-        return Ok(0);
-    }
-    for key in &keys {
-        store.remove(key);
-    }
-    write_auth_at(root, &store)?;
-    Ok(keys.len())
+    with_auth_mutation_lock(root, || {
+        let mut store = read_auth_at(root)?;
+        let keys: Vec<String> = store
+            .keys()
+            .filter(|key| {
+                key.starts_with(&prefix)
+                    && matches!(store.get(*key), Some(Credential::Oauth { .. }))
+            })
+            .cloned()
+            .collect();
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        for key in &keys {
+            store.remove(key);
+        }
+        write_auth_at_locked(root, &store)?;
+        Ok(keys.len())
+    })
 }
 
 /// Remove `provider_id` from the store. Returns `true` if a credential was
@@ -518,13 +589,15 @@ pub fn delete_credential(provider_id: &str) -> Result<bool, ConfigError> {
 
 /// [`delete_credential`] against an explicit agent directory.
 pub fn delete_credential_at(root: &Path, provider_id: &str) -> Result<bool, ConfigError> {
-    let mut store = read_auth_at(root)?;
-    if store.remove(provider_id).is_some() {
-        write_auth_at(root, &store)?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    with_auth_mutation_lock(root, || {
+        let mut store = read_auth_at(root)?;
+        if store.remove(provider_id).is_some() {
+            write_auth_at_locked(root, &store)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1469,6 +1542,65 @@ mod tests {
             read_auth().unwrap().get("plugin:install-1:anthropic"),
             Some(Credential::ApiKey { key, .. }) if key.as_deref() == Some("not-an-oauth-token")
         ));
+    }
+
+    #[test]
+    fn plugin_oauth_delete_preserves_a_non_oauth_namespaced_entry() {
+        let _cfg = TempConfig::new();
+        let key = plugin_credential_key("install-1", "anthropic");
+        upsert_credential(
+            &key,
+            Credential::ApiKey {
+                key: Some("sk-user".into()),
+                env: None,
+            },
+        )
+        .unwrap();
+
+        assert!(!delete_plugin_oauth_token("install-1", "anthropic").unwrap());
+        assert!(matches!(
+            read_auth().unwrap().get(&key),
+            Some(Credential::ApiKey { key, .. }) if key.as_deref() == Some("sk-user")
+        ));
+    }
+
+    #[test]
+    fn concurrent_plugin_oauth_writes_both_survive() {
+        let _cfg = TempConfig::new();
+        for round in 0..64 {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+            let mut writers = Vec::new();
+            for provider in ["first", "second"] {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let provider = format!("{provider}-{round}");
+                writers.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    upsert_plugin_oauth_token(
+                        "install-1",
+                        &provider,
+                        format!("at-{provider}"),
+                        "rt".into(),
+                        0,
+                        "fingerprint-1".into(),
+                    )
+                    .unwrap();
+                }));
+            }
+            barrier.wait();
+            for writer in writers {
+                writer.join().unwrap();
+            }
+
+            let store = read_auth().unwrap();
+            for provider in ["first", "second"] {
+                let provider = format!("{provider}-{round}");
+                let key = plugin_credential_key("install-1", &provider);
+                assert!(
+                    matches!(store.get(&key), Some(Credential::Oauth { .. })),
+                    "concurrent write lost `{key}` in round {round}: {store:?}"
+                );
+            }
+        }
     }
 
     #[test]
