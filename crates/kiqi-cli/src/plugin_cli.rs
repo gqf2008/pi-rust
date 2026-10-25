@@ -1692,10 +1692,18 @@ pub(crate) enum DigestStatus {
 /// (provenance) need a distribution channel to be worth anything, so they are
 /// deliberately not pretended here.
 pub(crate) fn digest_status(wasm: &Path) -> Result<DigestStatus, String> {
+    let bytes = std::fs::read(wasm).map_err(|error| format!("read {}: {error}", wasm.display()))?;
+    digest_status_bytes(wasm, &bytes)
+}
+
+/// [`digest_status`] against bytes the caller already read, so the verdict
+/// covers exactly those bytes: a file replaced between read and verify cannot
+/// slip past the gate.
+pub(crate) fn digest_status_bytes(wasm: &Path, bytes: &[u8]) -> Result<DigestStatus, String> {
     let Some(recorded) = read_digest_sidecar(wasm)? else {
         return Ok(DigestStatus::Missing);
     };
-    let actual = file_sha256_hex(wasm)?;
+    let actual = sha256_hex(bytes);
     if recorded == actual {
         Ok(DigestStatus::Ok { recorded })
     } else {

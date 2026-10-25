@@ -405,9 +405,10 @@ fn forward_delta(
 /// Create (or reuse) the dedicated [`kiqi_plugin_host::ProviderHost`].
 ///
 /// Runs on the blocking thread that owns the request. `Ok(None)` from
-/// `ProviderHost::load_with_options` — no provider grant (or no profile naming
-/// this install id) — becomes an error: deny-by-default means the guest is
-/// never instantiated.
+/// `ProviderHost::load_bytes_with_options` — no provider grant (or no profile
+/// naming this install id) — becomes an error: deny-by-default means the
+/// guest is never instantiated. The bytes are digest-gated here on every
+/// load/rebuild, not just at catalog construction.
 #[cfg(feature = "plugin-wasm")]
 fn ensure_host(slot: &ProviderSlot) -> Result<Arc<kiqi_plugin_host::ProviderHost>, String> {
     use kiqi_plugin_host::{ProviderHost, ProviderHostOptions};
@@ -437,9 +438,19 @@ fn ensure_host(slot: &ProviderSlot) -> Result<Arc<kiqi_plugin_host::ProviderHost
     // Never leave a stale instance eligible for a later request. A failed
     // rebuild fails closed and is retried from the current grant next time.
     *guard = None;
-    let host = ProviderHost::load_with_options(
+    // The catalog gate checked bytes that may long since have been replaced;
+    // re-hash exactly what will compile now and hand the loader those same
+    // bytes, so a plugin.wasm swapped after catalog resolution — or while a
+    // disabled host is being rebuilt — cannot run under the old grant.
+    let bytes = std::fs::read(&slot.wasm)
+        .map_err(|error| format!("{}: read {}: {error}", slot.id, slot.wasm.display()))?;
+    if let Err(diagnostic) = crate::plugins::digest_gate_bytes(&slot.wasm, &bytes) {
+        return Err(format!("{}: {diagnostic}", slot.id));
+    }
+    let host = ProviderHost::load_bytes_with_options(
         slot.id.clone(),
         &slot.wasm,
+        &bytes,
         &grants,
         ProviderHostOptions {
             agent_root: slot.agent_root.clone(),
@@ -1284,5 +1295,187 @@ mod tests {
         let narrowed = ensure_host(&slot).expect("narrowed grant builds a fresh host");
         assert!(!Arc::ptr_eq(&original, &narrowed));
         assert_eq!(hosts_built(), 2);
+    }
+
+    /// Rewrite `wasm` with one extra trailing custom section: still a valid
+    /// component (a loader without the digest gate compiles and runs it), but
+    /// different bytes, so the stale sidecar no longer matches.
+    fn replace_with_valid_but_different_bytes(wasm: &Path) {
+        let mut bytes = std::fs::read(wasm).expect("read plugin.wasm");
+        // Custom section: id 0x00, size 0x05, name length 0x01, name "x",
+        // three payload bytes. Custom sections are legal anywhere, last
+        // included.
+        bytes.extend([0x00, 0x05, 0x01, b'x', 0xde, 0xad, 0xbe]);
+        std::fs::write(wasm, &bytes).expect("replace plugin.wasm");
+    }
+
+    async fn wait_terminal(stream: &mut AssistantMessageEventStream) -> AssistantMessageEvent {
+        while let Some(event) = stream.next().await {
+            if matches!(
+                event,
+                AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
+            ) {
+                return event;
+            }
+        }
+        panic!("the provider stream closed without a terminal event")
+    }
+
+    fn assert_digest_error(event: &AssistantMessageEvent) {
+        match event {
+            AssistantMessageEvent::Error { error, .. } => assert!(
+                error
+                    .error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("digest mismatch"),
+                "the replaced bytes must be refused by the digest gate: {error:?}"
+            ),
+            other => panic!("the replaced bytes must not run: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wasm_replaced_after_catalog_resolution_is_refused_at_first_use() {
+        let _lock = HOST_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let wasm = install_conformance_provider(root.path(), &["conformance-stream"]);
+        // Catalog construction digests these bytes and offers the model; the
+        // sidecar is what makes any later replacement detectable.
+        crate::plugin_cli::write_digest_sidecar(&wasm).unwrap();
+        let provider = WasmProvider::new(
+            "conformance",
+            vec![conformance_model("conformance-stream")],
+            wasm.clone(),
+            Some(root.path().to_path_buf()),
+        );
+        // The plugin is swapped after catalog resolution, before first use.
+        replace_with_valid_but_different_bytes(&wasm);
+        reset_hosts_built();
+        let model = conformance_model("conformance-stream");
+        let mut stream = provider
+            .stream_simple(&model, &Context::default(), &SimpleStreamOptions::default())
+            .await;
+        let terminal = wait_terminal(&mut stream).await;
+        assert_digest_error(&terminal);
+        assert!(!provider.host_loaded());
+        assert_eq!(
+            hosts_built(),
+            0,
+            "replaced bytes must never be compiled under the old grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wasm_replacement_is_refused_when_a_disabled_host_rebuilds() {
+        let _lock = HOST_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let wasm =
+            install_conformance_provider_with_timeout(root.path(), &["conformance-model"], 1);
+        crate::plugin_cli::write_digest_sidecar(&wasm).unwrap();
+        let slot = ProviderSlot {
+            id: "conformance".to_string(),
+            wasm: wasm.clone(),
+            agent_root: Some(root.path().to_path_buf()),
+            host: std::sync::Mutex::new(None),
+        };
+        reset_hosts_built();
+        let original = ensure_host(&slot).expect("initial host");
+        assert_eq!(hosts_built(), 1);
+        // Disable the instance: spin mode trips the epoch deadline, and a
+        // trapped store is never reused, so the next request must rebuild.
+        let disabled = Arc::clone(&original);
+        let outcome = tokio::task::spawn_blocking(move || {
+            disabled.request(r#"{"model":"conformance-model","mode":"spin"}"#)
+        })
+        .await
+        .expect("join the request task");
+        assert!(
+            outcome.is_err(),
+            "the spin must hit its deadline: {outcome:?}"
+        );
+        assert!(original.is_disabled());
+
+        replace_with_valid_but_different_bytes(&wasm);
+        let error = match ensure_host(&slot) {
+            Ok(_) => panic!("the rebuild must re-check the digest"),
+            Err(error) => error,
+        };
+        assert!(error.contains("digest mismatch"), "{error}");
+        assert_eq!(
+            hosts_built(),
+            1,
+            "a disabled host must not be rebuilt from replaced bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_parked_requests_keep_abandoned_workers_bounded() {
+        let _lock = HOST_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let wasm = install_conformance_provider_with_timeout(root.path(), &["conformance-park"], 1);
+        let plugin_dir = wasm.parent().expect("plugin dir").to_path_buf();
+        let provider = WasmProvider::new(
+            "conformance",
+            vec![conformance_model("conformance-park")],
+            wasm.clone(),
+            Some(root.path().to_path_buf()),
+        );
+        let model = conformance_model("conformance-park");
+        let opts = || SimpleStreamOptions::default();
+        reset_hosts_built();
+        let cap = kiqi_plugin_host::PROVIDER_MAX_ABANDONED_WORKERS;
+
+        for expected in 1..=cap {
+            let mut stream = provider
+                .stream_simple(&model, &Context::default(), &opts())
+                .await;
+            let terminal = wait_terminal(&mut stream).await;
+            match &terminal {
+                AssistantMessageEvent::Error { error, .. } => assert!(
+                    error
+                        .error_message
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("deadline"),
+                    "a parked guest must hit the host deadline: {error:?}"
+                ),
+                other => panic!("a parked guest must not succeed: {other:?}"),
+            }
+            assert_eq!(
+                kiqi_plugin_host::abandoned_worker_count("conformance", &plugin_dir),
+                expected,
+                "the deadline must register its abandoned worker"
+            );
+        }
+
+        // The budget is full: the next request must be refused instead of
+        // accumulating yet another parked worker and store.
+        let mut stream = provider
+            .stream_simple(&model, &Context::default(), &opts())
+            .await;
+        let terminal = wait_terminal(&mut stream).await;
+        match &terminal {
+            AssistantMessageEvent::Error { error, .. } => assert!(
+                error
+                    .error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("abandoned"),
+                "the capped provider must fail closed: {error:?}"
+            ),
+            other => panic!("the capped provider must not run the guest: {other:?}"),
+        }
+        assert_eq!(
+            hosts_built(),
+            cap,
+            "no host may be built while abandoned workers hold the budget"
+        );
     }
 }

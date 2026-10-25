@@ -71,8 +71,8 @@ pub use provider_patch::{
 pub mod provider_host;
 pub mod provider_http;
 pub use provider_host::{
-    DeltaKind, DeltaPhase, ProviderDeltaEvent, ProviderHost, ProviderHostOptions, ProviderResponse,
-    ProviderStreamSegment,
+    abandoned_worker_count, DeltaKind, DeltaPhase, ProviderDeltaEvent, ProviderHost,
+    ProviderHostOptions, ProviderResponse, ProviderStreamSegment, PROVIDER_MAX_ABANDONED_WORKERS,
 };
 pub use provider_http::{
     fingerprint_credential, ProviderHttpError, ProviderHttpRequest, ProviderHttpStream,

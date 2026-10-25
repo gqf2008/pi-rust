@@ -23,7 +23,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
 
 use kiqi_plugin::grants::{Grants, ProviderModel, ProviderProfile};
 use kiqi_plugin::{CancelProbe, HostCaps, Log, LogLevel, PluginError};
@@ -300,6 +301,74 @@ fn validate_tool_call(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// How many workers one provider may leave abandoned — a wall-clock deadline
+/// returned while the worker was still parked inside a host import — before
+/// another instance build is refused. Every abandoned worker keeps owning a
+/// thread and a [`Store`] until the parked import returns, so replacing an
+/// instance without bound would accumulate both.
+pub const PROVIDER_MAX_ABANDONED_WORKERS: usize = 2;
+
+/// Abandoned provider workers per `(provider id, plugin dir)`, kept until
+/// their threads finish. The plugin dir is part of the key because two agent
+/// roots can grant the same install id; their workers are independent.
+static ABANDONED_WORKERS: OnceLock<Mutex<HashMap<String, Vec<JoinHandle<()>>>>> = OnceLock::new();
+
+fn abandoned_workers() -> &'static Mutex<HashMap<String, Vec<JoinHandle<()>>>> {
+    ABANDONED_WORKERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn abandoned_key(id: &str, plugin_dir: &Path) -> String {
+    format!("{id}\u{0}{}", plugin_dir.display())
+}
+
+/// Drop entries whose worker threads have finished.
+fn prune_abandoned(workers: &mut HashMap<String, Vec<JoinHandle<()>>>) {
+    for entry in workers.values_mut() {
+        entry.retain(|worker| !worker.is_finished());
+    }
+    workers.retain(|_, entry| !entry.is_empty());
+}
+
+/// How many abandoned workers of one provider are still running.
+pub fn abandoned_worker_count(id: &str, plugin_dir: &Path) -> usize {
+    let mut workers = abandoned_workers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    prune_abandoned(&mut workers);
+    workers
+        .get(&abandoned_key(id, plugin_dir))
+        .map_or(0, Vec::len)
+}
+
+/// Record a worker a deadline abandoned, so instance replacement can stay
+/// bounded. A worker that already finished occupies no budget: the next prune
+/// drops it.
+fn record_abandoned_worker(id: &str, plugin_dir: &Path, worker: JoinHandle<()>) {
+    let mut workers = abandoned_workers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    prune_abandoned(&mut workers);
+    workers
+        .entry(abandoned_key(id, plugin_dir))
+        .or_default()
+        .push(worker);
+}
+
+/// Refuse to build another instance while a provider's abandoned workers sit
+/// at the cap: each one pins a thread and a store, and a guest parked in a
+/// host import can keep them alive indefinitely. The caller's request fails
+/// closed and succeeds again once the parked workers return.
+fn refuse_when_abandoned_workers_overflow(id: &str, plugin_dir: &Path) -> Result<(), PluginError> {
+    let count = abandoned_worker_count(id, plugin_dir);
+    if count >= PROVIDER_MAX_ABANDONED_WORKERS {
+        return Err(PluginError::Failed(format!(
+            "{id}: {count} abandoned provider workers are still being reaped (cap \
+             {PROVIDER_MAX_ABANDONED_WORKERS}); retry once the parked calls return"
+        )));
+    }
+    Ok(())
+}
+
 /// One instantiated provider, on its own store.
 pub struct ProviderHost {
     id: String,
@@ -349,6 +418,23 @@ impl ProviderHost {
         grants: &Grants,
         options: ProviderHostOptions,
     ) -> Result<Option<Self>, PluginError> {
+        let bytes = std::fs::read(wasm)
+            .map_err(|error| PluginError::Failed(format!("read {}: {error}", wasm.display())))?;
+        Self::load_bytes_with_options(id, wasm, &bytes, grants, options)
+    }
+
+    /// [`Self::load_with_options`], compiling exactly `bytes`.
+    ///
+    /// Callers that verify the component against its digest sidecar hash the
+    /// bytes first; this lets them hand over those same bytes, so a file
+    /// replaced between verification and compilation is not what runs.
+    pub fn load_bytes_with_options(
+        id: impl Into<String>,
+        wasm: &Path,
+        bytes: &[u8],
+        grants: &Grants,
+        options: ProviderHostOptions,
+    ) -> Result<Option<Self>, PluginError> {
         let id = id.into();
         let Some(profile) = grants
             .provider
@@ -363,6 +449,8 @@ impl ProviderHost {
                 "{id}: provider profile has no models"
             )));
         }
+        let plugin_dir = wasm.parent().unwrap_or_else(|| Path::new("."));
+        refuse_when_abandoned_workers_overflow(&id, plugin_dir)?;
         let ticker = crate::render_ticker().ok_or_else(|| {
             PluginError::Failed(format!("{id}: provider epoch ticker is unavailable"))
         })?;
@@ -378,7 +466,7 @@ impl ProviderHost {
                 .map_err(|error| PluginError::Failed(format!("{id}: provider engine: {error}")))?,
         );
         ticker.register(&engine);
-        let component = Component::from_file(&engine, wasm)
+        let component = Component::new(&engine, bytes)
             .map_err(|error| PluginError::Failed(format!("load {}: {error}", wasm.display())))?;
 
         let mut linker = Linker::new(&engine);
@@ -430,10 +518,7 @@ impl ProviderHost {
             ),
             fuel: options.fuel.unwrap_or(u64::MAX),
             profile,
-            plugin_dir: wasm
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
+            plugin_dir: plugin_dir.to_path_buf(),
             agent_root: options.agent_root,
             transport: options
                 .transport
@@ -472,7 +557,7 @@ impl ProviderHost {
             return Err(format!("{}: reset provider fuel: {error}", self.id));
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        let probe = std::thread::Builder::new()
+        let worker = match std::thread::Builder::new()
             .name("kiqi-provider-metadata".to_string())
             .spawn(move || {
                 inner.store.data_mut().provider_http.reap();
@@ -496,14 +581,16 @@ impl ProviderHost {
                 crate::clear_context();
                 inner.store.data_mut().reap_call_scoped();
                 let _ = tx.send((outcome, inner));
-            });
-        if let Err(error) = probe {
-            self.disabled.store(true, Ordering::Release);
-            return Err(format!(
-                "{}: cannot start the metadata thread: {error}",
-                self.id
-            ));
-        }
+            }) {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.disabled.store(true, Ordering::Release);
+                return Err(format!(
+                    "{}: cannot start the metadata thread: {error}",
+                    self.id
+                ));
+            }
+        };
         match rx.recv_timeout(crate::DISCOVERY_WAIT) {
             Ok((outcome, inner)) => {
                 *guard = Some(inner);
@@ -513,6 +600,9 @@ impl ProviderHost {
             }
             Err(_) => {
                 self.disabled.store(true, Ordering::Release);
+                // The metadata worker still owns the store; keep it on the
+                // abandonment ledger so replacement stays bounded.
+                record_abandoned_worker(&self.id, &self.plugin_dir, worker);
                 Err(format!(
                     "{}: list-providers did not finish within {}s",
                     self.id,
@@ -635,7 +725,7 @@ impl ProviderHost {
             .max(1) as u64;
         let request = request.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
-        let worker = std::thread::Builder::new()
+        let worker = match std::thread::Builder::new()
             .name("kiqi-provider-request".to_string())
             .spawn(move || {
                 inner.store.data_mut().provider_http.begin_call();
@@ -669,14 +759,16 @@ impl ProviderHost {
                 let overflowed = assembler.overflowed;
                 let assembled = assembler.finish();
                 let _ = tx.send((outcome, assembled, inner, overflowed));
-            });
-        if let Err(error) = worker {
-            self.disabled.store(true, Ordering::Release);
-            return Err(format!(
-                "{}: cannot start the provider thread: {error}",
-                self.id
-            ));
-        }
+            }) {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.disabled.store(true, Ordering::Release);
+                return Err(format!(
+                    "{}: cannot start the provider thread: {error}",
+                    self.id
+                ));
+            }
+        };
 
         // The epoch deadline fires at `timeout`; this is the backstop for a
         // guest parked inside a host import, which epoch cannot interrupt.
@@ -713,6 +805,10 @@ impl ProviderHost {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 self.disabled.store(true, Ordering::Release);
+                // The worker still owns the store and may sit parked in a
+                // host import for a long time; the abandonment ledger is
+                // what bounds how many such instances may pile up.
+                record_abandoned_worker(&self.id, &self.plugin_dir, worker);
                 Err(format!(
                     "{}: provider request exceeded its {}s deadline",
                     self.id,
@@ -1003,5 +1099,70 @@ mod tests {
         assert_eq!(value["provider"], "acme");
         assert_eq!(value["model"], "acme-1");
         assert_eq!(value["api"], "openai-completions");
+    }
+
+    /// A per-test key for the process-wide abandonment ledger, so parallel
+    /// tests (and the other suites in this crate) never share a budget.
+    fn abandoned_scratch(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("kiqi-abandoned-{tag}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn a_finished_worker_is_pruned_and_holds_no_budget() {
+        let dir = abandoned_scratch("prune");
+        let finished = std::thread::Builder::new()
+            .spawn(|| {})
+            .expect("spawn a finished worker");
+        // `join` would consume the handle; poll instead. Once true it stays.
+        while !finished.is_finished() {
+            std::thread::yield_now();
+        }
+        record_abandoned_worker("abandoned-prune", &dir, finished);
+        assert_eq!(
+            abandoned_worker_count("abandoned-prune", &dir),
+            0,
+            "a finished worker must not occupy the budget"
+        );
+        refuse_when_abandoned_workers_overflow("abandoned-prune", &dir)
+            .expect("reaped workers keep the provider buildable");
+    }
+
+    #[test]
+    fn live_abandoned_workers_fill_the_budget_until_they_return() {
+        let dir = abandoned_scratch("cap");
+        let release = Arc::new(AtomicBool::new(false));
+        for _ in 0..PROVIDER_MAX_ABANDONED_WORKERS {
+            let parked = Arc::clone(&release);
+            let worker = std::thread::Builder::new()
+                .spawn(move || {
+                    while !parked.load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    }
+                })
+                .expect("spawn a parked worker");
+            record_abandoned_worker("abandoned-cap", &dir, worker);
+        }
+        assert_eq!(
+            abandoned_worker_count("abandoned-cap", &dir),
+            PROVIDER_MAX_ABANDONED_WORKERS
+        );
+        let error = refuse_when_abandoned_workers_overflow("abandoned-cap", &dir)
+            .expect_err("a full budget must refuse another instance");
+        let message = error.to_string();
+        assert!(message.contains("abandoned"), "{message}");
+        assert!(message.contains("retry"), "{message}");
+
+        // Releasing the parked workers must recover the budget.
+        release.store(true, Ordering::Release);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while abandoned_worker_count("abandoned-cap", &dir) > 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "released workers must be reaped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        refuse_when_abandoned_workers_overflow("abandoned-cap", &dir)
+            .expect("a reaped budget must be buildable again");
     }
 }

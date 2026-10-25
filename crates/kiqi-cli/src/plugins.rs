@@ -1450,8 +1450,19 @@ pub fn load_hosts() -> Vec<PluginHost> {
 /// than running bytes the recorded expectation does not match.
 #[cfg(feature = "plugin-wasm")]
 pub(crate) fn digest_gate(wasm: &std::path::Path) -> Result<Option<&'static str>, String> {
+    let bytes = std::fs::read(wasm).map_err(|error| format!("read {}: {error}", wasm.display()))?;
+    digest_gate_bytes(wasm, &bytes)
+}
+
+/// [`digest_gate`] for bytes the caller already read, so the gate judges
+/// exactly the bytes that are about to be compiled — the loader hands over
+/// the same buffer, closing the read-check-compile gap.
+pub(crate) fn digest_gate_bytes(
+    wasm: &std::path::Path,
+    bytes: &[u8],
+) -> Result<Option<&'static str>, String> {
     use crate::plugin_cli::DigestStatus;
-    match crate::plugin_cli::digest_status(wasm) {
+    match crate::plugin_cli::digest_status_bytes(wasm, bytes) {
         Ok(DigestStatus::Ok { .. }) => Ok(None),
         Ok(DigestStatus::Missing) => Ok(Some("missing")),
         Ok(DigestStatus::Mismatch { recorded, actual }) => Err(format!(
