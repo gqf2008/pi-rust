@@ -30,6 +30,67 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **BREAKING (wasm ABI 0.8.0): every installed guest must be rebuilt.** The package
+  version *is* the ABI version, so a 0.7.1 component fails instantiation. Two existing
+  signatures changed — `run-command` returns `command-result` and
+  `session-read.cli-flag` returns `option<flag-value>` (a bare `--foo` is now `bare`,
+  no longer a dropped JSON bool) — and two closed variants gained a case
+  (`event.input`, `event-action.patch`). All 12 in-repo guests are rebuilt in this
+  release; no third-party wasm ecosystem exists to migrate. The world also gains the
+  exports `oauth-api`, `provider-api` and `render-api`, which every guest must
+  implement (`kiqi_plugin_guest::deny_contribution_exports!` supplies empty/denied
+  stubs), and the imports `oauth-http`, `provider-stream` and `provider-http`.
+
+  Five capabilities arrive **deny-by-default**, each carrying its policy in the grant:
+  `oauth`, `provider`, `render`, `resources` and `provider-request`. None is
+  auto-granted by `--yes` (`AUTO_GRANT_EXEMPT`): an install lists them and stops, and
+  the user grants explicitly with `ki plugin grant <id> <capability> …`. A missing
+  grants file still grants nothing, and a hand-edited file fails closed — a key that
+  fails validation is dropped while the others survive.
+
+  Behaviour changes worth knowing before upgrading: OAuth tokens never cross the wasm
+  boundary (the host performs the token-endpoint HTTP and stores
+  `plugin:<install-id>:<provider-id>`; a guest sees only `oauth-credential-status`).
+  Stored tokens are bound to a fingerprint of the provider id, client id and endpoint
+  origins, so refresh/logout/revoke refuse a changed issuing profile. Logout requires
+  the explicit `--force-local` path to delete locally after a mismatch, and typed
+  deletion never removes an `ApiKey`. Auth-store mutations hold a process mutex and
+  `auth.json.lock` across their locked re-read and atomic replace.
+
+  The provider runtime is wired end to end. `WasmProvider` joins resolve and `/model`,
+  instantiates its dedicated `ProviderHost` lazily on the first request, and revalidates
+  the grant on every request, so revocation stops the next call. `provider-http`
+  enforces the endpoint before connecting, rejects encoded separators/dots, dot
+  segments and redirects, strips guest credential/framing headers, injects only the
+  host-held credential after a fresh fingerprint check, and reaps per-call handles.
+  `provider-stream` is restricted to provider calls and bounded at 16,384 deltas,
+  1,024 blocks and 16 MiB; the CLI's 256-entry live queue cancels on overflow, while
+  its `select!` forwards a host timeout as a terminal stream error without waiting for
+  an abandoned guest sender.
+
+  Markdown rendering is finalize-only on a deny-all instance. Both instantiation and
+  transformation are bounded; transformation uses a detached worker and a wall-clock
+  deadline (epoch interruption still covers pure-CPU spins). The
+  `before-provider-request` observation is redacted unless `provider-request --observe`
+  is granted (`apiKey` becomes `apiKeyPresent`, messages are dropped by default). Even
+  with `--headers values`, only `traceparent`, `tracestate`, `x-request-id`,
+  `x-correlation-id` and `x-trace` values cross the ABI. The Observe partition applies
+  only to this event, and
+  each patch gate uses a dedicated instance so a guest parked in a host import cannot
+  starve shared probes or tool calls.
+
+  Consent and residual-risk behavior is explicit: a resources manifest never grants
+  `resources`, including on reinstall or with `--yes`; use `ki plugin grant`. Granting
+  `oauth`/`provider` alongside existing `exec`/`fs`/`net-sockets` emits the implemented
+  O17 warning but does not refuse the grant.
+
+  Boundaries, stated rather than implied: built-in providers still resolve stored API
+  keys only (`stored_api_key` does not automatically consume an OAuth entry), whereas a
+  wasm provider can use an OAuth access token through an explicit, fingerprint-checked
+  `--credential-from` grant. The cdylib OAuth/provider/renderer/resources registrations
+  are superseded but their P6 deletion is still pending. The process-level compiled
+  event sink used by legacy plugins also remains last-writer-wins across session builds.
+
 - **MCP notices can suppress a session's own collab echoes.** Collab entries
   now carry the writing session (from `KI_AGENT_ID`), and the client keeps the
   *raw* session list a notification reports (`_meta.sessions`) to compare it at

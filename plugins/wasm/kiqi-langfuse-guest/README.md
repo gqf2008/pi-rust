@@ -17,3 +17,5 @@ Build:
 cargo build --manifest-path plugins/wasm/kiqi-langfuse-guest/Cargo.toml \
   --target wasm32-wasip2 --release
 ```
+
+ABI 0.8.0: a rebuild must also implement `continue_command` and the `oauth-api` / `provider-api` / `render-api` contribution exports; this crate fills the latter three with `kiqi_plugin_guest::deny_contribution_exports!(…)`.

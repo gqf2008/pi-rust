@@ -1,6 +1,6 @@
 # kiqi-lens-guest
 
-`kiqi-lens` ported to the kiqi wasm ABI (`kiqi:plugin@0.7.1`): the `code_lens`
+`kiqi-lens` ported to the kiqi wasm ABI (`kiqi:plugin@0.8.0`): the `code_lens`
 tool runs one allowlisted local check — `git diff --check`, `cargo check`,
 `cargo fmt -- --check`, or `cargo clippy -- -D warnings` — through the host's
 `exec` capability instead of spawning the process itself.
@@ -57,6 +57,8 @@ spelling (macOS `/tmp/…` vs `/private/tmp/…`) is refused — pass a relative
 path instead. And when an embedder overrides the host's `Options::project_dir`
 to something other than the process cwd, the guest's strip anchor and the
 host's jail root diverge; the default `ki` embedding never does this.
+
+ABI 0.8.0: a rebuild must also implement `continue_command` and the `oauth-api` / `provider-api` / `render-api` contribution exports; this crate fills the latter three with `kiqi_plugin_guest::deny_contribution_exports!(…)`.
 
 ## Build
 

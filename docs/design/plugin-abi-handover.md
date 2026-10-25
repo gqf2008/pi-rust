@@ -2,30 +2,44 @@
 
 # wasm 插件层 — 交接文档
 
-> 状态：**可用**。契约 `kiqi:plugin@0.7.0`，能力全实现，限额齐全，CI 全绿。
-> 分支：`fork/main`；设计细节见 `docs/design/plugin-abi.md`（§6.x 是逐轮记录）与 `docs/design/plugin-trait.md`。
+> 状态：**可用（ABI 0.8.0）**。契约 `kiqi:plugin@0.8.0`；12 个 guest 已按新导出面重建，
+> 十个授权 key 都进入 `ENFORCED_CAPABILITIES`（授权、策略校验与 CLI 齐全），OAuth / provider /
+> render / resources / 类型化命令面均已落地。provider 由专用 `ProviderHost` 与 CLI 的
+> `WasmProvider` 执行，详见 `plugin-abi.md` §6.41。设计细节见 `docs/design/plugin-abi.md`
+> （§6.x 是逐轮记录，0.8.0 的权威条款是 §6.39–§6.44）与 `docs/design/plugin-trait.md`（历史存档）。
 
 ## 1. 这是什么
 
-给 `ki` 加的第二条插件通道：**第三方插件编译成 wasm 组件**，跑在 wasmtime 沙箱里，按用户授权拿能力。
-第一方插件仍是编译期（`trait Plugin`，进程内、无沙箱）——这是设计取舍，不是没做完。
+给 `ki` 加的插件通道：**插件编译成 wasm 组件**，跑在 wasmtime 沙箱里，按用户授权拿能力。
+2026-10-21 起一方插件也只走 wasm；`trait Plugin` 与 cdylib 热载（`ki dev`）仅服务第三方扩展。
 
-一句话：**`plugins/kiqi-plugin.wit` 就是 `trait Plugin` 的 wasm 版，导出面与导入面都一一对应。**
+一句话：**`plugins/kiqi-plugin.wit` 是 `trait Plugin` 的 wasm 版**；0.8.0 起导出面多出三个
+贡献面（OAuth / provider / render），不再与 trait 一一对应。
 
 ## 2. 契约
 
-### 导出面（插件实现什么）—— 与 `trait Plugin` 一一对应
+### 导出面（插件实现什么）
+
+> 0.8.0 起导出面**不再与 `trait Plugin` 一一对应**：world 多出三个贡献面
+> （`plugins/kiqi-plugin.wit:641-644`），`run-command` 换成返回 `command-result`，并新增
+> `continue-command`（`plugins/kiqi-plugin.wit:596-607`）。组件模型要求 world 里每个导出都在
+> `Guest` trait 上实现——不贡献这些面的 guest 用
+> `kiqi_plugin_guest::deny_contribution_exports!(…)` 填桩
+> （`plugins/wasm/kiqi-plugin-guest/src/lib.rs:89-108`）。
 
 | `trait Plugin` | WIT `plugin-api` |
 |---|---|
 | `id()` | `id()` |
 | `tools()` / `call()` | `list-tools()` / `call-tool(name, arguments)` |
-| `commands()` / `run_command()` | `list-commands()` / `run-command(name, arguments)` |
+| `commands()` / `run_command()` | `list-commands()` / `run-command(name, arguments) -> command-result` / `continue-command(name, flow-id, reply)`（§6.44） |
 | `flags()` / `shortcuts()` | `list-flags()` / `list-shortcuts()` |
-| `on_event()` | `on-event(event) -> event-action`（`continue` / `claimed`） |
+| `on_event()` | `on-event(event) -> event-action`（`continue` / `claimed` / `patch`） |
 | `before_agent_start()` | `before-agent-start(prompt)` |
 | `probe_points()` / `probe()` | `list-probe-points()` / `probe(point, payload)` |
 | `shutdown()` | `shutdown()` |
+| —（贡献面，trait 无对应方法） | `oauth-api`：`list-providers()` / `action(provider-id, action)`（§6.40） |
+| —（贡献面，trait 无对应方法） | `provider-api`：`list-providers()` / `request(request-json)`（§6.41） |
+| —（贡献面，trait 无对应方法） | `render-api`：`transform-markdown(markdown)`（§6.42） |
 
 ### 导入面（插件能调用什么）—— 与 `HostCaps` + 能力对应
 
@@ -37,7 +51,22 @@
 | `InjectApi`（4） | `inject`（含 `append-custom-entry`） |
 | `UiApi`（4，含 `component`） | `ui` |
 | `ProgressSink` | `progress.emit` |
-| —（沙箱专有） | `net-http` `fs` `net-sockets` `exec` |
+| —（沙箱专有） | `net-http` `fs` `net-sockets` `exec` `proc` |
+| —（0.8.0，映射 `oauth` grant） | `oauth-http`：`token-request` / `revoke`（token 不进沙箱，§6.40） |
+| —（0.8.0，映射 `provider` grant） | `provider-stream`（delta sink）/ `provider-http`（受控流式 HTTP，§6.41） |
+
+`oauth` 不需要 `net-http` 授权：端点由 grant 给出，HTTP 由宿主发出。
+
+### 0.8.0 章节索引（`plugin-abi.md`）
+
+| 节 | 内容 | 主要代码 |
+|---|---|---|
+| §6.39 | 授权模型：五个新 key（`oauth`/`provider`/`render`/`resources`/`provider-request`），全部 deny-by-default、授权自带策略、`--yes` 不授予 | `crates/kiqi-plugin/src/grants.rs`、`crates/kiqi-cli/src/plugin_cli.rs` |
+| §6.40 | 宿主归因 OAuth：token 不进沙箱，URL 不由 guest 提供 | `crates/kiqi-plugin-host/src/oauth.rs`、`crates/kiqi-cli/src/wasm_oauth.rs` |
+| §6.41 | provider：grant 是唯一书目、专用实例、`provider-http` 请求过滤、带索引 delta | `crates/kiqi-plugin-host/src/lib.rs` |
+| §6.42 | render：deny-all 实例、仅定稿转换、输出上限与超时 | `crates/kiqi-cli/src/plugins.rs`（`WasmRenderTransformer`） |
+| §6.43 | resources：`resources.json` 包约定、安装期摘要、first-wins 顺序 | `crates/kiqi-cli/src/plugins.rs` |
+| §6.44 | 类型化命令面、`event.input`、`event-action.patch` | `crates/kiqi-cli/src/interactive_tui/plugin_commands.rs` |
 
 ## 3. 能力与授权
 
@@ -52,13 +81,31 @@
 | `proc` | `{commands:[…], cwd?, timeout-seconds?, max-open?}` | **调用内**可交互子进程（spawn/write/read-line/wait/kill）；命令白名单、cwd 同 exec 的 scope、`--timeout` 默认 **600s**/上限 1800s、`--max-open` 默认 **100**/上限 256；句柄只活一次调用，返回即杀组收尸 |
 | `net-sockets` | `{hosts:[…]}` | host 白名单；**宿主持 socket**，guest 只拿 `u32` 句柄 |
 
+### 0.8.0 的五个 key（全部 deny-by-default，`--yes` 不授予）
+
+| key | 授权形状（摘要） | 执行约束 | CLI 拼写 |
+|---|---|---|---|
+| `oauth` | `{providers:[{id, flows, authorization-endpoint, token-endpoint, device-authorization-endpoint?, revocation-endpoint?, client-id, supports-pkce?}], timeout-seconds?, max-requests?}` | 端点必须是**精确主机的 `https://` URL**（无通配、无 userinfo、无 fragment）；timeout 1..=900；max-requests 1..=64 | `ki plugin grant <id> oauth --provider <pid> --profile <file.json>`（可重复成对） |
+| `provider` | `{providers:[{id, models:[{id, api, base-url?, reasoning?, input?}], endpoint:{scheme, host, path-prefix, methods?}, credential?, timeout-seconds?}]}` | scheme 必须 `https`、host 精确无通配、methods 仅 `GET`/`POST`；`api` 只收 typed wire API（`faux` 与未知值拒绝） | `ki plugin grant <id> provider --model-json <file.json> --endpoint <scheme://host/prefix> [--method GET\|POST] --credential-from auth-json:<pid> [--timeout <s>]` |
+| `render` | `true` 或 `{kinds?, timeout-ms?, max-output-bytes?}` | kind 仅 `markdown`；2000 ms（上限 10 s）；1 MiB（上限 8 MiB） | `ki plugin grant <id> render --kind markdown` |
+| `resources` | `true` 或 `{kinds?, max-items?, max-bytes?}` | kind 仅 `skills`/`prompts`；64 项（上限 256）；1 MiB（上限 16 MiB） | `ki plugin grant <id> resources --kind skills\|prompts` |
+| `provider-request` | `{observe?, headers?, messages?, patch?, patch-timeout-ms?}` | 补丁走宿主固定表（§6.44）；observe 只有 `none`/`requests` | `ki plugin grant <id> provider-request --observe [--headers names\|values] [--messages none\|full] [--patch]` |
+
+`--yes` 只对 `net-http`/`fs`/`exec`/`proc`/`net-sockets` 生效；上面五个必须显式授予
+（`AUTO_GRANT_EXEMPT`）。无 tty 且无 `--yes` 时什么都不授。`resources.json` 只是包声明，
+安装/重装不会隐式授予或复活 `resources`；必须显式 `ki plugin grant`。**手改 `grants.json`
+fail-closed**：解析失败按零授权，某个 key 校验失败只清该 key。
+
 > ⚠️ exec 的子进程**不被文件系统沙箱化**：cwd jail 约束的是“从哪起跑”，不是“能碰哪”——
 > 拿到 `sh`/`cargo` 授权的插件本来就能 `cd` 到任何地方（甚至改自己的 `grants.json` 等重载
 > 生效）。`cwd: project` 没有引入新风险类别，它加的是人体工学；授权的重量始终在 `exec`
 > 本身，批 `exec` 给第三方插件前请当成“授予本机用户权限”来对待。
 
 隔离：fuel（可选）、**guest 内存上限 256 MiB**（`Options::max_memory_bytes`）、spin/panic 均 trap 不拖垮宿主。
-`ENFORCED_CAPABILITIES` = 上表四个（可授权集合 == 可实现集合）；`declared_capabilities()` 读组件声明的 import。
+`ENFORCED_CAPABILITIES` = 上表十个（五旧 + 五新，可授权集合 == 可实现集合，
+`crates/kiqi-plugin-host/src/lib.rs:294-305`）；`declared_capabilities()` 读组件声明的
+import **与 export**（`oauth-api`/`provider-api`/`render-api` 折叠成 grant key，
+`lib.rs:222-290`）。
 
 ## 4. 代码地图
 
@@ -68,14 +115,34 @@
 | 契约 Rust 侧（`trait Plugin`、`Event`/`Verdict`、`grants`） | `crates/kiqi-plugin` |
 | 宿主（wasmtime，把组件包成 `trait Plugin`） | `crates/kiqi-plugin-host` |
 | 插件 SDK（WIT → Rust trait） | `plugins/wasm/kiqi-plugin-guest` |
-| 已移植插件（12） | `plugins/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode,kiqi-lens,websearch,subagents,goal,codegraph,orchestrator}-guest` |
+| 已移植插件（12） | `plugins/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode,lens,websearch,subagents,goal,codegraph,orchestrator}-guest` |
 | 共享逻辑（编译期与 wasm 共用） | `crates/kiqi-plan-mode-core` |
 | CLI | `crates/kiqi-cli/src/plugin_cli.rs`（`ki plugin …`） |
 | 会话接线（发现/注册/事件 sink/各贡献面） | `crates/kiqi-cli/src/plugins.rs` |
+| 宿主归因 OAuth（端点、表单白名单、设备码轮询） | `crates/kiqi-plugin-host/src/oauth.rs` |
+| provider 请求补丁固定表 | `crates/kiqi-plugin-host/src/provider_patch.rs` |
+| `ki auth login/refresh/logout` 的 wasm 路径 | `crates/kiqi-cli/src/wasm_oauth.rs` |
+| provider 运行时适配器（惰性 `ProviderHost`、delta 流、取消与每次请求重验 grant） | `crates/kiqi-cli/src/wasm_provider.rs` |
 | 设计文档 | `docs/design/plugin-abi.md`、`docs/design/plugin-trait.md` |
 
 `ki` 通过 `plugin-wasm` feature（**默认开**）加载 `$KI_AGENT_DIR/plugins/<id>/plugin.wasm`；
 读同目录 `grants.json`。组件自报的 `id` **只用于核对**，install 目录才是身份与授权键。
+
+### cdylib 面 vs wasm 权威路径（0.8.0）
+
+OAuth / provider / renderer / resources 在 cdylib 通道里仍有**旧注册槽位**；0.8.0 起它们
+**不再是权威路径**。P6 会删掉 cdylib 代码，文档从这一轮起就认 wasm 侧：
+
+| cdylib 面（旧） | 现状 | 权威 wasm 路径 |
+|---|---|---|
+| `register_oauth_provider`（`crates/kiqi-plugin-sdk/src/lib.rs:1265`、`crates/kiqi-extensions/src/registry.rs:580`） | wasm grant 优先；无匹配 wasm provider 时 `ki auth` 仍回退到 cdylib registry；P6 待删 | `oauth-api` + `oauth-http`（§6.40） |
+| `register_provider`（`sdk/src/lib.rs:1186`、`registry.rs:565`） | 旧 `PluggableProvider` 仍随 `ExtensionSession` 注入，与 `WasmProvider` 并存；P6 待删 | `provider-api` + `provider-http`/`provider-stream`（§6.41） |
+| `register_message_renderer` / `register_markdown_transformer` / `register_entry_renderer`（`sdk/src/lib.rs:1196-1212`、`registry.rs:228-229`） | cdylib tier 仍先于 wasm 运行（`crates/kiqi-cli/src/interactive_tui.rs:131-160`）；P6 删除 | `render-api`（§6.42）。0.8.0 **只有 markdown**，消息/entry renderer 不提供 |
+| `register_resources_discover`（`sdk/src/lib.rs:1223`） | cdylib 的 startup/reload 发现仍在运行；wasm 包不经过它；P6 待删 | `resources.json` + `resources` grant（§6.43） |
+
+P6 的 cdylib 面删除仍未完成，所以上表是有意的**并存边界**，不是「旧槽位已不存在」。另一个
+遗留全局态是进程级 `compiled_event_sink`：每次 session build 调用
+`install_compiled_event_sink` 都替换同一槽位，仍是 **last-writer-wins**，不是每会话独立注册。
 
 ## 5. 上手
 
@@ -92,6 +159,10 @@ ki plugin list | show <id>          # show 会列出声明面（tools/commands/f
 ki plugin grant <id> exec --command echo     # 或 revoke / uninstall（uninstall 移到备份，不删）
 # exec 还能带 cwd 范围与时间预算（诊断类插件要在项目目录跑 cargo/clippy 时）：
 ki plugin grant <id> exec --command cargo --cwd project --timeout 120
+
+# 0.8.0 的五个新能力都必须显式授权（install --yes 不授予）
+ki plugin grant my-plugin render --kind markdown
+ki plugin grant my-plugin provider-request --observe
 
 # 校验契约
 wasm-tools component wit plugins/kiqi-plugin.wit
@@ -124,7 +195,11 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 | ~~第一方插件仍是编译期~~ | ❌ 已不成立（2026-10-21 退役）：一方插件只走 wasm，见 `plugins/wasm/kiqi-*-guest`；`kiqi_plugin::Plugin` trait 与 `ki dev` 的 cdylib 热载仅服务第三方扩展。 |
 | ~~默认只编入无 wasm 版的插件~~ | ❌ 已不成立（2026-10-21 退役）：`plugins/kiqi-*` crate、`plugin-kiqi-*` feature、opt-in feature CI 与独立 cdylib 构建全部删除，编译期通道不再编入任何一方插件；一方插件一律 `ki insmod --build plugins/wasm/kiqi-<name>-guest`。权限策略归宿主 `crates/kiqi-cli/src/permissions.rs`。仍然成立的耦合：两种 goal 都写 `.ki/goals.json` —— wasm guest 在 `fs` 授权 scope 为 project 时直接 `fs::write`（`plugins/wasm/kiqi-goal-guest/src/lib.rs` 的 `write_goals`），§6.35 之后默认就是 project。 |
 | `wasmtime` 常驻 `ki` | 由 `plugin-wasm`（默认开）控制；要瘦身需单独门控 |
-| `.wasm` 无签名/摘要校验 | 见 `plugin-abi.md` §7 待定项 |
+| `.wasm` 无来源签名 | 安装摘要 sidecar 会挡住安装后的字节变更，但摘要不是签名；来源签名仍见 `plugin-abi.md` §7 待定项 |
+| **内建 provider 不自动消费 OAuth entry** | 内建链路的 `stored_api_key` 仍只匹配 `ApiKey`；但 wasm provider 已能通过显式 `--credential-from` 使用 OAuth access token，并在每次请求重算凭据指纹，不能再概括为「OAuth 没有模型请求消费者」（§6.40/§6.41）。 |
+| **O17 残余风险仍在，告警已落地** | 同时持有 `exec`/`fs`/`net-sockets` 与 `oauth`/`provider` 时，`credential_capability_warning` 会在授权后警告并给出 revoke/logout 命令；它不拒绝授权，也不能消除插件经其它能力读取 `auth.json` 的爆炸半径（§6.39）。 |
+| **同意面仍不对称** | `probe`/`verdict.replace`、`before-agent-start`、`session-read`/`session-control`/`inject`/`ui` 在 0.8.0 仍不需要 grant（业主决定，§6.39 记录）。 |
+| **cdylib 的 OAuth/provider/renderer/resources 槽位待删** | 权威路径已切到 wasm；P6 删除仍未做。本页 §4 记录并存边界；进程级 compiled event sink 也仍是 last-writer-wins。 |
 | 装完需重启 | `compiled_plugin_hosts()` 是进程级 `OnceLock` |
 | ~~e2e 的 `exec_does_not_hang_when_the_command_leaves_a_background_child` 满负载偶发超时~~ | ✅ 已在 `dce1216` 缓解：把 `fixture_wasm()` 移到计时窗口**之外**（`e2e.rs:2425-2428` 的注释写明理由），15s 窗口里不再包含 wasmtime 编译时间。阈值未动，因为根因是窗口里混入了无关工作而非窗口太小。实测：e2e 单跑 3 次全绿；再与整个 workspace 测试**并行**跑一次，0 失败 |
 | ~~**acp 不迁，宿主级立项**~~ | ✅ 已落地：`ki acp serve`（批次 1/2 于 2026-10-16 完成；批次 3 为 abb 对接与文档销账）。裁定与方案见 `plugin-abi.md` §6.2 与 `ki-acp-serve.md`（进程内驱动 AgentHarness、协议层用官方 `agent-client-protocol` crate、abb-agent 做语义层参照） |

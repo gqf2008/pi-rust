@@ -12,7 +12,7 @@
 | 安装 | `ki install crate-name`（crates.io 或 `--path`） |
 | 入口 | `kiqi_plugin_register` C ABI 符号 |
 | 开发反馈 | `ki dev` watch + 热重载；`ki dev-local` 隔离调试 |
-| 静态资源 | `resources_discover` 或随项目放入 `.ki` |
+| 静态资源 | `resources_discover` 或随项目放入 `.ki`（wasm 插件改用 `resources.json` 包约定，见 §12.4） |
 | 运行环境 | 本机动态库，当前用户权限 |
 | 适用场景 | 本地工具、系统集成、性能敏感或纯 Rust 项目 |
 
@@ -168,11 +168,16 @@ fan-out 到所有已注册 handler，合并返回的 `{skillPaths, promptPaths, 
 单个 handler 报错不中止 fan-out。`out` 是插件拥有的 `StbString`，宿主通过插件
 注册时给的 `plugin_free_string` 回收。
 
-### Provider 与渲染器
+### Provider 与渲染器（cdylib 槽位，已被 wasm 取代）
 
 `api.register_provider` 注入自定义 LLM Provider（`provider_id`/`base_url`/
 `api_style` + `request_fn`）。`register_message_renderer`/`register_markdown_transformer`/
 `register_entry_renderer` 注册消息渲染能力。这些槽位都可能为 `None`，使用前必须检测。
+
+> **0.8.0 起这两类能力的权威路径是 wasm**：provider 走 `provider-api` 导出 +
+> `provider-http`/`provider-stream` 导入，渲染走 `render-api`（只支持 markdown 定稿转换）。
+> 上面的 cdylib 槽位已被取代（P6 删除代码），新插件不要再依赖它们。细节见
+> [plugin-abi.md §6.41/§6.42](../design/plugin-abi.md) 与本文 §12。
 
 ## 6. Rust 工具设计最佳实践
 
@@ -265,6 +270,11 @@ ki package unlink my-kiqi-extension
 动态 `resources_discover` 适合根据运行环境决定路径；固定资源优先使用 manifest 或
 约定目录，便于安装器、欢迎页和 `/context` 在扩展代码运行前发现它们。
 
+> **wasm 插件不用 `resources_discover`**：0.8.0 的权威路径是包约定
+> `resources.json` + `resources/<kind>/`，`ki insmod` 复制它们并写 `resources.sha256`，
+> 由 `resources` grant 决定加载哪些 kind（§12.4）。三方 cdylib 的
+> `register_resources_discover` 槽位已被取代，P6 删除。
+
 ### 自定义加载路径
 
 项目级 `.ki/settings.json` 可以声明额外资源路径；无需其他兼容
@@ -319,11 +329,19 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 5. 使用 `ki dev --no-watch` 与 `ki install <crate> --force` 做真实 smoke test。
 6. 不声称未验证的 Pi capability 已完全兼容；明确记录降级行为。
 
-## 11. OAuth 扩展接口（统一标准，实验阶段）
+## 11. OAuth 扩展接口（cdylib，已被 wasm 取代）
+
+> **已被取代（0.8.0）。** 权威实现见 [plugin-abi.md §6.40](../design/plugin-abi.md)：
+> `oauth-api` 导出 + `oauth-http` 导入，**token 由宿主持有，永不进入 guest 内存**。
+> 本节保留 cdylib 的旧契约，直到 P6 删除代码；新插件请直接看 §12。
+>
+> 两条契约的关键差异：旧接口把 token 本身（`{"access":"…","refresh":"…",…}`）交给宿主，
+> wasm 契约里**没有任何能跨边界的 token 类型**，只有 `oauth-credential-status`。
 
 ki 的 OAuth 方向是“轻量核心 + 平台插件”：平台差异由扩展实现，宿主负责统一
-发现、生命周期和后续的凭证存储。当前统一 ABI 已提供可选的
-`register_oauth_provider` 槽位；旧插件不需要重新编译即可继续加载。
+发现、生命周期和后续的凭证存储。cdylib 通道当前仍提供可选的
+`register_oauth_provider` 槽位（`crates/kiqi-plugin-sdk/src/lib.rs:1265`）；旧插件不需要
+重新编译即可继续加载，但该槽位已无宿主侧消费者。
 
 插件注册一个 JSON manifest 和一个 action callback：
 
@@ -397,3 +415,77 @@ ki auth login --provider <id>
 --provider <id>` 会传递标准 credential context 并调用 provider 的 `refresh` action；
 `ki auth logout --provider <id>` 会先调用 `revoke`，成功后才删除本地凭证。插件不得
 把 token 写入普通事件、模型消息或日志。
+
+## 12. wasm 侧的等价能力（0.8.0，权威路径）
+
+wasm 插件不注册槽位，改为**导出接口 + 授权 key**：能力是否存在只看 `grants.json`
+（缺失 = 拒绝），策略随授权一起存。下面五个 key 都**不会被 `--yes` 自动授予**——它们的
+策略无法从 import 名推导，必须显式执行 `ki plugin grant`（`AUTO_GRANT_EXEMPT`，
+`crates/kiqi-cli/src/plugin_cli.rs:1272-1278`；无 tty 且无 `--yes` 时什么都不授）。
+接口 → grant key 的唯一映射是 `grant_key_for_interface`
+（`crates/kiqi-plugin/src/grants.rs:1224-1243`）。
+
+| 能力 | 导出 / 导入面 | grant key | 授权命令 |
+|---|---|---|---|
+| OAuth | `oauth-api`（导出）+ `oauth-http`（导入） | `oauth` | `ki plugin grant <id> oauth --provider <pid> --profile <file.json>`（可重复成对） |
+| Provider | `provider-api`（导出）+ `provider-http`/`provider-stream`（导入） | `provider` | `ki plugin grant <id> provider --model-json <file.json> --endpoint <scheme://host/prefix> [--method GET\|POST] --credential-from auth-json:<pid> [--timeout <s>]` |
+| Render | `render-api`（导出） | `render` | `ki plugin grant <id> render --kind markdown` |
+| Resources | 包约定（无 WIT 面） | `resources` | `ki plugin grant <id> resources --kind skills\|prompts` |
+| 请求观察 / 补丁 | `on-event` 的 `before-provider-request` + `event-action.patch` | `provider-request` | `ki plugin grant <id> provider-request --observe [--headers names\|values] [--messages none\|full] [--patch]` |
+
+拼写以 `ki plugin grant` 的用法文本为准（`crates/kiqi-cli/src/plugin_cli.rs:1227-1240`）。
+
+### 12.1 OAuth：guest 是流程控制器，宿主做 HTTP 与存储
+
+- 导出 `list-providers()`（自己声明能驱动哪些 IdP）与 `action(provider-id, action)`；
+- 导入 `oauth-http` 只有 `token-request` 与 `revoke`：表单键白名单、`client_secret` 直接拒绝，
+  grant_type 对应的 flow 与每个 scope 都在计费/HTTP 前按 grant 校验；返回只有
+  `stored(status) | failed(string)`，原始 token 响应体从不回传；
+- 端点、`client-id`、scope 全部来自 grant；`action.begin(string)` 只携带 PKCE
+  `code_challenge`（设备码流传空串），授权 URL 由宿主构造，guest 返回的 `url` 被忽略；
+- token 存到命名空间 key `plugin:<install-id>:<provider-id>`；`ki auth refresh` /
+  `ki auth logout` 是纯宿主操作（refresh token 直达 IdP，logout 先 revoke 再删 key）；
+- 凭据绑定签发 profile 指纹（provider-id、client-id、各端点 origin）；指纹缺失或不匹配时
+  refresh/logout/revoke 拒绝把旧 token 发往新 IdP。logout 只有显式 `--force-local` 才在不发
+  远端请求的情况下删除本地 OAuth 项；删除按类型判断，绝不移除 `ApiKey`；
+- **边界**：内建 provider 的 `stored_api_key` 仍只匹配 `ApiKey`，不会自动采用 OAuth entry；
+  wasm provider 则可在显式 `--credential-from` 后使用 OAuth access token（§6.41）。
+
+### 12.2 Provider：grant 是唯一书目
+
+- 导出 `list-providers()`（安装期发现与交叉核对的建议性元数据）与 `request(request-json)`；
+  CLI catalog 直接来自 grant 的 `models`，guest 不能增加未授权模型；请求 model 也必须在 grant 里；
+- `WasmProvider` 已接入 resolve 与 `/model`：每次 resolve 有自己的 slot，首次 `stream_simple`
+  才编译/实例化专用 `ProviderHost`；每次请求都重读 grant，revoke 后下一次请求直接拒绝，profile
+  改变则重建实例；
+- 宿主用 grant 覆盖返回消息上的 `provider`/`model`/`api`，guest 不能冒充别的模型；
+- 流式用 `provider-stream.emit`/`emit-batch`：delta 带 `kind`（text/thinking/tool-call）、
+  `phase`（start/delta/end）与 `content-index`，只在 provider 调用栈上有效；聚合上限为
+  16,384 deltas / 1,024 blocks / 16 MiB，CLI 另有容量 256 的实时队列，溢出即取消并失败；
+- `provider-http.open/read/close` 是**请求过滤器**：必须同时匹配 grant 的
+  scheme/host/path-prefix/methods，否则 `denied` 且不建立连接；原始路径的 `%2F`、编码 dot、
+  dot segment 与重复 `/` 都拒绝，重定向拒绝，guest 的认证/框架头被剥离，凭据只由宿主注入；
+  句柄按调用回收；
+- 凭据在 grant 里只是不透明句柄：`--credential-from auth-json:<pid>` 由宿主解析，
+  `{source, provider, display, fingerprint}` 写入 `plugins/<id>/credentials.json`（0600，
+  在 fs jail 之外），`ki plugin show` 只展示指纹前缀；每次请求重新读取值并校验指纹，改变即拒绝；
+- 宿主墙钟覆盖 WASI 阻塞，CLI 用 `select!` 同时等宿主结果与 delta；超时后不再等遗留 guest
+  sender 关闭，立即以错误终止流。
+
+### 12.3 Render：只做 markdown 定稿转换
+
+- `render-api.transform-markdown(markdown) -> result<string, plugin-error>` 是唯一函数，
+  纯文本到文本；没有消息 / entry renderer 的 wasm 等价物；
+- 跑在 deny-all 实例上（独立 Engine/Store，没有 session/ui/exec），流式期间不调用，
+  每条定稿消息恰好调用一次；
+- 超时默认 2000 ms（上限 10 s），实例化也有 fuel/epoch/墙钟上限；transform 由墙钟等待独立
+  worker，超时 detach 而非 join，epoch 负责纯 CPU 自旋。输出默认 1 MiB（上限 8 MiB）；宿主先剥
+  ANSI、控制字符判硬错误、再按 UTF-8 边界截断；任何失败都保留原文并记一条诊断。
+
+### 12.4 Resources：包约定，不是注册
+
+- guest crate 在 `plugin.wasm` 旁放 `resources.json` 与 `resources/<kind>/`；
+  `ki insmod` 复制它们并写 `resources.sha256`（manifest 自己也在摘要内，安装后手改会失败）；
+- manifest 是包声明，grant 是用户授权，加载取两者交集；插件目录追加在最后并按名字
+  first-wins，内建/项目资源永远赢过插件；
+- 主题（themes）被丢弃：`ThemeManager` 是 preset 驱动的。
