@@ -32,6 +32,7 @@ kiqi-tui = { workspace = true }
 kiqi-plugin-sdk = { workspace = true }
 kiqi-extensions = { workspace = true }
 kiqi-mcp = { workspace = true }
+kiqi-acp = { workspace = true }
 tokio = { workspace = true, features = ["signal", "io-std", "net"] }
 tokio-util = { workspace = true, features = ["compat"] }
 async-trait = { workspace = true }

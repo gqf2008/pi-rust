@@ -13,6 +13,8 @@ kiqi-ai = { workspace = true }
 kiqi-agent = { workspace = true }
 kiqi-harness = { workspace = true }
 kiqi-mcp = { workspace = true }
+kiqi-extensions = { workspace = true }
+kiqi-plugin-sdk = { workspace = true }
 agent-client-protocol = { workspace = true }
 tokio = { workspace = true, features = ["signal", "io-std", "net"] }
 tokio-util = { workspace = true, features = ["compat"] }
@@ -21,3 +23,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+# Session-storage fixtures build real `JsonlSessionRepo`s over `OsExecutionEnv`.
+kiqi-tools = { workspace = true }

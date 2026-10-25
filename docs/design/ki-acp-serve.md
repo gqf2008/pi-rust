@@ -117,9 +117,8 @@ kiqi-mcp-adapter 插件，暂不接受会话级注入」），宁可报错也不
   `Some("acp") => crate::acp::run(&argv[1..]).await`）；生命周期复用 `RunMode` 的
   stdio-claim 骨架（BeforeTuiStart veto → SessionStart → 协议循环 → SessionShutdown，
   `app.rs:450-470`），保住插件事件面正确性；
-- 模块：`crates/kiqi-cli/src/acp/`（`mod.rs` / `protocol.rs` / `sessions.rs` /
-  `projection.rs` / `zed.rs` / `diag.rs`）——先做 kiqi-cli 内模块（`session::build`/
-  `ReloadContext`/`UiDialogMailbox` 都是 kiqi-cli 内部），长大再提 crate；
+- 模块：批次 1–3 时代在 `crates/kiqi-cli/src/acp/`（见 §16——已整体提取为
+  `crates/kiqi-acp`，会话组装根留在 kiqi-cli `src/acp.rs`）；
 - 进程：multi-thread tokio runtime（`bin/ki.rs:9-13` 硬要求，`block_in_place` 依赖）；
 - 依赖：`agent-client-protocol =3.3.0`（显式 `features=["stdio"]`）。
 
@@ -232,7 +231,7 @@ stdio/失败面纪律全盘继承（§6）。
   deferred resume 留批次 2+）；
 - ~~多会话共享进程的插件宿主语义上限~~（批次 1 曾临时裁定为**每进程一个活跃会话**；
   ✅ 2026-10-24 已改为按 `sessionId` 路由的多会话模型，见 §15。legacy compiled-plugin
-  sink 与部分第三方插件读取进程 cwd 的限制仍未按会话隔离，见 `acp/sessions.rs` 模块注释，
+  sink 与部分第三方插件读取进程 cwd 的限制仍未按会话隔离，见 `kiqi-acp/src/sessions.rs` 模块注释，
   不再用它拒绝第二个普通 ACP 会话）；
 - zed 注册是否进 `ki acp serve` 默认行为（现按 one-shot 子命令设计）；
 - ~~ABB 客户端 `protocolVersion: 2` 握手~~（✅ 2026-10-16 探针实测：**冲突不存在**——
@@ -376,7 +375,7 @@ session/new / EOF 全通，应答见 §7 表）。Zed 真机手测仍待人工�
   （包括 notices）属于**连接**，能力在会话激活时复制，不随某个会话关闭而丢失。
 - 进程级共享资源不因此复制成协议级全局会话；legacy compiled-plugin sink
   （last-writer-wins）及第三方插件读取进程 cwd 的既有边界如实保留在
-  `acp/sessions.rs`。内置工具的显式 cwd、ACP run/cancel、标题与上下文不经过这些全局槽。
+  `kiqi-acp/src/sessions.rs`。内置工具的显式 cwd、ACP run/cancel、标题与上下文不经过这些全局槽。
 
 兼容性测试以真实协议面钉住上述变化：旧的
 `second_live_session_is_refused_with_server_error` 拒绝测试由
@@ -384,3 +383,27 @@ session/new / EOF 全通，应答见 §7 表）。Zed 真机手测仍待人工�
 关闭 A 后新建 C、B 始终可继续使用，以及未知/已关闭 id 的错误形状；其余三条分别覆盖
 跨会话取消独立、cwd/system prompt/上下文隔离、close 先取消再释放。协议版本协商、
 能力声明和同会话单回合错误均未改变。
+
+## 16. crate 提取（2026-10-25）
+
+`crates/kiqi-cli/src/acp/` 六模块整体 `git mv` 为 `crates/kiqi-acp`（§12 批次 1 的
+"长大再提 crate" 兑现）。切割面按依赖方向定：
+
+- **协议 crate 持有**：协议机器（initialize / session new·load·prompt·cancel·close、
+  多会话路由）、`sessions.rs` 注册表（`LiveSession` / `TurnState` / `InFlightGuard`）、
+  `dialogs` / `projection` / `zed` / `diag`，以及 `SessionFactory` /
+  `SessionDeps` / `SessionParams` / `SessionRequest` 契约类型。
+- **宿主（kiqi-cli `src/acp.rs`）注入**：[`RunOptions`] 两半——生产 factory
+  （`session::build` 全管线：provider 解析、chdir、`ownsStdio` 检查、
+  `BeforeTuiStart` veto、`SessionStart` advisory）与 `session/load` 存在性
+  pre-check（目录解析 + 仓库列表 + `match_session_id`）。`ReloadContext` 不跨
+  crate：`SessionDeps` 只带协议侧要驱动的两件东西——`mcp`（边界 drain）与
+  `shutdown`（预构建的 `SessionShutdown` advisory future，future 持有 context，
+  cdylib 活到 dispatch 之后）。
+- **MCP 边界胶水下沉 `kiqi-mcp::boundary`**：`drain_mcp_boundary` /
+  `take_mcp_boundary` / `append_notice_batch` / `replace_mcp_tools` 从
+  kiqi-cli `session.rs` 迁出（两侧共用；`kiqi-mcp` 由此新增 `kiqi-harness`
+  依赖边，manager 本体仍不碰 harness）。
+- legacy-layout 迁移调用随 dispatch 移到 kiqi-cli 侧；进程退出码常量
+  （1/2）在协议 crate 本地重声明。
+- 门禁：workspace 1439 通过（另 feature 门 318：ai 206 / tools 34 / sdk 78；kiqi-acp 72 个 duplex e2e 原样搬入）。

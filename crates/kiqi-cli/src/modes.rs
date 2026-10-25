@@ -226,7 +226,7 @@ pub async fn print(
         while let Some(prompt) = prompts.pop_front() {
             // Between runs is a safe boundary: drain MCP resource notices into
             // the transcript so the NEXT prompt's context build includes them.
-            crate::session::drain_mcp_boundary(&harness, &reload_context.mcp).await;
+            kiqi_mcp::boundary::drain_mcp_boundary(&harness, &reload_context.mcp).await;
             match lane.prompt_text(&prompt, std::mem::take(&mut images)).await {
                 Ok(result) => {
                     last_exit = run_exit_code(&result.outcome, result.budget_stop.is_some());
@@ -275,7 +275,7 @@ pub async fn print(
         // Tail boundary: whatever arrived during the last run lands in the
         // transcript (a resumed session sees it); the shutdown advisory below
         // flushes anything later to stderr.
-        crate::session::drain_mcp_boundary(&harness, &reload_context.mcp).await;
+        kiqi_mcp::boundary::drain_mcp_boundary(&harness, &reload_context.mcp).await;
 
         // Print the final assistant text to stdout (TS: writeRawStdout text + "\n").
         if let Some(m) = &last_msg {
@@ -387,7 +387,7 @@ pub async fn json(
         for prompt in prompts {
             // Between runs is a safe boundary: drain MCP resource notices into
             // the transcript so the NEXT prompt's context build includes them.
-            crate::session::drain_mcp_boundary(&harness, &reload_context.mcp).await;
+            kiqi_mcp::boundary::drain_mcp_boundary(&harness, &reload_context.mcp).await;
             match lane.prompt_text(&prompt, std::mem::take(&mut images)).await {
                 Ok(result) => {
                     // The harness resolves after its run outcome, while the
@@ -422,7 +422,7 @@ pub async fn json(
         // Tail boundary first: whatever arrived during the last run lands in
         // the transcript; the shutdown advisory below flushes anything later
         // (post-terminal-event stragglers) to stderr.
-        crate::session::drain_mcp_boundary(&harness, &reload_context.mcp).await;
+        kiqi_mcp::boundary::drain_mcp_boundary(&harness, &reload_context.mcp).await;
         let (outcome_str, final_text) = match final_outcome {
             Some(HarnessRunOutcome::Completed { final_message, .. }) => {
                 ("completed", Some(assistant_text(&final_message)))
@@ -650,7 +650,7 @@ where
         // mid-run would splice a transcript entry between the live run's
         // entries (the TUI defers appends to AgentEnd for the same reason).
         if !run_active.load(std::sync::atomic::Ordering::Acquire) {
-            crate::session::drain_mcp_boundary(harness, &mcp).await;
+            kiqi_mcp::boundary::drain_mcp_boundary(harness, &mcp).await;
         }
 
         match kind.as_str() {
@@ -765,7 +765,7 @@ where
                     mailbox_task.cancel_all();
                     // Run-tail boundary: notices from the run land in the
                     // transcript now, so the NEXT prompt's run includes them.
-                    crate::session::drain_mcp_boundary(&harness_task, &mcp_task).await;
+                    kiqi_mcp::boundary::drain_mcp_boundary(&harness_task, &mcp_task).await;
                     active_task.store(false, std::sync::atomic::Ordering::Release);
                 }));
                 continue;

@@ -22,6 +22,7 @@
 //!
 //! Nothing is written to stdout from this crate; diagnostics go to stderr.
 
+pub mod boundary;
 pub mod config;
 mod http;
 pub mod manager;

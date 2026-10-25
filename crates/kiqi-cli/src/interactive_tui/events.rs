@@ -228,11 +228,11 @@ pub(super) async fn handle_signal_boundary(
     wake_state: &Arc<crate::signal_host::SignalHost>,
     tx: &mpsc::UnboundedSender<TuiMessage>,
 ) -> bool {
-    let batch = crate::session::take_mcp_boundary(harness, mcp).await;
+    let batch = kiqi_mcp::boundary::take_mcp_boundary(harness, mcp).await;
     if batch.is_empty() {
         return false;
     }
-    crate::session::append_notice_batch(harness, &batch).await;
+    kiqi_mcp::boundary::append_notice_batch(harness, &batch).await;
     let any_auto = batch.notices.iter().any(|notice| {
         mcp.signal_config_for(&notice.server, &notice.uri)
             .is_some_and(|config| config.wake == kiqi_mcp::WakeMode::Auto)

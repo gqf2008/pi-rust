@@ -34,6 +34,11 @@ mod projection;
 mod sessions;
 mod zed;
 
+pub use sessions::{
+    match_session_id, LoadPrecheck, RunOptions, SessionDeps, SessionFactory, SessionParams,
+    SessionRequest,
+};
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -53,9 +58,12 @@ use kiqi_harness::result::HarnessResult;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use crate::acp::sessions::{InFlightGuard, LiveSession, SessionFactory, TurnState};
-use crate::app::{EXIT_RUNTIME, EXIT_USAGE};
+use crate::sessions::{InFlightGuard, LiveSession, TurnState};
 
+/// Process exit code for a runtime failure (ki's `app::EXIT_RUNTIME` value).
+pub(crate) const EXIT_RUNTIME: i32 = 1;
+/// Process exit code for a usage error (ki's `app::EXIT_USAGE` value).
+pub(crate) const EXIT_USAGE: i32 = 2;
 /// JSON-RPC `invalid params` — the request's own arguments are wrong.
 const ERR_INVALID_PARAMS: i32 = -32602;
 /// JSON-RPC `internal error` — a valid request failed inside the machinery.
@@ -76,6 +84,8 @@ const CANCEL_ABORT_TICK: Duration = Duration::from_millis(100);
 struct ServerShared {
     live: HashMap<SessionId, LiveSession>,
     factory: SessionFactory,
+    /// Host-supplied restore-only `session/load` existence pre-check.
+    load_precheck: LoadPrecheck,
     /// Whether the client advertised the `notices` session capability
     /// ([`ClientSessionCapabilities::notices`]): user-facing
     /// `SessionUpdate::Notice`s are only sent when this is set (the schema's
@@ -88,18 +98,13 @@ type SharedServer = Arc<Mutex<ServerShared>>;
 /// `ki acp` entry. `serve` runs the server; `install-zed` / `print-zed` are
 /// one-shots that return before the serve-only shutdown line. Returns the
 /// process exit code: 0 = success or clean client EOF, 1 = runtime failure,
-/// 2 = usage error (same values as [`crate::app::EXIT_RUNTIME`] /
-/// [`EXIT_USAGE`]).
-pub async fn run(argv: &[String]) -> i32 {
-    // Best-effort legacy-layout migration (flat `~/.ki` → `~/.ki/agent/`): the
-    // parsed CLI path runs it before anything reads credentials/models, but
-    // this early-dispatched subcommand bypasses that path — without it, an
-    // upgrading user's first `ki acp serve` would resolve against an unmigrated
-    // layout (and fail every session/new) until some plain `ki` run happened.
-    let _ = crate::config::migrate_legacy_layout();
+/// 2 = usage error (same values as [`EXIT_RUNTIME`] / [`EXIT_USAGE`]). The
+/// host crate supplies the session seams through [`RunOptions`]; the
+/// best-effort legacy-layout migration runs on its side, before dispatch.
+pub async fn run(argv: &[String], opts: RunOptions) -> i32 {
     match argv.first().map(String::as_str) {
         Some("serve") if argv.len() == 1 => {
-            let (code, reason) = match serve().await {
+            let (code, reason) = match serve(opts).await {
                 Ok(()) => (0, "client disconnected"),
                 Err(error) => {
                     eprintln!("error: acp server failed: {error}");
@@ -137,11 +142,11 @@ const USAGE: &str = "usage: ki acp serve
        ki acp help";
 
 /// The production server over stdio. `normalize_offline_mode` has already run
-/// (the `app.rs` dispatcher precedes this match arm); `ki acp serve` takes no
-/// flags of its own, so the session factory gets default args.
-async fn serve() -> agent_client_protocol::Result<()> {
-    let factory = sessions::production_factory(crate::args::Args::default());
-    run_server(Stdio::new(), factory).await
+/// the host crate dispatches here with the seams already assembled in
+/// [`RunOptions`] (factory + load pre-check); `ki acp serve` takes no flags of
+/// its own.
+async fn serve(opts: RunOptions) -> agent_client_protocol::Result<()> {
+    run_server(Stdio::new(), opts).await
 }
 
 /// The protocol server, generic over the transport (stdio in production,
@@ -149,11 +154,16 @@ async fn serve() -> agent_client_protocol::Result<()> {
 /// `session::build` pipeline in production, FauxProvider harnesses in tests).
 pub(crate) async fn run_server(
     transport: impl ConnectTo<Agent> + 'static,
-    factory: SessionFactory,
+    opts: RunOptions,
 ) -> agent_client_protocol::Result<()> {
+    let RunOptions {
+        factory,
+        load_precheck,
+    } = opts;
     let shared: SharedServer = Arc::new(Mutex::new(ServerShared {
         live: HashMap::new(),
         factory,
+        load_precheck,
         client_notices: false,
     }));
 
@@ -627,7 +637,8 @@ async fn handle_session_load(
         request.session_id,
         cwd.display()
     );
-    let found = match sessions::existing_session_id(&cwd, &ki_id).await {
+    let precheck = Arc::clone(&shared.lock().unwrap().load_precheck);
+    let found = match precheck(cwd.clone(), ki_id.to_owned()).await {
         Ok(found) => found,
         Err(error) => {
             diag::diagln!("session/load pre-check failed: {error}");
@@ -768,10 +779,7 @@ async fn handle_prompt(
                     session.subscribe(),
                     Arc::clone(&session.turn),
                     session.harness.clone(),
-                    session
-                        .reload_context
-                        .as_ref()
-                        .map(|ctx| Arc::clone(&ctx.mcp)),
+                    session.mcp.clone(),
                     session.client_notices,
                 )),
             },
@@ -868,7 +876,7 @@ async fn drive_turn(
             &cx,
             &session_id,
             client_notices,
-            crate::session::drain_mcp_boundary(&harness, mcp).await,
+            kiqi_mcp::boundary::drain_mcp_boundary(&harness, mcp).await,
         );
     }
     // A clone survives for the decision below: a cancel landing in the gap
@@ -936,7 +944,7 @@ async fn drive_turn(
             &cx,
             &session_id,
             client_notices,
-            crate::session::drain_mcp_boundary(&harness, mcp).await,
+            kiqi_mcp::boundary::drain_mcp_boundary(&harness, mcp).await,
         );
     }
     let was_cancelled = turn.consume_cancelled() || decision_token.is_cancelled();
@@ -1319,7 +1327,8 @@ mod tests {
             harness,
             event_rx,
             ui_dialog: None,
-            reload_context: None,
+            mcp: None,
+            shutdown: None,
         }
     }
 
@@ -1343,7 +1352,7 @@ mod tests {
     }
 
     /// A faux session that carries a hand-constructed dialog mailbox — the
-    /// seam dialog tests use instead of a `session::build`-ed ReloadContext.
+    /// seam dialog tests use instead of a host-built reload context.
     fn dialog_factory(
         text: &'static str,
         tokens_per_second: f64,
@@ -1517,7 +1526,7 @@ mod tests {
             ByteStreams::new(server_writer.compat_write(), server_reader.compat());
         let client_transport =
             ByteStreams::new(client_writer.compat_write(), client_reader.compat());
-        let server = tokio::spawn(run_server(server_transport, factory));
+        let server = tokio::spawn(run_server(server_transport, run_options(factory)));
         let result = Client
             .builder()
             .on_receive_notification(
@@ -2416,6 +2425,53 @@ mod tests {
         dir
     }
 
+    /// The default session directory a fixture writes into (`<cwd>/.ki/sessions`
+    /// — ki's `session::default_session_dir` value, inlined to keep the test
+    /// free of host-crate dependencies).
+    fn default_sessions_dir(cwd: &std::path::Path) -> std::path::PathBuf {
+        cwd.join(".ki").join("sessions")
+    }
+
+    /// Test stand-in for the host's `session/load` pre-check: list the JSONL
+    /// storage under `<cwd>/.ki/sessions` and apply the shared id match. The
+    /// production pre-check resolves `--session-dir`/`sessionDir` first; the
+    /// tests always exercise the default branch.
+    fn storage_precheck() -> sessions::LoadPrecheck {
+        Arc::new(move |cwd: std::path::PathBuf, id: String| {
+            Box::pin(async move {
+                use kiqi_harness::session::jsonl::{
+                    JsonlSessionListOptions, JsonlSessionRepo, JsonlSessionRepoOptions,
+                };
+                use kiqi_harness::session::memory::SystemClock;
+                use kiqi_harness::session::session::DefaultIdGenerator;
+                use kiqi_tools::{FileSystem, OsExecutionEnv};
+
+                let dir = default_sessions_dir(&cwd);
+                let env = Arc::new(OsExecutionEnv::with_cwd(cwd.clone()));
+                let fs: Arc<dyn FileSystem> = env.clone();
+                let repo = JsonlSessionRepo::with_env_cwd(JsonlSessionRepoOptions {
+                    fs: fs.clone(),
+                    sessions_root: dir.to_string_lossy().into_owned(),
+                    clock: Arc::new(SystemClock),
+                    ids: Arc::new(DefaultIdGenerator::new()),
+                });
+                let metas = repo
+                    .list_typed(&JsonlSessionListOptions::default())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(sessions::match_session_id(&metas, &id))
+            }) as futures::future::BoxFuture<'static, Result<Option<String>, String>>
+        })
+    }
+
+    /// Wrap one factory into the host [`RunOptions`] every test server runs with.
+    fn run_options(factory: SessionFactory) -> RunOptions {
+        RunOptions {
+            factory,
+            load_precheck: storage_precheck(),
+        }
+    }
+
     /// initialize only (no session/new); pins that `loadSession` is advertised.
     async fn init_only(cx: &ConnectionTo<Agent>) -> agent_client_protocol::Result<()> {
         let init = cx
@@ -2492,7 +2548,7 @@ mod tests {
         use kiqi_harness::session::Session;
         use kiqi_tools::{FileSystem, OsExecutionEnv};
 
-        let dir = crate::session::default_session_dir(cwd);
+        let dir = default_sessions_dir(cwd);
         std::fs::create_dir_all(&dir).unwrap();
         let env = Arc::new(OsExecutionEnv::with_cwd(cwd.to_path_buf()));
         let fs: Arc<dyn FileSystem> = env.clone();
@@ -2562,7 +2618,7 @@ mod tests {
         use kiqi_harness::session::Session;
         use kiqi_tools::{FileSystem, OsExecutionEnv};
 
-        let dir = crate::session::default_session_dir(cwd);
+        let dir = default_sessions_dir(cwd);
         let env = Arc::new(OsExecutionEnv::with_cwd(cwd.to_path_buf()));
         let fs: Arc<dyn FileSystem> = env.clone();
         let repo = JsonlSessionRepo::with_env_cwd(JsonlSessionRepoOptions {
@@ -2602,7 +2658,8 @@ mod tests {
             harness,
             event_rx,
             ui_dialog: None,
-            reload_context: None,
+            mcp: None,
+            shutdown: None,
         })
     }
 
@@ -2766,7 +2823,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn load_rejects_unknown_ids_without_touching_storage_or_the_factory() {
         let tmp = tempdir("load-unknown");
-        let sessions_dir = crate::session::default_session_dir(&tmp);
+        let sessions_dir = default_sessions_dir(&tmp);
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let before = dir_snapshot(&sessions_dir);
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();

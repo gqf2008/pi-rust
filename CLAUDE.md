@@ -81,9 +81,10 @@ kiqi-plugin               # trait Plugin 定义（零内部依赖；外部仅 se
 ├─ kiqi-plugin-host       # wasmtime 宿主，跑 wasm 组件
 kiqi-plugin-sdk           # 第三方 cdylib 的 C ABI 类型（零内部依赖；默认 feature 带 serde_json）
 └─ kiqi-extensions         # 宿主侧扩展加载与桥接（另依赖 agent+ai）
-kiqi-mcp                  # MCP 客户端集成（依赖 ai+agent+plugin-sdk）
+kiqi-mcp                  # MCP 客户端集成（依赖 ai+agent+harness+plugin-sdk；boundary.rs 是与 harness 的接缝）
+kiqi-acp                  # `ki acp serve` 协议服务器（依赖 acp 协议 crate + agent/harness/mcp/extensions；会话组装根留在 kiqi-cli 注入）
 kiqi-plan-mode-core       # 计划模式核心逻辑（零内部依赖；只被 plugins/wasm/kiqi-plan-mode-guest 链接）
-kiqi-cli                  # 组合以上（plan-mode-core 除外）：配置、认证、CLI/TUI、acp 服务（MCP 只作客户端集成）
+kiqi-cli                  # 组合以上（plan-mode-core、kiqi-acp 除外）：配置、认证、CLI/TUI；acp 的 factory/precheck 宿主侧在 src/acp.rs
 ```
 
 feature 门：`kiqi-ai` 的真实 HTTP provider 在 `cfg(feature = "providers")` 后，默认关

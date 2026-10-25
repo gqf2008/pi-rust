@@ -17,6 +17,9 @@ categories = ["api-bindings", "development-tools"]
 [dependencies]
 kiqi-ai = { workspace = true, features = ["providers"] }
 kiqi-agent = { workspace = true }
+# Boundary glue only (`boundary.rs` drains notices into / refreshes tool
+# slices of a live harness) — the manager itself stays harness-free.
+kiqi-harness = { workspace = true }
 # For `AGENT_ID_ENV` only (zero-dependency, std-only): the session id forwarded
 # to spawned servers. Named through the constant so a rename is a compile error
 # rather than a silently forwarded nothing.

@@ -2075,6 +2075,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiqi-acp"
+version = "0.4.1"
+dependencies = [
+ "agent-client-protocol",
+ "futures",
+ "kiqi-agent",
+ "kiqi-ai",
+ "kiqi-extensions",
+ "kiqi-harness",
+ "kiqi-mcp",
+ "kiqi-plugin-sdk",
+ "kiqi-tools",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "kiqi-agent"
 version = "0.4.1"
 dependencies = [
@@ -2129,6 +2150,7 @@ dependencies = [
  "futures",
  "globset",
  "indexmap 2.14.2",
+ "kiqi-acp",
  "kiqi-agent",
  "kiqi-ai",
  "kiqi-extensions",
@@ -2211,6 +2233,7 @@ dependencies = [
  "http",
  "kiqi-agent",
  "kiqi-ai",
+ "kiqi-harness",
  "kiqi-plugin-sdk",
  "nix 0.31.3",
  "process-wrap",
