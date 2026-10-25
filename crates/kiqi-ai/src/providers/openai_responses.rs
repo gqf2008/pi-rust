@@ -2996,7 +2996,9 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_user_images_are_preserved_as_a_placeholder() {
+    fn user_images_are_always_included() {
+        // 0.8.1: modality 前置检查已移除——图片无条件组包发送，
+        // API 不支持时返回错误而不是静默降级成文字占位符。
         let user = crate::types::UserMessage::new(
             UserContent::Blocks(vec![
                 Content::text("before"),
@@ -3020,11 +3022,10 @@ mod tests {
             &SimpleStreamOptions::default(),
         );
         let content = body["input"][0]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 3);
-        assert_eq!(
-            content[1]["text"],
-            "(image omitted: model does not support images)"
-        );
+        assert_eq!(content.len(), 5);
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[2]["type"], "input_image");
+        assert_eq!(content[3]["type"], "input_text");
     }
 
     #[test]

@@ -3190,7 +3190,32 @@ impl AgentHarness {
         for prompt in prompts {
             normalized.push(normalize_user_images(prompt).await?);
         }
-        self.run_core_with_entry(normalized, false, window).await
+        let result = self
+            .run_core_with_entry(normalized.clone(), false, window)
+            .await?;
+        // 上下文超长 → 自动压缩后重试一次（0.8.1）。
+        if let HarnessRunOutcome::Failed { error, .. } = &result.outcome {
+            let msg = &error.message;
+            let is_context = [
+                "context length",
+                "context_length",
+                "prompt is too long",
+                "input length exceeds",
+                "maximum context length",
+            ]
+            .iter()
+            .any(|p| msg.to_lowercase().contains(p));
+            if is_context {
+                tracing::warn!("context-length error detected, auto-compacting and retrying");
+                let _ = AgentHarness::compact(self, None).await?;
+                // 重置 starting guard 后重试
+                let retry_window = StartingGuard::new(self);
+                return self
+                    .run_core_with_entry(normalized, false, retry_window)
+                    .await;
+            }
+        }
+        Ok(result)
     }
 
     /// Continue a run from the assistant message at the branch tip.
