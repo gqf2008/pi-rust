@@ -577,6 +577,11 @@ impl ExtensionRegistry {
     /// Register a provider-owned OAuth implementation. The manifest must be a
     /// JSON object with a non-empty string `id`; malformed manifests are
     /// rejected. Returns `true` when an existing provider won.
+    ///
+    /// An id starting with `plugin:` is rejected too: that prefix is the
+    /// plugin credential namespace in the host's `auth.json`
+    /// (`plugin:<install-id>:<provider>`), and a generic OAuth provider under
+    /// it would put user-owned login credentials inside a plugin's namespace.
     pub fn register_oauth_provider(&mut self, provider: RegisteredOAuthProvider) -> bool {
         let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&provider.manifest_json)
         else {
@@ -586,6 +591,7 @@ impl ExtensionRegistry {
             return true;
         };
         if id.trim().is_empty()
+            || id.starts_with("plugin:")
             || self.oauth_providers.iter().any(|p| {
                 serde_json::from_str::<serde_json::Value>(&p.manifest_json)
                     .ok()
@@ -1149,6 +1155,28 @@ mod tests {
         assert!(!reg.register_oauth_provider(make(r#"{"id":"acme","displayName":"Acme"}"#)));
         assert!(reg.register_oauth_provider(make(r#"{"id":"acme"}"#)));
         assert!(reg.register_oauth_provider(make(r#"{"displayName":"missing-id"}"#)));
+        assert_eq!(reg.snapshot().oauth_providers().len(), 1);
+    }
+
+    /// The `plugin:` prefix is the host's namespaced credential key; a generic
+    /// (cdylib) OAuth provider may never register under it, or `ki auth login`
+    /// would file user-owned tokens inside a plugin's namespace.
+    #[test]
+    fn oauth_manifest_refuses_the_reserved_plugin_prefix() {
+        let mut reg = ExtensionRegistry::new();
+        let make = |manifest: &str| RegisteredOAuthProvider {
+            plugin: "test-plugin".to_string(),
+            manifest_json: manifest.to_string(),
+            request_fn: noop_oauth,
+            plugin_free_string: noop_free,
+            user_data: std::ptr::null_mut(),
+        };
+        assert!(reg.register_oauth_provider(make(r#"{"id":"plugin:evil:acme"}"#)));
+        assert!(reg.register_oauth_provider(make(r#"{"id":"plugin:x"}"#)));
+        assert!(reg.snapshot().oauth_providers().is_empty());
+        // An id that merely contains the prefix is fine; only a leading one
+        // is reserved.
+        assert!(!reg.register_oauth_provider(make(r#"{"id":"acme:plugin:x"}"#)));
         assert_eq!(reg.snapshot().oauth_providers().len(), 1);
     }
 }

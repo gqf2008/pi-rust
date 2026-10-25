@@ -407,14 +407,36 @@ pub fn upsert_credential(provider_id: &str, cred: Credential) -> Result<(), Conf
     })
 }
 
+/// The [`ConfigError`] for a provider id that uses the reserved `plugin:`
+/// credential namespace.
+fn reserved_prefix_error(provider_id: &str) -> ConfigError {
+    let path = agent_dir()
+        .map(|root| root.join("auth.json"))
+        .unwrap_or_else(|_| PathBuf::from("auth.json"));
+    ConfigError::Write {
+        path,
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("provider id `{provider_id}` uses the reserved `{PLUGIN_KEY_PREFIX}` prefix"),
+        ),
+    }
+}
+
 /// Store an OAuth token under exactly one provider id using the atomic auth
 /// store writer. Token values never enter the event or session layer.
+///
+/// Provider ids starting with `plugin:` are refused: that prefix is the plugin
+/// credential namespace (see [`plugin_credential_key`]), and a generic OAuth
+/// login must never place a user-owned credential inside it.
 pub fn upsert_oauth_token(
     provider_id: &str,
     access: String,
     refresh: String,
     expires: i64,
 ) -> Result<(), ConfigError> {
+    if provider_id.starts_with(PLUGIN_KEY_PREFIX) {
+        return Err(reserved_prefix_error(provider_id));
+    }
     upsert_credential(
         provider_id,
         Credential::Oauth {
@@ -444,23 +466,46 @@ pub fn read_oauth_token(provider_id: &str) -> Result<Option<Credential>, ConfigE
     })
 }
 
+/// The auth-store key namespace reserved for plugin credentials. Generic
+/// writers refuse it ([`upsert_oauth_token`], the `ki auth` login paths), and
+/// the plugin paths overwrite or delete only entries that carry a plugin
+/// fingerprint (see [`is_plugin_owned_credential`]).
+const PLUGIN_KEY_PREFIX: &str = "plugin:";
+
+/// Whether a stored credential was written by the plugin channel. Only such
+/// entries may be replaced or removed through the plugin paths; anything else
+/// at a namespaced key (a bare `ApiKey`, a generic OAuth login) did not come
+/// from this channel and must be left untouched.
+fn is_plugin_owned_credential(credential: &Credential) -> bool {
+    matches!(
+        credential,
+        Credential::Oauth {
+            profile_fingerprint: Some(_),
+            ..
+        }
+    )
+}
+
 /// The auth-store key one plugin's OAuth credential lives under.
 ///
 /// The `plugin:` prefix *is* the isolation: a plugin provider id can never be a
 /// bare provider id (`anthropic`), so a plugin can never replace a
 /// user-owned credential, while re-login of the same namespaced key overwrites
-/// exactly that plugin's entry.
+/// exactly that plugin's entry. The prefix is reserved — the generic writers
+/// refuse it, so a `plugin:` key in `auth.json` can only have been created by
+/// [`upsert_plugin_oauth_token`].
 pub fn plugin_credential_key(install_id: &str, provider_id: &str) -> String {
-    format!("plugin:{install_id}:{provider_id}")
+    format!("{PLUGIN_KEY_PREFIX}{install_id}:{provider_id}")
 }
 
 /// Store a plugin's OAuth token under `plugin:<install-id>:<provider-id>`.
 ///
 /// This is the only write path for a guest-originated token. It deliberately
-/// does more than [`upsert_credential`]: an existing `ApiKey` at the namespaced
-/// key is refused (that entry did not come from this path), while an existing
-/// OAuth value is overwritten, which is what re-login of the same plugin
-/// provider needs.
+/// does more than [`upsert_credential`]: an existing entry at the namespaced
+/// key that the plugin channel did not write — a bare `ApiKey`, or a generic
+/// OAuth login (no profile fingerprint) — is refused, while an existing
+/// plugin-written OAuth value is overwritten, which is what re-login of the
+/// same plugin provider needs.
 pub fn upsert_plugin_oauth_token(
     install_id: &str,
     provider_id: &str,
@@ -473,14 +518,18 @@ pub fn upsert_plugin_oauth_token(
     let root = agent_dir()?;
     with_auth_mutation_lock(&root, || {
         let mut store = read_auth_at(&root)?;
-        if matches!(store.get(&key), Some(Credential::ApiKey { .. })) {
-            return Err(ConfigError::Write {
-                path: root.join("auth.json"),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("refusing to replace the non-OAuth credential at `{key}`"),
-                ),
-            });
+        if let Some(existing) = store.get(&key) {
+            if !is_plugin_owned_credential(existing) {
+                return Err(ConfigError::Write {
+                    path: root.join("auth.json"),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "refusing to replace the credential at `{key}`: it was not written by the plugin channel"
+                        ),
+                    ),
+                });
+            }
         }
         store.insert(
             key,
@@ -530,7 +579,9 @@ pub fn read_plugin_oauth_token_at(
 }
 
 /// Remove one plugin's namespaced OAuth credential, leaving every bare
-/// provider entry (and every other plugin's entry) untouched.
+/// provider entry (and every other plugin's entry) untouched. A generic
+/// OAuth entry at the namespaced key (no plugin fingerprint) is left alone
+/// too: the plugin channel may only remove what it wrote.
 pub fn delete_plugin_oauth_token(install_id: &str, provider_id: &str) -> Result<bool, ConfigError> {
     delete_plugin_oauth_token_at(&agent_dir()?, install_id, provider_id)
 }
@@ -544,7 +595,7 @@ pub fn delete_plugin_oauth_token_at(
     let key = plugin_credential_key(install_id, provider_id);
     with_auth_mutation_lock(root, || {
         let mut store = read_auth_at(root)?;
-        if !matches!(store.get(&key), Some(Credential::Oauth { .. })) {
+        if !matches!(store.get(&key), Some(cred) if is_plugin_owned_credential(cred)) {
             return Ok(false);
         }
         store.remove(&key);
@@ -553,9 +604,10 @@ pub fn delete_plugin_oauth_token_at(
     })
 }
 
-/// Remove every OAuth credential under `plugin:<install-id>:*`, returning how
-/// many entries went away. Non-OAuth entries, bare provider keys, and other
-/// plugins' entries are preserved.
+/// Remove every plugin-written OAuth credential under `plugin:<install-id>:*`,
+/// returning how many entries went away. Non-OAuth entries, generic OAuth
+/// entries (no plugin fingerprint), bare provider keys, and other plugins'
+/// entries are preserved.
 pub fn delete_plugin_credentials_at(root: &Path, install_id: &str) -> Result<usize, ConfigError> {
     let prefix = format!("plugin:{install_id}:");
     with_auth_mutation_lock(root, || {
@@ -563,8 +615,7 @@ pub fn delete_plugin_credentials_at(root: &Path, install_id: &str) -> Result<usi
         let keys: Vec<String> = store
             .keys()
             .filter(|key| {
-                key.starts_with(&prefix)
-                    && matches!(store.get(*key), Some(Credential::Oauth { .. }))
+                key.starts_with(&prefix) && store.get(*key).is_some_and(is_plugin_owned_credential)
             })
             .cloned()
             .collect();
@@ -1562,6 +1613,104 @@ mod tests {
             read_auth().unwrap().get(&key),
             Some(Credential::ApiKey { key, .. }) if key.as_deref() == Some("sk-user")
         ));
+    }
+
+    /// A generic OAuth credential (no profile fingerprint) sitting at a
+    /// plugin-namespaced key must be untouchable by the plugin paths: the
+    /// guest write refuses, and both delete shapes leave it in place.
+    #[test]
+    fn a_generic_oauth_entry_at_a_namespaced_key_blocks_the_plugin_write() {
+        let _cfg = TempConfig::new();
+        let key = plugin_credential_key("install-1", "anthropic");
+        upsert_credential(
+            &key,
+            Credential::Oauth {
+                access: "user-token".into(),
+                refresh: String::new(),
+                expires: 0,
+                profile_fingerprint: None,
+            },
+        )
+        .unwrap();
+
+        let error = upsert_plugin_oauth_token(
+            "install-1",
+            "anthropic",
+            "at".into(),
+            "rt".into(),
+            0,
+            "fingerprint-1".into(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("refusing to replace"), "{error}");
+        assert!(matches!(
+            read_auth().unwrap().get(&key),
+            Some(Credential::Oauth { access, profile_fingerprint: None, .. })
+                if access == "user-token"
+        ));
+    }
+
+    #[test]
+    fn plugin_deletes_leave_a_generic_oauth_namespaced_entry_alone() {
+        let _cfg = TempConfig::new();
+        let key = plugin_credential_key("install-1", "anthropic");
+        upsert_credential(
+            &key,
+            Credential::Oauth {
+                access: "user-token".into(),
+                refresh: String::new(),
+                expires: 0,
+                profile_fingerprint: None,
+            },
+        )
+        .unwrap();
+
+        // Per-provider delete (`ki plugin revoke` shape) preserves it.
+        assert!(!delete_plugin_oauth_token("install-1", "anthropic").unwrap());
+        assert!(read_auth().unwrap().get(&key).is_some());
+
+        // A plugin-written entry in the same namespace goes the normal way...
+        upsert_plugin_oauth_token(
+            "install-1",
+            "blocked",
+            "at".into(),
+            "rt".into(),
+            0,
+            "fingerprint-1".into(),
+        )
+        .unwrap();
+
+        // ...so the uninstall sweep removes exactly that one and keeps the
+        // generic entry.
+        let removed =
+            delete_plugin_credentials_at(&crate::config::agent_dir().unwrap(), "install-1")
+                .unwrap();
+        assert_eq!(removed, 1);
+        assert!(
+            read_auth().unwrap().get(&key).is_some(),
+            "the generic entry must survive the uninstall sweep"
+        );
+        assert!(read_auth()
+            .unwrap()
+            .get(&plugin_credential_key("install-1", "blocked"))
+            .is_none());
+    }
+
+    /// `ki auth login`/`refresh` (the generic OAuth writers) must refuse the
+    /// reserved `plugin:` prefix outright, so a user credential can never be
+    /// filed inside the plugin namespace in the first place.
+    #[test]
+    fn generic_oauth_writer_refuses_the_reserved_plugin_prefix() {
+        let _cfg = TempConfig::new();
+        let error = upsert_oauth_token(
+            "plugin:install-1:anthropic",
+            "access".into(),
+            "refresh".into(),
+            0,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("reserved"), "{error}");
+        assert!(read_auth().unwrap().is_empty(), "nothing may be written");
     }
 
     #[test]

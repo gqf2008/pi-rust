@@ -69,6 +69,17 @@ async fn run_login(
     snapshot: Option<&Arc<kiqi_extensions::RegistrySnapshot>>,
 ) -> i32 {
     let provider = parse_provider(args).unwrap_or(DEFAULT_PROVIDER_ID);
+    // The `plugin:` prefix is the plugin credential namespace in `auth.json`
+    // (`plugin:<install-id>:<provider-id>`); config::upsert_oauth_token refuses
+    // it too. A login under a reserved id would file a user-owned credential
+    // inside a plugin's namespace, where a later `ki plugin revoke/uninstall`
+    // or the plugin's own re-login could replace or remove it.
+    if provider.starts_with("plugin:") {
+        eprintln!(
+            "error: provider id \"{provider}\" uses the reserved `plugin:` prefix; choose another id"
+        );
+        return EXIT_ERROR;
+    }
     // A wasm plugin's granted provider wins over the cdylib registry when both
     // exist for the same id (the cdylib tier is the legacy channel). The plugin
     // is only loaded after the grant names it, so an ungranted provider never
@@ -862,6 +873,24 @@ mod tests {
         .unwrap();
         let code = run_check(&["--json".to_string()]).await;
         assert_eq!(code, 0);
+    }
+
+    /// `login` under a reserved `plugin:` id is refused before the wasm /
+    /// cdylib / API-key branches run: nothing prompts and nothing is saved.
+    #[tokio::test]
+    async fn login_refuses_a_reserved_plugin_namespaced_provider_id() {
+        let _cfg = TempConfig::new();
+        let code = run_login(
+            &[
+                "--provider".to_string(),
+                "plugin:install-1:anthropic".to_string(),
+            ],
+            None,
+        )
+        .await;
+        assert_eq!(code, EXIT_ERROR);
+        // The refusal happens before any prompt or store write.
+        assert!(!auth_path().unwrap().exists());
     }
 
     #[tokio::test]

@@ -3380,8 +3380,10 @@ mod tests {
         );
     }
 
-    /// `uninstall` deletes every `plugin:<install>:` OAuth credential and
-    /// nothing else, so no live token is stranded once its grant is gone.
+    /// `uninstall` deletes every `plugin:<install>:` OAuth credential the
+    /// plugin channel wrote and nothing else, so no live plugin token is
+    /// stranded once its grant is gone. A generic OAuth entry at a namespaced
+    /// key (no profile fingerprint) is not the plugin channel's to remove.
     #[test]
     fn uninstall_removes_every_namespaced_oauth_credential() {
         let agent = tempfile::tempdir().unwrap();
@@ -3390,11 +3392,25 @@ mod tests {
         assert!(root.join("plugins/foo").is_dir());
 
         let mut store = crate::config::AuthStore::new();
-        for (key, access) in [
-            ("plugin:foo:acme", "at-acme"),
-            ("plugin:foo:other", "at-other"),
-            ("plugin:bar:acme", "at-other-plugin"),
-            ("anthropic", "sk-live"),
+        for (key, access, fingerprint) in [
+            (
+                "plugin:foo:acme",
+                "at-acme",
+                Some("fingerprint-foo".to_string()),
+            ),
+            (
+                "plugin:foo:other",
+                "at-other",
+                Some("fingerprint-foo".to_string()),
+            ),
+            // A generic (user-written) OAuth credential at a namespaced key.
+            ("plugin:foo:generic", "at-generic", None),
+            (
+                "plugin:bar:acme",
+                "at-other-plugin",
+                Some("fingerprint-bar".to_string()),
+            ),
+            ("anthropic", "sk-live", None),
         ] {
             store.insert(
                 key.to_string(),
@@ -3402,7 +3418,7 @@ mod tests {
                     access: access.to_string(),
                     refresh: "rt".to_string(),
                     expires: 1,
-                    profile_fingerprint: None,
+                    profile_fingerprint: fingerprint,
                 },
             );
         }
@@ -3413,6 +3429,10 @@ mod tests {
         let after = crate::config::read_auth_at(root).unwrap();
         assert!(!after.contains_key("plugin:foo:acme"), "{after:?}");
         assert!(!after.contains_key("plugin:foo:other"), "{after:?}");
+        assert!(
+            after.contains_key("plugin:foo:generic"),
+            "the generic entry must survive: {after:?}"
+        );
         assert!(after.contains_key("plugin:bar:acme"), "{after:?}");
         assert!(after.contains_key("anthropic"), "{after:?}");
     }
