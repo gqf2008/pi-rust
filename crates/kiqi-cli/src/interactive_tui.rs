@@ -41,6 +41,8 @@ mod sessions;
 use sessions::*;
 mod run;
 use run::*;
+mod cron;
+use cron::*;
 pub(crate) mod events;
 use events::*;
 mod selectors;
@@ -751,6 +753,11 @@ enum TuiMessage {
     /// A plugin `run_command`/`continue_command` finished on its worker thread.
     /// Handled on the async loop, which owns selector/editor installation.
     PluginCommandDone(PluginCommandOutcome),
+    /// A `.ki/cron.json` job fired while the session was idle. The text is
+    /// already the final injected user message (`⏰ cron:<name> …`). Delivered
+    /// through the main loop so it starts a run exactly like an editor submit;
+    /// a fire that lands during a run is steered instead (see `cron.rs`).
+    CronInject(String),
 }
 
 /// Terminal result of a user-initiated `!command` shell run.
@@ -1358,6 +1365,20 @@ pub async fn interactive_tui(
         selection_start: std::sync::Mutex::new(None),
         selection_end: std::sync::Mutex::new(None),
     });
+
+    // 会话内定时任务：仅当 `.ki/cron.json` 存在时启动。去重状态独立于
+    // 调度器代际，在 `/reload` 先停后重建时继续复用，避免同分钟重触发。
+    let cron_dedup = Arc::new(crate::cron::CronDedup::default());
+    let mut session_cron = start_session_cron(
+        &cwd,
+        project_trusted,
+        args,
+        &lane,
+        &state,
+        &tx,
+        &tui,
+        Arc::clone(&cron_dedup),
+    );
 
     let _compaction_watcher = harness.watch({
         let state = Arc::clone(&state);
@@ -2966,6 +2987,33 @@ pub async fn interactive_tui(
                 )
                 .await;
             }
+            Some(TuiMessage::CronInject(prompt)) => {
+                // 定时任务不是用户出场：不清编辑器，也不重置 signal 链。
+                if !state.try_start_working() {
+                    // 投递时还空闲、主循环处理时已经跑起来了：按普通用户消息
+                    // 的语义排队（steer），绝不取消在途回合。
+                    let message = user_message_with_images(&prompt, Vec::new());
+                    if let Err(error) = lane.steer(message).await {
+                        diagnostic_log(&format!("cron: 注入失败（排队）：{error}"));
+                    } else {
+                        refresh_pending_messages(&state, &lane).await;
+                    }
+                    tui.request_render(false);
+                    continue;
+                }
+                add_user_message(&chat_container, &prompt);
+                tui.request_render(false);
+                run_prompt_streaming(
+                    &lane,
+                    &prompt,
+                    false,
+                    &tui,
+                    &state,
+                    drain_handle.is_some(),
+                    Vec::new(),
+                )
+                .await;
+            }
             Some(TuiMessage::McpInput) => {
                 // MUI input: drain at the same kind of boundary as terminal
                 // input, but never while a run is active. If a non-run command
@@ -3357,6 +3405,11 @@ pub async fn interactive_tui(
                 tui.request_render(false);
             }
             Some(TuiMessage::ReloadExtensions) => {
+                // 会话级调度器跟着 reload 一起换代：先停旧线程，取消并 join
+                // 在途命令；全部 worker 回收后才能重建，杜绝新旧两代重叠。
+                if let Some(cron) = session_cron.take() {
+                    cron.stop();
+                }
                 // B5d: drive the shared reload routine on the async runtime,
                 // then surface the outcome. `reload_context` was passed into
                 // `interactive_tui` and is the same `Arc<ReloadContext>` the
@@ -3409,6 +3462,19 @@ pub async fn interactive_tui(
                 } else {
                     add_note_message(&chat_container, &outcome.summary);
                 }
+                // 信任可能在会话中由 `/trust` 或外部修改；重建前必须重新判定，
+                // 不能沿用启动时的 `project_trusted` 快照。
+                let cron_project_trusted = crate::session::resolve_project_trust(args, &cwd);
+                session_cron = start_session_cron(
+                    &cwd,
+                    cron_project_trusted,
+                    args,
+                    &lane,
+                    &state,
+                    &tx,
+                    &tui,
+                    Arc::clone(&cron_dedup),
+                );
                 tui.request_render(false);
             }
             Some(TuiMessage::PluginCommandDone(outcome)) => {
@@ -3433,6 +3499,10 @@ pub async fn interactive_tui(
         handle.abort();
     }
     mui_handle.abort();
+    // 会话结束：先标记关闭，再停调度线程并取消、join 全部在途命令。
+    if let Some(cron) = session_cron.take() {
+        cron.stop();
+    }
     // Drop the reload bridge: clearing the mailbox closes the signal channel,
     // the drain task's `recv` returns `None`, and the task exits. (Aborting is
     // redundant — the recv terminates — but cheap + makes shutdown explicit.)

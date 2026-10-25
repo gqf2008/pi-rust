@@ -217,6 +217,9 @@ changes what you can build with it:
   release.
 - **One implementation, two surfaces.** The global CLI and an embedded agent load
   the same tools. You do not maintain a plugin and a library variant separately.
+- **Scheduled prompts, in-session.** `prompt` or `command` jobs in `.ki/cron.json`
+  fire while an interactive session is open and arrive in the transcript as a user
+  message the agent can act on.
 
 ### How it compares
 

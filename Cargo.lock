@@ -2122,6 +2122,7 @@ dependencies = [
  "arboard",
  "async-trait",
  "base64 0.22.1",
+ "chrono",
  "crossterm",
  "dirs",
  "fs2",
