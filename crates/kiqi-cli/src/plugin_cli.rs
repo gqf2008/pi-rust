@@ -617,13 +617,21 @@ fn credential_capability_warning(grants: &Grants, capability: &str, id: &str) ->
 /// policy here; every legacy key keeps the value-list form.
 fn apply_grant(grants: &mut Grants, target: &Target, root: &Path) -> Result<(), String> {
     target.flags.validate_for(&target.capability)?;
-    if !target.policy.is_empty() {
+    let capability = target.capability.as_str();
+    // 0.8.0 的五个新 key 用结构化 flag（--provider/--profile/--model-json/…）；
+    // `--host`/`--command` 值列表只属于 legacy key（net-http 的 host 列表、
+    // exec 的命令列表就靠它）——这里不能对新旧一刀切拒绝，否则 legacy 授权
+    // 全部不可用（round-4 评审实测回归）。
+    let is_new_key = matches!(
+        capability,
+        "oauth" | "provider" | "render" | "resources" | "provider-request"
+    );
+    if is_new_key && !target.policy.is_empty() {
         return Err(format!(
-            "`{}` takes no --host/--command; set its own policy flags instead",
-            target.capability
+            "`{capability}` takes no --host/--command; set its own policy flags instead"
         ));
     }
-    match target.capability.as_str() {
+    match capability {
         "oauth" => {
             reject_cwd_and_max_open(target)?;
             grants.grant_oauth(build_oauth(target)?)
@@ -851,12 +859,19 @@ fn build_provider_request(target: &Target) -> Result<ProviderRequestGrant, Strin
             ))
         }
     };
+    let observe = if flags.observe {
+        ObserveMode::Requests
+    } else {
+        ObserveMode::None
+    };
+    if observe == ObserveMode::None && !flags.patch {
+        return Err(
+            "provider-request needs --observe or --patch: a grant with neither delivers nothing"
+                .to_string(),
+        );
+    }
     Ok(ProviderRequestGrant {
-        observe: if flags.observe {
-            ObserveMode::Requests
-        } else {
-            ObserveMode::None
-        },
+        observe,
         headers,
         messages,
         patch: flags.patch,
@@ -3542,5 +3557,48 @@ mod tests {
         assert!(!text.contains("at-secret"), "{text}");
         assert!(!text.contains("rt-secret"), "{text}");
         assert!(!text.contains("sk-secret"), "{text}");
+    }
+
+    mod tests {
+        use super::*;
+
+        /// round-4 回归：legacy 拼法（--host/--command 值列表）必须仍能落到
+        /// `Grants::grant`，不能被新 key 的结构化 flag 校验一刀切拒绝。
+        #[test]
+        fn legacy_host_and_command_grants_still_apply() {
+            let root = tempfile::tempdir().unwrap();
+            let mut grants = Grants::default();
+
+            let parsed = parse_target(&[
+                "web".into(),
+                "net-http".into(),
+                "--host".into(),
+                "api.example.com".into(),
+            ])
+            .unwrap();
+            apply_grant(&mut grants, &parsed, root.path()).unwrap();
+            assert!(grants.allows_host("api.example.com"));
+
+            let parsed = parse_target(&[
+                "build".into(),
+                "exec".into(),
+                "--command".into(),
+                "cargo".into(),
+            ])
+            .unwrap();
+            apply_grant(&mut grants, &parsed, root.path()).unwrap();
+            assert!(grants.allows_command("cargo"));
+        }
+
+        /// round-4 修复附带的空 grant 拒绝：observe 与 patch 都没开 = 什么都不
+        /// 会投递，这样的 grant 直接报错而不是静默无用。
+        #[test]
+        fn empty_provider_request_grant_is_rejected() {
+            let root = tempfile::tempdir().unwrap();
+            let mut grants = Grants::default();
+            let parsed = parse_target(&["observe".into(), "provider-request".into()]).unwrap();
+            let error = apply_grant(&mut grants, &parsed, root.path()).unwrap_err();
+            assert!(error.contains("--observe or --patch"), "{error}");
+        }
     }
 }
