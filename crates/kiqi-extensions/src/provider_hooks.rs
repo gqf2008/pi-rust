@@ -168,8 +168,10 @@ impl ProviderHooks for ExtensionProviderHooks {
 
         // 凭据脱敏（卡：0.8.0 能力补齐，P0）：观测者只拿到「有没有 key」与
         // header **名字**，不再拿到 apiKey 与 header **值**（`authorization` /
-        // `x-api-key` 就在其中）。`messages` 保留——真实生成输入是 langfuse
-        // 这类观测者的唯一用途。
+        // `x-api-key` 就在其中）；`baseUrl` 去掉 userinfo 与查询串——网关地址里
+        // 常内嵌 `user:pass@host?api_key=…`，原样下发等于把凭据递进沙箱。
+        // `messages` 默认仍进载荷（由宿主按 grant 分级决定是否下发）——真实生成
+        // 输入是 langfuse 这类观测者的唯一用途。
         let header_names: Vec<String> = opts
             .headers
             .as_ref()
@@ -178,7 +180,7 @@ impl ProviderHooks for ExtensionProviderHooks {
         let mut request = serde_json::json!({
             "model": model.id,
             "provider": model.provider,
-            "baseUrl": model.base_url,
+            "baseUrl": sanitize_base_url(&model.base_url),
             "reasoning": model.reasoning,
             "apiKeyPresent": opts.api_key.as_deref().is_some_and(|key| !key.is_empty()),
             "timeoutMs": opts.timeout.map(|d| d.as_millis() as u64),
@@ -229,16 +231,28 @@ impl ProviderHooks for ExtensionProviderHooks {
         patch.as_ref().and_then(options_patch_from_value)
     }
 
-    /// Fan the terminal assistant message out to `AfterProviderResponse`
-    /// subscribers.
-    fn after_response(&self, _model: &Model, message: &AssistantMessage) {
-        let json = serde_json::to_value(message).unwrap_or(serde_json::json!({}));
-        dispatch_data_event(
-            &self.snapshot,
-            EventTag::AfterProviderResponse,
-            &json.to_string(),
-        );
-    }
+    // `AfterProviderResponse` 不再派发（0.8.0 契约，见 plugin-abi §6.41）：
+    // wasm 侧没有消费者，cdylib 侧也会在 P6 随通道删除；宿主侧同时拒绝向
+    // wasm 转发该 tag（见 kiqi-plugin-host `dispatch_event`）。终端 assistant
+    // 消息由 `MessageEnd` 覆盖观测需求。
+}
+
+/// 观测用的 baseUrl 脱敏：只保留 `scheme://authority/path`，丢弃 userinfo 与
+/// 整段查询/锚点。网关地址常把密钥内嵌在查询或 userinfo 里，观测者不需要它们。
+fn sanitize_base_url(raw: &str) -> String {
+    let (scheme, rest) = match raw.split_once("://") {
+        Some((scheme, rest)) => (scheme, rest),
+        None => return String::new(),
+    };
+    let rest = match rest.split_once(['?', '#']) {
+        Some((path, _)) => path,
+        None => rest,
+    };
+    let rest = match rest.rsplit_once('@') {
+        Some((_, without_userinfo)) => without_userinfo,
+        None => rest,
+    };
+    format!("{scheme}://{rest}")
 }
 
 /// Convert a host-validated patch JSON into the live options patch.
@@ -246,6 +260,25 @@ impl ProviderHooks for ExtensionProviderHooks {
 /// The wasm host has already enforced the clamp table and the protected-header
 /// deny-list, so this is a mechanical mapping: `null` deletes a map entry.
 /// Returns `None` for an empty patch (nothing to apply).
+#[cfg(test)]
+mod sanitize_tests {
+    use super::sanitize_base_url;
+
+    #[test]
+    fn strips_userinfo_query_and_fragment() {
+        assert_eq!(
+            sanitize_base_url("https://user:password@gateway.test/v1?api_key=sk-live"),
+            "https://gateway.test/v1"
+        );
+        assert_eq!(
+            sanitize_base_url("http://alice@host.example/path#frag"),
+            "http://host.example/path"
+        );
+        assert_eq!(sanitize_base_url("https://host.test"), "https://host.test");
+        assert_eq!(sanitize_base_url("not a url"), "");
+    }
+}
+
 fn options_patch_from_value(value: &serde_json::Value) -> Option<SimpleStreamOptionsPatch> {
     let mut patch = SimpleStreamOptionsPatch::default();
     let mut any = false;
@@ -604,6 +637,77 @@ mod tests {
             "the gate pass runs exactly once after the observe pass"
         );
         drop(seen);
+        crate::compiled::clear_compiled_event_sink();
+    }
+
+    /// Observation URLs are endpoint metadata, not a credential channel. Both
+    /// the native-redacted and wasm-rich payloads must drop userinfo, query
+    /// values and fragments before either serialization happens.
+    #[test]
+    fn before_request_sanitizes_base_url_in_both_observation_payloads() {
+        let _guard = PROVIDER_LOCK.lock().unwrap();
+        let _sink = crate::SINK_TEST_LOCK.lock().unwrap();
+        CAPTURED.lock().unwrap().clear();
+
+        type Seen = Vec<(crate::compiled::DispatchMode, u32, serde_json::Value)>;
+        let seen: Arc<Mutex<Seen>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        crate::compiled::set_compiled_event_sink(Arc::new(move |mode, tag, payload| {
+            recorder.lock().unwrap().push((mode, tag, payload.clone()));
+            crate::compiled::CompiledVerdict::Continue
+        }));
+
+        let mut registry = crate::registry::ExtensionRegistry::new();
+        registry.register_event_handler(
+            "test-plugin".to_string(),
+            EventTag::BeforeProviderRequest,
+            capture_handler,
+            std::ptr::null_mut(),
+        );
+        let hooks = ExtensionProviderHooks {
+            snapshot: Arc::new(registry.snapshot()),
+            _keepalive: Arc::new(crate::PluginKeepalive::new(Vec::new(), None)),
+            last_before_agent_start: Mutex::new(None),
+            last_forced_prompt: Mutex::new(None),
+        };
+        let model = kiqi_ai::Model::new(
+            "m",
+            "m",
+            kiqi_ai::Api::AnthropicMessages,
+            "anthropic",
+            "https://user:password@gateway.test/v1?api_key=sk-live&token=also-secret#fragment-secret",
+        );
+        hooks.before_request(&model, &kiqi_ai::Context::default(), &Default::default());
+
+        let request_tag = EventTag::BeforeProviderRequest as u32;
+        let mut payloads: Vec<serde_json::Value> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, tag, _)| *tag == request_tag)
+            .map(|(_, _, payload)| payload.clone())
+            .collect();
+        payloads.extend(
+            CAPTURED
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(tag, _)| *tag == EventTag::BeforeProviderRequest)
+                .map(|(_, payload)| serde_json::from_str(payload).expect("native payload is JSON")),
+        );
+        assert_eq!(payloads.len(), 3, "native, observe and gate payloads");
+        for payload in payloads {
+            let serialized = payload.to_string();
+            for secret in [
+                "user:password",
+                "api_key=sk-live",
+                "token=also-secret",
+                "fragment-secret",
+            ] {
+                assert!(!serialized.contains(secret), "leaked {secret}: {payload}");
+            }
+            assert_eq!(payload["baseUrl"], "https://gateway.test/v1");
+        }
         crate::compiled::clear_compiled_event_sink();
     }
 

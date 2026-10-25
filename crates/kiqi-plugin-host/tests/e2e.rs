@@ -856,6 +856,79 @@ fn provider_observation_is_not_delivered_without_a_grant() {
     );
 }
 
+/// All provider hooks cross the same deny-by-default wasm boundary: without a
+/// `provider-request` grant none of the three tags reaches the guest. The
+/// fixture claims every provider event it receives, so delivery is observable
+/// from the host side as a Claimed verdict — AfterProviderResponse must stay
+/// Continue forever (it has no wasm consumer).
+#[test]
+fn provider_hooks_require_a_grant_and_after_response_is_not_delivered() {
+    let wasm = fixture_wasm();
+    let events = [
+        (EventTag::BeforeProviderRequest, "request-marker"),
+        (EventTag::BeforeProviderHeaders, "headers-marker"),
+        (EventTag::AfterProviderResponse, "response-marker"),
+    ];
+
+    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, Grants::default())
+        .expect("load without grants");
+    let caps = HostCaps::observer(&NullLog);
+    for (tag, marker) in events {
+        let action = plugin.on_event(
+            &Event::new(tag, serde_json::json!({ "marker": marker })),
+            &caps,
+        );
+        assert!(
+            matches!(action, kiqi_plugin::EventAction::Continue),
+            "an ungranted guest must not be called for {tag:?}: {action:?}"
+        );
+    }
+
+    let grants = Grants {
+        provider_request: Some(kiqi_plugin::grants::ProviderRequestGrant {
+            observe: kiqi_plugin::grants::ObserveMode::Requests,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let plugin = WasmPlugin::load_with_grants("conformance-granted", &wasm, grants)
+        .expect("load with observation grant");
+    let caps = HostCaps::observer(&NullLog);
+    let request = plugin.on_event(
+        &Event::new(
+            EventTag::BeforeProviderRequest,
+            serde_json::json!({ "marker": "request-marker" }),
+        ),
+        &caps,
+    );
+    assert!(
+        matches!(request, kiqi_plugin::EventAction::Claimed),
+        "a granted guest must receive BeforeProviderRequest: {request:?}"
+    );
+    let headers = plugin.on_event(
+        &Event::new(
+            EventTag::BeforeProviderHeaders,
+            serde_json::json!({ "marker": "headers-marker" }),
+        ),
+        &caps,
+    );
+    assert!(
+        matches!(headers, kiqi_plugin::EventAction::Claimed),
+        "a granted guest must receive BeforeProviderHeaders: {headers:?}"
+    );
+    let after = plugin.on_event(
+        &Event::new(
+            EventTag::AfterProviderResponse,
+            serde_json::json!({ "marker": "response-marker" }),
+        ),
+        &caps,
+    );
+    assert!(
+        matches!(after, kiqi_plugin::EventAction::Continue),
+        "AfterProviderResponse must never reach a wasm guest: {after:?}"
+    );
+}
+
 /// Grants for the provider-gate fixture. `patch` is the switch under test;
 /// observation is left off in most cases to prove the gate does not depend on
 /// it (a patch-only grant still sees the request it patches).

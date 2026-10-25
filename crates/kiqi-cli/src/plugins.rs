@@ -495,6 +495,11 @@ pub(crate) fn dispatch_to_compiled(
         // and keeps the blocking call.
         let action = match mode {
             kiqi_extensions::DispatchMode::Observe => {
+                // AfterProviderResponse 在 0.8.0 无 wasm/compiled 面（终端消息
+                // 由 MessageEnd 覆盖），宿主源也已停止派发——这里双保险跳过。
+                if tag == kiqi_plugin::EventTag::AfterProviderResponse {
+                    continue;
+                }
                 // The partition belongs to the provider request alone: there a
                 // patch-capable host is invoked only by the gate, and a host
                 // with neither switch granted is never called. Every other tag
@@ -502,11 +507,27 @@ pub(crate) fn dispatch_to_compiled(
                 // out to every host, so a patch-capable plugin keeps its
                 // lifecycle trace. An in-process host (no policy) observes
                 // throughout.
-                if tag == kiqi_plugin::EventTag::BeforeProviderRequest {
-                    if let Some(policy) = host.provider_request_policy() {
-                        if policy.patch || !policy.observe {
-                            continue;
-                        }
+                // 两个 provider 事件都是 deny-by-default：无 grant 的主机一个
+                // 都不投递；BeforeProviderRequest 里可 patch 的主机只由 gate
+                // 调用（避免同请求双投递），observe 主机留在本扇出。
+                if matches!(
+                    tag,
+                    kiqi_plugin::EventTag::BeforeProviderRequest
+                        | kiqi_plugin::EventTag::BeforeProviderHeaders
+                ) {
+                    let Some(policy) = host.provider_request_policy() else {
+                        continue;
+                    };
+                    if tag == kiqi_plugin::EventTag::BeforeProviderRequest
+                        && (policy.patch || !policy.observe)
+                    {
+                        continue;
+                    }
+                    if tag == kiqi_plugin::EventTag::BeforeProviderHeaders
+                        && !policy.observe
+                        && !policy.patch
+                    {
+                        continue;
                     }
                 }
                 host.try_on_event(&event, &caps)
@@ -4075,6 +4096,94 @@ mod tests {
                 + none_counts.gate.load(std::sync::atomic::Ordering::SeqCst),
             0
         );
+    }
+
+    /// Header observation uses the same per-host grant partition as the
+    /// request event. AfterProviderResponse is native-only: neither compiled
+    /// nor wasm hosts have a delivery path for it.
+    #[test]
+    fn provider_header_hooks_are_partitioned_and_after_response_is_dropped() {
+        let caps = empty_caps();
+        let (observe_host, observe_counts) = gate_probe(
+            "observe",
+            Some(gate_policy(true, false, 500)),
+            serde_json::Value::Null,
+            None,
+            kiqi_plugin::EventAction::Continue,
+        );
+        let (patch_host, patch_counts) = gate_probe(
+            "patch",
+            Some(gate_policy(false, true, 500)),
+            serde_json::Value::Null,
+            None,
+            kiqi_plugin::EventAction::Continue,
+        );
+        let (none_host, none_counts) = gate_probe(
+            "none",
+            Some(gate_policy(false, false, 500)),
+            serde_json::Value::Null,
+            None,
+            kiqi_plugin::EventAction::Continue,
+        );
+        // AfterProviderResponse 在 0.8.0 起不再派发（无消费者，见 plugin-abi
+        // §6.41）。BeforeProviderHeaders 属于 provider 事件：有 grant 的主机
+        // 都收（patch 主机也不会重复——它只经 gate 收 BeforeProviderRequest），
+        // 无 grant 的主机不收。计数器跨条目累加，所以每条都用全新主机。
+        for (tag, observe_expected, patch_expected) in [
+            (kiqi_plugin::EventTag::BeforeProviderHeaders, 1usize, 1usize),
+            (kiqi_plugin::EventTag::AfterProviderResponse, 0usize, 0usize),
+        ] {
+            let (observe_host, observe_counts) = gate_probe(
+                "observe",
+                Some(gate_policy(true, false, 500)),
+                serde_json::Value::Null,
+                None,
+                kiqi_plugin::EventAction::Continue,
+            );
+            let (patch_host, patch_counts) = gate_probe(
+                "patch",
+                Some(gate_policy(false, true, 500)),
+                serde_json::Value::Null,
+                None,
+                kiqi_plugin::EventAction::Continue,
+            );
+            let (none_host, none_counts) = gate_probe(
+                "none",
+                Some(gate_policy(false, false, 500)),
+                serde_json::Value::Null,
+                None,
+                kiqi_plugin::EventAction::Continue,
+            );
+            let hosts = vec![observe_host, patch_host, none_host];
+            dispatch_to_compiled(
+                &hosts,
+                &caps,
+                tag,
+                serde_json::json!({ "secret": "must-not-cross" }),
+                kiqi_extensions::DispatchMode::Observe,
+            );
+            assert_eq!(
+                observe_counts
+                    .observe
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                observe_expected,
+                "observe host count after {tag:?}"
+            );
+            assert_eq!(
+                patch_counts
+                    .observe
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                patch_expected,
+                "patch host count after {tag:?}"
+            );
+            assert_eq!(
+                none_counts
+                    .observe
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "ungranted host must not observe {tag:?}"
+            );
+        }
     }
 
     /// The provider partition is scoped to `BeforeProviderRequest`: a

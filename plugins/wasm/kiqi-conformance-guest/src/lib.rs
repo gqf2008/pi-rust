@@ -542,6 +542,15 @@ impl Guest for Conformance {
             types::Event::BeforeAgentStart(_) => types::EventAction::Claimed,
             types::Event::Input(input) if input.key == "f8" => types::EventAction::Claimed,
             types::Event::BeforeProviderRequest(payload) => {
+                log::write(
+                    types::LogLevel::Info,
+                    &format!("provider-event:BeforeProviderRequest:{payload}"),
+                );
+                // 0.8.0 投递探针：带 marker 的载荷直接 Claimed，让宿主侧能从
+                // 返回值断言「这个 guest 被调用过」（provider_hooks 测试用）。
+                if payload.contains("\"marker\"") {
+                    return types::EventAction::Claimed;
+                }
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
                     return types::EventAction::Continue;
                 };
@@ -583,6 +592,21 @@ impl Guest for Conformance {
                     Some(patch) => types::EventAction::Patch(patch.to_string()),
                     None => types::EventAction::Continue,
                 }
+            }
+            types::Event::Other(other)
+                if matches!(
+                    other.kind.as_str(),
+                    "BeforeProviderHeaders" | "AfterProviderResponse"
+                ) =>
+            {
+                log::write(
+                    types::LogLevel::Info,
+                    &format!("provider-event:{}:{}", other.kind, other.payload),
+                );
+                // 0.8.0 投递探针：只要被调用就 Claimed，宿主据此区分
+                // 「投递了」与「从未投递」（AfterProviderResponse 应永远
+                // 不会有这条路径）。
+                types::EventAction::Claimed
             }
             types::Event::Other(other) if other.kind == "Context" => {
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(&other.payload) else {

@@ -2754,13 +2754,26 @@ impl WasmPlugin {
         // grant allows, and an ungranted guest is never called at all. The
         // grants live in the store (that is why this happens here and not in
         // kiqi-extensions, which cannot see them).
-        let wit = if event.tag == kiqi_plugin::EventTag::BeforeProviderRequest {
-            match graded_provider_request(event, &inner.store.data().grants, false) {
-                Some(wit) => wit,
-                None => return EventAction::Continue,
+        // Provider 观测三件套统一按 grant 投递：无 `provider-request` grant 的
+        // guest 一个都收不到；`AfterProviderResponse` 在 0.8.0 里没有 wasm 面
+        // （终端消息由 MessageEnd 覆盖），永远不投递。
+        let wit = match event.tag {
+            kiqi_plugin::EventTag::BeforeProviderRequest => {
+                match graded_provider_request(event, &inner.store.data().grants, false) {
+                    Some(wit) => wit,
+                    None => return EventAction::Continue,
+                }
             }
-        } else {
-            to_wit_event(event)
+            kiqi_plugin::EventTag::BeforeProviderHeaders => {
+                // 与 CLI 分流同口径：observe 与 patch 都没开就不投递。
+                match inner.store.data().grants.provider_request.as_ref() {
+                    Some(policy) if policy.observe == ObserveMode::Requests || policy.patch => {}
+                    _ => return EventAction::Continue,
+                }
+                to_wit_event(event)
+            }
+            kiqi_plugin::EventTag::AfterProviderResponse => return EventAction::Continue,
+            _ => to_wit_event(event),
         };
         let _context = install_context_kind(None, caps, CallKind::Event, None);
         let result = inner
