@@ -74,6 +74,10 @@ pub async fn run() -> i32 {
     // Startup profiling wrapper: KI_TIMING=1 records namespace timings and
     // flushes them to stderr once the run completes, regardless of exit path.
     crate::timings::reset(crate::timings::TimingNamespace::Main);
+    // plugin-host 的 guest 失败诊断（tracing::warn）在 ki 里没有 subscriber，
+    // 会整体被丢弃——接进 ki 自己的运行时日志（agent_dir/logs/ki.log），
+    // 与 MCP signal、goal continuation 的诊断走同一处。
+    crate::plugins::install_guest_error_sink();
     let code = run_inner().await;
     crate::timings::print_timings();
     code

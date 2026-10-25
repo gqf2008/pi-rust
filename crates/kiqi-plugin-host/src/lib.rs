@@ -2494,6 +2494,27 @@ pub struct WasmPlugin {
     inner: Mutex<Option<Inner>>,
 }
 
+/// 宿主侧 guest 失败诊断汇。kiqi-plugin-host 是库，`tracing::warn!` 只有在
+/// 宿主进程装了 subscriber 时才可见——ki（kiqi-cli）至今没有装，P0 加的
+/// 诊断因此是死代码。嵌入方（kiqi-cli）在进程启动时调用
+/// [`set_guest_error_sink`] 把诊断接进自己的日志文件；未设置时只剩 tracing。
+static GUEST_ERROR_SINK: std::sync::OnceLock<
+    std::sync::Arc<dyn Fn(&str, &str, &str) + Send + Sync>,
+> = std::sync::OnceLock::new();
+
+/// 把一条 guest 失败诊断同时发给 tracing 与已安装的 sink（若有的话）。
+fn emit_guest_error(plugin: &str, op: &str, error: &str) {
+    tracing::warn!(plugin = %plugin, op, %error, "guest call failed");
+    if let Some(sink) = GUEST_ERROR_SINK.get() {
+        sink(plugin, op, error);
+    }
+}
+
+/// 安装 guest 失败诊断汇（进程级，幂等：后一次设置不覆盖前一次）。
+pub fn set_guest_error_sink(sink: std::sync::Arc<dyn Fn(&str, &str, &str) + Send + Sync>) {
+    let _ = GUEST_ERROR_SINK.set(sink);
+}
+
 impl WasmPlugin {
     /// 宿主侧 guest 调用诊断汇（卡：0.8.0 能力补齐，P0）。
     ///
@@ -2502,7 +2523,7 @@ impl WasmPlugin {
     /// 安装/展示/事件扇出全都静默少一块，用户没有任何线索。这里统一走 tracing，
     /// 与 `kiqi-extensions` 既有诊断口径一致。
     fn report_guest_error(&self, op: &str, error: impl std::fmt::Display) {
-        tracing::warn!(plugin = %self.id, op, %error, "guest call failed");
+        emit_guest_error(&self.id, op, &error.to_string());
     }
 
     /// Load and instantiate a component with the grants the user recorded for
@@ -5249,5 +5270,33 @@ mod render_tests {
         assert!(RenderHost::granted(&grants).is_none());
         grants.render = Some(RenderGrant::default());
         assert!(RenderHost::granted(&grants).is_some());
+    }
+}
+
+#[cfg(test)]
+mod guest_error_sink_tests {
+    use super::{emit_guest_error, set_guest_error_sink};
+
+    /// P0 诊断汇不再依赖 tracing subscriber：嵌入方装了 sink 之后，guest
+    /// 失败必须出现在 sink 里（最终复审 round-4 的 blocking 1）。
+    #[test]
+    fn guest_error_sink_receives_emitted_diagnostics() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let for_sink = std::sync::Arc::clone(&captured);
+        set_guest_error_sink(std::sync::Arc::new(
+            move |plugin: &str, op: &str, error: &str| {
+                for_sink
+                    .lock()
+                    .unwrap()
+                    .push(format!("{plugin}/{op}/{error}"));
+            },
+        ));
+        emit_guest_error("test-plugin", "list-commands", "boom");
+        let got = captured.lock().unwrap();
+        assert!(
+            got.iter()
+                .any(|line| line == "test-plugin/list-commands/boom"),
+            "sink must capture the diagnostic verbatim: {got:?}"
+        );
     }
 }

@@ -248,6 +248,17 @@ pub struct Registered {
 /// extensions, but no crate is linked into the binary here. The historical
 /// `plugin-kiqi-*` cfg blocks below stay as design history; those features no
 /// longer exist, so they can never be enabled.
+/// 把 plugin-host 的 guest 失败诊断接进 ki 自己的运行时日志
+/// （`<agent_dir>/logs/ki.log`）。进程级一次：首次设置生效；之后任何
+/// WasmPlugin guest 的 trap/失败都会出现在 ki 的诊断日志里。
+pub(crate) fn install_guest_error_sink() {
+    kiqi_plugin_host::set_guest_error_sink(std::sync::Arc::new(
+        |plugin: &str, op: &str, error: &str| {
+            crate::interactive_tui::diagnostic_log(&format!("[{plugin}] {op} failed: {error}"));
+        },
+    ));
+}
+
 pub fn load_all() -> Vec<Registered> {
     Vec::new()
 }
