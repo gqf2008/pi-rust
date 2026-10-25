@@ -353,7 +353,7 @@ fn build_request(model: &Model, ctx: &Context, opts: &SimpleStreamOptions) -> Va
                     value["name"] = Value::String(message.tool_name.clone());
                 }
                 messages.push(value);
-                if model.input.contains(&InputModality::Image) {
+                { // 0.8.1: 无条件携带图片（modality 前置检查已移除）
                     pending_tool_images.extend(message.content.iter().filter_map(|content| {
                         match content {
                             Content::Image(image) => Some(json!({

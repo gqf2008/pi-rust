@@ -255,7 +255,9 @@ fn is_same_model(msg: &AssistantMessage, model: &Model) -> bool {
 /// the image-downgrade branch. The out `Vec<Message>` is what `convert_messages`
 /// then serializes.
 pub fn transform_messages(messages: &[Message], model: &Model) -> Vec<Message> {
-    let supports_images = model.input.contains(&InputModality::Image);
+    // 0.8.1: 不再做 input modality 前置检查——用户给什么就组什么包，
+    // API 不支持时返回的错误比静默降级更有用。
+    let supports_images = true;
     let mut tool_call_id_map: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
 

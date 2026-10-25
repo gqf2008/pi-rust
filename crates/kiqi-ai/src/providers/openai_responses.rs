@@ -2095,7 +2095,7 @@ fn user_content_for_model(c: &UserContent, model: &Model) -> Value {
     match c {
         UserContent::Text(s) => Value::String(s.clone()),
         UserContent::Blocks(blocks) => {
-            let supports_images = model.input.contains(&InputModality::Image);
+            let supports_images = true; // 0.8.1: 无条件携带图片
             let mut content = Vec::with_capacity(blocks.len());
             let mut previous_image = false;
             for item in blocks {
