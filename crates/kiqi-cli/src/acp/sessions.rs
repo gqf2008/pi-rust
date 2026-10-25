@@ -1,12 +1,13 @@
-//! The single-session state machine for `ki acp serve`, plus the turn state
-//! the cancellation discipline (abb lessons) needs.
+//! `ki acp serve` 的会话状态机，以及取消语义所需的 turn 状态。
 //!
-//! ONE LIVE SESSION PER PROCESS (batch 1): the compiled-plugin event sink is a
-//! process-global last-writer-wins slot installed per `session::build`
-//! (`kiqi-extensions::compiled::set_compiled_event_sink`), and plugins read the
-//! process cwd at call time — a second concurrent session build would steal
-//! the first session's plugin events. `session/new` while a session is live is
-//! rejected with a JSON-RPC error; after a clean close a new one may be built.
+//! 每个 [`LiveSession`] 独立持有 harness、事件接收器、turn/cancel 与对话框；
+//! ACP 层按 session id 路由，连接能力快照只在激活时复制到各会话。
+//!
+//! 已知的进程级限制：legacy compiled-plugin sink
+//! （`kiqi_extensions::set_compiled_event_sink`）与 `plugins::COMPILED_CAPS`
+//! 仍是 last-writer-wins，部分第三方插件也会在调用时读取进程 cwd。内置工具使用显式 cwd，ACP 的 run、
+//! cancel、标题和上下文不经过这些全局槽；不同 cwd 的 legacy 插件事件/项目状态
+//! 目前不能按会话隔离，后续需要单独的插件路由改造。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +19,7 @@ use futures::future::BoxFuture;
 use kiqi_agent::events::AgentEvent;
 use kiqi_extensions::UiDialogMailbox;
 use kiqi_harness::agent_harness::AgentHarness;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
 
 use super::dialogs::DialogPump;
@@ -76,7 +77,7 @@ pub(crate) type SessionFactory = Arc<
         + Sync,
 >;
 
-/// The one live ACP session.
+/// 一个活跃的 ACP 会话；不同实例之间不共享 turn 或事件流。
 pub(crate) struct LiveSession {
     pub(crate) id: SessionId,
     pub(crate) harness: AgentHarness,
@@ -142,6 +143,15 @@ impl LiveSession {
     /// advisory then flushes state, and only afterwards does the reload
     /// context — and with it the cdylibs — drop.
     pub(crate) async fn close(self) {
+        // ACP session/close 要求先取消相关工作；等待 turn 真正退出后再销毁
+        // 插件/MCP 上下文，避免运行中的工具看到被提前释放的资源。
+        self.turn.cancel();
+        if let Some(dialogs) = &self.dialogs {
+            // 与 session/cancel 一样先释放权限等待，否则 turn 可能停在对话框上，
+            // 而 close 又在等 turn，双方互等。
+            dialogs.cancel_all();
+        }
+        self.turn.wait_idle().await;
         if let Some(dialogs) = &self.dialogs {
             dialogs.shutdown();
         }
@@ -180,6 +190,7 @@ pub(crate) struct TurnState {
     in_flight: AtomicBool,
     cancelled: AtomicBool,
     token: Mutex<Option<CancellationToken>>,
+    idle: Notify,
 }
 
 impl TurnState {
@@ -188,6 +199,7 @@ impl TurnState {
             in_flight: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
             token: Mutex::new(None),
+            idle: Notify::new(),
         }
     }
 
@@ -216,6 +228,18 @@ impl TurnState {
         }
     }
 
+    /// 等待当前 turn 释放执行槽。先注册通知再复查状态，避免完成通知落在
+    /// 状态检查与 await 之间而永久等待。
+    pub(crate) async fn wait_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            if !self.in_flight.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Whether a client cancel was armed for the turn that is ending. The ACP
     /// spec requires `cancelled` as the stop reason after `session/cancel`,
     /// even when the run finished on its own in the race window.
@@ -238,6 +262,7 @@ impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.0.in_flight.store(false, Ordering::Release);
         *self.0.token.lock().unwrap() = None;
+        self.0.idle.notify_waiters();
     }
 }
 

@@ -22,7 +22,7 @@
 
 | | 项 | 现状 | 本方案 |
 |---|---|---|---|
-| ✅ | Zed 等 ACP 客户端驱动 ki | 无入口 | `ki acp serve`（v1：initialize / session/new / prompt / cancel / load） |
+| ✅ | Zed 等 ACP 客户端驱动 ki | 无入口 | `ki acp serve`（v1：initialize / session/new / prompt / cancel / load / close） |
 | ✅ | 事件→`session/update` 投影 | 事件在，无 ACP 面 | 逐 delta 投影（§4.5），abb 的 `event_updates` 做语义对照 |
 | ✅ | 取消贯穿（cancel 打断在途回合） | harness 原语齐 | abb 三件套落到 ki 原语上（§4.4） |
 | ⏳ | `session/request_permission`（插件 UI 对话框→客户端授权） | `UiDialogMailbox` 桥已在 RPC 通道打通 | 批次 2（§4.6） |
@@ -129,9 +129,10 @@ kiqi-mcp-adapter 插件，暂不接受会话级注入」），宁可报错也不
 |---|---|---|
 | `initialize` | ✅ | 应答 `protocolVersion: 1`（本端只讲 v1；实测 ABB 的 v2 请求照常接受，见 §7）；能力如实声明：`loadSession` true、不声明 auth |
 | `authenticate`/`logout` | 容忍 | 凭据走 ki 自己的配置（`~/.ki/agent/auth.json`、env），无 ACP auth；stray 调用回 `{}`（kiqi-acp 先例） |
-| `session/new` | ✅ | §4.7 参数立场；每会话一个 harness |
-| `session/prompt` | ✅ | ContentBlock 提文本（`prompt_text` 语义照搬 kiqi-acp）；spawn 回合 task |
-| `session/cancel` | ✅ | 通知，不应答；§4.4 |
+| `session/new` | ✅ | §4.7 参数立场；每次创建并插入一个独立 harness，其他会话活跃不构成拒绝理由（§15） |
+| `session/prompt` | ✅ | ContentBlock 提文本（`prompt_text` 语义照搬 kiqi-acp）；spawn 回合 task；每个会话至多一个活跃回合 |
+| `session/cancel` | ✅ | 通知，不应答；§4.4；只取消 `sessionId` 指定的会话 |
+| `session/close` | ✅ | 从会话表移除后取消并等待在途回合，再释放会话资源；其他会话不受影响 |
 | `session/load` | 批次 2 | resume harness（`allow_existing_session` 路径，`session.rs:706-713`）+ 把 JSONL 分支回放成 `session/update`（kiqi-acp `history.rs` 的回放语义） |
 | `session/set_mode` | ❌ | ki 无模式概念 |
 | `session/request_permission` | 批次 2 | §4.6 |
@@ -192,8 +193,12 @@ ABB 已有一个 4710 行的 ACP 客户端。它对 agent 的六点硬假设（�
 
 - **一致性测试**（进程内，DuplexStream 打协议面，kiqi-acp 测试风格）：分发竞态两条
   （§4.4）、投影单测（`projection.rs` 纯函数）、stopReason 映射表、参数第一刀解析
-  （mcpServers 拒绝、systemPrompt 生效）、`session/load` 回放、对话簿记竞态三条
-  （迟到应答/cancel 清理/关窗不阻塞——kiqi-acp `session.rs:852-966` 同款）；
+  （不支持的 MCP transport 拒绝、systemPrompt 生效）、`session/load` 回放、对话簿记竞态三条
+  （迟到应答/cancel 清理/关窗不阻塞——kiqi-acp `session.rs:852-966` 同款）、多会话并发与隔离
+  （`abb_multi_chat_sessions_run_close_and_reopen`、
+  `turns_and_cancellation_are_independent_between_sessions`、
+  `session_cwd_system_prompt_and_context_do_not_leak`、
+  `close_cancels_the_turn_before_releasing_the_session`，§15）；
 - **门禁**：常规 fmt/check/test + 文档快照；新增依赖锁 `=3.3.0`；
 - **人工验收**：Zed 真机一轮（批次 2 起）；ABB 客户端一轮（批次 3）。
 
@@ -225,10 +230,10 @@ stdio/失败面纪律全盘继承（§6）。
 - ~~官方 crate 分发模型实测结论~~（✅ 批次 1 已收敛，见 §12）；
 - ~~`Suspended` → stopReason 的准确命名~~（✅ 批次 1 落定：`end_turn` + stderr 说明，
   deferred resume 留批次 2+）；
-- ~~多会话共享进程的插件宿主语义上限~~（✅ 批次 1 落定：**每进程一个活跃会话**——
-  编译期插件事件 sink 是进程级 last-writer-wins（`kiqi-extensions::compiled`），第二个并发
-  `session::build` 会抢走第一会话的插件事件，且插件按进程 cwd 取路径。多会话需先做
-  sink 仲裁/按会话扩展世界，是独立设计活）；
+- ~~多会话共享进程的插件宿主语义上限~~（批次 1 曾临时裁定为**每进程一个活跃会话**；
+  ✅ 2026-10-24 已改为按 `sessionId` 路由的多会话模型，见 §15。legacy compiled-plugin
+  sink 与部分第三方插件读取进程 cwd 的限制仍未按会话隔离，见 `acp/sessions.rs` 模块注释，
+  不再用它拒绝第二个普通 ACP 会话）；
 - zed 注册是否进 `ki acp serve` 默认行为（现按 one-shot 子命令设计）；
 - ~~ABB 客户端 `protocolVersion: 2` 握手~~（✅ 2026-10-16 探针实测：**冲突不存在**——
   v1 守卫整个在 `unstable_protocol_v2` feature 门后，ki 只启 `stdio`，编译进去的是
@@ -343,3 +348,39 @@ session/new / EOF 全通，应答见 §7 表）。Zed 真机手测仍待人工�
   Zed 真机拉起 `ki acp serve` 并保持连接（spawn/注册面通过，进程与 initialize 实证）；
   完整回合由业主终止——Zed 弃用并卸载。abb 生产发行包继续走随包 abb-agent，`ki acp serve`
   回落路径仅在开发/自签构建触达。
+
+## 15. 多会话模型修正（2026-10-24）
+
+**动机是 ABB 的多聊天渠道生产用法。** ABB 在一个 `ki acp serve` 进程上复用多个聊天
+渠道（其 harness 以 `HashMap<Uuid, ChannelMeta>` 保存渠道），而旧实现把「进程内只能有
+一个活跃会话」当成硬约束：第一个会话尚未关闭时，第二次 `session/new` 会以
+`ki acp serve supports one live session per process; the current session is still live`
+失败。旧 ABB agent 支持多会话，因此这不是客户端应适应的新协议限制，而是回落到 ki 后
+产生的兼容性回归。
+
+现行模型与不变量：
+
+- `ServerShared::live` 是 `HashMap<SessionId, LiveSession>`。`session/new` 每次创建并
+  插入独立会话；只要 id 不冲突，其他会话是否活跃、是否有回合在运行都**不影响新建**。
+  `session/load` 同样插入；同一 id 已活跃仍按重复激活拒绝，不能覆盖旧实例。
+- `session/prompt`、`session/cancel`、`session/close` 全按 `sessionId` 路由。
+  **单活跃回合的粒度是每个会话**：同一会话的第二个并发 prompt 仍返回
+  `a prompt turn is already in flight`，不同会话则可并行流式输出；取消 A 不得截断 B。
+  取消的 100ms `CANCEL_ABORT_TICK` 兜底唤醒保持不变。
+- close 先把 id 从路由表移除，再取消并等待该会话的回合退出，最后关闭对话框泵并释放
+  harness / 插件 / MCP 上下文。未知或已经关闭的 id 在 prompt/close 上继续得到
+  `-32602` + `unknown session <id>`；load 的未知 id 继续得到原有的
+  `unknown sessionId <id>` 错误形状。连接 EOF 仍逐一关闭当时所有活跃会话。
+- 每个 `LiveSession` 独立持有 cwd、harness/上下文、事件接收器、system prompt 覆盖、
+  turn/cancel 与对话框状态，禁止串话。`initialize` 的协议版本协商和客户端能力快照
+  （包括 notices）属于**连接**，能力在会话激活时复制，不随某个会话关闭而丢失。
+- 进程级共享资源不因此复制成协议级全局会话；legacy compiled-plugin sink
+  （last-writer-wins）及第三方插件读取进程 cwd 的既有边界如实保留在
+  `acp/sessions.rs`。内置工具的显式 cwd、ACP run/cancel、标题与上下文不经过这些全局槽。
+
+兼容性测试以真实协议面钉住上述变化：旧的
+`second_live_session_is_refused_with_server_error` 拒绝测试由
+`abb_multi_chat_sessions_run_close_and_reopen` 取代，覆盖 A 活跃时新建 B、按 id 分流、
+关闭 A 后新建 C、B 始终可继续使用，以及未知/已关闭 id 的错误形状；其余三条分别覆盖
+跨会话取消独立、cwd/system prompt/上下文隔离、close 先取消再释放。协议版本协商、
+能力声明和同会话单回合错误均未改变。

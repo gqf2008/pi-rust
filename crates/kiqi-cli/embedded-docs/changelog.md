@@ -469,9 +469,10 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   client (Zed, ABB) at `ki` as an external coding agent over stdio JSON-RPC
   (official `agent-client-protocol` crate, pinned 3.3.0). Covers `initialize`
   / `session/new` / `session/prompt` / `session/cancel` and `session/load`
-  replay: one live session per process, per-delta streaming of message/thought
-  chunks and tool-call progress, honest stop reasons (a failed run surfaces as
-  a JSON-RPC error; a client cancel always answers `cancelled`), restart-stable
+  replay: multiple live sessions per process routed by `sessionId` (one active
+  turn per session), `session/close` cleanup, per-delta streaming of
+  message/thought chunks and tool-call progress, honest stop reasons (a failed
+  run surfaces as a JSON-RPC error; a client cancel always answers `cancelled`), restart-stable
   session ids a later load restores with the full transcript streamed back
   before the response, and stderr-only diagnostics (`KI_ACP_DEBUG` traces
   method flow). Permission dialogs bridge ki's plugin UI prompts to

@@ -1,6 +1,7 @@
 //! `ki acp serve` — a host-level Agent Client Protocol server (batch 1:
-//! initialize / session/new / session/prompt / session/cancel, one live
-//! session per process; proposal `docs/design/ki-acp-serve.md`).
+//! initialize / session/new / session/load / session/prompt / session/cancel /
+//! session/close, multiple live sessions per process; proposal
+//! `docs/design/ki-acp-serve.md`).
 //!
 //! The server owns the process's stdio for its lifetime (the same claim as
 //! `--connect`, bypassing arg parsing, provider resolution, and stdin
@@ -20,6 +21,12 @@
 //! - **Ordering**: the turn drains the event stream until the terminal
 //!   `AgentEnd` (bounded) before responding, so the response never overtakes
 //!   the last `session/update` — both serialize through the outgoing actor.
+//! - **会话路由**：[`ServerShared::live`] 按 [`SessionId`] 保存多个
+//!   [`LiveSession`]；`session/new` / `session/load` 插入，`prompt` / `cancel`
+//!   按 id 路由，`session/close` 先从表中移除再取消回合并释放资源。未知或
+//!   已关闭的 id 保持 invalid-params 错误；每个会话至多一个活跃回合，但
+//!   一个会话的回合不阻塞其他会话创建或运行。`initialize` 的协议协商与
+//!   客户端能力快照属于连接，会话状态仍由各自的 [`LiveSession`] 持有。
 
 mod diag;
 mod dialogs;
@@ -27,14 +34,16 @@ mod projection;
 mod sessions;
 mod zed;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, AuthenticateRequest, AuthenticateResponse, CancelNotification, ContentBlock,
-    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, LogoutRequest,
-    LogoutResponse, McpCapabilities, NewSessionRequest, NewSessionResponse, PromptRequest,
-    PromptResponse, SessionId, SessionNotification, SessionUpdate, StopReason,
+    AgentCapabilities, AuthenticateRequest, AuthenticateResponse, CancelNotification,
+    CloseSessionRequest, CloseSessionResponse, ContentBlock, InitializeRequest, InitializeResponse,
+    LoadSessionRequest, LoadSessionResponse, LogoutRequest, LogoutResponse, McpCapabilities,
+    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionCapabilities,
+    SessionCloseCapabilities, SessionId, SessionNotification, SessionUpdate, StopReason,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Error, Responder, Stdio};
@@ -51,7 +60,7 @@ use crate::app::{EXIT_RUNTIME, EXIT_USAGE};
 const ERR_INVALID_PARAMS: i32 = -32602;
 /// JSON-RPC `internal error` — a valid request failed inside the machinery.
 const ERR_INTERNAL: i32 = -32603;
-/// Server-defined — process-level constraints (one live session, one turn).
+/// Server-defined — per-session constraints (one active turn).
 const ERR_SERVER: i32 = -32000;
 /// How long the turn drain waits for the terminal event before answering.
 const TERMINAL_DRAIN: Duration = Duration::from_millis(250);
@@ -62,10 +71,10 @@ const TERMINAL_DRAIN: Duration = Duration::from_millis(250);
 /// needs a fixed wakeup source (abb's 100ms tick, design doc §4.4).
 const CANCEL_ABORT_TICK: Duration = Duration::from_millis(100);
 
-/// Shared server state: the one live session, its factory, and the client
+/// Shared server state: live sessions keyed by ACP id, their factory, and the client
 /// capability snapshot `initialize` left behind (one connection = one client).
 struct ServerShared {
-    live: Option<LiveSession>,
+    live: HashMap<SessionId, LiveSession>,
     factory: SessionFactory,
     /// Whether the client advertised the `notices` session capability
     /// ([`ClientSessionCapabilities::notices`]): user-facing
@@ -143,7 +152,7 @@ pub(crate) async fn run_server(
     factory: SessionFactory,
 ) -> agent_client_protocol::Result<()> {
     let shared: SharedServer = Arc::new(Mutex::new(ServerShared {
-        live: None,
+        live: HashMap::new(),
         factory,
         client_notices: false,
     }));
@@ -153,6 +162,7 @@ pub(crate) async fn run_server(
     let shared_load = Arc::clone(&shared);
     let shared_prompt = Arc::clone(&shared);
     let shared_cancel = Arc::clone(&shared);
+    let shared_close = Arc::clone(&shared);
 
     let result = Agent
         .builder()
@@ -194,6 +204,9 @@ pub(crate) async fn run_server(
                     InitializeResponse::new(ProtocolVersion::V1).agent_capabilities(
                         AgentCapabilities::new()
                             .load_session(true)
+                            .session_capabilities(
+                                SessionCapabilities::new().close(SessionCloseCapabilities::new()),
+                            )
                             // Stdio is always served; Streamable HTTP landed in
                             // batch 4. The legacy SSE transport is not
                             // implemented, so it stays false.
@@ -259,6 +272,15 @@ pub(crate) async fn run_server(
             },
             agent_client_protocol::on_receive_notification!(),
         )
+        .on_receive_request(
+            async move |request: CloseSessionRequest,
+                        responder: Responder<CloseSessionResponse>,
+                        _cx: ConnectionTo<Client>| {
+                handle_session_close(&shared_close, request, responder).await;
+                Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .connect_to(transport)
         .await;
 
@@ -267,18 +289,54 @@ pub(crate) async fn run_server(
     // `connect_to` resolves, so there is no in-flight turn left to abort here.
     // Run the SessionShutdown advisory before the reload context (and with it
     // the plugin cdylibs) drops.
-    close_live_session(&shared).await;
+    close_live_sessions(&shared).await;
     result
 }
 
-/// Dispatches the `SessionShutdown` advisory for the live session, if any. An
+/// Dispatches the `SessionShutdown` advisory for every live session. An
 /// in-flight turn does not survive to this point: the crate drops the task
 /// actor (and the turn future with it) while the connection is closing, and
 /// the turn's guard releases the harness run on drop.
-async fn close_live_session(shared: &SharedServer) {
-    let session = shared.lock().unwrap().live.take();
-    if let Some(session) = session {
+async fn close_live_sessions(shared: &SharedServer) {
+    let sessions = std::mem::take(&mut shared.lock().unwrap().live);
+    for (_, session) in sessions {
         session.close().await;
+    }
+}
+
+/// 插入新会话而不覆盖同 id 的活跃会话。冲突时把所有权交还调用方执行关闭。
+fn insert_live_session(shared: &SharedServer, session: LiveSession) -> Result<(), LiveSession> {
+    use std::collections::hash_map::Entry;
+
+    let id = session.id.clone();
+    match shared.lock().unwrap().live.entry(id) {
+        Entry::Vacant(entry) => {
+            entry.insert(session);
+            Ok(())
+        }
+        Entry::Occupied(_) => Err(session),
+    }
+}
+
+/// `session/close`：先从路由表移除，再取消并等待当前 turn，最后释放资源。
+/// 未知或已经关闭的 id 与 prompt 使用同一种 invalid-params 错误形状。
+async fn handle_session_close(
+    shared: &SharedServer,
+    request: CloseSessionRequest,
+    responder: Responder<CloseSessionResponse>,
+) {
+    let session = shared.lock().unwrap().live.remove(&request.session_id);
+    match session {
+        Some(session) => {
+            diag::diagln!("session/close id={}", request.session_id);
+            session.close().await;
+            let _ = responder.respond(CloseSessionResponse::new());
+        }
+        None => {
+            let message = format!("unknown session {}", request.session_id);
+            diag::diagln!("session/close rejected: {message}");
+            let _ = responder.respond_with_error(Error::new(ERR_INVALID_PARAMS, message));
+        }
     }
 }
 
@@ -428,22 +486,7 @@ async fn handle_session_new(
         ));
         return;
     }
-    let factory = {
-        let state = shared.lock().unwrap();
-        if state.live.is_some() {
-            None
-        } else {
-            Some(Arc::clone(&state.factory))
-        }
-    };
-    let Some(factory) = factory else {
-        diag::diagln!("session/new rejected: a session is already live");
-        let _ = responder.respond_with_error(Error::new(
-            ERR_SERVER,
-            "ki acp serve supports one live session per process; the current session is still live",
-        ));
-        return;
-    };
+    let factory = Arc::clone(&shared.lock().unwrap().factory);
 
     // Design doc §4.7: `systemPrompt` 收下, never silently dropped (abb
     // lesson 7). The pinned v1 schema carries it only through `_meta`.
@@ -472,9 +515,19 @@ async fn handle_session_new(
             // before the session id is ever handed out.
             session.start_dialog_pump(cx);
             let id = session.id.clone();
-            diag::diagln!("session/new ok id={id}");
-            shared.lock().unwrap().live = Some(session);
-            let _ = responder.respond(NewSessionResponse::new(id));
+            match insert_live_session(shared, session) {
+                Ok(()) => {
+                    diag::diagln!("session/new ok id={id}");
+                    let _ = responder.respond(NewSessionResponse::new(id));
+                }
+                Err(session) => {
+                    // 理论上只有会话 id 冲突才会走到这里；不能覆盖仍活跃的旧会话。
+                    session.close().await;
+                    let message = format!("session {id} is already live");
+                    diag::diagln!("session/new rejected: {message}");
+                    let _ = responder.respond_with_error(Error::new(ERR_SERVER, message));
+                }
+            }
         }
         Err(message) => {
             diag::diagln!("session/new failed: {message}");
@@ -488,30 +541,14 @@ async fn handle_session_new(
 /// agent-side obligation: "Stream the entire conversation history back to the
 /// client via notifications"; kiqi-acp `protocol.rs` replays the same way under
 /// serial dispatch). Runs inline — like `session/new`, the build is the slow
-/// part and no turn can be in flight (the live check already refused that).
+/// part; other sessions' spawned turns continue on the connection's task actor.
 async fn handle_session_load(
     shared: &SharedServer,
     request: LoadSessionRequest,
     responder: Responder<LoadSessionResponse>,
     cx: ConnectionTo<Client>,
 ) {
-    // One live session per process applies to load as much as to new.
-    let factory = {
-        let state = shared.lock().unwrap();
-        if state.live.is_some() {
-            None
-        } else {
-            Some(Arc::clone(&state.factory))
-        }
-    };
-    let Some(factory) = factory else {
-        diag::diagln!("session/load rejected: a session is already live");
-        let _ = responder.respond_with_error(Error::new(
-            ERR_SERVER,
-            "ki acp serve supports one live session per process; the current session is still live",
-        ));
-        return;
-    };
+    let factory = Arc::clone(&shared.lock().unwrap().factory);
 
     // Client-supplied MCP servers on load: the same decode and the same
     // policy as session/new, word for word — stdio accepted loudly, the rest
@@ -569,6 +606,17 @@ async fn handle_session_load(
         let _ = responder.respond_with_error(unknown());
         return;
     }
+    if shared
+        .lock()
+        .unwrap()
+        .live
+        .contains_key(&request.session_id)
+    {
+        let message = format!("session {} is already live", request.session_id);
+        diag::diagln!("session/load rejected: {message}");
+        let _ = responder.respond_with_error(Error::new(ERR_SERVER, message));
+        return;
+    }
 
     // Restore-only existence pre-check under the request cwd (never
     // ByExactId, which would create the missing session): the request cwd must
@@ -621,15 +669,22 @@ async fn handle_session_load(
             // Replay BEFORE the response, from the built harness's own session
             // face (the factory holds the advisory lock — no second open).
             match replay_updates(&session.harness).await {
-                Ok(updates) => {
-                    shared.lock().unwrap().live = Some(session);
-                    diag::diagln!("session/load replayed {} updates", updates.len());
-                    send_updates(&cx, &request.session_id, updates);
-                    let _ = responder.respond(LoadSessionResponse::new());
-                }
+                Ok(updates) => match insert_live_session(shared, session) {
+                    Ok(()) => {
+                        diag::diagln!("session/load replayed {} updates", updates.len());
+                        send_updates(&cx, &request.session_id, updates);
+                        let _ = responder.respond(LoadSessionResponse::new());
+                    }
+                    Err(session) => {
+                        session.close().await;
+                        let message = format!("session {} is already live", request.session_id);
+                        diag::diagln!("session/load rejected: {message}");
+                        let _ = responder.respond_with_error(Error::new(ERR_SERVER, message));
+                    }
+                },
                 Err(error) => {
-                    // Built but unreadable: leaving it live would wedge the
-                    // process behind the single-live-session rule, so answer
+                    // Built but unreadable: leaving it in the live map would
+                    // expose an id whose history could not be replayed, so answer
                     // the error and run the advisory dispatch (close()) before
                     // the reload context — and the plugin cdylibs — drop.
                     diag::diagln!("session/load replay failed: {error}");
@@ -700,12 +755,8 @@ async fn handle_prompt(
 ) {
     let began = {
         let mut state = shared.lock().unwrap();
-        match state.live.as_mut() {
+        match state.live.get_mut(&request.session_id) {
             None => Err((
-                ERR_INVALID_PARAMS,
-                "no live session; send session/new first".to_string(),
-            )),
-            Some(session) if session.id != request.session_id => Err((
                 ERR_INVALID_PARAMS,
                 format!("unknown session {}", request.session_id),
             )),
@@ -1018,11 +1069,7 @@ fn stop_reason(
 /// handler too. Idle cancels are absorbed by [`TurnState::cancel`].
 fn handle_cancel(shared: &SharedServer, notification: CancelNotification) {
     let state = shared.lock().unwrap();
-    if let Some(session) = state
-        .live
-        .as_ref()
-        .filter(|session| session.id == notification.session_id)
-    {
+    if let Some(session) = state.live.get(&notification.session_id) {
         diag::diagln!("session/cancel id={}", session.id);
         session.turn.cancel();
         // The protocol has the client answer Cancelled for in-flight
@@ -1230,16 +1277,41 @@ mod tests {
     /// seam tests use instead of `session::build` (which writes session JSONL
     /// and installs global plugin state).
     async fn faux_deps(text: &str, tokens_per_second: f64) -> sessions::SessionDeps {
-        let provider = FauxProvider::new(
-            FauxScript::new()
-                .with_text(text)
-                .with_tokens_per_second(tokens_per_second),
-        );
+        faux_deps_with_responses(text, tokens_per_second, 1).await
+    }
+
+    async fn faux_deps_with_responses(
+        text: &str,
+        tokens_per_second: f64,
+        responses: usize,
+    ) -> sessions::SessionDeps {
+        let mut script = FauxScript::new();
+        for _ in 0..responses {
+            script = script.with_text(text);
+        }
+        faux_deps_with_script(script.with_tokens_per_second(tokens_per_second)).await
+    }
+
+    async fn faux_deps_with_script(script: FauxScript) -> sessions::SessionDeps {
+        let provider = FauxProvider::new(script);
         let (broadcast, event_rx) = BroadcastEmitter::new(256);
+        let session = kiqi_harness::session::session::Session::new(
+            Arc::new(kiqi_harness::session::memory::InMemorySessionStorage::new(
+                kiqi_harness::session::types::SessionMetadata {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    created_at: 0,
+                    parent_session_id: None,
+                },
+                Arc::new(kiqi_harness::session::memory::SystemClock),
+                Arc::new(kiqi_harness::session::session::DefaultIdGenerator::new()),
+            )),
+            None,
+        );
         let options = AgentHarnessOptions {
             model: provider.default_model().clone(),
             models: vec![provider.clone()],
             agent_emitter: Some(Arc::new(broadcast)),
+            session,
             ..Default::default()
         };
         let harness = AgentHarness::create(options).await.expect("faux harness");
@@ -1252,9 +1324,19 @@ mod tests {
     }
 
     fn faux_factory(text: &'static str, tokens_per_second: f64) -> SessionFactory {
+        faux_factory_with_responses(text, tokens_per_second, 1)
+    }
+
+    fn faux_factory_with_responses(
+        text: &'static str,
+        tokens_per_second: f64,
+        responses: usize,
+    ) -> SessionFactory {
         Arc::new(
             move |_cwd, _params: sessions::SessionParams, _request: sessions::SessionRequest| {
-                Box::pin(async move { Ok(faux_deps(text, tokens_per_second).await) })
+                Box::pin(async move {
+                    Ok(faux_deps_with_responses(text, tokens_per_second, responses).await)
+                })
                     as futures::future::BoxFuture<'static, Result<sessions::SessionDeps, String>>
             },
         )
@@ -1562,6 +1644,29 @@ mod tests {
         text
     }
 
+    /// 按 sessionId 汇集已经送达的消息块，避免一个会话的消费掩盖另一个会话的串流。
+    async fn collect_texts_by_session(updates: &mut Updates) -> HashMap<SessionId, String> {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut texts = HashMap::new();
+        while let Ok(notification) = updates.try_recv() {
+            if let SessionUpdate::AgentMessageChunk(chunk) = notification.update {
+                if let ContentBlock::Text(received) = chunk.content {
+                    texts
+                        .entry(notification.session_id)
+                        .or_insert_with(String::new)
+                        .push_str(&received.text);
+                }
+            }
+        }
+        texts
+    }
+
+    fn assert_unknown_session(error: Error, session_id: &SessionId) {
+        assert_eq!(i32::from(error.code), ERR_INVALID_PARAMS);
+        assert_eq!(error.message, format!("unknown session {session_id}"));
+        assert_eq!(error.data, None);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn happy_path_streams_chunks_and_answers_end_turn() {
         const SCRIPT: &str = "hello from faux";
@@ -1821,21 +1926,313 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn second_live_session_is_refused_with_server_error() {
-        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+    async fn abb_multi_chat_sessions_run_close_and_reopen() {
+        let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let factory: SessionFactory = Arc::new(
+            |cwd: &std::path::Path,
+             _params: sessions::SessionParams,
+             _request: sessions::SessionRequest| {
+                let label = cwd
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("unknown")
+                    .to_owned();
+                Box::pin(async move {
+                    // B 在 A 关闭后还要再跑一轮，因此给它两段相同的 faux 响应。
+                    let responses = if label == "b" { 2 } else { 1 };
+                    let text = format!("reply-{label}");
+                    Ok(faux_deps_with_responses(&text, 1000.0, responses).await)
+                })
+                    as futures::future::BoxFuture<'static, Result<sessions::SessionDeps, String>>
+            },
+        );
         let result = run_client(
-            faux_factory("ok", 1000.0),
+            factory,
             updates_tx,
             None,
             async move |cx: ConnectionTo<Agent>| {
-                let _sid = init_and_new(&cx).await?;
+                init_only(&cx).await?;
+                let ghost = SessionId::from("ki-ghost");
+                let error = cx
+                    .send_request(PromptRequest::new(
+                        ghost.clone(),
+                        vec![ContentBlock::from("hi")],
+                    ))
+                    .block_task()
+                    .await
+                    .expect_err("unknown session prompt must fail");
+                assert_unknown_session(error, &ghost);
+
+                let root = std::env::temp_dir().join("ki-acp-abb-multi-chat");
+                let a = cx
+                    .send_request(NewSessionRequest::new(root.join("a")))
+                    .block_task()
+                    .await?
+                    .session_id;
+                // A 仍活跃时创建 B；两个 id 必须都能独立路由。
+                let b = cx
+                    .send_request(NewSessionRequest::new(root.join("b")))
+                    .block_task()
+                    .await?
+                    .session_id;
+                assert_ne!(a, b);
+                for sid in [&a, &b] {
+                    let response = cx
+                        .send_request(PromptRequest::new(
+                            sid.clone(),
+                            vec![ContentBlock::from("hi")],
+                        ))
+                        .block_task()
+                        .await?;
+                    assert_eq!(response.stop_reason, StopReason::EndTurn);
+                }
+                let texts = collect_texts_by_session(&mut updates_rx).await;
+                assert_eq!(texts.len(), 2);
+                assert_eq!(texts.get(&a).map(String::as_str), Some("reply-a"));
+                assert_eq!(texts.get(&b).map(String::as_str), Some("reply-b"));
+
+                // ABB 的关键路径：关闭 A 后创建 C，B 始终不必重建。
+                cx.send_request(CloseSessionRequest::new(a.clone()))
+                    .block_task()
+                    .await?;
+                let error = cx
+                    .send_request(PromptRequest::new(
+                        a.clone(),
+                        vec![ContentBlock::from("closed")],
+                    ))
+                    .block_task()
+                    .await
+                    .expect_err("closed session prompt must fail");
+                assert_unknown_session(error, &a);
+                let error = cx
+                    .send_request(CloseSessionRequest::new(a.clone()))
+                    .block_task()
+                    .await
+                    .expect_err("closing an unknown id must fail");
+                assert_unknown_session(error, &a);
+
+                let c = cx
+                    .send_request(NewSessionRequest::new(root.join("c")))
+                    .block_task()
+                    .await?
+                    .session_id;
+                assert_ne!(c, a);
+                assert_ne!(c, b);
+                for sid in [&b, &c] {
+                    let response = cx
+                        .send_request(PromptRequest::new(
+                            sid.clone(),
+                            vec![ContentBlock::from("still live")],
+                        ))
+                        .block_task()
+                        .await?;
+                    assert_eq!(response.stop_reason, StopReason::EndTurn);
+                }
+                let texts = collect_texts_by_session(&mut updates_rx).await;
+                assert_eq!(texts.len(), 2);
+                assert_eq!(texts.get(&b).map(String::as_str), Some("reply-b"));
+                assert_eq!(texts.get(&c).map(String::as_str), Some("reply-c"));
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn session_cwd_system_prompt_and_context_do_not_leak() {
+        let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let factory: SessionFactory = Arc::new(
+            |cwd: &std::path::Path,
+             params: sessions::SessionParams,
+             _request: sessions::SessionRequest| {
+                let cwd = cwd.to_path_buf();
+                let system_prompt = params.system_prompt_append.unwrap_or_default();
+                Box::pin(async move {
+                    let response_cwd = cwd.display().to_string();
+                    let response_prompt = system_prompt.clone();
+                    let script = FauxScript::new();
+                    script.set_responses(vec![kiqi_ai::providers::faux::FauxStep::factory(
+                        move |context| {
+                            let users = context
+                                .messages
+                                .iter()
+                                .filter_map(|message| match message {
+                                    kiqi_ai::types::Message::User(user) => user.content.as_text(),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            kiqi_ai::providers::faux::faux_assistant_message(
+                                format!(
+                                    "cwd={response_cwd}|system={response_prompt}|users={users}"
+                                ),
+                                kiqi_ai::types::StopReason::Stop,
+                            )
+                        },
+                    )]);
+                    let deps = faux_deps_with_script(script.with_tokens_per_second(1000.0)).await;
+                    deps.harness
+                        .set_system_prompt(Some(system_prompt))
+                        .await
+                        .expect("set per-session system prompt");
+                    Ok(deps)
+                })
+                    as futures::future::BoxFuture<'static, Result<sessions::SessionDeps, String>>
+            },
+        );
+        let result = run_client(
+            factory,
+            updates_tx,
+            None,
+            async move |cx: ConnectionTo<Agent>| {
+                init_only(&cx).await?;
+                let root = std::env::temp_dir().join("ki-acp-session-state");
+                let mut meta_a = agent_client_protocol::schema::v1::Meta::new();
+                meta_a.insert(
+                    "systemPrompt".into(),
+                    serde_json::json!({"append": "system-a"}),
+                );
+                let mut meta_b = agent_client_protocol::schema::v1::Meta::new();
+                meta_b.insert(
+                    "systemPrompt".into(),
+                    serde_json::json!({"append": "system-b"}),
+                );
+                let a = cx
+                    .send_request(NewSessionRequest::new(root.join("a")).meta(meta_a))
+                    .block_task()
+                    .await?
+                    .session_id;
+                let b = cx
+                    .send_request(NewSessionRequest::new(root.join("b")).meta(meta_b))
+                    .block_task()
+                    .await?
+                    .session_id;
+                for (sid, prompt) in [(&a, "question-a"), (&b, "question-b")] {
+                    let response = cx
+                        .send_request(PromptRequest::new(
+                            sid.clone(),
+                            vec![ContentBlock::from(prompt)],
+                        ))
+                        .block_task()
+                        .await?;
+                    assert_eq!(response.stop_reason, StopReason::EndTurn);
+                }
+                let texts = collect_texts_by_session(&mut updates_rx).await;
+                let expected_a = format!(
+                    "cwd={}|system=system-a|users=question-a",
+                    root.join("a").display()
+                );
+                let expected_b = format!(
+                    "cwd={}|system=system-b|users=question-b",
+                    root.join("b").display()
+                );
+                assert_eq!(texts.get(&a), Some(&expected_a));
+                assert_eq!(texts.get(&b), Some(&expected_b));
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn turns_and_cancellation_are_independent_between_sessions() {
+        const SCRIPT: &str = "both sessions can stream independently";
+        let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = run_client(
+            faux_factory(SCRIPT, 20.0),
+            updates_tx,
+            None,
+            async move |cx: ConnectionTo<Agent>| {
+                let first = init_and_new(&cx).await?;
                 let second = cx
                     .send_request(NewSessionRequest::new(std::env::temp_dir()))
                     .block_task()
-                    .await;
-                let error = second.expect_err("second session should fail");
-                assert_eq!(i32::from(error.code), ERR_SERVER);
-                assert!(error.message.contains("one live session per process"));
+                    .await?
+                    .session_id;
+                let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+                let (second_tx, second_rx) = tokio::sync::oneshot::channel();
+                for (sid, tx) in [(first.clone(), first_tx), (second.clone(), second_tx)] {
+                    cx.send_request(PromptRequest::new(sid, vec![ContentBlock::from("go")]))
+                        .on_receiving_result(async move |result| {
+                            let _ = tx.send(result);
+                            Ok(())
+                        })?;
+                }
+
+                // 等 B 真正开始串流再取消 A，避免测试只覆盖两个 turn 的启动竞态。
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                let mut second_text = String::new();
+                while second_text.is_empty() {
+                    let notification = tokio::time::timeout_at(deadline, updates_rx.recv())
+                        .await
+                        .expect("second session never streamed")
+                        .expect("updates channel closed");
+                    if notification.session_id == second {
+                        if let SessionUpdate::AgentMessageChunk(chunk) = notification.update {
+                            if let ContentBlock::Text(received) = chunk.content {
+                                second_text.push_str(&received.text);
+                            }
+                        }
+                    }
+                }
+                cx.send_notification(CancelNotification::new(first.clone()))?;
+                let first_response = first_rx
+                    .await
+                    .expect("first prompt response channel")
+                    .expect("first prompt failed");
+                let second_response = second_rx
+                    .await
+                    .expect("second prompt response channel")
+                    .expect("second prompt failed");
+                assert_eq!(first_response.stop_reason, StopReason::Cancelled);
+                assert_eq!(second_response.stop_reason, StopReason::EndTurn);
+
+                let mut texts = collect_texts_by_session(&mut updates_rx).await;
+                second_text.push_str(texts.remove(&second).as_deref().unwrap_or_default());
+                assert_eq!(second_text, SCRIPT, "cancel on A must not truncate B");
+                let first_text = texts.remove(&first).unwrap_or_default();
+                assert!(
+                    first_text.len() < SCRIPT.len(),
+                    "cancel on A must truncate A: {first_text:?}"
+                );
+                Ok(())
+            },
+        )
+        .await;
+        result.expect("client failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn close_cancels_the_turn_before_releasing_the_session() {
+        let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = run_client(
+            faux_factory(
+                "a long response that must be cancelled by session close",
+                20.0,
+            ),
+            updates_tx,
+            None,
+            async move |cx: ConnectionTo<Agent>| {
+                let sid = init_and_new(&cx).await?;
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                cx.send_request(PromptRequest::new(
+                    sid.clone(),
+                    vec![ContentBlock::from("go")],
+                ))
+                .on_receiving_result(async move |result| {
+                    let _ = tx.send(result);
+                    Ok(())
+                })?;
+                cx.send_request(CloseSessionRequest::new(sid.clone()))
+                    .block_task()
+                    .await?;
+                let response = rx
+                    .await
+                    .expect("prompt response channel")
+                    .expect("cancelled prompt must still receive a response");
+                assert_eq!(response.stop_reason, StopReason::Cancelled);
                 Ok(())
             },
         )
@@ -2029,6 +2426,10 @@ mod tests {
         assert!(
             init.agent_capabilities.load_session,
             "initialize must advertise loadSession once session/load exists"
+        );
+        assert!(
+            init.agent_capabilities.session_capabilities.close.is_some(),
+            "initialize must advertise session/close"
         );
         assert!(
             init.agent_capabilities.mcp_capabilities.http,
@@ -2414,13 +2815,30 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn load_while_a_session_is_live_is_refused_and_leaves_it_working() {
+    async fn load_while_another_session_is_live_keeps_both_working() {
         let tmp = tempdir("load-live");
         let fixture_id = write_fixture_session(&tmp).await;
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
         let request_cwd = tmp.clone();
+        let factory_cwd = tmp.clone();
         let result = run_client(
-            faux_factory("ok", 1000.0),
+            Arc::new(
+                move |_cwd: &std::path::Path,
+                      _params: sessions::SessionParams,
+                      request: sessions::SessionRequest| {
+                    let cwd = factory_cwd.clone();
+                    Box::pin(async move {
+                        match request {
+                            sessions::SessionRequest::New => Ok(faux_deps("new", 1000.0).await),
+                            sessions::SessionRequest::Load { id } => restored_deps(&cwd, &id).await,
+                        }
+                    })
+                        as futures::future::BoxFuture<
+                            'static,
+                            Result<sessions::SessionDeps, String>,
+                        >
+                },
+            ),
             updates_tx,
             None,
             async move |cx: ConnectionTo<Agent>| {
@@ -2428,26 +2846,20 @@ mod tests {
                 let live = cx
                     .send_request(NewSessionRequest::new(request_cwd.clone()))
                     .block_task()
-                    .await?;
-                let error = cx
-                    .send_request(LoadSessionRequest::new(
-                        SessionId::from(format!("ki-{fixture_id}")),
-                        request_cwd.clone(),
-                    ))
-                    .block_task()
-                    .await
-                    .expect_err("load while live must be refused");
-                assert_eq!(i32::from(error.code), ERR_SERVER);
-                assert!(error.message.contains("one live session per process"));
-                // The live session is untouched and still prompts.
-                let response = cx
-                    .send_request(PromptRequest::new(
-                        live.session_id,
-                        vec![ContentBlock::from("hi")],
-                    ))
+                    .await?
+                    .session_id;
+                let loaded = SessionId::from(format!("ki-{fixture_id}"));
+                cx.send_request(LoadSessionRequest::new(loaded.clone(), request_cwd.clone()))
                     .block_task()
                     .await?;
-                assert_eq!(response.stop_reason, StopReason::EndTurn);
+                // 两个会话都按自己的 id 继续工作；加载不再拒绝或替换原会话。
+                for sid in [live, loaded] {
+                    let response = cx
+                        .send_request(PromptRequest::new(sid, vec![ContentBlock::from("hi")]))
+                        .block_task()
+                        .await?;
+                    assert_eq!(response.stop_reason, StopReason::EndTurn);
+                }
                 Ok(())
             },
         )
