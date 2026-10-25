@@ -26,7 +26,7 @@ pub(crate) fn shutdown(reason: &str, code: i32) {
 /// Method-flow tracing to stderr; the gate is checked per call.
 macro_rules! diagln {
     ($($arg:tt)*) => {
-        if $crate::acp::diag::enabled() {
+        if $crate::diag::enabled() {
             eprintln!("[ki acp] {}", format_args!($($arg)*));
         }
     };

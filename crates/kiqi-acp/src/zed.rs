@@ -448,7 +448,7 @@ pub(crate) fn install_zed(rest: &[String]) -> i32 {
             },
             other => {
                 eprintln!("error: unknown option `{other}` (try --help)");
-                return crate::app::EXIT_USAGE;
+                return crate::EXIT_USAGE;
             }
         }
         index += 1;
