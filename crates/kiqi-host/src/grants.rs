@@ -16,10 +16,18 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// The current grants.json format version.
+pub const GRANTS_VERSION: u32 = 2;
+const GRANTS_VERSION_LEGACY: u32 = 1;
+
 /// What the user authorized for one extension.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Grants {
+    /// The file format version. Absent on disk means legacy version 1; every
+    /// save writes [`GRANTS_VERSION`], regardless of the in-memory value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
     /// Host-mediated HTTP, with a host allow-list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net_http: Option<NetHttpGrant>,
@@ -93,7 +101,7 @@ pub enum ExecCwd {
     /// rename spell this as `"plugin-data"`. Without the alias serde rejects the
     /// whole document, `load_for_at` falls back to empty grants, and the next
     /// save would rewrite the file without every capability. The alias is
-    /// transient: the first save after upgrade rewrites the new spelling.
+    /// transient: a successful load migrates it to the new spelling.
     #[default]
     #[serde(alias = "plugin-data")]
     ExtensionData,
@@ -118,6 +126,32 @@ impl ExecCwd {
     fn is_extension_data(&self) -> bool {
         matches!(self, ExecCwd::ExtensionData)
     }
+}
+
+fn grants_file_version(value: &Value) -> Result<u32, String> {
+    match value.get("version") {
+        None | Some(Value::Null) => Ok(GRANTS_VERSION_LEGACY),
+        Some(version) => version
+            .as_u64()
+            .and_then(|version| u32::try_from(version).ok())
+            .ok_or_else(|| "grants.json `version` must be an unsigned 32-bit integer".to_string()),
+    }
+}
+
+/// Detect the legacy cwd spelling that serde accepts through `ExecCwd`'s alias.
+/// Checking the raw JSON lets a successful read trigger an explicit migration
+/// back to the current spelling instead of silently carrying the alias forever.
+fn legacy_cwd_capabilities(value: &Value) -> Vec<&'static str> {
+    ["fs", "exec", "proc"]
+        .into_iter()
+        .filter(|capability| {
+            value
+                .get(*capability)
+                .and_then(|grant| grant.get("cwd"))
+                .and_then(Value::as_str)
+                == Some("plugin-data")
+        })
+        .collect()
 }
 
 fn default_exec_timeout() -> u64 {
@@ -1477,29 +1511,92 @@ impl Grants {
     /// a CLI that was handed a directory) never has to write a process-global
     /// environment variable to redirect it.
     pub fn load_for_at(root: &std::path::Path, extension_id: &str) -> Self {
+        Self::load_for_at_with(root, extension_id, |warning| eprintln!("{warning}"))
+    }
+
+    /// Load with an injectable diagnostic sink so tests can prove that parse
+    /// failures and migrations are loud. Only successfully parsed, supported
+    /// versions are eligible for migration write-back.
+    fn load_for_at_with(
+        root: &std::path::Path,
+        extension_id: &str,
+        mut warn: impl FnMut(String),
+    ) -> Self {
         let path = grants_path_at(root, extension_id);
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
+        // Parse the envelope separately so an unsupported version fails closed
+        // before any of its capability values can be interpreted by this build.
+        let value: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(error) => {
+                warn(format!(
+                    "warning: {} is unreadable ({error}); treating every capability as ungranted and leaving the file unchanged",
+                    path.display()
+                ));
+                return Self::default();
+            }
+        };
+        let version = match grants_file_version(&value) {
+            Ok(version) => version,
+            Err(error) => {
+                warn(format!(
+                    "warning: {} is unreadable ({error}); treating every capability as ungranted and leaving the file unchanged",
+                    path.display()
+                ));
+                return Self::default();
+            }
+        };
+        if version != GRANTS_VERSION_LEGACY && version != GRANTS_VERSION {
+            warn(format!(
+                "warning: {} has unsupported grants.json version {version} (supported: {GRANTS_VERSION_LEGACY}, {GRANTS_VERSION}); treating every capability as ungranted and leaving the file unchanged",
+                path.display()
+            ));
+            return Self::default();
+        }
+        let legacy_cwds = legacy_cwd_capabilities(&value);
         // A file this build cannot parse must not silently become "no grants":
-        // the user would lose every capability with no diagnostic, and the next
-        // save would persist that. Say so loudly; the caller still fails closed.
-        let grants: Grants = match serde_json::from_str(&text) {
+        // the user would lose every capability with no diagnostic, and an
+        // automatic migration must never overwrite the unreadable original.
+        let mut grants: Grants = match serde_json::from_value(value) {
             Ok(grants) => grants,
             Err(error) => {
-                eprintln!(
-                    "warning: {} is unreadable ({error}); treating every capability as ungranted",
+                warn(format!(
+                    "warning: {} is unreadable ({error}); treating every capability as ungranted and leaving the file unchanged",
                     path.display()
-                );
-                Self::default()
+                ));
+                return Self::default();
             }
         };
         // A hand-edited file must not buy policy the CLI would refuse, so the
         // same validation the constructors use runs here. An invalid policy is
         // treated as absent (that one capability is cleared, the rest of the
-        // file still loads), silently, exactly like a malformed file grants
-        // nothing: the caller sees only what survived.
-        grants.validated()
+        // file still loads): the caller sees only what survived.
+        grants = grants.validated();
+
+        if version < GRANTS_VERSION || !legacy_cwds.is_empty() {
+            let reason = match (version < GRANTS_VERSION, !legacy_cwds.is_empty()) {
+                (true, true) => "old version and legacy cwd spelling",
+                (true, false) => "old version",
+                (false, true) => "legacy cwd spelling",
+                (false, false) => unreachable!(),
+            };
+            warn(format!(
+                "warning: {} needs grants.json migration ({reason}); writing version {GRANTS_VERSION} with current capability spellings",
+                path.display()
+            ));
+            grants.version = Some(GRANTS_VERSION);
+            if let Err(error) =
+                Self::save_for_at_with_cwds(root, extension_id, &grants, &legacy_cwds)
+            {
+                warn(format!(
+                    "warning: could not migrate {}: {error}; using the parsed grants for this load and leaving migration for a later load",
+                    path.display()
+                ));
+            }
+        }
+        grants
     }
 
     /// Write the grants, creating `extensions/<id>/` as needed.
@@ -1514,12 +1611,35 @@ impl Grants {
         extension_id: &str,
         grants: &Grants,
     ) -> Result<(), String> {
+        Self::save_for_at_with_cwds(root, extension_id, grants, &[])
+    }
+
+    /// Serialize with the current version. Migration also re-inserts default
+    /// cwd values that were present with their legacy spelling, because normal
+    /// serialization omits defaults and must stay minimal for ordinary saves.
+    fn save_for_at_with_cwds(
+        root: &std::path::Path,
+        extension_id: &str,
+        grants: &Grants,
+        explicit_cwds: &[&str],
+    ) -> Result<(), String> {
         let path = grants_path_at(root, extension_id);
+        let mut current = grants.clone();
+        current.version = Some(GRANTS_VERSION);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("create {}: {error}", parent.display()))?;
         }
-        let text = serde_json::to_string_pretty(grants).map_err(|error| error.to_string())?;
+        let mut value = serde_json::to_value(&current).map_err(|error| error.to_string())?;
+        for capability in explicit_cwds {
+            if let Some(grant) = value.get_mut(*capability).and_then(Value::as_object_mut) {
+                grant.insert(
+                    "cwd".to_string(),
+                    Value::String("extension-data".to_string()),
+                );
+            }
+        }
+        let text = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
         std::fs::write(&path, format!("{text}\n"))
             .map_err(|error| format!("write {}: {error}", path.display()))
     }
@@ -2880,6 +3000,129 @@ mod tests {
                 "`{capability}` must reject --cwd"
             );
         }
+    }
+
+    #[test]
+    fn legacy_cwd_spelling_keeps_capabilities_and_migrates_to_current_json() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = extension_dir_at(root.path(), "legacy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grants.json");
+        // Deliberate legacy compatibility fixture: this was the pre-rename cwd
+        // value, and all three cwd-scoped capabilities must survive migration.
+        std::fs::write(
+            &path,
+            r#"{
+                "net-http": {"hosts": ["api.example.test"]},
+                "fs": {"cwd": "plugin-data"},
+                "exec": {"commands": ["echo"], "cwd": "plugin-data"},
+                "proc": {"commands": ["server"], "cwd": "plugin-data"}
+            }"#,
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let grants =
+            Grants::load_for_at_with(root.path(), "legacy", |warning| warnings.push(warning));
+        assert!(grants.allows_host("api.example.test"));
+        assert!(grants.allows_command("echo"));
+        assert!(grants.allows_proc_command("server"));
+        assert_eq!(grants.fs.unwrap().cwd, ExecCwd::ExtensionData);
+        assert_eq!(grants.exec.unwrap().cwd, ExecCwd::ExtensionData);
+        assert_eq!(grants.proc.unwrap().cwd, ExecCwd::ExtensionData);
+        assert_eq!(grants.version, Some(GRANTS_VERSION));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("old version and legacy cwd spelling"));
+
+        let migrated = std::fs::read_to_string(&path).unwrap();
+        assert!(!migrated.contains("plugin-data"));
+        let migrated: Value = serde_json::from_str(&migrated).unwrap();
+        assert_eq!(migrated["version"], GRANTS_VERSION);
+        for capability in ["fs", "exec", "proc"] {
+            assert_eq!(migrated[capability]["cwd"], "extension-data");
+        }
+    }
+
+    #[test]
+    fn explicit_legacy_version_is_migrated_even_without_legacy_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = extension_dir_at(root.path(), "version-one");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grants.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"net-http":{"hosts":["api.example.test"]}}"#,
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let grants =
+            Grants::load_for_at_with(root.path(), "version-one", |warning| warnings.push(warning));
+        assert!(grants.allows_host("api.example.test"));
+        assert_eq!(grants.version, Some(GRANTS_VERSION));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("old version"));
+
+        let migrated: Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(migrated["version"], GRANTS_VERSION);
+        assert_eq!(migrated["net-http"]["hosts"][0], "api.example.test");
+    }
+
+    #[test]
+    fn unknown_version_fails_closed_loudly_without_rewriting() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = extension_dir_at(root.path(), "future");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grants.json");
+        let original = r#"{
+            "version": 99,
+            "net-http": {"hosts": ["api.example.test"]}
+        }"#;
+        std::fs::write(&path, original).unwrap();
+
+        let mut warnings = Vec::new();
+        let grants =
+            Grants::load_for_at_with(root.path(), "future", |warning| warnings.push(warning));
+        assert_eq!(grants, Grants::default());
+        assert!(grants.granted().is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("unsupported grants.json version 99"));
+        assert!(warnings[0].contains("leaving the file unchanged"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn malformed_grants_fail_closed_loudly_without_rewriting() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = extension_dir_at(root.path(), "malformed");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grants.json");
+        let original = r#"{"version":1,"exec":{"commands":"not-an-array"}}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let mut warnings = Vec::new();
+        let grants =
+            Grants::load_for_at_with(root.path(), "malformed", |warning| warnings.push(warning));
+        assert_eq!(grants, Grants::default());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("is unreadable"));
+        assert!(warnings[0].contains("leaving the file unchanged"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn every_save_writes_the_current_version() {
+        let root = tempfile::tempdir().unwrap();
+        let stale = Grants {
+            version: Some(99),
+            ..Grants::default()
+        };
+        Grants::save_for_at(root.path(), "current", &stale).unwrap();
+
+        let path = grants_path_at(root.path(), "current");
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(saved["version"], GRANTS_VERSION);
     }
 
     /// A hand-edited file cannot smuggle invalid policy in: the offending
