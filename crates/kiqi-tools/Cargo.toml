@@ -21,7 +21,7 @@ categories = [
 
 [dependencies]
 # Env-var contract names only (SESSION_ID_ENV / SUBAGENT_PARENT_*): zero-dep crate.
-kiqi-plugin = { workspace = true }
+kiqi-host = { workspace = true }
 kiqi-agent = { workspace = true }
 kiqi-ai = { workspace = true }
 # For the env-var names the host and its plugins share (see `HOST_PRIVATE_ENV`).

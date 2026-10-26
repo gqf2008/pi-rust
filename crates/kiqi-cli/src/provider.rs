@@ -461,7 +461,7 @@ fn resolve_with_settings(
     // valid `--provider` / `provider/id` spellings and their models are authed.
     let granted_root: Option<PathBuf> = agent_root
         .map(Path::to_path_buf)
-        .or_else(kiqi_plugin::grants::agent_dir);
+        .or_else(kiqi_host::grants::agent_dir);
     let granted_plugins = match &granted_root {
         Some(root) => granted_plugin_models(root),
         None => Vec::new(),
@@ -1099,7 +1099,7 @@ struct GrantedPlugin {
     /// `plugins/<id>/plugin.wasm`, verified through the digest sidecar before
     /// its catalog is surfaced. The provider adapter loads from here.
     wasm: PathBuf,
-    grant: kiqi_plugin::grants::ProviderGrant,
+    grant: kiqi_host::grants::ProviderGrant,
 }
 
 /// Read `plugins/*/grants.json` and return the providers the user actually
@@ -1112,8 +1112,8 @@ struct GrantedPlugin {
 /// recorded bytes will run, so mismatched bytes must not appear.
 fn granted_plugin_models(root: &Path) -> Vec<GrantedPlugin> {
     let mut granted = Vec::new();
-    for install_id in kiqi_plugin::grants::installed_plugins_at(root) {
-        let grants = kiqi_plugin::grants::Grants::load_for_at(root, &install_id);
+    for install_id in kiqi_host::grants::installed_plugins_at(root) {
+        let grants = kiqi_host::grants::Grants::load_for_at(root, &install_id);
         let Some(grant) = grants.provider.clone() else {
             continue;
         };
@@ -1126,7 +1126,7 @@ fn granted_plugin_models(root: &Path) -> Vec<GrantedPlugin> {
         {
             continue;
         }
-        let wasm = kiqi_plugin::grants::plugin_dir_at(root, &install_id).join("plugin.wasm");
+        let wasm = kiqi_host::grants::plugin_dir_at(root, &install_id).join("plugin.wasm");
         if !wasm.is_file() {
             continue;
         }
@@ -1166,7 +1166,7 @@ fn wasm_digest_permits_catalog(_wasm: &Path) -> bool {
 /// the authority for every field, so nothing here reads a guest declaration.
 fn granted_model_to_model(
     provider_id: &str,
-    model: &kiqi_plugin::grants::ProviderModel,
+    model: &kiqi_host::grants::ProviderModel,
 ) -> Option<Model> {
     let api: kiqi_ai::Api =
         serde_json::from_value(serde_json::Value::String(model.api.clone())).ok()?;
@@ -3797,7 +3797,7 @@ mod tests {
     /// instantiated here (no host is built); only the catalog path is exercised.
     #[cfg(feature = "plugin-wasm")]
     fn install_plugin_provider(root: &Path, id: &str, models: &[(&str, &str)]) {
-        use kiqi_plugin::grants::{
+        use kiqi_host::grants::{
             Grants, ProviderEndpoint, ProviderGrant, ProviderModel, ProviderProfile,
             PROVIDER_MAX_HANDLES_DEFAULT, PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
             PROVIDER_TIMEOUT_DEFAULT_SECONDS,
@@ -3843,7 +3843,7 @@ mod tests {
     /// these bytes are a loadable component, so a test may drive a request.
     #[cfg(feature = "plugin-wasm")]
     fn install_real_conformance_provider(root: &Path, models: &[&str]) -> PathBuf {
-        use kiqi_plugin::grants::{
+        use kiqi_host::grants::{
             Grants, ProviderEndpoint, ProviderGrant, ProviderModel, ProviderProfile,
             PROVIDER_MAX_HANDLES_DEFAULT, PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
         };
@@ -3892,7 +3892,7 @@ mod tests {
     /// Install a component directory with no capability grant at all.
     #[cfg(feature = "plugin-wasm")]
     fn install_plugin_without_grants(root: &Path, id: &str) {
-        use kiqi_plugin::grants::Grants;
+        use kiqi_host::grants::Grants;
         let dir = root.join("plugins").join(id);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("plugin.wasm"), b"not-a-real-component").unwrap();

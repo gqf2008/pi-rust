@@ -77,9 +77,7 @@ kiqi-telemetry            # 遥测接口与 span/event 合约（零内部依赖�
       └─ kiqi-tools       # 内置工具 + ExecutionEnv 抽象（真实/离线环境）
          └─ kiqi-harness  # 会话树、JSONL 持久化、压缩、崩溃恢复、skills
 kiqi-tui                  # 终端组件、编辑器、渲染（零内部依赖）
-kiqi-plugin               # trait Plugin 定义（零内部依赖；外部仅 serde/serde_json）
-├─ kiqi-plugin-host       # wasmtime 宿主，跑 wasm 组件
-└─ kiqi-extensions         # 宿主侧扩展加载与桥接（另依赖 agent+ai）
+kiqi-host                 # Extension 契约 + 事件派发脊柱（恒编译）+ wasm 后端（`wasm` feature，wasmtime）
 kiqi-mcp                  # MCP 客户端集成（依赖 ai+agent+harness；boundary.rs 是与 harness 的接缝）
 kiqi-acp                  # `ki acp serve` 协议服务器（依赖 acp 协议 crate + agent/harness/mcp/extensions；会话组装根留在 kiqi-cli 注入）
 kiqi-plan-mode-core       # 计划模式核心逻辑（零内部依赖；只被 plugins/wasm/kiqi-plan-mode-guest 链接）
@@ -114,10 +112,12 @@ TUI Enter → `interactive_tui/run.rs::run_prompt_streaming` →
   差异写进 guest README。
 - 编译期一方插件通道已于 2026-10-21 退役；**cdylib 通道（`kiqi-plugin-sdk` /
   `ki dev` / `ki install` / `ki package` / `libloading` 装载）已于 2026-10-26 整体退役**——
-  wasm 是唯一插件通道。`kiqi-extensions` 保留为宿主侧派发脊柱（registry/translate/
-  compiled sink/mailboxes），`src/abi.rs` 是内部事件总线的线格式。
+  wasm 是唯一插件通道。三个宿主侧 crate 已合并为 **`kiqi-host`**（契约 + 派发脊柱
+  + `wasm` 子模块；trait 由 `Plugin` 改名为 `Extension`）：registry/translate/
+  compiled sink/mailboxes 恒编译，wasmtime 只在 `wasm` feature 后；
+  `src/abi.rs` 是内部事件总线的线格式。
 - **wasm guest crate 里不写单测**：guest 只对 `wasm32-wasip2` 链接，行为一律由
-  `crates/kiqi-plugin-host/tests/e2e.rs` 从宿主侧验证。
+  `crates/kiqi-host/tests/e2e.rs` 从宿主侧验证（`--features wasm`）。
 
 ### 设计文档
 

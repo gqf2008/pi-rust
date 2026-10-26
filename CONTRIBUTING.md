@@ -79,8 +79,7 @@ crate name; the directory name is not part of the public API.
 | `crates/kiqi-harness`                | `kiqi-harness`    |
 | `crates/kiqi-cli`                    | `kiqi-cli`        |
 | `crates/kiqi-tui`                    | `kiqi-tui`        |
-| `crates/kiqi-plugin`                | `kiqi-plugin`     |
-| `crates/kiqi-extensions`            | `kiqi-extensions` |
+| `crates/kiqi-host`                   | `kiqi-host`       |
 
 Dependency direction is one-way and must stay that way:
 
@@ -88,10 +87,11 @@ Dependency direction is one-way and must stay that way:
 kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli
 ```
 
-`kiqi-plugin` is a zero-internal-dependency leaf so that plugins do not pull the
-whole runtime; `kiqi-extensions` sits on top of it. Adding a dependency that
-points backwards (for example `kiqi-agent` depending on `kiqi-cli`) will be
-rejected.
+`kiqi-host` sits beside the runtime chain: its contract and dispatch spine
+build without wasmtime (so `kiqi-tools` can read the env-var names), and the
+wasmtime backend is behind the `wasm` feature that only `kiqi-cli` enables.
+Adding a dependency that points backwards (for example `kiqi-agent` depending
+on `kiqi-cli`) will be rejected.
 
 `docs/architecture/overview.md` explains the design intent behind the split;
 `docs/agent/project-structure.md` is the recommended structure for projects built on top
@@ -138,7 +138,7 @@ keep the type prefix and scope in the conventional form.
    is intended to be small and stable.
 
 If your change touches the plugin contract (`plugins/kiqi-plugin.wit`,
-`kiqi-plugin`), call it out explicitly in the PR description. Contract changes
+`kiqi-host`), call it out explicitly in the PR description. Contract changes
 affect every already-built wasm plugin and require a documented negotiation
 story (`docs/design/plugin-abi.md`).
 

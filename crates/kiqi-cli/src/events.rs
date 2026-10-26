@@ -1,7 +1,7 @@
 //! `ki events …` — inspect the extension event journal (P3).
 //!
 //! The journal is written only when `KI_EVENT_LOG=1` is set (see
-//! [`kiqi_extensions::event_log`]). This subcommand reads the same file:
+//! [`kiqi_host::event_log`]). This subcommand reads the same file:
 //!
 //! - `ki events path` — print the resolved log path.
 //! - `ki events tail` — print the log and follow new entries (Ctrl+C to stop).
@@ -26,7 +26,7 @@ pub async fn run(args: &[String]) -> i32 {
     }
     match args.first().map(String::as_str) {
         Some("tail") => tail().await,
-        Some("path") => match kiqi_extensions::event_log_path() {
+        Some("path") => match kiqi_host::event_log_path() {
             Some(path) => {
                 println!("{}", path.display());
                 0
@@ -62,7 +62,7 @@ fn print_help() {
 /// (Ctrl+C stops the process). A partial trailing line is re-read on the next
 /// tick rather than emitted split.
 async fn tail() -> i32 {
-    let Some(path) = kiqi_extensions::event_log_path() else {
+    let Some(path) = kiqi_host::event_log_path() else {
         eprintln!("error: could not resolve the event log path (set KI_EVENT_LOG_PATH)");
         return EXIT_RUNTIME;
     };

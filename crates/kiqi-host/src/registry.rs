@@ -16,9 +16,9 @@ use crate::{
     BeforeAgentStartFn, CommandHandlerFn, EventHandlerFn, FreeStringFn, OAuthRequestFn,
     ProviderRequestFn, RenderFn, ResourcesDiscoverFn,
 };
+use crate::{EventTag, EVENT_TAG_COUNT};
 use kiqi_agent::error::AgentError;
 use kiqi_ai::types::Tool;
-use kiqi_plugin::{EventTag, EVENT_TAG_COUNT};
 
 use crate::tool::PluginToolHandle;
 

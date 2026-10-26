@@ -15,7 +15,7 @@
 
 use super::*;
 
-use kiqi_plugin::{CommandReply, CommandResult, CommandResultBody};
+use kiqi_host::{CommandReply, CommandResult, CommandResultBody};
 
 /// One finished plugin call, posted back to the main loop.
 pub(super) struct PluginCommandOutcome {
@@ -219,7 +219,7 @@ fn cancel_flow(ctx: &CommandContext) {
     );
 }
 
-fn open_selector_flow(ctx: &CommandContext, flow: FlowContext, spec: kiqi_plugin::SelectorSpec) {
+fn open_selector_flow(ctx: &CommandContext, flow: FlowContext, spec: kiqi_host::SelectorSpec) {
     if spec.items.is_empty() {
         // The caller installed the slot before opening; an empty selector has
         // no reply path, so drop it rather than leak a pending flow.
@@ -290,7 +290,7 @@ fn open_selector_flow(ctx: &CommandContext, flow: FlowContext, spec: kiqi_plugin
     );
 }
 
-fn open_editor_flow(ctx: &CommandContext, flow: FlowContext, spec: kiqi_plugin::EditorSpec) {
+fn open_editor_flow(ctx: &CommandContext, flow: FlowContext, spec: kiqi_host::EditorSpec) {
     let editor = Arc::new(Editor::new(
         EditorOptions {
             padding_x: 1,
@@ -353,7 +353,7 @@ fn open_editor_flow(ctx: &CommandContext, flow: FlowContext, spec: kiqi_plugin::
     ctx.tui.request_render(false);
 }
 
-fn open_prompt_flow(ctx: &CommandContext, flow: FlowContext, spec: kiqi_plugin::PromptSpec) {
+fn open_prompt_flow(ctx: &CommandContext, flow: FlowContext, spec: kiqi_host::PromptSpec) {
     let input = if spec.placeholder.is_empty() {
         Input::new()
     } else {
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(
             route_command_result(&result(
                 "f1",
-                CommandResultBody::Selector(kiqi_plugin::SelectorSpec {
+                CommandResultBody::Selector(kiqi_host::SelectorSpec {
                     title: "t".to_string(),
                     items: vec!["a".to_string()],
                 })
@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(
             route_command_result(&result(
                 "f2",
-                CommandResultBody::Editor(kiqi_plugin::EditorSpec {
+                CommandResultBody::Editor(kiqi_host::EditorSpec {
                     initial_text: "x".to_string(),
                 })
             )),
@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(
             route_command_result(&result(
                 "f3",
-                CommandResultBody::Prompt(kiqi_plugin::PromptSpec {
+                CommandResultBody::Prompt(kiqi_host::PromptSpec {
                     title: "t".to_string(),
                     placeholder: "p".to_string(),
                 })
@@ -473,7 +473,7 @@ mod tests {
     fn a_flow_without_an_id_is_a_diagnostic() {
         let route = route_command_result(&result(
             "",
-            CommandResultBody::Selector(kiqi_plugin::SelectorSpec {
+            CommandResultBody::Selector(kiqi_host::SelectorSpec {
                 title: "t".to_string(),
                 items: vec!["a".to_string()],
             }),

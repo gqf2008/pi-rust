@@ -1,3 +1,4 @@
+#![cfg(feature = "wasm")]
 //! End-to-end: build the conformance guest, load it, call its tool, unload it.
 //!
 //! Requires the `wasm32-wasip2` target (`rustup target add wasm32-wasip2`); the
@@ -9,11 +10,11 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use kiqi_plugin::{
-    Block, CancelProbe, Event, EventAction, EventTag, HostCaps, Log, LogLevel, Plugin, PluginError,
-    Progress, ProgressSink, Verdict,
+use kiqi_host::wasm::{Grants, NetHttpGrant, WasmPlugin};
+use kiqi_host::{
+    Block, CancelProbe, Event, EventAction, EventTag, Extension, HostCaps, Log, LogLevel,
+    PluginError, Progress, ProgressSink, Verdict,
 };
-use kiqi_plugin_host::{Grants, NetHttpGrant, WasmPlugin};
 
 struct RecordingSink {
     blocks: Mutex<Vec<Progress>>,
@@ -275,7 +276,7 @@ struct FixedSession {
     branch: serde_json::Value,
 }
 
-impl kiqi_plugin::SessionRead for FixedSession {
+impl kiqi_host::SessionRead for FixedSession {
     fn active_tools(&self) -> Vec<String> {
         Vec::new()
     }
@@ -285,7 +286,7 @@ impl kiqi_plugin::SessionRead for FixedSession {
     fn thinking_level(&self) -> String {
         String::new()
     }
-    fn cli_flag(&self, _name: &str) -> Option<kiqi_plugin::FlagValue> {
+    fn cli_flag(&self, _name: &str) -> Option<kiqi_host::FlagValue> {
         None
     }
     fn session_branch(&self) -> serde_json::Value {
@@ -454,7 +455,7 @@ struct SwappingSession {
     branch: Mutex<serde_json::Value>,
 }
 
-impl kiqi_plugin::SessionRead for SwappingSession {
+impl kiqi_host::SessionRead for SwappingSession {
     fn active_tools(&self) -> Vec<String> {
         Vec::new()
     }
@@ -464,7 +465,7 @@ impl kiqi_plugin::SessionRead for SwappingSession {
     fn thinking_level(&self) -> String {
         String::new()
     }
-    fn cli_flag(&self, _name: &str) -> Option<kiqi_plugin::FlagValue> {
+    fn cli_flag(&self, _name: &str) -> Option<kiqi_host::FlagValue> {
         None
     }
     fn session_branch(&self) -> serde_json::Value {
@@ -614,7 +615,7 @@ fn net_http_is_gated_by_the_users_grant() {
     server.join().unwrap();
 }
 
-fn text_of(outcome: &kiqi_plugin::ToolOutcome) -> String {
+fn text_of(outcome: &kiqi_host::ToolOutcome) -> String {
     outcome
         .blocks
         .iter()
@@ -714,8 +715,8 @@ fn langfuse_subset_builds_a_trace_and_flushes_it_over_net_http() {
         }),
         // Observation is deny-by-default: without this the generation span
         // below would never be created.
-        provider_request: Some(kiqi_plugin::grants::ProviderRequestGrant {
-            observe: kiqi_plugin::grants::ObserveMode::Requests,
+        provider_request: Some(kiqi_host::grants::ProviderRequestGrant {
+            observe: kiqi_host::grants::ObserveMode::Requests,
             ..Default::default()
         }),
         ..Default::default()
@@ -879,14 +880,14 @@ fn provider_hooks_require_a_grant_and_after_response_is_not_delivered() {
             &caps,
         );
         assert!(
-            matches!(action, kiqi_plugin::EventAction::Continue),
+            matches!(action, kiqi_host::EventAction::Continue),
             "an ungranted guest must not be called for {tag:?}: {action:?}"
         );
     }
 
     let grants = Grants {
-        provider_request: Some(kiqi_plugin::grants::ProviderRequestGrant {
-            observe: kiqi_plugin::grants::ObserveMode::Requests,
+        provider_request: Some(kiqi_host::grants::ProviderRequestGrant {
+            observe: kiqi_host::grants::ObserveMode::Requests,
             ..Default::default()
         }),
         ..Default::default()
@@ -902,7 +903,7 @@ fn provider_hooks_require_a_grant_and_after_response_is_not_delivered() {
         &caps,
     );
     assert!(
-        matches!(request, kiqi_plugin::EventAction::Claimed),
+        matches!(request, kiqi_host::EventAction::Claimed),
         "a granted guest must receive BeforeProviderRequest: {request:?}"
     );
     let headers = plugin.on_event(
@@ -913,7 +914,7 @@ fn provider_hooks_require_a_grant_and_after_response_is_not_delivered() {
         &caps,
     );
     assert!(
-        matches!(headers, kiqi_plugin::EventAction::Claimed),
+        matches!(headers, kiqi_host::EventAction::Claimed),
         "a granted guest must receive BeforeProviderHeaders: {headers:?}"
     );
     let after = plugin.on_event(
@@ -924,7 +925,7 @@ fn provider_hooks_require_a_grant_and_after_response_is_not_delivered() {
         &caps,
     );
     assert!(
-        matches!(after, kiqi_plugin::EventAction::Continue),
+        matches!(after, kiqi_host::EventAction::Continue),
         "AfterProviderResponse must never reach a wasm guest: {after:?}"
     );
 }
@@ -934,8 +935,8 @@ fn provider_hooks_require_a_grant_and_after_response_is_not_delivered() {
 /// it (a patch-only grant still sees the request it patches).
 fn gate_grants(patch: bool, timeout_ms: u64) -> Grants {
     Grants {
-        provider_request: Some(kiqi_plugin::grants::ProviderRequestGrant {
-            observe: kiqi_plugin::grants::ObserveMode::Requests,
+        provider_request: Some(kiqi_host::grants::ProviderRequestGrant {
+            observe: kiqi_host::grants::ObserveMode::Requests,
             patch,
             patch_timeout_ms: timeout_ms,
             ..Default::default()
@@ -1045,27 +1046,27 @@ struct RecordingUi {
     statuses: Mutex<Vec<serde_json::Value>>,
 }
 
-impl kiqi_plugin::UiApi for RecordingUi {
+impl kiqi_host::UiApi for RecordingUi {
     fn dialog(
         &self,
         request: &serde_json::Value,
-    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+    ) -> Result<serde_json::Value, kiqi_host::PluginError> {
         self.dialogs.lock().unwrap().push(request.clone());
         Ok(serde_json::json!({ "answer": "42" }))
     }
-    fn set_status(&self, update: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+    fn set_status(&self, update: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
         self.statuses.lock().unwrap().push(update.clone());
         Ok(())
     }
-    fn set_editor_text(&self, _edit: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+    fn set_editor_text(&self, _edit: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
         Ok(())
     }
     fn component(
         &self,
         _name: &str,
         _payload: &serde_json::Value,
-    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
-        Err(kiqi_plugin::PluginError::Failed(
+    ) -> Result<serde_json::Value, kiqi_host::PluginError> {
+        Err(kiqi_host::PluginError::Failed(
             "no components here".to_string(),
         ))
     }
@@ -1105,7 +1106,7 @@ fn conformance_surface_is_reachable() {
     assert_eq!(plugin.commands()[0].name, "conformance");
     assert_eq!(
         plugin.run_command("conformance", "", &caps).unwrap().body,
-        kiqi_plugin::CommandResultBody::Message("conformance command ran".to_string())
+        kiqi_host::CommandResultBody::Message("conformance command ran".to_string())
     );
     assert_eq!(plugin.flags()[0].name, "conformance-flag");
     assert_eq!(plugin.shortcuts()[0].key, "f8");
@@ -1175,7 +1176,7 @@ fn a_spinning_guest_is_metered_and_a_panicking_one_traps() {
         "conformance",
         &wasm,
         Grants::default(),
-        kiqi_plugin_host::Options {
+        kiqi_host::wasm::Options {
             fuel: Some(5_000_000),
             ..Default::default()
         },
@@ -1235,11 +1236,11 @@ impl ScriptedUi {
     }
 }
 
-impl kiqi_plugin::UiApi for ScriptedUi {
+impl kiqi_host::UiApi for ScriptedUi {
     fn dialog(
         &self,
         request: &serde_json::Value,
-    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+    ) -> Result<serde_json::Value, kiqi_host::PluginError> {
         let op = request
             .get("op")
             .and_then(serde_json::Value::as_str)
@@ -1260,18 +1261,18 @@ impl kiqi_plugin::UiApi for ScriptedUi {
         })
     }
 
-    fn set_status(&self, _update: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+    fn set_status(&self, _update: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
         Ok(())
     }
-    fn set_editor_text(&self, _edit: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+    fn set_editor_text(&self, _edit: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
         Ok(())
     }
     fn component(
         &self,
         _name: &str,
         _payload: &serde_json::Value,
-    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
-        Err(kiqi_plugin::PluginError::Failed("none".to_string()))
+    ) -> Result<serde_json::Value, kiqi_host::PluginError> {
+        Err(kiqi_host::PluginError::Failed("none".to_string()))
     }
 }
 
@@ -1542,7 +1543,7 @@ fn ask_user_honours_timeout() {
 #[test]
 fn declared_capabilities_reads_the_components_imports_and_exports() {
     let wasm = fixture_wasm();
-    let caps = kiqi_plugin_host::declared_capabilities(&wasm).expect("read component surface");
+    let caps = kiqi_host::wasm::declared_capabilities(&wasm).expect("read component surface");
     assert_eq!(
         caps,
         vec![
@@ -1572,7 +1573,7 @@ fn load_fixture_in_temp(grants: Grants) -> (tempfile::TempDir, WasmPlugin) {
 fn call_main_tool(
     plugin: &WasmPlugin,
     arguments: serde_json::Value,
-) -> Result<kiqi_plugin::ToolOutcome, PluginError> {
+) -> Result<kiqi_host::ToolOutcome, PluginError> {
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     let sink = RecordingSink {
@@ -1586,8 +1587,8 @@ fn call_main_tool(
 #[test]
 fn fs_is_granted_and_jailed_to_the_plugins_data_directory() {
     let (dir, plugin) = load_fixture_in_temp(Grants {
-        fs: Some(kiqi_plugin::grants::FsGrant {
-            cwd: kiqi_plugin::grants::ExecCwd::PluginData,
+        fs: Some(kiqi_host::grants::FsGrant {
+            cwd: kiqi_host::grants::ExecCwd::PluginData,
         }),
         ..Grants::default()
     });
@@ -1608,7 +1609,7 @@ fn fs_is_granted_and_jailed_to_the_plugins_data_directory() {
 /// outside the grant (or no grant at all) is denied, not silently skipped.
 #[test]
 fn exec_runs_only_allow_listed_commands() {
-    use kiqi_plugin_host::ExecGrant;
+    use kiqi_host::wasm::ExecGrant;
 
     let (_dir, plugin) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
@@ -1651,9 +1652,9 @@ fn load_fixture_with_project(grants: Grants) -> (tempfile::TempDir, tempfile::Te
         "conformance",
         &wasm,
         grants,
-        kiqi_plugin_host::Options {
+        kiqi_host::wasm::Options {
             project_dir: Some(project.path().to_path_buf()),
-            ..kiqi_plugin_host::Options::default()
+            ..kiqi_host::wasm::Options::default()
         },
     )
     .expect("load");
@@ -1665,7 +1666,7 @@ fn load_fixture_with_project(grants: Grants) -> (tempfile::TempDir, tempfile::Te
 /// inside it.
 #[test]
 fn exec_cwd_defaults_to_the_plugin_data_directory() {
-    use kiqi_plugin_host::ExecGrant;
+    use kiqi_host::wasm::ExecGrant;
 
     let (dir, plugin) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
@@ -1714,7 +1715,7 @@ fn exec_cwd_defaults_to_the_plugin_data_directory() {
 /// `..` or by an absolute path.
 #[test]
 fn exec_cwd_cannot_escape_its_scope_root() {
-    use kiqi_plugin_host::ExecGrant;
+    use kiqi_host::wasm::ExecGrant;
 
     let (dir, plugin) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
@@ -1744,7 +1745,7 @@ fn exec_cwd_cannot_escape_its_scope_root() {
 #[cfg(unix)]
 #[test]
 fn exec_cwd_refuses_a_symlinked_parent() {
-    use kiqi_plugin_host::ExecGrant;
+    use kiqi_host::wasm::ExecGrant;
 
     let (dir, plugin) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
@@ -1793,7 +1794,7 @@ fn exec_cwd_refuses_a_symlinked_parent() {
 /// what a diagnostic plugin needs to run `cargo`/`clippy` on the user's tree.
 #[test]
 fn exec_cwd_project_scope_runs_in_the_project_directory() {
-    use kiqi_plugin_host::{ExecCwd, ExecGrant};
+    use kiqi_host::wasm::{ExecCwd, ExecGrant};
 
     let (dir, project, plugin) = load_fixture_with_project(Grants {
         exec: Some(ExecGrant {
@@ -1865,7 +1866,7 @@ fn exec_cwd_project_scope_runs_in_the_project_directory() {
 /// and reported as timed out, long before its own duration.
 #[test]
 fn exec_times_out_at_the_grants_budget() {
-    use kiqi_plugin_host::ExecGrant;
+    use kiqi_host::wasm::ExecGrant;
 
     let (_dir, plugin) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
@@ -1948,8 +1949,8 @@ fn codegraph_guest_declares_the_eight_tools() {
 /// error names the subcommand — which is how the test tells them apart.
 #[test]
 fn codegraph_guest_probes_the_index_then_needs_the_codegraph_grant() {
-    use kiqi_plugin_host::ExecCwd;
-    use kiqi_plugin_host::ExecGrant;
+    use kiqi_host::wasm::ExecCwd;
+    use kiqi_host::wasm::ExecGrant;
 
     // projectPath must live inside the session's directory (the guest resolves
     // it lexically against `info().cwd`), so the fixture project goes in a temp
@@ -2015,7 +2016,7 @@ fn codegraph_guest_probes_the_index_then_needs_the_codegraph_grant() {
 /// installed, rather than pretending the protocol path was covered.
 #[test]
 fn codegraph_guest_live_session_when_asked() {
-    use kiqi_plugin_host::{ExecCwd, ExecGrant, ProcGrant};
+    use kiqi_host::wasm::{ExecCwd, ExecGrant, ProcGrant};
 
     let available = std::process::Command::new("codegraph")
         .arg("--version")
@@ -2081,7 +2082,7 @@ fn codegraph_guest_live_session_when_asked() {
 /// can complete without any real agent.
 #[test]
 fn orchestrator_guest_runs_a_wave_via_cat() {
-    use kiqi_plugin_host::ProcGrant;
+    use kiqi_host::wasm::ProcGrant;
 
     let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
     let plugin = WasmPlugin::load_with_grants(
@@ -2090,7 +2091,7 @@ fn orchestrator_guest_runs_a_wave_via_cat() {
         Grants {
             proc: Some(ProcGrant {
                 commands: vec!["cat".to_string(), "test".to_string(), "sh".to_string()],
-                cwd: kiqi_plugin_host::ExecCwd::Project,
+                cwd: kiqi_host::wasm::ExecCwd::Project,
                 ..ProcGrant::default()
             }),
             ..Grants::default()
@@ -2165,7 +2166,7 @@ fn orchestrator_guest_runs_a_wave_via_cat() {
 /// The subagent tool drives one child via `proc` (task on stdin, EOF, collect).
 #[test]
 fn orchestrator_guest_subagent_round_trips_via_cat() {
-    use kiqi_plugin_host::ProcGrant;
+    use kiqi_host::wasm::ProcGrant;
 
     let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
     let plugin = WasmPlugin::load_with_grants(
@@ -2174,7 +2175,7 @@ fn orchestrator_guest_subagent_round_trips_via_cat() {
         Grants {
             proc: Some(ProcGrant {
                 commands: vec!["cat".to_string()],
-                cwd: kiqi_plugin_host::ExecCwd::Project,
+                cwd: kiqi_host::wasm::ExecCwd::Project,
                 ..ProcGrant::default()
             }),
             ..Grants::default()
@@ -2234,7 +2235,7 @@ impl CancelProbe for PollThenCancel {
 /// waiting out `timeoutSeconds` while holding the plugin's call mutex.
 #[test]
 fn orchestrator_guest_subagent_stops_when_the_host_cancels() {
-    use kiqi_plugin_host::ProcGrant;
+    use kiqi_host::wasm::ProcGrant;
 
     let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
     let plugin = WasmPlugin::load_with_grants(
@@ -2243,7 +2244,7 @@ fn orchestrator_guest_subagent_stops_when_the_host_cancels() {
         Grants {
             proc: Some(ProcGrant {
                 commands: vec!["sh".to_string()],
-                cwd: kiqi_plugin_host::ExecCwd::Project,
+                cwd: kiqi_host::wasm::ExecCwd::Project,
                 ..ProcGrant::default()
             }),
             ..Grants::default()
@@ -2331,7 +2332,7 @@ fn orchestrator_guest_session_switch_clears_the_plan() {
 /// active goal exists, never twice, and always fail-closed.
 #[test]
 fn orchestrator_guest_gates_guidance_on_the_active_goal() {
-    use kiqi_plugin_host::{ExecCwd, FsGrant};
+    use kiqi_host::wasm::{ExecCwd, FsGrant};
 
     let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
     let project = tempfile::tempdir().expect("project tempdir");
@@ -2344,9 +2345,9 @@ fn orchestrator_guest_gates_guidance_on_the_active_goal() {
             }),
             ..Grants::default()
         },
-        kiqi_plugin_host::Options {
+        kiqi_host::wasm::Options {
             project_dir: Some(project.path().to_path_buf()),
-            ..kiqi_plugin_host::Options::default()
+            ..kiqi_host::wasm::Options::default()
         },
     )
     .expect("load");
@@ -2411,9 +2412,9 @@ fn orchestrator_guest_guidance_needs_the_fs_grant() {
         "kiqi-orchestrator",
         &wasm,
         Grants::default(),
-        kiqi_plugin_host::Options {
+        kiqi_host::wasm::Options {
             project_dir: Some(project.path().to_path_buf()),
-            ..kiqi_plugin_host::Options::default()
+            ..kiqi_host::wasm::Options::default()
         },
     )
     .expect("load");
@@ -2438,7 +2439,7 @@ fn orchestrator_guest_guidance_needs_the_fs_grant() {
 /// two per-guest suites would both still pass.
 #[test]
 fn goal_guest_output_turns_the_orchestrator_guidance_on() {
-    use kiqi_plugin_host::{ExecCwd, FsGrant};
+    use kiqi_host::wasm::{ExecCwd, FsGrant};
 
     // One project tree, shared by both guests (their `fs --cwd project` root).
     let project = tempfile::tempdir().expect("project tempdir");
@@ -2452,9 +2453,9 @@ fn goal_guest_output_turns_the_orchestrator_guidance_on() {
         "kiqi-goal",
         &goal_wasm,
         goal_fs_grant(),
-        kiqi_plugin_host::Options {
+        kiqi_host::wasm::Options {
             project_dir: Some(project.path().to_path_buf()),
-            ..kiqi_plugin_host::Options::default()
+            ..kiqi_host::wasm::Options::default()
         },
     )
     .expect("load the goal guest");
@@ -2489,9 +2490,9 @@ fn goal_guest_output_turns_the_orchestrator_guidance_on() {
             }),
             ..Grants::default()
         },
-        kiqi_plugin_host::Options {
+        kiqi_host::wasm::Options {
             project_dir: Some(project.path().to_path_buf()),
-            ..kiqi_plugin_host::Options::default()
+            ..kiqi_host::wasm::Options::default()
         },
     )
     .expect("load the orchestrator guest");
@@ -2513,7 +2514,7 @@ fn goal_guest_output_turns_the_orchestrator_guidance_on() {
 /// reading and writing the project tree.
 #[test]
 fn fs_project_scope_reads_and_writes_the_project_tree() {
-    use kiqi_plugin_host::{ExecCwd, FsGrant};
+    use kiqi_host::wasm::{ExecCwd, FsGrant};
 
     let project = tempfile::tempdir().expect("project tempdir");
     std::fs::write(project.path().join("notes.txt"), b"project file").expect("seed file");
@@ -2527,9 +2528,9 @@ fn fs_project_scope_reads_and_writes_the_project_tree() {
             }),
             ..Grants::default()
         },
-        kiqi_plugin_host::Options {
+        kiqi_host::wasm::Options {
             project_dir: Some(project.path().to_path_buf()),
-            ..kiqi_plugin_host::Options::default()
+            ..kiqi_host::wasm::Options::default()
         },
     )
     .expect("load");
@@ -2558,7 +2559,7 @@ fn fs_project_scope_reads_and_writes_the_project_tree() {
 /// by the conformance fixture inside one tool call.
 #[test]
 fn proc_round_trips_a_line_through_the_host() {
-    use kiqi_plugin_host::ProcGrant;
+    use kiqi_host::wasm::ProcGrant;
 
     let (dir, plugin) = load_fixture_in_temp(Grants {
         proc: Some(ProcGrant {
@@ -2589,7 +2590,7 @@ fn proc_round_trips_a_line_through_the_host() {
 /// allow-list, and a cwd that leaves the scope are each refused.
 #[test]
 fn proc_is_gated_like_exec() {
-    use kiqi_plugin_host::ProcGrant;
+    use kiqi_host::wasm::ProcGrant;
 
     let (_dir, plugin) = load_fixture_in_temp(Grants::default());
     let denied = call_main_tool(
@@ -2644,7 +2645,7 @@ fn proc_is_gated_like_exec() {
 /// The grant's `max-open` bounds how many children one call may hold.
 #[test]
 fn proc_max_open_is_enforced() {
-    use kiqi_plugin_host::ProcGrant;
+    use kiqi_host::wasm::ProcGrant;
 
     let (_dir, plugin) = load_fixture_in_temp(Grants {
         proc: Some(ProcGrant {
@@ -2676,7 +2677,7 @@ fn proc_max_open_is_enforced() {
 #[cfg(unix)]
 #[test]
 fn proc_reaps_children_when_the_call_ends() {
-    use kiqi_plugin_host::ProcGrant;
+    use kiqi_host::wasm::ProcGrant;
 
     let (_dir, plugin) = load_fixture_in_temp(Grants {
         proc: Some(ProcGrant {
@@ -2723,7 +2724,7 @@ fn proc_reaps_children_when_the_call_ends() {
 /// guest only ever sees a handle.
 #[test]
 fn net_sockets_connect_through_a_host_allow_list() {
-    use kiqi_plugin_host::NetSocketsGrant;
+    use kiqi_host::wasm::NetSocketsGrant;
     use std::io::{Read, Write};
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
@@ -2786,11 +2787,11 @@ fn only_enforced_capabilities_count_as_working() {
     // nothing to warn about for a component that declares all four.
     for enforced in ["net-http", "fs", "exec", "net-sockets"] {
         assert!(
-            kiqi_plugin_host::capability_is_enforced(enforced),
+            kiqi_host::wasm::capability_is_enforced(enforced),
             "`{enforced}` is implemented and must be advertised as working"
         );
     }
-    assert!(!kiqi_plugin_host::capability_is_enforced(
+    assert!(!kiqi_host::wasm::capability_is_enforced(
         "no-such-capability"
     ));
 }
@@ -2863,7 +2864,7 @@ fn guest_memory_is_capped() {
         "conformance",
         &wasm,
         Grants::default(),
-        kiqi_plugin_host::Options {
+        kiqi_host::wasm::Options {
             max_memory_bytes: Some(32 * 1024 * 1024),
             ..Default::default()
         },
@@ -2962,7 +2963,7 @@ fn net_http_refuses_an_oversized_response_body() {
 #[cfg(unix)]
 #[test]
 fn exec_does_not_hang_when_the_command_leaves_a_background_child() {
-    use kiqi_plugin_host::ExecGrant;
+    use kiqi_host::wasm::ExecGrant;
 
     // Build outside the timed window: `fixture_wasm()` runs `cargo build`, and
     // with the whole suite building guests in parallel that can take longer than
@@ -3057,7 +3058,7 @@ fn webfetch_guest_keeps_its_url_policy_and_needs_the_grant() {
 /// deny instead of running.
 #[test]
 fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
-    use kiqi_plugin_host::{ExecCwd, ExecGrant};
+    use kiqi_host::wasm::{ExecCwd, ExecGrant};
 
     // The test needs `git` for real (the fixture init below and the guest's
     // diff check). If it is not installed, say so and skip rather than fail on
@@ -3101,9 +3102,9 @@ fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
             }),
             ..Grants::default()
         },
-        kiqi_plugin_host::Options {
+        kiqi_host::wasm::Options {
             project_dir: Some(project.path().to_path_buf()),
-            ..kiqi_plugin_host::Options::default()
+            ..kiqi_host::wasm::Options::default()
         },
     )
     .expect("load");
@@ -3269,7 +3270,7 @@ struct PlanSessionHost {
     messages: Mutex<Vec<String>>,
 }
 
-impl kiqi_plugin::SessionRead for PlanSessionHost {
+impl kiqi_host::SessionRead for PlanSessionHost {
     fn active_tools(&self) -> Vec<String> {
         self.active.lock().unwrap().clone()
     }
@@ -3279,7 +3280,7 @@ impl kiqi_plugin::SessionRead for PlanSessionHost {
     fn thinking_level(&self) -> String {
         String::new()
     }
-    fn cli_flag(&self, _name: &str) -> Option<kiqi_plugin::FlagValue> {
+    fn cli_flag(&self, _name: &str) -> Option<kiqi_host::FlagValue> {
         None
     }
     fn session_branch(&self) -> serde_json::Value {
@@ -3287,7 +3288,7 @@ impl kiqi_plugin::SessionRead for PlanSessionHost {
     }
 }
 
-impl kiqi_plugin::SessionControl for PlanSessionHost {
+impl kiqi_host::SessionControl for PlanSessionHost {
     fn set_session_name(&self, _name: &str) -> Result<(), PluginError> {
         Ok(())
     }
@@ -3321,7 +3322,7 @@ impl kiqi_plugin::SessionControl for PlanSessionHost {
     }
 }
 
-impl kiqi_plugin::InjectApi for PlanSessionHost {
+impl kiqi_host::InjectApi for PlanSessionHost {
     fn send_message(&self, _message: &serde_json::Value) -> Result<(), PluginError> {
         Ok(())
     }
@@ -3405,7 +3406,7 @@ fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
     let status = plugin
         .run_command("plan", "show", &caps)
         .expect("plan show");
-    let kiqi_plugin::CommandResultBody::Message(status) = status.body else {
+    let kiqi_host::CommandResultBody::Message(status) = status.body else {
         panic!("plan show returns a message");
     };
     assert!(status.contains("Do the thing"), "got {status}");
@@ -3673,7 +3674,7 @@ struct GoalInjectHost {
     messages: Mutex<Vec<serde_json::Value>>,
 }
 
-impl kiqi_plugin::InjectApi for GoalInjectHost {
+impl kiqi_host::InjectApi for GoalInjectHost {
     fn send_message(&self, _message: &serde_json::Value) -> Result<(), PluginError> {
         Ok(())
     }
@@ -3698,8 +3699,8 @@ impl kiqi_plugin::InjectApi for GoalInjectHost {
 /// the repo or the build output.
 fn goal_fs_grant() -> Grants {
     Grants {
-        fs: Some(kiqi_plugin::grants::FsGrant {
-            cwd: kiqi_plugin::grants::ExecCwd::Project,
+        fs: Some(kiqi_host::grants::FsGrant {
+            cwd: kiqi_host::grants::ExecCwd::Project,
         }),
         ..Grants::default()
     }
@@ -3723,9 +3724,9 @@ fn load_goal_guest(grants: Grants) -> (tempfile::TempDir, tempfile::TempDir, Was
         "kiqi-goal",
         &wasm,
         grants,
-        kiqi_plugin_host::Options {
+        kiqi_host::wasm::Options {
             project_dir: Some(project.path().to_path_buf()),
-            ..kiqi_plugin_host::Options::default()
+            ..kiqi_host::wasm::Options::default()
         },
     )
     .expect("load");
@@ -3748,7 +3749,7 @@ struct ToolFaceSession {
     tools: Vec<String>,
 }
 
-impl kiqi_plugin::SessionRead for ToolFaceSession {
+impl kiqi_host::SessionRead for ToolFaceSession {
     fn active_tools(&self) -> Vec<String> {
         self.tools.clone()
     }
@@ -3758,7 +3759,7 @@ impl kiqi_plugin::SessionRead for ToolFaceSession {
     fn thinking_level(&self) -> String {
         String::new()
     }
-    fn cli_flag(&self, _name: &str) -> Option<kiqi_plugin::FlagValue> {
+    fn cli_flag(&self, _name: &str) -> Option<kiqi_host::FlagValue> {
         None
     }
     fn session_branch(&self) -> serde_json::Value {
@@ -4019,7 +4020,7 @@ fn goal_guest_charges_the_turn_budget_from_the_project_file() {
     let status = plugin
         .run_command("goal", "status", &caps)
         .expect("goal status");
-    let kiqi_plugin::CommandResultBody::Message(status) = status.body else {
+    let kiqi_host::CommandResultBody::Message(status) = status.body else {
         panic!("goal status returns a message");
     };
     assert!(status.contains("Ship the goal port"), "got {status}");
@@ -4053,9 +4054,9 @@ fn goal_guest_migrates_the_pre_scope_store() {
         "kiqi-goal",
         &wasm,
         goal_fs_grant(),
-        kiqi_plugin_host::Options {
+        kiqi_host::wasm::Options {
             project_dir: Some(data.clone()),
-            ..kiqi_plugin_host::Options::default()
+            ..kiqi_host::wasm::Options::default()
         },
     )
     .expect("load");
@@ -4155,7 +4156,7 @@ fn goal_guest_denies_without_fs_and_injection_is_optional() {
 // the guest side, where it matters.
 // ---------------------------------------------------------------------------
 
-use kiqi_plugin_host::{RenderGrant, RenderHost, RENDER_KIND_MARKDOWN};
+use kiqi_host::wasm::{RenderGrant, RenderHost, RENDER_KIND_MARKDOWN};
 
 fn render_grant(max_output_bytes: u64) -> RenderGrant {
     RenderGrant {
@@ -4288,11 +4289,11 @@ fn render_instantiation_bounds_a_spinning_start_function() {
 /// A `SessionRead` that answers two different flags, so one can prove the
 /// host scopes each read to the *calling* plugin's declarations.
 struct FlagSession {
-    conformance: Option<kiqi_plugin::FlagValue>,
-    todo: Option<kiqi_plugin::FlagValue>,
+    conformance: Option<kiqi_host::FlagValue>,
+    todo: Option<kiqi_host::FlagValue>,
 }
 
-impl kiqi_plugin::SessionRead for FlagSession {
+impl kiqi_host::SessionRead for FlagSession {
     fn active_tools(&self) -> Vec<String> {
         Vec::new()
     }
@@ -4302,7 +4303,7 @@ impl kiqi_plugin::SessionRead for FlagSession {
     fn thinking_level(&self) -> String {
         String::new()
     }
-    fn cli_flag(&self, name: &str) -> Option<kiqi_plugin::FlagValue> {
+    fn cli_flag(&self, name: &str) -> Option<kiqi_host::FlagValue> {
         match name {
             "conformance-flag" => self.conformance.clone(),
             "todo-flag" => self.todo.clone(),
@@ -4314,9 +4315,9 @@ impl kiqi_plugin::SessionRead for FlagSession {
     }
 }
 
-fn text_of_message(result: &kiqi_plugin::CommandResult) -> &str {
+fn text_of_message(result: &kiqi_host::CommandResult) -> &str {
     match &result.body {
-        kiqi_plugin::CommandResultBody::Message(text) => text,
+        kiqi_host::CommandResultBody::Message(text) => text,
         other => panic!("expected a message body, got {other:?}"),
     }
 }
@@ -4333,7 +4334,7 @@ fn command_flows_round_trip_and_carry_flow_ids() {
     let selector = plugin.run_command("conformance", "flow:", &caps).unwrap();
     assert_eq!(selector.flow_id, "flow-1");
     match selector.body {
-        kiqi_plugin::CommandResultBody::Selector(spec) => {
+        kiqi_host::CommandResultBody::Selector(spec) => {
             assert_eq!(spec.title, "Pick one");
             assert_eq!(spec.items, vec!["alpha".to_string(), "beta".to_string()]);
         }
@@ -4345,7 +4346,7 @@ fn command_flows_round_trip_and_carry_flow_ids() {
         .continue_command(
             "conformance",
             "flow-1",
-            kiqi_plugin::CommandReply::Selected("alpha".to_string()),
+            kiqi_host::CommandReply::Selected("alpha".to_string()),
             &caps,
         )
         .unwrap();
@@ -4356,7 +4357,7 @@ fn command_flows_round_trip_and_carry_flow_ids() {
         .continue_command(
             "conformance",
             "flow-ed",
-            kiqi_plugin::CommandReply::Cancelled,
+            kiqi_host::CommandReply::Cancelled,
             &caps,
         )
         .unwrap();
@@ -4367,20 +4368,20 @@ fn command_flows_round_trip_and_carry_flow_ids() {
     assert_eq!(editor.flow_id, "flow-ed");
     assert!(matches!(
         editor.body,
-        kiqi_plugin::CommandResultBody::Editor(_)
+        kiqi_host::CommandResultBody::Editor(_)
     ));
     let prompt = plugin.run_command("conformance", "prompt:", &caps).unwrap();
     assert_eq!(prompt.flow_id, "flow-pr");
     assert!(matches!(
         prompt.body,
-        kiqi_plugin::CommandResultBody::Prompt(_)
+        kiqi_host::CommandResultBody::Prompt(_)
     ));
 
     // An unknown flow id is refused by the guest.
     let stale = plugin.continue_command(
         "conformance",
         "gone",
-        kiqi_plugin::CommandReply::Selected("x".to_string()),
+        kiqi_host::CommandReply::Selected("x".to_string()),
         &caps,
     );
     assert!(stale.is_err(), "unknown flow id must be refused: {stale:?}");
@@ -4397,7 +4398,7 @@ fn command_results_are_sanitized_before_render() {
     // ANSI escapes are stripped from selector strings.
     let ansi = plugin.run_command("conformance", "ansi:", &caps).unwrap();
     match ansi.body {
-        kiqi_plugin::CommandResultBody::Selector(spec) => {
+        kiqi_host::CommandResultBody::Selector(spec) => {
             assert_eq!(spec.title, "Red");
             assert!(!spec.title.contains('\u{1b}'));
         }
@@ -4423,8 +4424,8 @@ fn cli_flag_is_scoped_to_the_calling_plugins_declarations() {
         WasmPlugin::load_with_grants("todo", &todo_wasm, Grants::default()).expect("load todo");
 
     let session = FlagSession {
-        conformance: Some(kiqi_plugin::FlagValue::Bare),
-        todo: Some(kiqi_plugin::FlagValue::Text("loud".to_string())),
+        conformance: Some(kiqi_host::FlagValue::Bare),
+        todo: Some(kiqi_host::FlagValue::Text("loud".to_string())),
     };
     let log = NullLog;
     let caps = HostCaps {
@@ -4495,14 +4496,14 @@ fn typed_input_events_reach_the_guest_and_can_be_claimed() {
 // ---------------------------------------------------------------------------
 
 /// A valid grant profile. The conformance guest declares the matching ids.
-fn oauth_profile(id: &str) -> kiqi_plugin::grants::OAuthProviderProfile {
-    kiqi_plugin::grants::OAuthProviderProfile {
+fn oauth_profile(id: &str) -> kiqi_host::grants::OAuthProviderProfile {
+    kiqi_host::grants::OAuthProviderProfile {
         id: id.to_string(),
         display_name: "Conformance OAuth".to_string(),
         scopes: vec!["openid".to_string()],
         flows: vec![
-            kiqi_plugin::grants::OAuthFlow::AuthorizationCode,
-            kiqi_plugin::grants::OAuthFlow::DeviceCode,
+            kiqi_host::grants::OAuthFlow::AuthorizationCode,
+            kiqi_host::grants::OAuthFlow::DeviceCode,
         ],
         authorization_endpoint: "https://id.acme.test/authorize".to_string(),
         token_endpoint: "https://id.acme.test/token".to_string(),
@@ -4514,9 +4515,9 @@ fn oauth_profile(id: &str) -> kiqi_plugin::grants::OAuthProviderProfile {
 }
 
 fn oauth_grant(
-    providers: Vec<kiqi_plugin::grants::OAuthProviderProfile>,
-) -> kiqi_plugin::grants::OAuthGrant {
-    kiqi_plugin::grants::OAuthGrant {
+    providers: Vec<kiqi_host::grants::OAuthProviderProfile>,
+) -> kiqi_host::grants::OAuthGrant {
+    kiqi_host::grants::OAuthGrant {
         providers,
         timeout_seconds: 60,
         max_requests: 5,
@@ -4537,7 +4538,7 @@ fn oauth_action_without_a_grant_never_calls_the_guest() {
     let error = plugin
         .oauth_action(
             "conformance-oauth",
-            kiqi_plugin::OAuthAction::Begin(String::new()),
+            kiqi_host::OAuthAction::Begin(String::new()),
         )
         .expect_err("no grant means no guest call");
     let message = error.to_string();
@@ -4566,11 +4567,11 @@ fn oauth_action_reaches_a_granted_guest_and_narrows_by_declaration() {
     match plugin
         .oauth_action(
             "conformance-oauth",
-            kiqi_plugin::OAuthAction::Begin("challenge".to_string()),
+            kiqi_host::OAuthAction::Begin("challenge".to_string()),
         )
         .expect("the guest answers")
     {
-        kiqi_plugin::OAuthResponse::Interaction(interaction) => {
+        kiqi_host::OAuthResponse::Interaction(interaction) => {
             assert_eq!(interaction.title, "conformance oauth begin");
             // The guest may put a URL in the response, but it is data only:
             // `ki auth` builds the URL from the grant and never opens this one.
@@ -4606,7 +4607,7 @@ fn oauth_providers_are_narrowed_by_the_guest_list() {
 
     // The guest never declared `ghost`, so the wrapper refuses without a call.
     let error = plugin
-        .oauth_action("ghost", kiqi_plugin::OAuthAction::Poll)
+        .oauth_action("ghost", kiqi_host::OAuthAction::Poll)
         .expect_err("not declared");
     assert!(error.to_string().contains("not declared"), "{error}");
 }
@@ -4618,7 +4619,7 @@ fn oauth_action_times_out_on_a_spinning_guest() {
     let wasm = fixture_wasm();
     let mut grants = Grants::default();
     grants
-        .grant_oauth(kiqi_plugin::grants::OAuthGrant {
+        .grant_oauth(kiqi_host::grants::OAuthGrant {
             providers: vec![
                 oauth_profile("conformance-spin"),
                 oauth_profile("conformance-oauth"),
@@ -4633,7 +4634,7 @@ fn oauth_action_times_out_on_a_spinning_guest() {
     let error = plugin
         .oauth_action(
             "conformance-spin",
-            kiqi_plugin::OAuthAction::Begin(String::new()),
+            kiqi_host::OAuthAction::Begin(String::new()),
         )
         .expect_err("the deadline must fire");
     let elapsed = started.elapsed();
@@ -4650,10 +4651,10 @@ fn oauth_action_times_out_on_a_spinning_guest() {
     // A timeout must not leave the plugin permanently "unloaded": the host
     // rebuilds the instance from the retained engine and component.
     let next = plugin
-        .oauth_action("conformance-oauth", kiqi_plugin::OAuthAction::Poll)
+        .oauth_action("conformance-oauth", kiqi_host::OAuthAction::Poll)
         .expect("a second action after a timeout must still work");
     assert!(
-        matches!(next, kiqi_plugin::OAuthResponse::AuthorizationPending),
+        matches!(next, kiqi_host::OAuthResponse::AuthorizationPending),
         "got {next:?}"
     );
 }
@@ -4662,11 +4663,11 @@ fn oauth_action_times_out_on_a_spinning_guest() {
 // provider-api / provider-http / provider-stream
 // ---------------------------------------------------------------------------
 
-use kiqi_plugin::grants::{
+use kiqi_host::grants::{
     ProviderEndpoint, ProviderGrant, ProviderModel, ProviderProfile,
     PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
 };
-use kiqi_plugin_host::{
+use kiqi_host::wasm::{
     fingerprint_credential, ProviderHost, ProviderHostOptions, ProviderHttpRequest,
     ProviderHttpStream, ProviderHttpTransport, ProviderResponse,
 };
@@ -4981,16 +4982,16 @@ fn provider_stream_deltas_are_assembled_and_bad_order_fails() {
     assert_eq!(response.model, "conformance-model");
     assert_eq!(response.api, "openai-completions");
     assert_eq!(response.segments.len(), 3);
-    assert_eq!(response.segments[0].kind, kiqi_plugin_host::DeltaKind::Text);
+    assert_eq!(response.segments[0].kind, kiqi_host::wasm::DeltaKind::Text);
     assert_eq!(response.segments[0].text, "Hello world");
     assert_eq!(
         response.segments[1].kind,
-        kiqi_plugin_host::DeltaKind::Thinking
+        kiqi_host::wasm::DeltaKind::Thinking
     );
     assert_eq!(response.segments[1].text, "reasoned");
     assert_eq!(
         response.segments[2].kind,
-        kiqi_plugin_host::DeltaKind::ToolCall
+        kiqi_host::wasm::DeltaKind::ToolCall
     );
     assert!(response.segments[2]
         .text

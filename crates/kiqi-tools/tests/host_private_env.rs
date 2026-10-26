@@ -66,7 +66,7 @@ async fn a_host_private_variable_does_not_reach_the_shell() {
 
     let _env = lock_session_env();
     std::env::set_var("KI_SESSION_ID", "01a0f60b-parent-session");
-    std::env::set_var(kiqi_plugin::AGENT_ID_ENV, "01a0f60b-parent-session");
+    std::env::set_var(kiqi_host::AGENT_ID_ENV, "01a0f60b-parent-session");
 
     // A variable the host does NOT mark private still inherits, so this is a
     // targeted exclusion rather than "the shell sees no environment".
@@ -88,7 +88,7 @@ async fn a_host_private_variable_does_not_reach_the_shell() {
     );
 
     std::env::remove_var("KI_TOOLS_INHERIT_PROBE");
-    std::env::remove_var(kiqi_plugin::AGENT_ID_ENV);
+    std::env::remove_var(kiqi_host::AGENT_ID_ENV);
     std::env::remove_var("KI_SESSION_ID");
 }
 
@@ -128,9 +128,9 @@ fn the_private_list_covers_what_the_contract_declares() {
     // these names out of literals was that a copy can drift. Iterating the
     // declared slice means a newly added family member is covered (and checked)
     // without anyone remembering to extend this test.
-    for name in kiqi_plugin::SUBAGENT_PARENT_ENV
+    for name in kiqi_host::SUBAGENT_PARENT_ENV
         .iter()
-        .chain(std::iter::once(&kiqi_plugin::SESSION_ID_ENV))
+        .chain(std::iter::once(&kiqi_host::SESSION_ID_ENV))
     {
         assert!(
             is_host_private_env(name),
@@ -142,7 +142,7 @@ fn the_private_list_covers_what_the_contract_declares() {
     // silently defeat `walgit collab claim --session "$KI_AGENT_ID"`, so the
     // tempting symmetry fix (append it to HOST_PRIVATE_ENV) must fail here.
     assert!(
-        !is_host_private_env(kiqi_plugin::AGENT_ID_ENV),
+        !is_host_private_env(kiqi_host::AGENT_ID_ENV),
         "KI_AGENT_ID must reach the shell; only KI_SESSION_ID is stripped"
     );
 

@@ -2082,10 +2082,9 @@ dependencies = [
  "futures",
  "kiqi-agent",
  "kiqi-ai",
- "kiqi-extensions",
  "kiqi-harness",
+ "kiqi-host",
  "kiqi-mcp",
- "kiqi-plugin",
  "kiqi-tools",
  "serde",
  "serde_json",
@@ -2153,11 +2152,9 @@ dependencies = [
  "kiqi-acp",
  "kiqi-agent",
  "kiqi-ai",
- "kiqi-extensions",
  "kiqi-harness",
+ "kiqi-host",
  "kiqi-mcp",
- "kiqi-plugin",
- "kiqi-plugin-host",
  "kiqi-telemetry",
  "kiqi-tools",
  "kiqi-tui",
@@ -2177,25 +2174,6 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "kiqi-extensions"
-version = "0.4.1"
-dependencies = [
- "async-trait",
- "dirs",
- "futures",
- "kiqi-agent",
- "kiqi-ai",
- "kiqi-plugin",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -2222,6 +2200,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiqi-host"
+version = "0.4.1"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "futures",
+ "kiqi-agent",
+ "kiqi-ai",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "wasmparser 0.259.0",
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "kiqi-mcp"
 version = "0.4.1"
 dependencies = [
@@ -2232,7 +2234,7 @@ dependencies = [
  "kiqi-agent",
  "kiqi-ai",
  "kiqi-harness",
- "kiqi-plugin",
+ "kiqi-host",
  "nix 0.31.3",
  "process-wrap",
  "reqwest",
@@ -2251,31 +2253,6 @@ name = "kiqi-plan-mode-core"
 version = "0.1.5"
 dependencies = [
  "serde_json",
-]
-
-[[package]]
-name = "kiqi-plugin"
-version = "0.4.1"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kiqi-plugin-host"
-version = "0.4.1"
-dependencies = [
- "kiqi-plugin",
- "libc",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tracing",
- "wasmparser 0.259.0",
- "wasmtime",
- "wasmtime-wasi",
 ]
 
 [[package]]
@@ -2300,7 +2277,7 @@ dependencies = [
  "image",
  "kiqi-agent",
  "kiqi-ai",
- "kiqi-plugin",
+ "kiqi-host",
  "nix 0.29.0",
  "regex",
  "schemars 0.8.22",

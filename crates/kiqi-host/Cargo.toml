@@ -1,0 +1,65 @@
+[package]
+publish = false
+name = "kiqi-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/kiqi-host"
+description = "ki's host-side plugin crate: Extension contract, event dispatch spine, and the wasm (component model) plugin backend"
+readme = "README.md"
+keywords = ["ki", "kiqi", "plugin", "wasm", "component-model"]
+categories = ["api-bindings", "development-tools"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Contract + dispatch spine (always compiled — `kiqi-tools`/`kiqi-mcp`/`kiqi-acp`
+# depend on the constants and `EventTag`; only `kiqi-cli` enables `wasm`).
+kiqi-ai = { workspace = true }
+kiqi-agent = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Wasm backend — behind the `wasm` feature so the contract/spine never pull
+# wasmtime (see the crate-doc "Red line").
+wasmtime = { version = "49", features = ["component-model"], optional = true }
+wasmtime-wasi = { version = "49", optional = true }
+wasmparser = { version = "0.259", optional = true }
+sha2 = { workspace = true, optional = true }
+reqwest = { workspace = true, features = ["blocking"], optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+wasmparser = "0.259"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+
+# Killing a child's whole process group (see `run_with_limits`).
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
+[features]
+default = []
+wasm = [
+    "dep:wasmtime",
+    "dep:wasmtime-wasi",
+    "dep:wasmparser",
+    "dep:sha2",
+    "dep:reqwest",
+    "dep:libc",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

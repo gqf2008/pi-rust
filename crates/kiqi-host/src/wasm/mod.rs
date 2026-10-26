@@ -1,7 +1,7 @@
 //! Host-side backend for **wasm plugins** (the component model tier).
 //!
 //! Binds `plugins/kiqi-plugin.wit` (ABI 0.8.0) with wasmtime's `bindgen!` and
-//! hosts a plugin component behind the same [`kiqi_plugin::Plugin`] seam the
+//! hosts a plugin component behind the same [`crate::Plugin`] seam the
 //! compiled-in plugins implement.
 //!
 //! Two deliberate choices:
@@ -19,7 +19,7 @@
 //!   imports the interfaces it uses, so a plugin that never touches `exec` never
 //!   asks for it.
 //!
-//! `WasmPlugin::unload` (and `Drop`, and [`kiqi_plugin::Plugin::shutdown`])
+//! `WasmPlugin::unload` (and `Drop`, and [`crate::Plugin::shutdown`])
 //! releases the instance so `/reload` can swap a plugin without leaking linear
 //! memory.
 
@@ -32,27 +32,27 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Mutex;
 
-use kiqi_plugin::grants::{
+use crate::grants::{
     resolve_provider_request_policy, HeadersMode, MessagesMode, ObserveMode, ProviderRequestPolicy,
 };
-use kiqi_plugin::{
-    Block, CommandSpec, Event, EventAction, FlagSpec, HostCaps, OAuthAction, OAuthCredentialStatus,
-    OAuthInteraction, OAuthProvider, OAuthResponse, Plugin as PluginTrait, PluginError, Progress,
-    ProgressSink, ShortcutSpec, ToolOutcome, ToolSpec, Verdict,
+use crate::{
+    Block, CommandSpec, Event, EventAction, Extension as ExtensionTrait, FlagSpec, HostCaps,
+    OAuthAction, OAuthCredentialStatus, OAuthInteraction, OAuthProvider, OAuthResponse,
+    PluginError, Progress, ProgressSink, ShortcutSpec, ToolOutcome, ToolSpec, Verdict,
 };
 use serde_json::Value;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use crate::kiqi::plugin::types::{
+use crate::wasm::kiqi::plugin::types::{
     CapabilityError, ContentBlock, Event as WitEvent, EventAction as WitEventAction, InputEvent,
     InputKind, LogLevel, OauthAction as WitOauthAction, OauthCredentialStatus,
     OauthProvider as WitOauthProvider, OauthResponse as WitOauthResponse, OauthTokenOutcome,
     OtherEvent, ProgressBlock, ProviderDelta as WitDelta, ToolCall, ToolResult, ToolResultEvent,
     Verdict as WitVerdict,
 };
-use crate::Plugin as World;
+use crate::wasm::Plugin as World;
 
 pub mod oauth;
 pub use oauth::{
@@ -80,7 +80,7 @@ pub use provider_http::{
 };
 
 /// The generated world struct is named after the world (`plugin`); alias it so
-/// it does not collide with the `kiqi_plugin::Plugin` trait.
+/// it does not collide with the `crate::Plugin` trait.
 const NOT_GRANTED: &str = "capability not granted";
 
 /// Which kind of entry point is running on this thread.
@@ -114,7 +114,7 @@ struct CallContext {
     caps: *const HostCaps<'static>,
     kind: CallKind,
     /// Set only for a provider request; `provider-stream.emit` writes here.
-    deltas: Option<*mut crate::provider_host::DeltaAssembler>,
+    deltas: Option<*mut crate::wasm::provider_host::DeltaAssembler>,
 }
 
 thread_local! {
@@ -136,7 +136,7 @@ fn install_context_kind(
     sink: Option<&dyn ProgressSink>,
     caps: &HostCaps<'_>,
     kind: CallKind,
-    deltas: Option<&mut crate::provider_host::DeltaAssembler>,
+    deltas: Option<&mut crate::wasm::provider_host::DeltaAssembler>,
 ) -> CallContext {
     let context = CallContext {
         sink: sink.map(|sink| {
@@ -151,7 +151,7 @@ fn install_context_kind(
         caps: unsafe { std::mem::transmute::<*const HostCaps<'_>, *const HostCaps<'static>>(caps) },
         kind,
         // SAFETY: as above.
-        deltas: deltas.map(|deltas| deltas as *mut crate::provider_host::DeltaAssembler),
+        deltas: deltas.map(|deltas| deltas as *mut crate::wasm::provider_host::DeltaAssembler),
     };
     CURRENT.with(|slot| *slot.borrow_mut() = Some(context));
     context
@@ -209,19 +209,19 @@ fn with_caps_context<R>(f: impl FnOnce(&HostCaps<'_>) -> R) -> Option<R> {
     })
 }
 
-fn with_session<R>(f: impl FnOnce(&dyn kiqi_plugin::SessionRead) -> R) -> Option<R> {
+fn with_session<R>(f: impl FnOnce(&dyn crate::SessionRead) -> R) -> Option<R> {
     with_caps_context(|caps| caps.session.map(f)).flatten()
 }
 
-fn with_control<R>(f: impl FnOnce(&dyn kiqi_plugin::SessionControl) -> R) -> Option<R> {
+fn with_control<R>(f: impl FnOnce(&dyn crate::SessionControl) -> R) -> Option<R> {
     with_caps_context(|caps| caps.control.map(f)).flatten()
 }
 
-fn with_inject<R>(f: impl FnOnce(&dyn kiqi_plugin::InjectApi) -> R) -> Option<R> {
+fn with_inject<R>(f: impl FnOnce(&dyn crate::InjectApi) -> R) -> Option<R> {
     with_caps_context(|caps| caps.inject.map(f)).flatten()
 }
 
-fn with_ui<R>(f: impl FnOnce(&dyn kiqi_plugin::UiApi) -> R) -> Option<R> {
+fn with_ui<R>(f: impl FnOnce(&dyn crate::UiApi) -> R) -> Option<R> {
     with_caps_context(|caps| caps.ui.map(f)).flatten()
 }
 
@@ -248,7 +248,7 @@ fn denied() -> CapabilityError {
 
 /// What the user authorized for one plugin, shared with the CLI through the
 /// contract crate (`kiqi-plugin`).
-pub use kiqi_plugin::grants::{
+pub use crate::grants::{
     allows, ExecCwd, ExecGrant, FsGrant, Grants, NetHttpGrant, NetSocketsGrant, ProcGrant,
     RenderGrant, RENDER_KIND_MARKDOWN, RENDER_MAX_OUTPUT_BYTES_MAX, RENDER_TIMEOUT_MS_MAX,
 };
@@ -260,7 +260,7 @@ pub use kiqi_plugin::grants::{
 /// for (`net-http`, `fs`, `exec`, `proc`, `net-sockets`, `provider-http`,
 /// `oauth-http`, `provider-request`); an export names a surface it offers the
 /// host (`oauth-api`, `provider-api`, `render-api`).
-/// [`kiqi_plugin::grants::grant_key_for_interface`] turns either spelling into
+/// [`crate::grants::grant_key_for_interface`] turns either spelling into
 /// its grant key, so the scanner and the grants model can never disagree
 /// (`provider-http`/`provider-stream` → `provider`, `oauth-http` → `oauth`, …).
 ///
@@ -313,7 +313,7 @@ const GRANTABLE: &[&str] = &[
 /// capability-as-interface convention (`kiqi:plugin/exec@0.7.1` → `exec`), which
 /// is what every 0.7.1 component imports.
 fn note_declared(name: &str, caps: &mut Vec<String>) {
-    let key = kiqi_plugin::grants::grant_key_for_interface(name).or_else(|| {
+    let key = crate::grants::grant_key_for_interface(name).or_else(|| {
         let bare = name.strip_prefix("kiqi:plugin/").unwrap_or(name);
         let bare = bare.split('@').next().unwrap_or(bare);
         GRANTABLE.iter().copied().find(|cap| *cap == bare)
@@ -829,18 +829,18 @@ impl WasiView for HostState {
 
 /// `types` exports no functions, but the world-level linker still requires its
 /// (empty) host trait to be implemented.
-impl crate::kiqi::plugin::types::Host for HostState {}
+impl crate::wasm::kiqi::plugin::types::Host for HostState {}
 
-impl crate::kiqi::plugin::log::Host for HostState {
+impl crate::wasm::kiqi::plugin::log::Host for HostState {
     fn write(&mut self, _level: LogLevel, message: String) {
         eprintln!("[kiqi-plugin] {message}");
     }
 }
 
 /// Read-only session state, forwarded to the call's `HostCaps::session`.
-impl crate::kiqi::plugin::session_read::Host for HostState {
-    fn info(&mut self) -> crate::kiqi::plugin::types::SessionInfo {
-        crate::kiqi::plugin::types::SessionInfo {
+impl crate::wasm::kiqi::plugin::session_read::Host for HostState {
+    fn info(&mut self) -> crate::wasm::kiqi::plugin::types::SessionInfo {
+        crate::wasm::kiqi::plugin::types::SessionInfo {
             session_id: with_session(|session| session.session_id())
                 .flatten()
                 .unwrap_or_default(),
@@ -866,8 +866,8 @@ impl crate::kiqi::plugin::session_read::Host for HostState {
     fn thinking_level(&mut self) -> String {
         with_session(|session| session.thinking_level()).unwrap_or_default()
     }
-    fn cli_flag(&mut self, name: String) -> Option<crate::kiqi::plugin::types::FlagValue> {
-        use crate::kiqi::plugin::types::FlagValue as Wit;
+    fn cli_flag(&mut self, name: String) -> Option<crate::wasm::kiqi::plugin::types::FlagValue> {
+        use crate::wasm::kiqi::plugin::types::FlagValue as Wit;
         // Declaration-scoped: the calling plugin may only read a flag it
         // declared itself. This is the default (no grant), so an install-tree
         // plugin cannot probe the flags of its neighbours.
@@ -877,8 +877,8 @@ impl crate::kiqi::plugin::session_read::Host for HostState {
         with_session(|session| session.cli_flag(&name))
             .flatten()
             .map(|value| match value {
-                kiqi_plugin::FlagValue::Bare => Wit::Bare,
-                kiqi_plugin::FlagValue::Text(text) => Wit::Text(text),
+                crate::FlagValue::Bare => Wit::Bare,
+                crate::FlagValue::Text(text) => Wit::Text(text),
             })
     }
     fn session_branch(&mut self) -> String {
@@ -887,7 +887,7 @@ impl crate::kiqi::plugin::session_read::Host for HostState {
     }
 }
 
-impl crate::kiqi::plugin::progress::Host for HostState {
+impl crate::wasm::kiqi::plugin::progress::Host for HostState {
     fn emit(&mut self, block: ProgressBlock) {
         emit_progress(match block {
             ProgressBlock::Text(text) => Progress::Text(text),
@@ -901,7 +901,7 @@ impl crate::kiqi::plugin::progress::Host for HostState {
 /// Streamed provider deltas. Honored only while a `provider-api.request` call
 /// is on the stack; outside one this is a no-op by contract, so a tool or an
 /// event handler cannot smuggle deltas into another call's stream.
-impl crate::kiqi::plugin::provider_stream::Host for HostState {
+impl crate::wasm::kiqi::plugin::provider_stream::Host for HostState {
     fn emit(&mut self, delta: WitDelta) {
         emit_provider_delta(delta);
     }
@@ -914,7 +914,7 @@ impl crate::kiqi::plugin::provider_stream::Host for HostState {
 
 /// Host-attributed OAuth endpoints. Deny-by-default: a provider id is reachable
 /// only when the `oauth` grant names exactly that profile.
-impl crate::kiqi::plugin::oauth_http::Host for HostState {
+impl crate::wasm::kiqi::plugin::oauth_http::Host for HostState {
     fn token_request(
         &mut self,
         provider_id: String,
@@ -933,7 +933,7 @@ impl crate::kiqi::plugin::oauth_http::Host for HostState {
 /// thread-local call kind), and that call must have installed a grant-backed
 /// [`HostState::provider_call`]. The tool and OAuth instances satisfy neither,
 /// so they can never hold a handle.
-impl crate::kiqi::plugin::provider_http::Host for HostState {
+impl crate::wasm::kiqi::plugin::provider_http::Host for HostState {
     fn open(&mut self, request: String) -> Result<u32, CapabilityError> {
         self.provider_http_open(&request)
             .map_err(provider_http::ProviderHttpError::into_capability)
@@ -1015,7 +1015,7 @@ impl HostState {
 
 /// Session mutations, forwarded to the call's `HostCaps::control`; a call
 /// without that capability gets `denied`.
-impl crate::kiqi::plugin::session_control::Host for HostState {
+impl crate::wasm::kiqi::plugin::session_control::Host for HostState {
     fn set_session_name(&mut self, name: String) -> Result<(), CapabilityError> {
         forward(with_control(|control| control.set_session_name(&name)))
     }
@@ -1049,7 +1049,7 @@ impl crate::kiqi::plugin::session_control::Host for HostState {
 }
 
 /// Content injection, forwarded to the call's `HostCaps::inject`.
-impl crate::kiqi::plugin::inject::Host for HostState {
+impl crate::wasm::kiqi::plugin::inject::Host for HostState {
     fn send_message(&mut self, message: String) -> Result<(), CapabilityError> {
         let message = serde_json::from_str(&message).unwrap_or(serde_json::Value::Null);
         forward(with_inject(|inject| inject.send_message(&message)))
@@ -1074,7 +1074,7 @@ impl crate::kiqi::plugin::inject::Host for HostState {
 }
 
 /// UI, forwarded to the call's `HostCaps::ui`.
-impl crate::kiqi::plugin::ui::Host for HostState {
+impl crate::wasm::kiqi::plugin::ui::Host for HostState {
     fn dialog(&mut self, request: String) -> Result<String, CapabilityError> {
         let request = serde_json::from_str(&request).unwrap_or(serde_json::Value::Null);
         match with_ui(|ui| ui.dialog(&request)) {
@@ -1109,7 +1109,7 @@ impl crate::kiqi::plugin::ui::Host for HostState {
 const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Host-mediated HTTP: the request's host must be in the grant's allow-list.
-impl crate::kiqi::plugin::net_http::Host for HostState {
+impl crate::wasm::kiqi::plugin::net_http::Host for HostState {
     fn fetch(&mut self, request: String) -> Result<String, CapabilityError> {
         let request: serde_json::Value = serde_json::from_str(&request).map_err(|error| {
             CapabilityError::Failed(format!("invalid net-http request: {error}"))
@@ -1217,7 +1217,7 @@ impl HostState {
     fn oauth_profile(
         &self,
         provider_id: &str,
-    ) -> Result<kiqi_plugin::grants::OAuthProviderProfile, CapabilityError> {
+    ) -> Result<crate::grants::OAuthProviderProfile, CapabilityError> {
         let grant = self
             .grants
             .oauth
@@ -1403,8 +1403,8 @@ impl HostState {
             return Err(CapabilityError::Denied("fs is not granted".to_string()));
         };
         let (root, what) = match grant.scope() {
-            kiqi_plugin::grants::ExecCwd::PluginData => (self.data_dir()?, "the plugin directory"),
-            kiqi_plugin::grants::ExecCwd::Project => (self.project_dir()?, "the project directory"),
+            crate::grants::ExecCwd::PluginData => (self.data_dir()?, "the plugin directory"),
+            crate::grants::ExecCwd::Project => (self.project_dir()?, "the project directory"),
         };
         let resolved = jail_under(&root, rel, what)?;
         symlink_checked_under(&root, &resolved, create_parents, what)
@@ -1430,14 +1430,14 @@ impl HostState {
     /// it.
     fn scoped_cwd(
         &self,
-        scope: kiqi_plugin::grants::ExecCwd,
+        scope: crate::grants::ExecCwd,
         cwd: Option<String>,
     ) -> Result<std::path::PathBuf, CapabilityError> {
         let (root, what) = match scope {
-            kiqi_plugin::grants::ExecCwd::PluginData => (self.data_dir()?, "the plugin directory"),
-            kiqi_plugin::grants::ExecCwd::Project => (self.project_dir()?, "the project directory"),
+            crate::grants::ExecCwd::PluginData => (self.data_dir()?, "the plugin directory"),
+            crate::grants::ExecCwd::Project => (self.project_dir()?, "the project directory"),
         };
-        let sandboxed = matches!(scope, kiqi_plugin::grants::ExecCwd::PluginData);
+        let sandboxed = matches!(scope, crate::grants::ExecCwd::PluginData);
         let resolved = match cwd {
             Some(rel) => {
                 let resolved = jail_under(&root, &rel, what)?;
@@ -1632,7 +1632,7 @@ fn symlink_checked_under(
 }
 
 /// Plugin filesystem, jailed to `plugins/<id>/data/`.
-impl crate::kiqi::plugin::fs::Host for HostState {
+impl crate::wasm::kiqi::plugin::fs::Host for HostState {
     fn read(&mut self, rel_path: String) -> Result<Vec<u8>, CapabilityError> {
         let path = self.fs_checked(&rel_path, false)?;
         std::fs::read(&path)
@@ -1662,7 +1662,7 @@ impl crate::kiqi::plugin::fs::Host for HostState {
 /// Raw TCP, allow-listed per host. The host holds the sockets and hands the
 /// guest opaque handles (which is exactly the shape the WIT already declared),
 /// so the grant cannot be bypassed by a second connect.
-impl crate::kiqi::plugin::net_sockets::Host for HostState {
+impl crate::wasm::kiqi::plugin::net_sockets::Host for HostState {
     fn connect(&mut self, address: String) -> Result<u32, CapabilityError> {
         let (host, port) = split_host_port(&address)?;
         if !self.grants.allows_socket_host(&host) {
@@ -1782,7 +1782,7 @@ fn truncate_chars(text: &str, max_bytes: u64) -> String {
 /// * **Nothing unbounded**: channels are bounded (a chatty child blocks on its
 ///   own write), lines and stderr are capped, and the number of live children
 ///   is the grant's `max-open`.
-impl crate::kiqi::plugin::proc::Host for HostState {
+impl crate::wasm::kiqi::plugin::proc::Host for HostState {
     fn spawn(
         &mut self,
         cmd: String,
@@ -1794,7 +1794,7 @@ impl crate::kiqi::plugin::proc::Host for HostState {
             .proc
             .clone()
             .ok_or_else(|| CapabilityError::Denied("proc is not granted".to_string()))?;
-        if !kiqi_plugin::grants::allows(&grant.commands, &cmd) {
+        if !crate::grants::allows(&grant.commands, &cmd) {
             return Err(CapabilityError::Denied(format!(
                 "proc of `{cmd}` is not granted"
             )));
@@ -2089,7 +2089,7 @@ impl crate::kiqi::plugin::proc::Host for HostState {
 /// the user's privileges and can read or write anywhere it can path to. The
 /// scope exists so a plugin cannot *accidentally* operate on the wrong tree
 /// and so the grant's intent stays legible — not to sandbox the child.
-impl crate::kiqi::plugin::exec::Host for HostState {
+impl crate::wasm::kiqi::plugin::exec::Host for HostState {
     fn run(
         &mut self,
         cmd: String,
@@ -2157,7 +2157,7 @@ fn effective_proc_timeout(timeout_seconds: u64) -> std::time::Duration {
         );
         return std::time::Duration::from_secs(1);
     }
-    let clamped = timeout_seconds.min(kiqi_plugin::grants::PROC_TIMEOUT_MAX_SECONDS);
+    let clamped = timeout_seconds.min(crate::grants::PROC_TIMEOUT_MAX_SECONDS);
     if clamped != timeout_seconds {
         eprintln!(
             "[kiqi-plugin] proc grant timeout {timeout_seconds}s exceeds the {clamped}s cap; \
@@ -2173,7 +2173,7 @@ fn effective_proc_timeout(timeout_seconds: u64) -> std::time::Duration {
 /// over it — `grant()` rejects the rest at grant time — so the clamp is the
 /// last-resort guard, and it says so.
 fn effective_proc_max_open(max_open: u32) -> u32 {
-    let clamped = max_open.min(kiqi_plugin::grants::PROC_MAX_OPEN_MAX);
+    let clamped = max_open.min(crate::grants::PROC_MAX_OPEN_MAX);
     if clamped != max_open {
         eprintln!(
             "[kiqi-plugin] proc grant max-open {max_open} exceeds the {clamped} cap; \
@@ -2196,7 +2196,7 @@ fn effective_exec_timeout(timeout_seconds: u64) -> std::time::Duration {
         );
         return std::time::Duration::from_secs(1);
     }
-    let clamped = timeout_seconds.min(kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS);
+    let clamped = timeout_seconds.min(crate::grants::EXEC_TIMEOUT_MAX_SECONDS);
     if clamped != timeout_seconds {
         eprintln!(
             "[kiqi-plugin] exec grant timeout {timeout_seconds}s exceeds the {clamped}s cap; \
@@ -2266,7 +2266,7 @@ impl ProcChild {
 /// Spawn, capture output with a byte cap, and enforce a wall-clock deadline.
 ///
 /// `timeout_seconds` is the grant's budget, clamped to
-/// [`EXEC_TIMEOUT_MAX_SECONDS`](kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS).
+/// [`EXEC_TIMEOUT_MAX_SECONDS`](crate::grants::EXEC_TIMEOUT_MAX_SECONDS).
 /// Read `reader` to the end, keeping at most `cap` bytes.
 ///
 /// Stopping at the cap and closing the pipe (`.take(cap)`) hands a still-running
@@ -2401,9 +2401,9 @@ struct InstanceRecipe {
 /// list (fail closed) rather than retrying on every keystroke.
 #[derive(Debug, Default, Clone)]
 struct DeclaredSurfaces {
-    commands: Option<Vec<kiqi_plugin::CommandSpec>>,
-    flags: Option<Vec<kiqi_plugin::FlagSpec>>,
-    shortcuts: Option<Vec<kiqi_plugin::ShortcutSpec>>,
+    commands: Option<Vec<crate::CommandSpec>>,
+    flags: Option<Vec<crate::FlagSpec>>,
+    shortcuts: Option<Vec<crate::ShortcutSpec>>,
     probe_points: Option<Vec<String>>,
 }
 
@@ -2482,7 +2482,7 @@ pub struct WasmPlugin {
     /// The `oauth` grant's profiles, hoisted out of the store so the CLI can
     /// ask which providers this host offers without waiting for a guest that is
     /// mid-call. `None` means no `oauth` grant: the guest is never called.
-    oauth_grant: Option<kiqi_plugin::grants::OAuthGrant>,
+    oauth_grant: Option<crate::grants::OAuthGrant>,
     /// Provider ids the guest declared through `oauth-api.list-providers` in
     /// the bounded load-time cross-check. `None` means the cross-check could
     /// not run (fail open to the grant, the sole catalog authority);
@@ -2618,7 +2618,7 @@ impl WasmPlugin {
                     let names = specs.iter().map(|spec| spec.name.clone()).collect();
                     let flags = specs
                         .into_iter()
-                        .map(|spec| kiqi_plugin::FlagSpec {
+                        .map(|spec| crate::FlagSpec {
                             name: spec.name,
                             description: spec.description,
                         })
@@ -2779,13 +2779,13 @@ impl WasmPlugin {
         // guest 一个都收不到；`AfterProviderResponse` 在 0.8.0 里没有 wasm 面
         // （终端消息由 MessageEnd 覆盖），永远不投递。
         let wit = match event.tag {
-            kiqi_plugin::EventTag::BeforeProviderRequest => {
+            crate::EventTag::BeforeProviderRequest => {
                 match graded_provider_request(event, &inner.store.data().grants, false) {
                     Some(wit) => wit,
                     None => return EventAction::Continue,
                 }
             }
-            kiqi_plugin::EventTag::BeforeProviderHeaders => {
+            crate::EventTag::BeforeProviderHeaders => {
                 // 与 CLI 分流同口径：observe 与 patch 都没开就不投递。
                 match inner.store.data().grants.provider_request.as_ref() {
                     Some(policy) if policy.observe == ObserveMode::Requests || policy.patch => {}
@@ -2793,7 +2793,7 @@ impl WasmPlugin {
                 }
                 to_wit_event(event)
             }
-            kiqi_plugin::EventTag::AfterProviderResponse => return EventAction::Continue,
+            crate::EventTag::AfterProviderResponse => return EventAction::Continue,
             _ => to_wit_event(event),
         };
         let _context = install_context_kind(None, caps, CallKind::Event, None);
@@ -2833,7 +2833,7 @@ impl WasmPlugin {
         event: &Event,
         caps: &HostCaps<'_>,
     ) -> Result<Option<Value>, String> {
-        if event.tag != kiqi_plugin::EventTag::BeforeProviderRequest {
+        if event.tag != crate::EventTag::BeforeProviderRequest {
             return Ok(None);
         }
         let Some(policy) = self.provider_request else {
@@ -2916,7 +2916,7 @@ impl WasmPlugin {
     }
 
     /// `list-commands`, captured on first use.
-    fn cached_commands(&self) -> Vec<kiqi_plugin::CommandSpec> {
+    fn cached_commands(&self) -> Vec<crate::CommandSpec> {
         if let Some(cached) = self
             .declared
             .lock()
@@ -2938,7 +2938,7 @@ impl WasmPlugin {
         let commands = match result {
             Ok(specs) => specs
                 .into_iter()
-                .map(|spec| kiqi_plugin::CommandSpec {
+                .map(|spec| crate::CommandSpec {
                     name: spec.name,
                     description: spec.description,
                 })
@@ -2956,7 +2956,7 @@ impl WasmPlugin {
     }
 
     /// `list-flags`, captured on first use.
-    fn cached_flags(&self) -> Vec<kiqi_plugin::FlagSpec> {
+    fn cached_flags(&self) -> Vec<crate::FlagSpec> {
         if let Some(cached) = self
             .declared
             .lock()
@@ -2975,10 +2975,10 @@ impl WasmPlugin {
             .kiqi_plugin_plugin_api()
             .call_list_flags(&mut inner.store);
         inner.store.data_mut().reap_call_scoped();
-        let flags: Vec<kiqi_plugin::FlagSpec> = match result {
+        let flags: Vec<crate::FlagSpec> = match result {
             Ok(specs) => specs
                 .into_iter()
-                .map(|spec| kiqi_plugin::FlagSpec {
+                .map(|spec| crate::FlagSpec {
                     name: spec.name,
                     description: spec.description,
                 })
@@ -2997,7 +2997,7 @@ impl WasmPlugin {
 
     /// `list-shortcuts`, captured on first use. This is the hot path the cache
     /// exists for: shortcut lookup runs on every key event.
-    fn cached_shortcuts(&self) -> Vec<kiqi_plugin::ShortcutSpec> {
+    fn cached_shortcuts(&self) -> Vec<crate::ShortcutSpec> {
         if let Some(cached) = self
             .declared
             .lock()
@@ -3016,10 +3016,10 @@ impl WasmPlugin {
             .kiqi_plugin_plugin_api()
             .call_list_shortcuts(&mut inner.store);
         inner.store.data_mut().reap_call_scoped();
-        let shortcuts: Vec<kiqi_plugin::ShortcutSpec> = match result {
+        let shortcuts: Vec<crate::ShortcutSpec> = match result {
             Ok(specs) => specs
                 .into_iter()
-                .map(|spec| kiqi_plugin::ShortcutSpec {
+                .map(|spec| crate::ShortcutSpec {
                     key: spec.key,
                     description: spec.description,
                 })
@@ -3077,7 +3077,7 @@ impl Drop for WasmPlugin {
     }
 }
 
-impl PluginTrait for WasmPlugin {
+impl ExtensionTrait for WasmPlugin {
     fn id(&self) -> &str {
         &self.id
     }
@@ -3117,7 +3117,7 @@ impl PluginTrait for WasmPlugin {
         name: &str,
         arguments: &str,
         caps: &HostCaps<'_>,
-    ) -> Result<kiqi_plugin::CommandResult, PluginError> {
+    ) -> Result<crate::CommandResult, PluginError> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let Some(inner) = guard.as_mut() else {
             return Err(PluginError::Failed(format!("{} is unloaded", self.id)));
@@ -3159,9 +3159,9 @@ impl PluginTrait for WasmPlugin {
         &self,
         name: &str,
         flow_id: &str,
-        reply: kiqi_plugin::CommandReply,
+        reply: crate::CommandReply,
         caps: &HostCaps<'_>,
-    ) -> Result<kiqi_plugin::CommandResult, PluginError> {
+    ) -> Result<crate::CommandResult, PluginError> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let Some(inner) = guard.as_mut() else {
             return Err(PluginError::Failed(format!("{} is unloaded", self.id)));
@@ -3331,12 +3331,10 @@ impl PluginTrait for WasmPlugin {
                     .flows
                     .iter()
                     .map(|flow| match flow {
-                        kiqi_plugin::grants::OAuthFlow::AuthorizationCode => {
-                            kiqi_plugin::OAuthFlow::AuthorizationCode
+                        crate::grants::OAuthFlow::AuthorizationCode => {
+                            crate::OAuthFlow::AuthorizationCode
                         }
-                        kiqi_plugin::grants::OAuthFlow::DeviceCode => {
-                            kiqi_plugin::OAuthFlow::DeviceCode
-                        }
+                        crate::grants::OAuthFlow::DeviceCode => crate::OAuthFlow::DeviceCode,
                     })
                     .collect(),
                 supports_pkce: profile.supports_pkce,
@@ -3464,8 +3462,8 @@ impl PluginTrait for WasmPlugin {
 // Mapping between the host's types and the ABI's
 // ---------------------------------------------------------------------------
 
-fn map_plugin_error(error: crate::kiqi::plugin::types::PluginError) -> PluginError {
-    use crate::kiqi::plugin::types::PluginError as Wit;
+fn map_plugin_error(error: crate::wasm::kiqi::plugin::types::PluginError) -> PluginError {
+    use crate::wasm::kiqi::plugin::types::PluginError as Wit;
     match error {
         Wit::UnknownTool(name) => PluginError::UnknownTool(name),
         Wit::InvalidArguments(detail) => PluginError::InvalidArguments(detail),
@@ -3475,38 +3473,36 @@ fn map_plugin_error(error: crate::kiqi::plugin::types::PluginError) -> PluginErr
 }
 
 fn to_command_result(
-    result: crate::kiqi::plugin::types::CommandResult,
-) -> kiqi_plugin::CommandResult {
-    use crate::kiqi::plugin::types::CommandResultBody as Wit;
+    result: crate::wasm::kiqi::plugin::types::CommandResult,
+) -> crate::CommandResult {
+    use crate::wasm::kiqi::plugin::types::CommandResultBody as Wit;
     let body = match result.body {
-        Wit::Message(text) => kiqi_plugin::CommandResultBody::Message(text),
-        Wit::Selector(spec) => {
-            kiqi_plugin::CommandResultBody::Selector(kiqi_plugin::SelectorSpec {
-                title: spec.title,
-                items: spec.items,
-            })
-        }
-        Wit::Editor(spec) => kiqi_plugin::CommandResultBody::Editor(kiqi_plugin::EditorSpec {
+        Wit::Message(text) => crate::CommandResultBody::Message(text),
+        Wit::Selector(spec) => crate::CommandResultBody::Selector(crate::SelectorSpec {
+            title: spec.title,
+            items: spec.items,
+        }),
+        Wit::Editor(spec) => crate::CommandResultBody::Editor(crate::EditorSpec {
             initial_text: spec.initial_text,
         }),
-        Wit::Prompt(spec) => kiqi_plugin::CommandResultBody::Prompt(kiqi_plugin::PromptSpec {
+        Wit::Prompt(spec) => crate::CommandResultBody::Prompt(crate::PromptSpec {
             title: spec.title,
             placeholder: spec.placeholder,
         }),
     };
-    kiqi_plugin::CommandResult {
+    crate::CommandResult {
         flow_id: result.flow_id,
         body,
     }
 }
 
 /// Convert a reply crossing back into the guest.
-fn to_wit_reply(reply: kiqi_plugin::CommandReply) -> crate::kiqi::plugin::types::CommandReply {
-    use crate::kiqi::plugin::types::CommandReply as Wit;
+fn to_wit_reply(reply: crate::CommandReply) -> crate::wasm::kiqi::plugin::types::CommandReply {
+    use crate::wasm::kiqi::plugin::types::CommandReply as Wit;
     match reply {
-        kiqi_plugin::CommandReply::Selected(value) => Wit::Selected(value),
-        kiqi_plugin::CommandReply::Submitted(value) => Wit::Submitted(value),
-        kiqi_plugin::CommandReply::Cancelled => Wit::Cancelled,
+        crate::CommandReply::Selected(value) => Wit::Selected(value),
+        crate::CommandReply::Submitted(value) => Wit::Submitted(value),
+        crate::CommandReply::Cancelled => Wit::Cancelled,
     }
 }
 
@@ -3528,9 +3524,9 @@ pub const COMMAND_FLOW_MAX_EDITOR_BYTES: usize = 256 * 1024;
 /// A selector/editor/prompt body must carry a non-empty `flow_id`, otherwise
 /// the continuation could never be addressed and the slot would leak.
 pub fn sanitize_command_result(
-    result: kiqi_plugin::CommandResult,
-) -> Result<kiqi_plugin::CommandResult, String> {
-    use kiqi_plugin::{CommandResult, CommandResultBody};
+    result: crate::CommandResult,
+) -> Result<crate::CommandResult, String> {
+    use crate::{CommandResult, CommandResultBody};
     let flow_id = sanitize_command_text(&result.flow_id, "flow id", COMMAND_FLOW_MAX_ITEM_BYTES)?;
     let body = match result.body {
         CommandResultBody::Message(text) => CommandResultBody::Message(sanitize_command_text(
@@ -3553,7 +3549,7 @@ pub fn sanitize_command_result(
                 }
                 items.push(item);
             }
-            CommandResultBody::Selector(kiqi_plugin::SelectorSpec { title, items })
+            CommandResultBody::Selector(crate::SelectorSpec { title, items })
         }
         CommandResultBody::Editor(spec) => {
             require_flow_id(&flow_id, "editor")?;
@@ -3562,7 +3558,7 @@ pub fn sanitize_command_result(
                 "editor initial text",
                 COMMAND_FLOW_MAX_EDITOR_BYTES,
             )?;
-            CommandResultBody::Editor(kiqi_plugin::EditorSpec { initial_text })
+            CommandResultBody::Editor(crate::EditorSpec { initial_text })
         }
         CommandResultBody::Prompt(spec) => {
             require_flow_id(&flow_id, "prompt")?;
@@ -3573,7 +3569,7 @@ pub fn sanitize_command_result(
                 "prompt placeholder",
                 COMMAND_FLOW_MAX_ITEM_BYTES,
             )?;
-            CommandResultBody::Prompt(kiqi_plugin::PromptSpec { title, placeholder })
+            CommandResultBody::Prompt(crate::PromptSpec { title, placeholder })
         }
     };
     Ok(CommandResult { flow_id, body })
@@ -3734,7 +3730,7 @@ fn to_wit_input(event: &Event) -> InputEvent {
 }
 
 fn to_wit_event(event: &Event) -> WitEvent {
-    use kiqi_plugin::EventTag as T;
+    use crate::EventTag as T;
     match event.tag {
         T::SessionStart => WitEvent::SessionStart,
         T::SessionShutdown => WitEvent::SessionShutdown,
@@ -4280,8 +4276,8 @@ mod tests {
             wasi: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
             grants: Grants {
-                fs: Some(kiqi_plugin::grants::FsGrant {
-                    cwd: kiqi_plugin::grants::ExecCwd::PluginData,
+                fs: Some(crate::grants::FsGrant {
+                    cwd: crate::grants::ExecCwd::PluginData,
                 }),
                 ..Grants::default()
             },
@@ -4354,7 +4350,7 @@ mod tests {
     /// an in-range budget passes through untouched.
     #[test]
     fn the_exec_timeout_is_capped() {
-        let max = kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS;
+        let max = crate::grants::EXEC_TIMEOUT_MAX_SECONDS;
         assert_eq!(
             effective_exec_timeout(max + 1),
             std::time::Duration::from_secs(max),
@@ -4377,7 +4373,7 @@ mod tests {
     /// parse layer's rejection implies.
     #[test]
     fn the_proc_timeout_is_capped() {
-        let max = kiqi_plugin::grants::PROC_TIMEOUT_MAX_SECONDS;
+        let max = crate::grants::PROC_TIMEOUT_MAX_SECONDS;
         assert_eq!(
             effective_proc_timeout(max + 1),
             std::time::Duration::from_secs(max),
@@ -4401,7 +4397,7 @@ mod tests {
     /// in-range one passes through untouched.
     #[test]
     fn the_proc_max_open_is_capped() {
-        let max = kiqi_plugin::grants::PROC_MAX_OPEN_MAX;
+        let max = crate::grants::PROC_MAX_OPEN_MAX;
         assert_eq!(
             effective_proc_max_open(max + 1),
             max,
@@ -4683,14 +4679,14 @@ mod tests {
     #[test]
     fn provider_observation_is_denied_without_an_observe_grant() {
         let event = Event::new(
-            kiqi_plugin::EventTag::BeforeProviderRequest,
+            crate::EventTag::BeforeProviderRequest,
             serde_json::json!({ "model": "m", "messages": [{ "role": "user" }] }),
         );
 
         let mut grants = Grants::default();
         assert!(graded_provider_request(&event, &grants, false).is_none());
 
-        grants.provider_request = Some(kiqi_plugin::grants::ProviderRequestGrant::default());
+        grants.provider_request = Some(crate::grants::ProviderRequestGrant::default());
         assert!(
             graded_provider_request(&event, &grants, false).is_none(),
             "a grant with observe = none delivers nothing"
@@ -4702,7 +4698,7 @@ mod tests {
     #[test]
     fn provider_observation_strips_messages_and_header_values() {
         let event = Event::new(
-            kiqi_plugin::EventTag::BeforeProviderRequest,
+            crate::EventTag::BeforeProviderRequest,
             serde_json::json!({
                 "model": "m",
                 "apiKeyPresent": true,
@@ -4716,9 +4712,9 @@ mod tests {
             }),
         );
         let mut grants = Grants::default();
-        grants.provider_request = Some(kiqi_plugin::grants::ProviderRequestGrant {
+        grants.provider_request = Some(crate::grants::ProviderRequestGrant {
             observe: ObserveMode::Requests,
-            ..kiqi_plugin::grants::ProviderRequestGrant::default()
+            ..crate::grants::ProviderRequestGrant::default()
         });
 
         let Some(WitEvent::BeforeProviderRequest(payload)) =
@@ -4735,11 +4731,11 @@ mod tests {
         assert_eq!(payload["apiKeyPresent"], true);
 
         // Both explicit opt-ins deliver the full view.
-        grants.provider_request = Some(kiqi_plugin::grants::ProviderRequestGrant {
+        grants.provider_request = Some(crate::grants::ProviderRequestGrant {
             observe: ObserveMode::Requests,
             messages: MessagesMode::Full,
             headers: HeadersMode::Values,
-            ..kiqi_plugin::grants::ProviderRequestGrant::default()
+            ..crate::grants::ProviderRequestGrant::default()
         });
         let Some(WitEvent::BeforeProviderRequest(payload)) =
             graded_provider_request(&event, &grants, false)
@@ -4767,13 +4763,13 @@ mod tests {
     #[test]
     fn provider_observation_always_reports_a_message_count() {
         let event = Event::new(
-            kiqi_plugin::EventTag::BeforeProviderRequest,
+            crate::EventTag::BeforeProviderRequest,
             serde_json::json!({ "model": "m" }),
         );
         let mut grants = Grants::default();
-        grants.provider_request = Some(kiqi_plugin::grants::ProviderRequestGrant {
+        grants.provider_request = Some(crate::grants::ProviderRequestGrant {
             observe: ObserveMode::Requests,
-            ..kiqi_plugin::grants::ProviderRequestGrant::default()
+            ..crate::grants::ProviderRequestGrant::default()
         });
         let Some(WitEvent::BeforeProviderRequest(payload)) =
             graded_provider_request(&event, &grants, false)
@@ -4789,7 +4785,7 @@ mod tests {
     #[test]
     fn provider_observation_header_values_use_a_non_credential_allowlist() {
         let event = Event::new(
-            kiqi_plugin::EventTag::BeforeProviderRequest,
+            crate::EventTag::BeforeProviderRequest,
             serde_json::json!({
                 "headerNames": ["x-portkey-key", "private-token", "x-custom", "traceparent"],
                 "headerValues": {
@@ -4801,10 +4797,10 @@ mod tests {
             }),
         );
         let mut grants = Grants::default();
-        grants.provider_request = Some(kiqi_plugin::grants::ProviderRequestGrant {
+        grants.provider_request = Some(crate::grants::ProviderRequestGrant {
             observe: ObserveMode::Requests,
             headers: HeadersMode::Values,
-            ..kiqi_plugin::grants::ProviderRequestGrant::default()
+            ..crate::grants::ProviderRequestGrant::default()
         });
 
         let Some(WitEvent::BeforeProviderRequest(payload)) =
@@ -4826,8 +4822,8 @@ mod tests {
     // oauth-http
     // -----------------------------------------------------------------------
 
-    use crate::kiqi::plugin::oauth_http::Host as _;
-    use kiqi_plugin::grants::{OAuthFlow, OAuthGrant, OAuthProviderProfile};
+    use crate::grants::{OAuthFlow, OAuthGrant, OAuthProviderProfile};
+    use crate::wasm::kiqi::plugin::oauth_http::Host as _;
 
     fn oauth_profile() -> OAuthProviderProfile {
         OAuthProviderProfile {

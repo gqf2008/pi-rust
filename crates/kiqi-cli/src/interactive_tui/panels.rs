@@ -1,6 +1,6 @@
 //! Generic passive plugin panels. No plugin names or domain metrics live here.
 use super::*;
-use kiqi_extensions::{ExtensionPanel, PanelAnchor, PanelLayout};
+use kiqi_host::{ExtensionPanel, PanelAnchor, PanelLayout};
 use kiqi_tui::ansi::visible_width;
 use kiqi_tui::tui::OverlayHandle;
 use kiqi_tui::{OverlayAnchor, OverlayOptions};
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Panel(Mutex<ExtensionPanel>);
 /// Generic plugin rows below the built-in usage footer, in both terminal modes.
-pub(super) struct FooterPanels(pub kiqi_extensions::ExtensionStatusMailbox);
+pub(super) struct FooterPanels(pub kiqi_host::ExtensionStatusMailbox);
 impl Component for FooterPanels {
     fn render(&self, width: usize) -> Vec<String> {
         self.0
@@ -27,7 +27,7 @@ impl Component for FooterPanels {
 /// Native scrollback has no constrained transcript viewport. Keep sidebar
 /// content adjacent to the editor instead of attaching it to historical rows.
 pub(super) struct RegularPanels {
-    pub mailbox: kiqi_extensions::ExtensionStatusMailbox,
+    pub mailbox: kiqi_host::ExtensionStatusMailbox,
     pub enabled: bool,
 }
 impl Component for RegularPanels {
@@ -137,7 +137,7 @@ fn left_anchor(anchor: PanelAnchor) -> bool {
     )
 }
 struct Rail {
-    mailbox: kiqi_extensions::ExtensionStatusMailbox,
+    mailbox: kiqi_host::ExtensionStatusMailbox,
     left: bool,
     height: AtomicUsize,
     screen_width: AtomicUsize,
@@ -223,7 +223,7 @@ impl Panels {
     pub(super) fn with_sidebar(
         stack: Arc<kiqi_tui::HStack>,
         scroll: Arc<ScrollView>,
-        mailbox: kiqi_extensions::ExtensionStatusMailbox,
+        mailbox: kiqi_host::ExtensionStatusMailbox,
     ) -> Self {
         let rail = |left| {
             Arc::new(Rail {
@@ -246,7 +246,7 @@ impl Panels {
     pub(super) fn sync(
         &mut self,
         tui: &TuiAltScreen,
-        mailbox: &kiqi_extensions::ExtensionStatusMailbox,
+        mailbox: &kiqi_host::ExtensionStatusMailbox,
     ) -> bool {
         let viewport = (
             tui.width(),
@@ -260,7 +260,7 @@ impl Panels {
     fn sync_viewport(
         &mut self,
         tui: &dyn TUI,
-        mailbox: &kiqi_extensions::ExtensionStatusMailbox,
+        mailbox: &kiqi_host::ExtensionStatusMailbox,
         viewport: (usize, usize),
     ) -> bool {
         let revision = mailbox.revision();
@@ -374,7 +374,7 @@ impl Drop for Panels {
 #[cfg(test)]
 mod tests {
     fn set_component(
-        m: &kiqi_extensions::ExtensionStatusMailbox,
+        m: &kiqi_host::ExtensionStatusMailbox,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         let id = args["key"].as_str().unwrap();
@@ -416,7 +416,7 @@ mod tests {
     use super::*;
     #[test]
     fn footer_monitor_follows_usage_row_and_hides_without_taking_sidebar_space() {
-        let mailbox = kiqi_extensions::ExtensionStatusMailbox::new();
+        let mailbox = kiqi_host::ExtensionStatusMailbox::new();
         let monitor = Arc::new(FooterPanels(mailbox.clone()));
         assert!(monitor.render(120).is_empty());
         set_component(&mailbox,serde_json::json!({"key":"monitor","panel":{"version":1,"layout":"footer","width":240,"maxHeight":1,"border":false,"lines":["Turns 1 · Steps 87 · TPS 252 · TTFT 0.42s · Latency 2.1s · TPM 15.1k"]}})).unwrap();
@@ -442,7 +442,7 @@ mod tests {
     }
     #[test]
     fn regular_mode_keeps_monitor_next_to_editor_without_reserving_chat_columns() {
-        let mailbox = kiqi_extensions::ExtensionStatusMailbox::new();
+        let mailbox = kiqi_host::ExtensionStatusMailbox::new();
         set_component(&mailbox,serde_json::json!({"key":"monitor","panel":{"version":1,"layout":"sidebar","width":24,"maxHeight":11,"minScreenWidth":80,"border":false,"title":"RUN STATS","lines":["TTFT 0.42 s","TPS 252 tok/s","Cost USD 0.0123"]}})).unwrap();
         let fallback = Arc::new(RegularPanels {
             mailbox: mailbox.clone(),
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn overlay_visibility_uses_terminal_width_and_reflows_with_resize() {
         let tui = TuiAltScreen::new(Box::new(ProcessTerminal::new()), false, None);
-        let mailbox = kiqi_extensions::ExtensionStatusMailbox::new();
+        let mailbox = kiqi_host::ExtensionStatusMailbox::new();
         let mut panels = Panels::default();
         set_component(&mailbox,serde_json::json!({"key":"monitor","panel":{"version":1,"width":24,"minScreenWidth":80,"lines":["visible"]}})).unwrap();
         panels.sync_viewport(&tui, &mailbox, (120, 21));
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn sidebar_reserves_space_preserves_scroll_and_editor_and_restores_layout_when_hidden() {
         let tui = TuiAltScreen::new(Box::new(ProcessTerminal::new()), false, None);
-        let mailbox = kiqi_extensions::ExtensionStatusMailbox::new();
+        let mailbox = kiqi_host::ExtensionStatusMailbox::new();
         let scroll = Arc::new(ScrollView::new(
             Arc::new(Text::new("CHAT\n".repeat(50), 0, 0)),
             ScrollViewOptions {
@@ -561,7 +561,7 @@ mod tests {
         let tui = TuiAltScreen::new(Box::new(ProcessTerminal::new()), false, None);
         let editor: Arc<dyn Component> = Arc::new(Editor::simple());
         tui.set_focus(Some(editor.clone()));
-        let mailbox = kiqi_extensions::ExtensionStatusMailbox::new();
+        let mailbox = kiqi_host::ExtensionStatusMailbox::new();
         let mut panels = Panels::default();
         set_component(&mailbox,serde_json::json!({"key":"a","panel":{"version":1,"anchor":"top-left","lines":["first"]}})).unwrap();
         set_component(&mailbox,serde_json::json!({"key":"b","panel":{"version":1,"anchor":"bottom-right","lines":["other"]}})).unwrap();

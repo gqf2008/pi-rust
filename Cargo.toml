@@ -10,10 +10,8 @@ members = [
     "crates/kiqi-cli",
     "crates/kiqi-acp",
     "crates/kiqi-tui",
-    "crates/kiqi-plugin",
-    "crates/kiqi-plugin-host",
+    "crates/kiqi-host",
     "crates/kiqi-mcp",
-    "crates/kiqi-extensions",
     "examples/minimal",
     "examples/tools",
     "examples/tui",
@@ -99,8 +97,7 @@ kiqi-harness = { path = "crates/kiqi-harness", version = "0.4.1" }
 
 kiqi-tui = { path = "crates/kiqi-tui", version = "0.4.1" }
 
-kiqi-plugin = { path = "crates/kiqi-plugin", version = "0.4.1" }
-kiqi-extensions = { path = "crates/kiqi-extensions", version = "0.4.1" }
+kiqi-host = { path = "crates/kiqi-host", version = "0.4.1" }
 kiqi-mcp = { path = "crates/kiqi-mcp", version = "0.4.1" }
 kiqi-acp = { path = "crates/kiqi-acp", version = "0.4.1" }
 

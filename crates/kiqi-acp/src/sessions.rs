@@ -4,7 +4,7 @@
 //! ACP 层按 session id 路由，连接能力快照只在激活时复制到各会话。
 //!
 //! 已知的进程级限制：legacy compiled-plugin sink
-//! （`kiqi_extensions::set_compiled_event_sink`）与 `plugins::COMPILED_CAPS`
+//! （`kiqi_host::set_compiled_event_sink`）与 `plugins::COMPILED_CAPS`
 //! 仍是 last-writer-wins，部分第三方插件也会在调用时读取进程 cwd。内置工具使用显式 cwd，ACP 的 run、
 //! cancel、标题和上下文不经过这些全局槽；不同 cwd 的 legacy 插件事件/项目状态
 //! 目前不能按会话隔离，后续需要单独的插件路由改造。
@@ -17,8 +17,8 @@ use agent_client_protocol::schema::v1::SessionId;
 use agent_client_protocol::{Client, ConnectionTo};
 use futures::future::BoxFuture;
 use kiqi_agent::events::AgentEvent;
-use kiqi_extensions::UiDialogMailbox;
 use kiqi_harness::agent_harness::AgentHarness;
+use kiqi_host::UiDialogMailbox;
 use tokio::sync::{broadcast, Notify};
 use tokio_util::sync::CancellationToken;
 

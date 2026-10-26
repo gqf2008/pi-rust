@@ -17,7 +17,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kiqi_plugin::grants::{
+use crate::grants::{
     OAuthFlow, OAuthGrant, OAuthProviderProfile, OAUTH_MAX_REQUESTS_DEFAULT,
     OAUTH_TIMEOUT_DEFAULT_SECONDS,
 };
@@ -40,7 +40,7 @@ pub const TOKEN_FORM_KEYS: &[&str] = &[
 pub const MAX_OAUTH_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// A token pair the host parsed and will store. It never leaves the host: the
-/// guest sees only [`crate::kiqi::plugin::types::oauth_credential_status`].
+/// guest sees only [`crate::wasm::kiqi::plugin::types::oauth_credential_status`].
 #[derive(Clone, PartialEq, Eq)]
 pub struct OAuthTokens {
     pub access: String,

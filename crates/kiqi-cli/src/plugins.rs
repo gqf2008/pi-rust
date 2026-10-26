@@ -9,8 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
-use kiqi_plugin::grants::{Grants, ResourcesGrant, RESOURCES_KIND_PROMPTS, RESOURCES_KIND_SKILLS};
-use kiqi_plugin::{HostCaps, Plugin};
+use kiqi_host::grants::{Grants, ResourcesGrant, RESOURCES_KIND_PROMPTS, RESOURCES_KIND_SKILLS};
+use kiqi_host::{Extension, HostCaps};
 
 /// Host capabilities backed by the real runtime-action host.
 ///
@@ -20,13 +20,13 @@ use kiqi_plugin::{HostCaps, Plugin};
 /// ANY thread - no ambient runtime needed"). The adapter reuses exactly that
 /// mechanism instead of inventing a second one.
 pub struct ActionCaps {
-    host: std::sync::Arc<dyn kiqi_extensions::RuntimeActionHost>,
+    host: std::sync::Arc<dyn kiqi_host::RuntimeActionHost>,
     runtime: tokio::runtime::Handle,
 }
 
 impl ActionCaps {
     pub fn new(
-        host: std::sync::Arc<dyn kiqi_extensions::RuntimeActionHost>,
+        host: std::sync::Arc<dyn kiqi_host::RuntimeActionHost>,
         runtime: tokio::runtime::Handle,
     ) -> Self {
         Self { host, runtime }
@@ -37,7 +37,7 @@ impl ActionCaps {
         &self,
         action: &'static str,
         args: serde_json::Value,
-    ) -> Result<(), kiqi_plugin::PluginError> {
+    ) -> Result<(), kiqi_host::PluginError> {
         let host = self.host.clone();
         let call = move |args: serde_json::Value| async move {
             match action {
@@ -64,7 +64,7 @@ impl ActionCaps {
         &self,
         action: &str,
         future: impl std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'static,
-    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+    ) -> Result<serde_json::Value, kiqi_host::PluginError> {
         let (tx, rx) = std::sync::mpsc::channel();
         self.runtime.spawn(async move {
             let _ = tx.send(future.await);
@@ -83,8 +83,8 @@ impl ActionCaps {
         };
         match answer {
             Ok(Ok(value)) => Ok(value),
-            Ok(Err(error)) => Err(kiqi_plugin::PluginError::Failed(error)),
-            Err(_) => Err(kiqi_plugin::PluginError::Failed(format!(
+            Ok(Err(error)) => Err(kiqi_host::PluginError::Failed(error)),
+            Err(_) => Err(kiqi_host::PluginError::Failed(format!(
                 "the host dropped `{action}` without answering"
             ))),
         }
@@ -93,7 +93,7 @@ impl ActionCaps {
 
 /// `SessionRead` reads return whatever the host action returned; the plugin
 /// gets the documented field rather than a raw blob.
-impl kiqi_plugin::SessionRead for ActionCaps {
+impl kiqi_host::SessionRead for ActionCaps {
     fn active_tools(&self) -> Vec<String> {
         let host = self.host.clone();
         self.drive("get_active_tools", async move {
@@ -131,14 +131,14 @@ impl kiqi_plugin::SessionRead for ActionCaps {
         .unwrap_or_default()
     }
 
-    fn cli_flag(&self, name: &str) -> Option<kiqi_plugin::FlagValue> {
+    fn cli_flag(&self, name: &str) -> Option<kiqi_host::FlagValue> {
         let host = self.host.clone();
         let args = serde_json::json!({ "name": name });
         self.drive("get_cli_flag", async move { host.get_cli_flag(args).await })
             .ok()
             .and_then(|value| match value.get("value")? {
-                serde_json::Value::Bool(true) => Some(kiqi_plugin::FlagValue::Bare),
-                serde_json::Value::String(text) => Some(kiqi_plugin::FlagValue::Text(text.clone())),
+                serde_json::Value::Bool(true) => Some(kiqi_host::FlagValue::Bare),
+                serde_json::Value::String(text) => Some(kiqi_host::FlagValue::Text(text.clone())),
                 _ => None,
             })
     }
@@ -165,54 +165,54 @@ impl kiqi_plugin::SessionRead for ActionCaps {
 /// `SetEditorText` / `UiComponent` are served by the bridge's own registries,
 /// not by `RuntimeActionHost`, so that adapter needs the bridge rather than
 /// this host handle.
-impl kiqi_plugin::SessionControl for ActionCaps {
-    fn set_session_name(&self, name: &str) -> Result<(), kiqi_plugin::PluginError> {
+impl kiqi_host::SessionControl for ActionCaps {
+    fn set_session_name(&self, name: &str) -> Result<(), kiqi_host::PluginError> {
         self.run("set_session_name", serde_json::json!({ "name": name }))
     }
 
-    fn set_active_tools(&self, tools: &[String]) -> Result<(), kiqi_plugin::PluginError> {
+    fn set_active_tools(&self, tools: &[String]) -> Result<(), kiqi_host::PluginError> {
         self.run("set_active_tools", serde_json::json!({ "tools": tools }))
     }
 
-    fn set_model(&self, model: &str) -> Result<(), kiqi_plugin::PluginError> {
+    fn set_model(&self, model: &str) -> Result<(), kiqi_host::PluginError> {
         self.run("set_model", serde_json::json!({ "model": model }))
     }
 
-    fn set_thinking_level(&self, level: &str) -> Result<(), kiqi_plugin::PluginError> {
+    fn set_thinking_level(&self, level: &str) -> Result<(), kiqi_host::PluginError> {
         self.run("set_thinking_level", serde_json::json!({ "level": level }))
     }
 
-    fn compact(&self) -> Result<(), kiqi_plugin::PluginError> {
+    fn compact(&self) -> Result<(), kiqi_host::PluginError> {
         self.run("compact", serde_json::json!({}))
     }
 
-    fn new_session(&self) -> Result<(), kiqi_plugin::PluginError> {
+    fn new_session(&self) -> Result<(), kiqi_host::PluginError> {
         self.run("new_session", serde_json::json!({}))
     }
 
-    fn fork(&self) -> Result<(), kiqi_plugin::PluginError> {
+    fn fork(&self) -> Result<(), kiqi_host::PluginError> {
         self.run("fork", serde_json::json!({}))
     }
 
-    fn navigate_tree(&self, target: &str) -> Result<(), kiqi_plugin::PluginError> {
+    fn navigate_tree(&self, target: &str) -> Result<(), kiqi_host::PluginError> {
         self.run("navigate_tree", serde_json::json!({ "targetId": target }))
     }
 
-    fn switch_session(&self, id: &str) -> Result<(), kiqi_plugin::PluginError> {
+    fn switch_session(&self, id: &str) -> Result<(), kiqi_host::PluginError> {
         self.run("switch_session", serde_json::json!({ "id": id }))
     }
 
-    fn reload(&self) -> Result<(), kiqi_plugin::PluginError> {
+    fn reload(&self) -> Result<(), kiqi_host::PluginError> {
         self.run("reload", serde_json::json!({}))
     }
 }
 
-impl kiqi_plugin::InjectApi for ActionCaps {
-    fn send_message(&self, message: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+impl kiqi_host::InjectApi for ActionCaps {
+    fn send_message(&self, message: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
         self.run("send_message", serde_json::json!({ "message": message }))
     }
 
-    fn send_user_message(&self, text: &str) -> Result<(), kiqi_plugin::PluginError> {
+    fn send_user_message(&self, text: &str) -> Result<(), kiqi_host::PluginError> {
         self.run("send_user_message", serde_json::json!({ "text": text }))
     }
 
@@ -221,7 +221,7 @@ impl kiqi_plugin::InjectApi for ActionCaps {
     /// earlier version sent `{"data": ...}`, which matches neither branch, and
     /// a test that asserted that same wrong shape still passed - which is why
     /// these expectations cite the host rather than the sender.
-    fn append_message(&self, message: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+    fn append_message(&self, message: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
         self.run("append_entry", serde_json::json!({ "message": message }))
     }
 
@@ -229,7 +229,7 @@ impl kiqi_plugin::InjectApi for ActionCaps {
         &self,
         custom_type: &str,
         data: &serde_json::Value,
-    ) -> Result<(), kiqi_plugin::PluginError> {
+    ) -> Result<(), kiqi_host::PluginError> {
         self.run(
             "append_entry",
             serde_json::json!({ "customType": custom_type, "data": data }),
@@ -240,7 +240,7 @@ impl kiqi_plugin::InjectApi for ActionCaps {
 /// A plugin the host registered at build time.
 pub struct Registered {
     pub id: &'static str,
-    pub plugin: Box<dyn Plugin>,
+    pub plugin: Box<dyn Extension>,
 }
 
 /// Every first-party plugin compiled into this binary.
@@ -255,7 +255,7 @@ pub struct Registered {
 /// （`<agent_dir>/logs/ki.log`）。进程级一次：首次设置生效；之后任何
 /// WasmPlugin guest 的 trap/失败都会出现在 ki 的诊断日志里。
 pub(crate) fn install_guest_error_sink() {
-    kiqi_plugin_host::set_guest_error_sink(std::sync::Arc::new(
+    kiqi_host::wasm::set_guest_error_sink(std::sync::Arc::new(
         |plugin: &str, op: &str, error: &str| {
             crate::interactive_tui::diagnostic_log(&format!("[{plugin}] {op} failed: {error}"));
         },
@@ -273,11 +273,11 @@ pub fn load_all() -> Vec<Registered> {
 /// form exists only to produce the borrowed one.
 #[derive(Clone)]
 pub struct OwnedCaps {
-    pub session: Option<std::sync::Arc<dyn kiqi_plugin::SessionRead>>,
-    pub control: Option<std::sync::Arc<dyn kiqi_plugin::SessionControl>>,
-    pub inject: Option<std::sync::Arc<dyn kiqi_plugin::InjectApi>>,
-    pub ui: Option<std::sync::Arc<dyn kiqi_plugin::UiApi>>,
-    pub log: std::sync::Arc<dyn kiqi_plugin::Log>,
+    pub session: Option<std::sync::Arc<dyn kiqi_host::SessionRead>>,
+    pub control: Option<std::sync::Arc<dyn kiqi_host::SessionControl>>,
+    pub inject: Option<std::sync::Arc<dyn kiqi_host::InjectApi>>,
+    pub ui: Option<std::sync::Arc<dyn kiqi_host::UiApi>>,
+    pub log: std::sync::Arc<dyn kiqi_host::Log>,
 }
 
 impl OwnedCaps {
@@ -300,7 +300,7 @@ impl OwnedCaps {
 /// `ui` stays `None` on purpose: `SetStatus`/`SetEditorText`/`UiComponent` are
 /// served by the bridge's registries, not by the action host.
 pub fn owned_caps(
-    host: std::sync::Arc<dyn kiqi_extensions::RuntimeActionHost>,
+    host: std::sync::Arc<dyn kiqi_host::RuntimeActionHost>,
     runtime: Option<tokio::runtime::Handle>,
     ui: Option<std::sync::Arc<UiCaps>>,
 ) -> OwnedCaps {
@@ -308,14 +308,14 @@ pub fn owned_caps(
         session: None,
         control: None,
         inject: None,
-        ui: ui.map(|ui| ui as std::sync::Arc<dyn kiqi_plugin::UiApi>),
+        ui: ui.map(|ui| ui as std::sync::Arc<dyn kiqi_host::UiApi>),
         log: std::sync::Arc::new(StderrLog),
     };
     if let Some(runtime) = runtime {
         let shared = std::sync::Arc::new(ActionCaps::new(host, runtime));
-        caps.session = Some(shared.clone() as std::sync::Arc<dyn kiqi_plugin::SessionRead>);
-        caps.control = Some(shared.clone() as std::sync::Arc<dyn kiqi_plugin::SessionControl>);
-        caps.inject = Some(shared as std::sync::Arc<dyn kiqi_plugin::InjectApi>);
+        caps.session = Some(shared.clone() as std::sync::Arc<dyn kiqi_host::SessionRead>);
+        caps.control = Some(shared.clone() as std::sync::Arc<dyn kiqi_host::SessionControl>);
+        caps.inject = Some(shared as std::sync::Arc<dyn kiqi_host::InjectApi>);
     }
     caps
 }
@@ -329,10 +329,10 @@ pub fn owned_caps(
 /// ones the TUI is attached to — otherwise a plugin that opened a dialog before
 /// the reload can never reach the user again.
 pub fn reload_caps(
-    host: std::sync::Arc<dyn kiqi_extensions::RuntimeActionHost>,
-    ui_dialog: kiqi_extensions::UiDialogMailbox,
-    ext_status: kiqi_extensions::ExtensionStatusMailbox,
-    editor_text: kiqi_extensions::EditorTextMailbox,
+    host: std::sync::Arc<dyn kiqi_host::RuntimeActionHost>,
+    ui_dialog: kiqi_host::UiDialogMailbox,
+    ext_status: kiqi_host::ExtensionStatusMailbox,
+    editor_text: kiqi_host::EditorTextMailbox,
 ) -> OwnedCaps {
     owned_caps(
         host,
@@ -349,7 +349,7 @@ pub fn reload_caps(
 ///
 /// `kiqi-extensions` owns the dispatch funnels (the `AgentEvent` emitter,
 /// lifecycle events, provider hooks); this closure is how those reach
-/// [`Plugin::on_event`](kiqi_plugin::Plugin::on_event). The host calls it once
+/// [`Plugin::on_event`](kiqi_host::Extension::on_event). The host calls it once
 /// per session build with that session's capabilities; last writer wins, so a
 /// second build (or a test) simply replaces the sink.
 ///
@@ -375,7 +375,7 @@ pub fn install_compiled_event_sink(caps: OwnedCaps) {
 #[cfg(test)]
 fn clear_compiled_event_sink() {
     let _guard = lock_test_sink();
-    kiqi_extensions::clear_compiled_event_sink();
+    kiqi_host::clear_compiled_event_sink();
 }
 
 /// [`install_compiled_event_sink`] without the test gate, for callers that
@@ -389,20 +389,19 @@ fn install_compiled_event_sink_locked(caps: OwnedCaps) {
         *guard = Some(caps.clone());
     }
     let hosts = compiled_plugin_hosts();
-    let sink: kiqi_extensions::CompiledEventSink =
-        std::sync::Arc::new(move |mode, tag, payload| {
-            let Some(tag) = kiqi_plugin::EventTag::from_u32(tag) else {
-                return kiqi_extensions::CompiledVerdict::Continue;
+    let sink: kiqi_host::CompiledEventSink = std::sync::Arc::new(move |mode, tag, payload| {
+        let Some(tag) = kiqi_host::EventTag::from_u32(tag) else {
+            return kiqi_host::CompiledVerdict::Continue;
+        };
+        if mode == kiqi_host::DispatchMode::ProviderGate {
+            return match dispatch_provider_gate(&hosts, &caps, tag, payload) {
+                Some(patch) => kiqi_host::CompiledVerdict::Patch(patch),
+                None => kiqi_host::CompiledVerdict::Continue,
             };
-            if mode == kiqi_extensions::DispatchMode::ProviderGate {
-                return match dispatch_provider_gate(&hosts, &caps, tag, payload) {
-                    Some(patch) => kiqi_extensions::CompiledVerdict::Patch(patch),
-                    None => kiqi_extensions::CompiledVerdict::Continue,
-                };
-            }
-            dispatch_to_compiled(&hosts, &caps, tag, payload, mode)
-        });
-    kiqi_extensions::set_compiled_event_sink(sink);
+        }
+        dispatch_to_compiled(&hosts, &caps, tag, payload, mode)
+    });
+    kiqi_host::set_compiled_event_sink(sink);
 }
 
 // ---------------------------------------------------------------------------
@@ -473,7 +472,7 @@ fn with_test_sink<R>(caps: OwnedCaps, f: impl FnOnce() -> R) -> R {
     let _guard = lock_test_sink();
     install_compiled_event_sink_locked(caps);
     let result = f();
-    kiqi_extensions::clear_compiled_event_sink();
+    kiqi_host::clear_compiled_event_sink();
     result
 }
 
@@ -485,15 +484,15 @@ fn with_test_sink<R>(caps: OwnedCaps, f: impl FnOnce() -> R) -> R {
 pub(crate) fn dispatch_to_compiled(
     hosts: &[std::sync::Arc<PluginHost>],
     caps: &OwnedCaps,
-    tag: kiqi_plugin::EventTag,
+    tag: kiqi_host::EventTag,
     payload: serde_json::Value,
-    mode: kiqi_extensions::DispatchMode,
-) -> kiqi_extensions::CompiledVerdict {
-    let event = kiqi_plugin::Event::new(tag, payload);
+    mode: kiqi_host::DispatchMode,
+) -> kiqi_host::CompiledVerdict {
+    let event = kiqi_host::Event::new(tag, payload);
     let caps = caps.caps();
     // An `Input` event is a key: only the plugins that declared it are asked,
     // matching the native `has_shortcut` filter. Every other tag goes to all.
-    let key = (tag == kiqi_plugin::EventTag::Input)
+    let key = (tag == kiqi_host::EventTag::Input)
         .then(|| event.payload.get("key").and_then(|key| key.as_str()))
         .flatten()
         .map(str::to_string);
@@ -501,17 +500,17 @@ pub(crate) fn dispatch_to_compiled(
         Some(key) => shortcut_hosts(hosts, key),
         None => hosts.to_vec(),
     };
-    let mut verdict = kiqi_extensions::CompiledVerdict::Continue;
+    let mut verdict = kiqi_host::CompiledVerdict::Continue;
     for host in &asked {
         // Observe fan-out runs on the UI key loop and must not wait for a guest
         // that is itself waiting on the user (`ask_user` holds the wasm call
         // lock while its dialog is open). Claiming fan-out decides control flow
         // and keeps the blocking call.
         let action = match mode {
-            kiqi_extensions::DispatchMode::Observe => {
+            kiqi_host::DispatchMode::Observe => {
                 // AfterProviderResponse 在 0.8.0 无 wasm/compiled 面（终端消息
                 // 由 MessageEnd 覆盖），宿主源也已停止派发——这里双保险跳过。
-                if tag == kiqi_plugin::EventTag::AfterProviderResponse {
+                if tag == kiqi_host::EventTag::AfterProviderResponse {
                     continue;
                 }
                 // The partition belongs to the provider request alone: there a
@@ -526,18 +525,18 @@ pub(crate) fn dispatch_to_compiled(
                 // 调用（避免同请求双投递），observe 主机留在本扇出。
                 if matches!(
                     tag,
-                    kiqi_plugin::EventTag::BeforeProviderRequest
-                        | kiqi_plugin::EventTag::BeforeProviderHeaders
+                    kiqi_host::EventTag::BeforeProviderRequest
+                        | kiqi_host::EventTag::BeforeProviderHeaders
                 ) {
                     let Some(policy) = host.provider_request_policy() else {
                         continue;
                     };
-                    if tag == kiqi_plugin::EventTag::BeforeProviderRequest
+                    if tag == kiqi_host::EventTag::BeforeProviderRequest
                         && (policy.patch || !policy.observe)
                     {
                         continue;
                     }
-                    if tag == kiqi_plugin::EventTag::BeforeProviderHeaders
+                    if tag == kiqi_host::EventTag::BeforeProviderHeaders
                         && !policy.observe
                         && !policy.patch
                     {
@@ -546,19 +545,19 @@ pub(crate) fn dispatch_to_compiled(
                 }
                 host.try_on_event(&event, &caps)
             }
-            kiqi_extensions::DispatchMode::Claiming => host.on_event(&event, &caps),
+            kiqi_host::DispatchMode::Claiming => host.on_event(&event, &caps),
             // The gate goes through `dispatch_provider_gate`, never this fold.
-            kiqi_extensions::DispatchMode::ProviderGate => continue,
+            kiqi_host::DispatchMode::ProviderGate => continue,
         };
         match action {
             // A patch is consumed only by the provider gate; on this fan-out it
             // changes nothing and does not claim the event.
-            kiqi_plugin::EventAction::Patch(_) => {}
-            kiqi_plugin::EventAction::Continue => {}
+            kiqi_host::EventAction::Patch(_) => {}
+            kiqi_host::EventAction::Continue => {}
             // `Claimed` (and the legacy `Replace`, folded to `Claimed` upstream)
             // takes the event, but the carried payload has no channel here.
-            kiqi_plugin::EventAction::Claimed => {
-                verdict = kiqi_extensions::CompiledVerdict::Claimed;
+            kiqi_host::EventAction::Claimed => {
+                verdict = kiqi_host::CompiledVerdict::Claimed;
             }
         }
     }
@@ -576,13 +575,13 @@ pub(crate) fn dispatch_to_compiled(
 pub(crate) fn dispatch_provider_gate(
     hosts: &[std::sync::Arc<PluginHost>],
     caps: &OwnedCaps,
-    tag: kiqi_plugin::EventTag,
+    tag: kiqi_host::EventTag,
     payload: serde_json::Value,
 ) -> Option<serde_json::Value> {
-    if tag != kiqi_plugin::EventTag::BeforeProviderRequest {
+    if tag != kiqi_host::EventTag::BeforeProviderRequest {
         return None;
     }
-    let event = kiqi_plugin::Event::new(tag, payload);
+    let event = kiqi_host::Event::new(tag, payload);
     let mut merged: Option<serde_json::Value> = None;
     for host in hosts {
         let Some(policy) = host.provider_request_policy() else {
@@ -613,10 +612,10 @@ pub(crate) fn dispatch_provider_gate(
         let size = serde_json::to_vec(value)
             .map(|bytes| bytes.len())
             .unwrap_or(0);
-        if size > kiqi_plugin_host::MAX_ENVELOPE_BYTES {
+        if size > kiqi_host::wasm::MAX_ENVELOPE_BYTES {
             tracing::warn!(
                 bytes = size,
-                cap = kiqi_plugin_host::MAX_ENVELOPE_BYTES,
+                cap = kiqi_host::wasm::MAX_ENVELOPE_BYTES,
                 "merged provider patch is over the envelope cap; request proceeds unpatched"
             );
             return None;
@@ -635,7 +634,7 @@ pub(crate) fn dispatch_provider_gate(
 fn gate_with_deadline(
     host: std::sync::Arc<PluginHost>,
     caps: OwnedCaps,
-    event: kiqi_plugin::Event,
+    event: kiqi_host::Event,
     deadline: std::time::Duration,
 ) -> Result<Option<serde_json::Value>, String> {
     let id = host.id().to_string();
@@ -726,9 +725,9 @@ fn next_compiled_owner() -> u64 {
 /// registries (`actions.rs`), not by `RuntimeActionHost`, which is exactly why
 /// this adapter exists separately from [`ActionCaps`].
 pub struct UiCaps {
-    dialog: kiqi_extensions::UiDialogMailbox,
-    status: kiqi_extensions::ExtensionStatusMailbox,
-    editor: kiqi_extensions::EditorTextMailbox,
+    dialog: kiqi_host::UiDialogMailbox,
+    status: kiqi_host::ExtensionStatusMailbox,
+    editor: kiqi_host::EditorTextMailbox,
     /// Component ownership. The native bridge keys components by the registry
     /// id it assigned at load; compiled plugins have no registry entry, so they
     /// draw from a high range that cannot collide with one.
@@ -737,9 +736,9 @@ pub struct UiCaps {
 
 impl UiCaps {
     pub fn new(
-        dialog: kiqi_extensions::UiDialogMailbox,
-        status: kiqi_extensions::ExtensionStatusMailbox,
-        editor: kiqi_extensions::EditorTextMailbox,
+        dialog: kiqi_host::UiDialogMailbox,
+        status: kiqi_host::ExtensionStatusMailbox,
+        editor: kiqi_host::EditorTextMailbox,
     ) -> Self {
         Self {
             dialog,
@@ -750,28 +749,28 @@ impl UiCaps {
     }
 }
 
-impl kiqi_plugin::UiApi for UiCaps {
+impl kiqi_host::UiApi for UiCaps {
     fn dialog(
         &self,
         request: &serde_json::Value,
-    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+    ) -> Result<serde_json::Value, kiqi_host::PluginError> {
         self.dialog
             .handle(request.clone())
-            .map_err(kiqi_plugin::PluginError::Failed)
+            .map_err(kiqi_host::PluginError::Failed)
     }
 
-    fn set_status(&self, update: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+    fn set_status(&self, update: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
         self.status
             .handle(update.clone())
             .map(|_| ())
-            .map_err(kiqi_plugin::PluginError::Failed)
+            .map_err(kiqi_host::PluginError::Failed)
     }
 
-    fn set_editor_text(&self, edit: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+    fn set_editor_text(&self, edit: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
         self.editor
             .handle(edit.clone())
             .map(|_| ())
-            .map_err(kiqi_plugin::PluginError::Failed)
+            .map_err(kiqi_host::PluginError::Failed)
     }
 
     /// Served by the status mailbox's component registry, exactly as the
@@ -783,18 +782,18 @@ impl kiqi_plugin::UiApi for UiCaps {
         &self,
         _name: &str,
         payload: &serde_json::Value,
-    ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+    ) -> Result<serde_json::Value, kiqi_host::PluginError> {
         self.status
             .component(self.owner, payload.clone())
-            .map_err(kiqi_plugin::PluginError::Failed)
+            .map_err(kiqi_host::PluginError::Failed)
     }
 }
 
 /// Plugin logging goes to stderr for now, prefixed so it is attributable.
 pub struct StderrLog;
 
-impl kiqi_plugin::Log for StderrLog {
-    fn log(&self, level: kiqi_plugin::LogLevel, message: &str) {
+impl kiqi_host::Log for StderrLog {
+    fn log(&self, level: kiqi_host::LogLevel, message: &str) {
         eprintln!("[plugin/{level:?}] {message}");
     }
 }
@@ -844,7 +843,7 @@ impl CompiledToolAdapter {
     /// diagnoses and skips rather than losing the whole tool list.
     pub fn new(
         host: std::sync::Arc<PluginHost>,
-        spec: &kiqi_plugin::ToolSpec,
+        spec: &kiqi_host::ToolSpec,
         caps: OwnedCaps,
     ) -> Option<Self> {
         let parameters =
@@ -870,11 +869,11 @@ struct UpdateSink {
     on_update: std::sync::Arc<dyn Fn(kiqi_agent::types::ToolResultPartial) + Send + Sync>,
 }
 
-impl kiqi_plugin::ProgressSink for UpdateSink {
-    fn progress(&self, progress: kiqi_plugin::Progress) {
+impl kiqi_host::ProgressSink for UpdateSink {
+    fn progress(&self, progress: kiqi_host::Progress) {
         let text = match progress {
-            kiqi_plugin::Progress::Text(text) => text,
-            kiqi_plugin::Progress::Json(value) => value.to_string(),
+            kiqi_host::Progress::Text(text) => text,
+            kiqi_host::Progress::Json(value) => value.to_string(),
         };
         (self.on_update)(kiqi_agent::types::AgentToolResult {
             content: vec![kiqi_agent::types::TextContentOrImage::Text(
@@ -934,14 +933,14 @@ impl kiqi_agent::agent_tool::AgentTool for CompiledToolAdapter {
             .blocks
             .iter()
             .map(|block| match block {
-                kiqi_plugin::Block::Text(text) => {
+                kiqi_host::Block::Text(text) => {
                     kiqi_agent::types::TextContentOrImage::Text(kiqi_ai::types::TextContent {
                         kind: Default::default(),
                         text: text.clone(),
                         text_signature: None,
                     })
                 }
-                kiqi_plugin::Block::Json(value) => {
+                kiqi_host::Block::Json(value) => {
                     kiqi_agent::types::TextContentOrImage::Text(kiqi_ai::types::TextContent {
                         kind: Default::default(),
                         text: value.to_string(),
@@ -959,8 +958,8 @@ impl kiqi_agent::agent_tool::AgentTool for CompiledToolAdapter {
                     .blocks
                     .iter()
                     .map(|block| match block {
-                        kiqi_plugin::Block::Text(text) => text.clone(),
-                        kiqi_plugin::Block::Json(value) => value.to_string(),
+                        kiqi_host::Block::Text(text) => text.clone(),
+                        kiqi_host::Block::Json(value) => value.to_string(),
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),
@@ -975,12 +974,12 @@ impl kiqi_agent::agent_tool::AgentTool for CompiledToolAdapter {
     }
 }
 
-/// The harness's cancellation token as a [`kiqi_plugin::CancelProbe`], so a
+/// The harness's cancellation token as a [`kiqi_host::CancelProbe`], so a
 /// long-running plugin tool (a subagent wave) can wind down when the user
 /// aborts the call instead of leaving its children running.
 struct HarnessCancel(tokio_util::sync::CancellationToken);
 
-impl kiqi_plugin::CancelProbe for HarnessCancel {
+impl kiqi_host::CancelProbe for HarnessCancel {
     fn is_cancelled(&self) -> bool {
         self.0.is_cancelled()
     }
@@ -1075,7 +1074,7 @@ pub fn compiled_tool_schemas(hosts: &[PluginHost]) -> Vec<kiqi_ai::types::Tool> 
 /// loader gets from `catch_unwind`.
 pub struct PluginHost {
     id: String,
-    plugin: Box<dyn Plugin>,
+    plugin: Box<dyn Extension>,
     /// Third-party and sandboxed (currently: wasm). A trusted host may take a
     /// name over — that is what "extension overrides same-named built-in" means
     /// for the tiers the user opted into — but an untrusted one must not, or an
@@ -1085,7 +1084,7 @@ pub struct PluginHost {
 }
 
 impl PluginHost {
-    pub fn new(id: impl Into<String>, plugin: Box<dyn Plugin>) -> Self {
+    pub fn new(id: impl Into<String>, plugin: Box<dyn Extension>) -> Self {
         Self {
             id: id.into(),
             plugin,
@@ -1095,7 +1094,7 @@ impl PluginHost {
 
     /// A sandboxed third-party plugin: its tools may not collide with a name the
     /// host or a trusted plugin already provides.
-    pub fn untrusted(id: impl Into<String>, plugin: Box<dyn Plugin>) -> Self {
+    pub fn untrusted(id: impl Into<String>, plugin: Box<dyn Extension>) -> Self {
         Self {
             id: id.into(),
             plugin,
@@ -1111,7 +1110,7 @@ impl PluginHost {
         &self.id
     }
 
-    pub fn plugin(&self) -> &dyn Plugin {
+    pub fn plugin(&self) -> &dyn Extension {
         self.plugin.as_ref()
     }
 
@@ -1120,33 +1119,33 @@ impl PluginHost {
         name: &str,
         arguments: &serde_json::Value,
         caps: &HostCaps<'_>,
-        sink: &dyn kiqi_plugin::ProgressSink,
-    ) -> Result<kiqi_plugin::ToolOutcome, kiqi_plugin::PluginError> {
+        sink: &dyn kiqi_host::ProgressSink,
+    ) -> Result<kiqi_host::ToolOutcome, kiqi_host::PluginError> {
         self.guard_result("call", || self.plugin.call(name, arguments, caps, sink))
     }
 
     /// A panicking plugin observes nothing rather than aborting the loop.
     pub fn on_event(
         &self,
-        event: &kiqi_plugin::Event,
+        event: &kiqi_host::Event,
         caps: &HostCaps<'_>,
-    ) -> kiqi_plugin::EventAction {
+    ) -> kiqi_host::EventAction {
         self.guard("on-event", || self.plugin.on_event(event, caps))
-            .unwrap_or(kiqi_plugin::EventAction::Continue)
+            .unwrap_or(kiqi_host::EventAction::Continue)
     }
 
     /// Observe-only fan-out: never waits for a plugin that is mid-call.
     pub fn try_on_event(
         &self,
-        event: &kiqi_plugin::Event,
+        event: &kiqi_host::Event,
         caps: &HostCaps<'_>,
-    ) -> kiqi_plugin::EventAction {
+    ) -> kiqi_host::EventAction {
         self.guard("on-event", || self.plugin.try_on_event(event, caps))
-            .unwrap_or(kiqi_plugin::EventAction::Continue)
+            .unwrap_or(kiqi_host::EventAction::Continue)
     }
 
     /// The `provider-request` policy this plugin enforces, if it has one.
-    pub fn provider_request_policy(&self) -> Option<kiqi_plugin::grants::ProviderRequestPolicy> {
+    pub fn provider_request_policy(&self) -> Option<kiqi_host::grants::ProviderRequestPolicy> {
         self.plugin.provider_request_policy()
     }
 
@@ -1154,7 +1153,7 @@ impl PluginHost {
     /// (the caller then proceeds unpatched); `Ok(None)` means no patch.
     pub fn provider_gate(
         &self,
-        event: &kiqi_plugin::Event,
+        event: &kiqi_host::Event,
         caps: &HostCaps<'_>,
     ) -> Result<Option<serde_json::Value>, String> {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1173,7 +1172,7 @@ impl PluginHost {
         name: &str,
         arguments: &str,
         caps: &HostCaps<'_>,
-    ) -> Result<kiqi_plugin::CommandResult, kiqi_plugin::PluginError> {
+    ) -> Result<kiqi_host::CommandResult, kiqi_host::PluginError> {
         self.guard_result("command", || self.plugin.run_command(name, arguments, caps))
     }
 
@@ -1185,9 +1184,9 @@ impl PluginHost {
         &self,
         name: &str,
         flow_id: &str,
-        reply: kiqi_plugin::CommandReply,
+        reply: kiqi_host::CommandReply,
         caps: &HostCaps<'_>,
-    ) -> Result<kiqi_plugin::CommandResult, kiqi_plugin::PluginError> {
+    ) -> Result<kiqi_host::CommandResult, kiqi_host::PluginError> {
         self.guard_result("command", || {
             self.plugin.continue_command(name, flow_id, reply, caps)
         })
@@ -1200,9 +1199,9 @@ impl PluginHost {
         point: &str,
         payload: &serde_json::Value,
         caps: &HostCaps<'_>,
-    ) -> kiqi_plugin::Verdict {
+    ) -> kiqi_host::Verdict {
         self.guard("probe", || self.plugin.probe(point, payload, caps))
-            .unwrap_or(kiqi_plugin::Verdict::Continue)
+            .unwrap_or(kiqi_host::Verdict::Continue)
     }
 
     /// `Some(replacement)` when this plugin claims to rewrite the system prompt.
@@ -1227,11 +1226,11 @@ impl PluginHost {
     fn guard_result<T>(
         &self,
         what: &str,
-        body: impl FnOnce() -> Result<T, kiqi_plugin::PluginError>,
-    ) -> Result<T, kiqi_plugin::PluginError> {
+        body: impl FnOnce() -> Result<T, kiqi_host::PluginError>,
+    ) -> Result<T, kiqi_host::PluginError> {
         match self.guard(what, body) {
             Some(result) => result,
-            None => Err(kiqi_plugin::PluginError::Failed(format!(
+            None => Err(kiqi_host::PluginError::Failed(format!(
                 "plugin `{}` panicked during {what}",
                 self.id
             ))),
@@ -1249,7 +1248,7 @@ pub fn probe_tool_call(
     tool_call_id: &str,
     tool_name: &str,
     args: &serde_json::Value,
-) -> Option<kiqi_plugin::Verdict> {
+) -> Option<kiqi_host::Verdict> {
     probe_tool_call_with(
         &compiled_plugin_hosts(),
         &compiled_caps(),
@@ -1267,7 +1266,7 @@ pub fn probe_tool_call_with(
     tool_call_id: &str,
     tool_name: &str,
     args: &serde_json::Value,
-) -> Option<kiqi_plugin::Verdict> {
+) -> Option<kiqi_host::Verdict> {
     let mut current = args.clone();
     let mut replaced = false;
     for host in hosts {
@@ -1285,17 +1284,17 @@ pub fn probe_tool_call_with(
             "args": current.clone(),
         });
         match host.probe("before-tool-call", &payload, &caps.caps()) {
-            kiqi_plugin::Verdict::Block { reason } => {
-                return Some(kiqi_plugin::Verdict::Block { reason })
+            kiqi_host::Verdict::Block { reason } => {
+                return Some(kiqi_host::Verdict::Block { reason })
             }
-            kiqi_plugin::Verdict::Replace(next) => {
+            kiqi_host::Verdict::Replace(next) => {
                 current = next;
                 replaced = true;
             }
-            kiqi_plugin::Verdict::Continue => {}
+            kiqi_host::Verdict::Continue => {}
         }
     }
-    replaced.then(|| kiqi_plugin::Verdict::Replace(current))
+    replaced.then(|| kiqi_host::Verdict::Replace(current))
 }
 
 /// Compiled plugins that declared `key` as a shortcut.
@@ -1384,7 +1383,7 @@ impl kiqi_ai::ProviderHooks for CompiledPromptHooks {
             .inner
             .as_ref()
             .and_then(|hooks| hooks.transform_context(model, ctx));
-        let Some((timestamp, mut event)) = kiqi_extensions::before_agent_start_input(ctx) else {
+        let Some((timestamp, mut event)) = kiqi_host::before_agent_start_input(ctx) else {
             return native;
         };
         // The prompt a compiled transform starts from: whatever the native slot
@@ -1450,7 +1449,7 @@ pub fn load_hosts() -> Vec<PluginHost> {
     // with `plugins/<id>/grants.json` (the user's authorization, read by
     // `WasmPlugin::load`).
     #[cfg(feature = "plugin-wasm")]
-    if let Some(plugins_dir) = kiqi_plugin::grants::agent_dir().map(|root| root.join("plugins")) {
+    if let Some(plugins_dir) = kiqi_host::grants::agent_dir().map(|root| root.join("plugins")) {
         hosts.extend(load_wasm_hosts(&plugins_dir));
     }
     hosts
@@ -1502,7 +1501,7 @@ pub(crate) fn digest_gate_bytes(
 pub(crate) struct ConfigCredentialSink;
 
 #[cfg(feature = "plugin-wasm")]
-impl kiqi_plugin_host::PluginCredentialSink for ConfigCredentialSink {
+impl kiqi_host::wasm::PluginCredentialSink for ConfigCredentialSink {
     fn store_plugin_oauth(
         &self,
         install_id: &str,
@@ -1527,7 +1526,7 @@ impl kiqi_plugin_host::PluginCredentialSink for ConfigCredentialSink {
         &self,
         install_id: &str,
         provider_id: &str,
-    ) -> Result<Option<kiqi_plugin_host::StoredOAuthToken>, String> {
+    ) -> Result<Option<kiqi_host::wasm::StoredOAuthToken>, String> {
         match crate::config::read_plugin_oauth_token(install_id, provider_id)
             .map_err(|error| error.to_string())?
         {
@@ -1536,7 +1535,7 @@ impl kiqi_plugin_host::PluginCredentialSink for ConfigCredentialSink {
                 refresh,
                 expires,
                 profile_fingerprint,
-            }) => Ok(Some(kiqi_plugin_host::StoredOAuthToken {
+            }) => Ok(Some(kiqi_host::wasm::StoredOAuthToken {
                 access,
                 refresh,
                 expires,
@@ -1553,7 +1552,7 @@ impl kiqi_plugin_host::PluginCredentialSink for ConfigCredentialSink {
 }
 
 /// Discover `plugins/<id>/plugin.wasm` under `plugins_dir` and load each behind
-/// the same [`Plugin`] seam as the compiled-in ones.
+/// the same [`Extension`] seam as the compiled-in ones.
 ///
 /// A plugin that fails to load (bad component, refused grants, missing WASI
 /// import) is reported and skipped rather than taking the session down. A
@@ -1578,7 +1577,7 @@ pub fn load_wasm_hosts(plugins_dir: &std::path::Path) -> Vec<PluginHost> {
         // it; the moved copy still holds `plugin.wasm` and `grants.json`, so
         // loading it would keep running (and granting) a plugin the user
         // removed.
-        if kiqi_plugin::grants::is_uninstalled_dir_name(&id) {
+        if kiqi_host::grants::is_uninstalled_dir_name(&id) {
             continue;
         }
         let wasm = entry.path().join("plugin.wasm");
@@ -1593,14 +1592,14 @@ pub fn load_wasm_hosts(plugins_dir: &std::path::Path) -> Vec<PluginHost> {
                 continue;
             }
         };
-        let options = kiqi_plugin_host::Options {
+        let options = kiqi_host::wasm::Options {
             credential_sink: Some(std::sync::Arc::new(ConfigCredentialSink)),
             ..Default::default()
         };
-        match kiqi_plugin_host::WasmPlugin::load_with_options(
+        match kiqi_host::wasm::WasmPlugin::load_with_options(
             &id,
             &wasm,
-            kiqi_plugin::grants::Grants::load_for(&id),
+            kiqi_host::grants::Grants::load_for(&id),
             options,
         ) {
             Ok(plugin) => {
@@ -1648,14 +1647,14 @@ const RENDER_CACHE_MAX_ENTRIES: usize = 128;
 
 /// Finalize-only markdown transformation backed by granted wasm plugins.
 ///
-/// Each plugin is a [`kiqi_plugin_host::RenderHost`]: its own deny-all store,
+/// Each plugin is a [`kiqi_host::wasm::RenderHost`]: its own deny-all store,
 /// its own engine, called only when the message is finalized. This type adds
 /// the scheduling and the `(plugin id, text hash)` cache on top. A plugin whose
 /// grant is absent is never loaded, and a transform failure keeps the previous
 /// text (the render path must never break assistant output).
 #[cfg(feature = "plugin-wasm")]
 pub struct WasmRenderTransformer {
-    hosts: Vec<(String, std::sync::Arc<kiqi_plugin_host::RenderHost>)>,
+    hosts: Vec<(String, std::sync::Arc<kiqi_host::wasm::RenderHost>)>,
     cache: std::sync::Mutex<std::collections::HashMap<(String, u64), String>>,
 }
 
@@ -1669,7 +1668,7 @@ impl WasmRenderTransformer {
     /// is skipped by `RenderHost::load_with_grants` (`Ok(None)`).
     pub fn load() -> Self {
         let mut hosts = Vec::new();
-        if let Some(root) = kiqi_plugin::grants::agent_dir() {
+        if let Some(root) = kiqi_host::grants::agent_dir() {
             let plugins_dir = root.join("plugins");
             if let Ok(entries) = std::fs::read_dir(&plugins_dir) {
                 for entry in entries.flatten() {
@@ -1679,7 +1678,7 @@ impl WasmRenderTransformer {
                     let Some(id) = entry.file_name().to_str().map(str::to_string) else {
                         continue;
                     };
-                    if kiqi_plugin::grants::is_uninstalled_dir_name(&id) {
+                    if kiqi_host::grants::is_uninstalled_dir_name(&id) {
                         continue;
                     }
                     let wasm = entry.path().join("plugin.wasm");
@@ -1691,7 +1690,7 @@ impl WasmRenderTransformer {
                         continue;
                     }
                     let grants = Grants::load_for_at(&root, &id);
-                    match kiqi_plugin_host::RenderHost::load_with_grants(&id, &wasm, &grants) {
+                    match kiqi_host::wasm::RenderHost::load_with_grants(&id, &wasm, &grants) {
                         Ok(Some(host)) => hosts.push((id, std::sync::Arc::new(host))),
                         Ok(None) => {}
                         Err(error) => eprintln!("plugin `{id}`: {error}"),
@@ -2261,8 +2260,8 @@ pub fn resolve_package_resources(
 /// Resolve every installed, granted package under `root/plugins/`.
 pub fn granted_package_resource_dirs(root: &Path) -> PluginResourceDirs {
     let mut dirs = PluginResourceDirs::default();
-    for id in kiqi_plugin::grants::installed_plugins_at(root) {
-        let package = kiqi_plugin::grants::plugin_dir_at(root, &id);
+    for id in kiqi_host::grants::installed_plugins_at(root) {
+        let package = kiqi_host::grants::plugin_dir_at(root, &id);
         // A resources-only directory is not a plugin; only a package with a
         // component participates.
         if !package.join("plugin.wasm").is_file() {
@@ -2286,7 +2285,7 @@ pub fn granted_package_resource_dirs(root: &Path) -> PluginResourceDirs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiqi_plugin::{HostCaps, Log, LogLevel, NoProgress, SessionRead};
+    use kiqi_host::{HostCaps, Log, LogLevel, NoProgress, SessionRead};
 
     struct Silent;
     impl Log for Silent {
@@ -2487,12 +2486,12 @@ mod tests {
     /// event.
     #[test]
     fn ui_capabilities_reach_the_mailboxes() {
-        use kiqi_plugin::UiApi;
+        use kiqi_host::UiApi;
 
         let ui = UiCaps::new(
-            kiqi_extensions::UiDialogMailbox::new(),
-            kiqi_extensions::ExtensionStatusMailbox::new(),
-            kiqi_extensions::EditorTextMailbox::new(),
+            kiqi_host::UiDialogMailbox::new(),
+            kiqi_host::ExtensionStatusMailbox::new(),
+            kiqi_host::EditorTextMailbox::new(),
         );
 
         // The host-shaped payloads are accepted as-is.
@@ -2598,7 +2597,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl kiqi_extensions::RuntimeActionHost for FakeHost {
+    impl kiqi_host::RuntimeActionHost for FakeHost {
         async fn send_message(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
             self.record("send_message", args)
         }
@@ -2736,14 +2735,14 @@ mod tests {
         assert_eq!(caps_host.system_prompt(), "you are kiqi");
         assert_eq!(
             caps_host.cli_flag("verbose"),
-            Some(kiqi_plugin::FlagValue::Text("2".to_string()))
+            Some(kiqi_host::FlagValue::Text("2".to_string()))
         );
         assert_eq!(caps_host.cli_flag("missing"), None);
 
         // The mutating capabilities must hand the host the documented args,
-        // not a re-shaped blob. `kiqi_plugin::SessionControl` / `InjectApi` are
+        // not a re-shaped blob. `kiqi_host::SessionControl` / `InjectApi` are
         // in scope for these calls.
-        use kiqi_plugin::{InjectApi, SessionControl};
+        use kiqi_host::{InjectApi, SessionControl};
         caps_host.set_model("deepseek-flash").unwrap();
         caps_host.set_active_tools(&["todo".to_string()]).unwrap();
         caps_host.navigate_tree("abc").unwrap();
@@ -2866,7 +2865,7 @@ mod tests {
             assert!(
                 matches!(
                     &refused.body,
-                    kiqi_plugin::CommandResultBody::Message(text) if text.contains("Unable")
+                    kiqi_host::CommandResultBody::Message(text) if text.contains("Unable")
                 ),
                 "without SessionControl plan mode cannot start: {refused:?}"
             );
@@ -2886,8 +2885,8 @@ mod tests {
                 // end.
                 let host = PluginHost::new("kiqi-todo", kiqi_todo::kiqi::factory());
                 host.on_event(
-                    &kiqi_plugin::Event::new(
-                        kiqi_plugin::EventTag::SessionStart,
+                    &kiqi_host::Event::new(
+                        kiqi_host::EventTag::SessionStart,
                         serde_json::Value::Null,
                     ),
                     &caps,
@@ -2901,7 +2900,7 @@ mod tests {
                     )
                     .unwrap();
                 let text = match &listed.blocks[0] {
-                    kiqi_plugin::Block::Text(text) => text.clone(),
+                    kiqi_host::Block::Text(text) => text.clone(),
                     other => panic!("unexpected block {other:?}"),
                 };
                 assert!(text.contains("from the branch"), "got {text}");
@@ -3067,7 +3066,7 @@ mod tests {
         let owned = OwnedCaps {
             session: Some(
                 std::sync::Arc::new(ActionCaps::new(fake, runtime.handle().clone()))
-                    as std::sync::Arc<dyn kiqi_plugin::SessionRead>,
+                    as std::sync::Arc<dyn kiqi_host::SessionRead>,
             ),
             control: None,
             inject: None,
@@ -3076,11 +3075,9 @@ mod tests {
         };
         with_test_sink(owned, || {
             // A registry with no cdylib handlers still reaches the compiled plugin.
-            let snapshot = kiqi_extensions::ExtensionRegistry::new().snapshot();
-            let native_handled = kiqi_extensions::dispatch_empty_event(
-                &snapshot,
-                kiqi_plugin::EventTag::SessionStart,
-            );
+            let snapshot = kiqi_host::ExtensionRegistry::new().snapshot();
+            let native_handled =
+                kiqi_host::dispatch_empty_event(&snapshot, kiqi_host::EventTag::SessionStart);
             assert!(!native_handled, "no cdylib subscribed");
 
             // kiqi-todo restored the task list the host served on the branch —
@@ -3096,7 +3093,7 @@ mod tests {
                 )
                 .unwrap();
             let text = match &listed.blocks[0] {
-                kiqi_plugin::Block::Text(text) => text.clone(),
+                kiqi_host::Block::Text(text) => text.clone(),
                 other => panic!("unexpected block {other:?}"),
             };
             assert!(text.contains("from the branch"), "got {text}");
@@ -3124,7 +3121,7 @@ mod tests {
         let owned = OwnedCaps {
             session: Some(
                 std::sync::Arc::new(ActionCaps::new(fake, runtime.handle().clone()))
-                    as std::sync::Arc<dyn kiqi_plugin::SessionRead>,
+                    as std::sync::Arc<dyn kiqi_host::SessionRead>,
             ),
             control: None,
             inject: None,
@@ -3134,11 +3131,9 @@ mod tests {
         with_test_sink(owned, || {
             // A registry with no cdylib handlers still fans SessionTree out to the
             // compiled+wasm tier.
-            let snapshot = kiqi_extensions::ExtensionRegistry::new().snapshot();
-            let native_handled = kiqi_extensions::dispatch_empty_event(
-                &snapshot,
-                kiqi_plugin::EventTag::SessionTree,
-            );
+            let snapshot = kiqi_host::ExtensionRegistry::new().snapshot();
+            let native_handled =
+                kiqi_host::dispatch_empty_event(&snapshot, kiqi_host::EventTag::SessionTree);
             assert!(!native_handled, "no cdylib subscribed");
 
             // kiqi-todo re-restored the task list the host served on the branch,
@@ -3155,7 +3150,7 @@ mod tests {
                 )
                 .unwrap();
             let text = match &listed.blocks[0] {
-                kiqi_plugin::Block::Text(text) => text.clone(),
+                kiqi_host::Block::Text(text) => text.clone(),
                 other => panic!("unexpected block {other:?}"),
             };
             assert!(text.contains("from the branch"), "got {text}");
@@ -3228,8 +3223,8 @@ mod tests {
     #[test]
     fn a_sink_clear_cannot_land_inside_another_tests_window() {
         let gate = lock_test_sink();
-        kiqi_extensions::set_compiled_event_sink(std::sync::Arc::new(|_, _, _| {
-            kiqi_extensions::CompiledVerdict::Continue
+        kiqi_host::set_compiled_event_sink(std::sync::Arc::new(|_, _, _| {
+            kiqi_host::CompiledVerdict::Continue
         }));
 
         let (cleared_tx, cleared_rx) = std::sync::mpsc::channel();
@@ -3269,7 +3264,7 @@ mod tests {
     }
 
     struct Panicky;
-    impl Plugin for Panicky {
+    impl Extension for Panicky {
         fn id(&self) -> &str {
             "panicky"
         }
@@ -3278,15 +3273,15 @@ mod tests {
             _name: &str,
             _arguments: &serde_json::Value,
             _caps: &HostCaps<'_>,
-            _sink: &dyn kiqi_plugin::ProgressSink,
-        ) -> Result<kiqi_plugin::ToolOutcome, kiqi_plugin::PluginError> {
+            _sink: &dyn kiqi_host::ProgressSink,
+        ) -> Result<kiqi_host::ToolOutcome, kiqi_host::PluginError> {
             panic!("this plugin is broken")
         }
         fn on_event(
             &self,
-            _event: &kiqi_plugin::Event,
+            _event: &kiqi_host::Event,
             _caps: &HostCaps<'_>,
-        ) -> kiqi_plugin::EventAction {
+        ) -> kiqi_host::EventAction {
             panic!("this plugin is broken on events too")
         }
     }
@@ -3306,13 +3301,10 @@ mod tests {
         );
         assert_eq!(
             host.on_event(
-                &kiqi_plugin::Event::new(
-                    kiqi_plugin::EventTag::SessionStart,
-                    serde_json::Value::Null
-                ),
+                &kiqi_host::Event::new(kiqi_host::EventTag::SessionStart, serde_json::Value::Null),
                 &caps
             ),
-            kiqi_plugin::EventAction::Continue
+            kiqi_host::EventAction::Continue
         );
 
         // The process is still alive and every other plugin still works.
@@ -3372,7 +3364,7 @@ mod tests {
             .plugin
             .call("nope", &serde_json::json!({}), &caps, &NoProgress)
             .unwrap_err();
-        assert!(matches!(err, kiqi_plugin::PluginError::UnknownTool(_)));
+        assert!(matches!(err, kiqi_host::PluginError::UnknownTool(_)));
     }
 
     /// The wasm orchestrator polls `proc.cancel-requested`; a cancelled tool
@@ -3381,17 +3373,17 @@ mod tests {
     #[test]
     fn a_cancelled_wasm_dispatch_returns_immediately() {
         struct Cancelled;
-        impl kiqi_plugin::CancelProbe for Cancelled {
+        impl kiqi_host::CancelProbe for Cancelled {
             fn is_cancelled(&self) -> bool {
                 true
             }
         }
 
         let wasm = build_guest("kiqi-orchestrator-guest");
-        let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants(
+        let plugin = kiqi_host::wasm::WasmPlugin::load_with_grants(
             "kiqi-orchestrator",
             &wasm,
-            kiqi_plugin::grants::Grants::default(),
+            kiqi_host::grants::Grants::default(),
         )
         .expect("load the orchestrator guest");
 
@@ -3408,7 +3400,7 @@ mod tests {
     }
 
     /// The wasm tier is wired: a `.wasm` under `plugins/<id>/` is discovered and
-    /// registered behind the same [`Plugin`] seam as the compiled-in plugins.
+    /// registered behind the same [`Extension`] seam as the compiled-in plugins.
     #[cfg(feature = "plugin-wasm")]
     #[test]
     fn wasm_plugins_are_discovered_and_registered() {
@@ -3443,7 +3435,7 @@ mod tests {
             )
             .unwrap();
         let text = match &outcome.blocks[0] {
-            kiqi_plugin::Block::Text(text) => text.clone(),
+            kiqi_host::Block::Text(text) => text.clone(),
             other => panic!("unexpected block {other:?}"),
         };
         assert!(text.contains("ui="), "got {text}");
@@ -3563,10 +3555,10 @@ mod tests {
         }
 
         let wasm_path = build_guest("kiqi-todo-guest");
-        let wasm_plugin = kiqi_plugin_host::WasmPlugin::load_with_grants(
+        let wasm_plugin = kiqi_host::wasm::WasmPlugin::load_with_grants(
             "kiqi-todo",
             &wasm_path,
-            kiqi_plugin_host::Grants::default(),
+            kiqi_host::wasm::Grants::default(),
         )
         .expect("load the wasm todo");
 
@@ -3605,13 +3597,13 @@ mod tests {
         prompt_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
-    impl Plugin for Surface {
+    impl Extension for Surface {
         fn id(&self) -> &str {
             "surface"
         }
 
-        fn commands(&self) -> Vec<kiqi_plugin::CommandSpec> {
-            vec![kiqi_plugin::CommandSpec {
+        fn commands(&self) -> Vec<kiqi_host::CommandSpec> {
+            vec![kiqi_host::CommandSpec {
                 name: "surface".into(),
                 description: "surface command".into(),
             }]
@@ -3622,14 +3614,14 @@ mod tests {
             _name: &str,
             args: &str,
             _caps: &HostCaps<'_>,
-        ) -> Result<kiqi_plugin::CommandResult, kiqi_plugin::PluginError> {
-            Ok(kiqi_plugin::CommandResult::message(format!(
+        ) -> Result<kiqi_host::CommandResult, kiqi_host::PluginError> {
+            Ok(kiqi_host::CommandResult::message(format!(
                 "surface ran {args}"
             )))
         }
 
-        fn shortcuts(&self) -> Vec<kiqi_plugin::ShortcutSpec> {
-            vec![kiqi_plugin::ShortcutSpec {
+        fn shortcuts(&self) -> Vec<kiqi_host::ShortcutSpec> {
+            vec![kiqi_host::ShortcutSpec {
                 key: "f8".into(),
                 description: "surface shortcut".into(),
             }]
@@ -3644,18 +3636,18 @@ mod tests {
             point: &str,
             payload: &serde_json::Value,
             _caps: &HostCaps<'_>,
-        ) -> kiqi_plugin::Verdict {
+        ) -> kiqi_host::Verdict {
             assert_eq!(point, "before-tool-call");
             let args = &payload["args"];
             if args["block"] == serde_json::json!(true) {
-                return kiqi_plugin::Verdict::Block {
+                return kiqi_host::Verdict::Block {
                     reason: format!("{} is blocked", payload["toolName"].as_str().unwrap_or("?")),
                 };
             }
             if let Some(rewrite) = args.get("rewrite") {
-                return kiqi_plugin::Verdict::Replace(rewrite.clone());
+                return kiqi_host::Verdict::Replace(rewrite.clone());
             }
-            kiqi_plugin::Verdict::Continue
+            kiqi_host::Verdict::Continue
         }
 
         fn before_agent_start(
@@ -3671,15 +3663,15 @@ mod tests {
 
         fn on_event(
             &self,
-            event: &kiqi_plugin::Event,
+            event: &kiqi_host::Event,
             _caps: &HostCaps<'_>,
-        ) -> kiqi_plugin::EventAction {
+        ) -> kiqi_host::EventAction {
             // It only ever sees `Input` for a key it declared (`f8`), which is
             // what the dispatch-filter test relies on.
-            if event.tag == kiqi_plugin::EventTag::Input {
-                kiqi_plugin::EventAction::Claimed
+            if event.tag == kiqi_host::EventTag::Input {
+                kiqi_host::EventAction::Claimed
             } else {
-                kiqi_plugin::EventAction::Continue
+                kiqi_host::EventAction::Continue
             }
         }
     }
@@ -3720,7 +3712,7 @@ mod tests {
         );
         assert_eq!(
             blocked,
-            Some(kiqi_plugin::Verdict::Block {
+            Some(kiqi_host::Verdict::Block {
                 reason: "bash is blocked".into()
             })
         );
@@ -3734,7 +3726,7 @@ mod tests {
         );
         assert_eq!(
             rewritten,
-            Some(kiqi_plugin::Verdict::Replace(
+            Some(kiqi_host::Verdict::Replace(
                 serde_json::json!({ "command": "ls" })
             ))
         );
@@ -3795,33 +3787,33 @@ mod tests {
             dispatch_to_compiled(
                 &[host.clone()],
                 &caps,
-                kiqi_plugin::EventTag::Input,
+                kiqi_host::EventTag::Input,
                 serde_json::json!({ "key": "f8" }),
-                kiqi_extensions::DispatchMode::Claiming,
+                kiqi_host::DispatchMode::Claiming,
             ),
-            kiqi_extensions::CompiledVerdict::Claimed,
+            kiqi_host::CompiledVerdict::Claimed,
             "the plugin declared f8, so it is asked and its claim counts"
         );
         assert_eq!(
             dispatch_to_compiled(
                 &[host.clone()],
                 &caps,
-                kiqi_plugin::EventTag::Input,
+                kiqi_host::EventTag::Input,
                 serde_json::json!({ "key": "f9" }),
-                kiqi_extensions::DispatchMode::Claiming,
+                kiqi_host::DispatchMode::Claiming,
             ),
-            kiqi_extensions::CompiledVerdict::Continue,
+            kiqi_host::CompiledVerdict::Continue,
             "an undeclared key must not reach the plugin at all"
         );
         assert_eq!(
             dispatch_to_compiled(
                 &[host],
                 &caps,
-                kiqi_plugin::EventTag::SessionStart,
+                kiqi_host::EventTag::SessionStart,
                 serde_json::Value::Null,
-                kiqi_extensions::DispatchMode::Observe,
+                kiqi_host::DispatchMode::Observe,
             ),
-            kiqi_extensions::CompiledVerdict::Continue,
+            kiqi_host::CompiledVerdict::Continue,
             "a lifecycle event is observed but not claimed"
         );
     }
@@ -3831,23 +3823,19 @@ mod tests {
     #[test]
     fn observe_dispatch_does_not_wait_for_a_busy_plugin() {
         struct Split;
-        impl kiqi_plugin::Plugin for Split {
+        impl kiqi_host::Extension for Split {
             fn id(&self) -> &str {
                 "split"
             }
-            fn on_event(
-                &self,
-                _: &kiqi_plugin::Event,
-                _: &HostCaps<'_>,
-            ) -> kiqi_plugin::EventAction {
-                kiqi_plugin::EventAction::Continue
+            fn on_event(&self, _: &kiqi_host::Event, _: &HostCaps<'_>) -> kiqi_host::EventAction {
+                kiqi_host::EventAction::Continue
             }
             fn try_on_event(
                 &self,
-                _: &kiqi_plugin::Event,
+                _: &kiqi_host::Event,
                 _: &HostCaps<'_>,
-            ) -> kiqi_plugin::EventAction {
-                kiqi_plugin::EventAction::Claimed
+            ) -> kiqi_host::EventAction {
+                kiqi_host::EventAction::Claimed
             }
         }
         let host = std::sync::Arc::new(PluginHost::new("split", Box::new(Split)));
@@ -3856,22 +3844,22 @@ mod tests {
             dispatch_to_compiled(
                 &[host.clone()],
                 &caps,
-                kiqi_plugin::EventTag::SessionStart,
+                kiqi_host::EventTag::SessionStart,
                 serde_json::Value::Null,
-                kiqi_extensions::DispatchMode::Observe,
+                kiqi_host::DispatchMode::Observe,
             ),
-            kiqi_extensions::CompiledVerdict::Claimed,
+            kiqi_host::CompiledVerdict::Claimed,
             "observe must use try_on_event"
         );
         assert_eq!(
             dispatch_to_compiled(
                 &[host],
                 &caps,
-                kiqi_plugin::EventTag::SessionStart,
+                kiqi_host::EventTag::SessionStart,
                 serde_json::Value::Null,
-                kiqi_extensions::DispatchMode::Claiming,
+                kiqi_host::DispatchMode::Claiming,
             ),
-            kiqi_extensions::CompiledVerdict::Continue,
+            kiqi_host::CompiledVerdict::Continue,
             "claiming must use the blocking on_event"
         );
     }
@@ -3886,34 +3874,30 @@ mod tests {
 
     struct GateProbe {
         id: &'static str,
-        policy: Option<kiqi_plugin::grants::ProviderRequestPolicy>,
+        policy: Option<kiqi_host::grants::ProviderRequestPolicy>,
         counts: std::sync::Arc<GateCounts>,
         patch: serde_json::Value,
         reject: Option<String>,
-        observe_action: kiqi_plugin::EventAction,
+        observe_action: kiqi_host::EventAction,
     }
 
-    impl Plugin for GateProbe {
+    impl Extension for GateProbe {
         fn id(&self) -> &str {
             self.id
         }
 
-        fn provider_request_policy(&self) -> Option<kiqi_plugin::grants::ProviderRequestPolicy> {
+        fn provider_request_policy(&self) -> Option<kiqi_host::grants::ProviderRequestPolicy> {
             self.policy
         }
 
-        fn on_event(&self, _: &kiqi_plugin::Event, _: &HostCaps<'_>) -> kiqi_plugin::EventAction {
+        fn on_event(&self, _: &kiqi_host::Event, _: &HostCaps<'_>) -> kiqi_host::EventAction {
             self.counts
                 .observe
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.observe_action.clone()
         }
 
-        fn try_on_event(
-            &self,
-            _: &kiqi_plugin::Event,
-            _: &HostCaps<'_>,
-        ) -> kiqi_plugin::EventAction {
+        fn try_on_event(&self, _: &kiqi_host::Event, _: &HostCaps<'_>) -> kiqi_host::EventAction {
             self.counts
                 .observe
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3922,7 +3906,7 @@ mod tests {
 
         fn provider_gate(
             &self,
-            _: &kiqi_plugin::Event,
+            _: &kiqi_host::Event,
             _: &HostCaps<'_>,
         ) -> Result<Option<serde_json::Value>, String> {
             self.counts
@@ -3939,8 +3923,8 @@ mod tests {
         observe: bool,
         patch: bool,
         timeout_ms: u64,
-    ) -> kiqi_plugin::grants::ProviderRequestPolicy {
-        kiqi_plugin::grants::ProviderRequestPolicy {
+    ) -> kiqi_host::grants::ProviderRequestPolicy {
+        kiqi_host::grants::ProviderRequestPolicy {
             observe,
             patch,
             patch_timeout: std::time::Duration::from_millis(timeout_ms),
@@ -3949,10 +3933,10 @@ mod tests {
 
     fn gate_probe(
         id: &'static str,
-        policy: Option<kiqi_plugin::grants::ProviderRequestPolicy>,
+        policy: Option<kiqi_host::grants::ProviderRequestPolicy>,
         patch: serde_json::Value,
         reject: Option<&str>,
-        observe_action: kiqi_plugin::EventAction,
+        observe_action: kiqi_host::EventAction,
     ) -> (std::sync::Arc<PluginHost>, std::sync::Arc<GateCounts>) {
         let counts = std::sync::Arc::new(GateCounts::default());
         let plugin = Box::new(GateProbe {
@@ -3977,32 +3961,32 @@ mod tests {
             Some(gate_policy(false, true, 500)),
             serde_json::json!({ "maxTokens": 128 }),
             None,
-            kiqi_plugin::EventAction::Continue,
+            kiqi_host::EventAction::Continue,
         );
         let (observe_host, observe_counts) = gate_probe(
             "observe",
             Some(gate_policy(true, false, 500)),
             serde_json::Value::Null,
             None,
-            kiqi_plugin::EventAction::Continue,
+            kiqi_host::EventAction::Continue,
         );
         let (none_host, none_counts) = gate_probe(
             "none",
             Some(gate_policy(false, false, 500)),
             serde_json::Value::Null,
             None,
-            kiqi_plugin::EventAction::Continue,
+            kiqi_host::EventAction::Continue,
         );
         let hosts = vec![patch_host, observe_host, none_host];
 
         let verdict = dispatch_to_compiled(
             &hosts,
             &caps,
-            kiqi_plugin::EventTag::BeforeProviderRequest,
+            kiqi_host::EventTag::BeforeProviderRequest,
             serde_json::json!({ "model": "m" }),
-            kiqi_extensions::DispatchMode::Observe,
+            kiqi_host::DispatchMode::Observe,
         );
-        assert_eq!(verdict, kiqi_extensions::CompiledVerdict::Continue);
+        assert_eq!(verdict, kiqi_host::CompiledVerdict::Continue);
         assert_eq!(
             patch_counts
                 .observe
@@ -4028,7 +4012,7 @@ mod tests {
         let patch = dispatch_provider_gate(
             &hosts,
             &caps,
-            kiqi_plugin::EventTag::BeforeProviderRequest,
+            kiqi_host::EventTag::BeforeProviderRequest,
             serde_json::json!({ "model": "m" }),
         );
         assert_eq!(patch, Some(serde_json::json!({ "maxTokens": 128 })));
@@ -4082,50 +4066,50 @@ mod tests {
             Some(gate_policy(true, false, 500)),
             serde_json::Value::Null,
             None,
-            kiqi_plugin::EventAction::Continue,
+            kiqi_host::EventAction::Continue,
         );
         let (patch_host, patch_counts) = gate_probe(
             "patch",
             Some(gate_policy(false, true, 500)),
             serde_json::Value::Null,
             None,
-            kiqi_plugin::EventAction::Continue,
+            kiqi_host::EventAction::Continue,
         );
         let (none_host, none_counts) = gate_probe(
             "none",
             Some(gate_policy(false, false, 500)),
             serde_json::Value::Null,
             None,
-            kiqi_plugin::EventAction::Continue,
+            kiqi_host::EventAction::Continue,
         );
         // AfterProviderResponse 在 0.8.0 起不再派发（无消费者，见 plugin-abi
         // §6.41）。BeforeProviderHeaders 属于 provider 事件：有 grant 的主机
         // 都收（patch 主机也不会重复——它只经 gate 收 BeforeProviderRequest），
         // 无 grant 的主机不收。计数器跨条目累加，所以每条都用全新主机。
         for (tag, observe_expected, patch_expected) in [
-            (kiqi_plugin::EventTag::BeforeProviderHeaders, 1usize, 1usize),
-            (kiqi_plugin::EventTag::AfterProviderResponse, 0usize, 0usize),
+            (kiqi_host::EventTag::BeforeProviderHeaders, 1usize, 1usize),
+            (kiqi_host::EventTag::AfterProviderResponse, 0usize, 0usize),
         ] {
             let (observe_host, observe_counts) = gate_probe(
                 "observe",
                 Some(gate_policy(true, false, 500)),
                 serde_json::Value::Null,
                 None,
-                kiqi_plugin::EventAction::Continue,
+                kiqi_host::EventAction::Continue,
             );
             let (patch_host, patch_counts) = gate_probe(
                 "patch",
                 Some(gate_policy(false, true, 500)),
                 serde_json::Value::Null,
                 None,
-                kiqi_plugin::EventAction::Continue,
+                kiqi_host::EventAction::Continue,
             );
             let (none_host, none_counts) = gate_probe(
                 "none",
                 Some(gate_policy(false, false, 500)),
                 serde_json::Value::Null,
                 None,
-                kiqi_plugin::EventAction::Continue,
+                kiqi_host::EventAction::Continue,
             );
             let hosts = vec![observe_host, patch_host, none_host];
             dispatch_to_compiled(
@@ -4133,7 +4117,7 @@ mod tests {
                 &caps,
                 tag,
                 serde_json::json!({ "secret": "must-not-cross" }),
-                kiqi_extensions::DispatchMode::Observe,
+                kiqi_host::DispatchMode::Observe,
             );
             assert_eq!(
                 observe_counts
@@ -4170,11 +4154,11 @@ mod tests {
             Some(gate_policy(false, true, 500)),
             serde_json::json!({ "maxTokens": 8 }),
             None,
-            kiqi_plugin::EventAction::Continue,
+            kiqi_host::EventAction::Continue,
         );
         for tag in [
-            kiqi_plugin::EventTag::SessionStart,
-            kiqi_plugin::EventTag::MessageUpdate,
+            kiqi_host::EventTag::SessionStart,
+            kiqi_host::EventTag::MessageUpdate,
         ] {
             assert_eq!(
                 dispatch_to_compiled(
@@ -4182,9 +4166,9 @@ mod tests {
                     &caps,
                     tag,
                     serde_json::json!({}),
-                    kiqi_extensions::DispatchMode::Observe,
+                    kiqi_host::DispatchMode::Observe,
                 ),
-                kiqi_extensions::CompiledVerdict::Continue,
+                kiqi_host::CompiledVerdict::Continue,
                 "{tag:?} is observed, not claimed"
             );
         }
@@ -4199,9 +4183,9 @@ mod tests {
         dispatch_to_compiled(
             &[patch_host],
             &caps,
-            kiqi_plugin::EventTag::BeforeProviderRequest,
+            kiqi_host::EventTag::BeforeProviderRequest,
             serde_json::json!({ "model": "m" }),
-            kiqi_extensions::DispatchMode::Observe,
+            kiqi_host::DispatchMode::Observe,
         );
         assert_eq!(
             counts.observe.load(std::sync::atomic::Ordering::SeqCst),
@@ -4220,20 +4204,20 @@ mod tests {
             Some(gate_policy(false, true, 500)),
             serde_json::json!({ "temperature": 0.5 }),
             None,
-            kiqi_plugin::EventAction::Continue,
+            kiqi_host::EventAction::Continue,
         );
         let (invalid, _) = gate_probe(
             "invalid",
             Some(gate_policy(false, true, 500)),
             serde_json::json!({ "maxTokens": 8 }),
             Some("protected header"),
-            kiqi_plugin::EventAction::Continue,
+            kiqi_host::EventAction::Continue,
         );
         assert_eq!(
             dispatch_provider_gate(
                 &[valid, invalid],
                 &caps,
-                kiqi_plugin::EventTag::BeforeProviderRequest,
+                kiqi_host::EventTag::BeforeProviderRequest,
                 serde_json::json!({ "model": "m" }),
             ),
             None
@@ -4250,24 +4234,24 @@ mod tests {
             Some(gate_policy(true, true, 500)),
             serde_json::json!({ "maxTokens": 8 }),
             None,
-            kiqi_plugin::EventAction::Patch(serde_json::json!({ "maxTokens": 8 })),
+            kiqi_host::EventAction::Patch(serde_json::json!({ "maxTokens": 8 })),
         );
         assert_eq!(
             dispatch_to_compiled(
                 &[patch_host.clone()],
                 &caps,
-                kiqi_plugin::EventTag::BeforeProviderRequest,
+                kiqi_host::EventTag::BeforeProviderRequest,
                 serde_json::json!({ "model": "m" }),
-                kiqi_extensions::DispatchMode::Observe,
+                kiqi_host::DispatchMode::Observe,
             ),
-            kiqi_extensions::CompiledVerdict::Continue,
+            kiqi_host::CompiledVerdict::Continue,
             "an observe patch is ignored"
         );
         assert_eq!(
             dispatch_provider_gate(
                 &[patch_host],
                 &caps,
-                kiqi_plugin::EventTag::Context,
+                kiqi_host::EventTag::Context,
                 serde_json::json!({ "tagPatch": { "maxTokens": 8 } }),
             ),
             None,
@@ -4286,16 +4270,16 @@ mod tests {
     #[test]
     fn provider_gate_times_out_without_patching_or_retrying() {
         let wasm = build_guest("kiqi-conformance-guest");
-        let grants = kiqi_plugin::grants::Grants {
-            provider_request: Some(kiqi_plugin::grants::ProviderRequestGrant {
-                observe: kiqi_plugin::grants::ObserveMode::Requests,
+        let grants = kiqi_host::grants::Grants {
+            provider_request: Some(kiqi_host::grants::ProviderRequestGrant {
+                observe: kiqi_host::grants::ObserveMode::Requests,
                 patch: true,
                 patch_timeout_ms: 100,
                 ..Default::default()
             }),
             ..Default::default()
         };
-        let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants("conformance", &wasm, grants)
+        let plugin = kiqi_host::wasm::WasmPlugin::load_with_grants("conformance", &wasm, grants)
             .expect("load the conformance guest");
         let host = std::sync::Arc::new(PluginHost::new("conformance", Box::new(plugin)));
         let caps = OwnedCaps {
@@ -4310,7 +4294,7 @@ mod tests {
         let patch = dispatch_provider_gate(
             &[host],
             &caps,
-            kiqi_plugin::EventTag::BeforeProviderRequest,
+            kiqi_host::EventTag::BeforeProviderRequest,
             serde_json::json!({
                 "model": "m",
                 "gatePatch": { "maxTokens": 8 },
@@ -4332,16 +4316,16 @@ mod tests {
     #[test]
     fn provider_gate_timeout_releases_the_instance_for_later_calls() {
         let wasm = build_guest("kiqi-conformance-guest");
-        let grants = kiqi_plugin::grants::Grants {
-            provider_request: Some(kiqi_plugin::grants::ProviderRequestGrant {
-                observe: kiqi_plugin::grants::ObserveMode::Requests,
+        let grants = kiqi_host::grants::Grants {
+            provider_request: Some(kiqi_host::grants::ProviderRequestGrant {
+                observe: kiqi_host::grants::ObserveMode::Requests,
                 patch: true,
                 patch_timeout_ms: 100,
                 ..Default::default()
             }),
             ..Default::default()
         };
-        let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants("conformance", &wasm, grants)
+        let plugin = kiqi_host::wasm::WasmPlugin::load_with_grants("conformance", &wasm, grants)
             .expect("load the conformance guest");
         let host = std::sync::Arc::new(PluginHost::new("conformance", Box::new(plugin)));
         let caps = OwnedCaps {
@@ -4356,7 +4340,7 @@ mod tests {
         let patch = dispatch_provider_gate(
             &[host.clone()],
             &caps,
-            kiqi_plugin::EventTag::BeforeProviderRequest,
+            kiqi_host::EventTag::BeforeProviderRequest,
             serde_json::json!({
                 "model": "m",
                 "gatePatch": { "maxTokens": 8 },
@@ -4390,7 +4374,7 @@ mod tests {
             .expect("the timed-out gate must not leave the instance mutex held");
         assert_eq!(
             verdict,
-            Some(kiqi_plugin::Verdict::Block {
+            Some(kiqi_host::Verdict::Block {
                 reason: "conformance blocks this".into()
             }),
             "the plugin must still answer after a timed-out gate"
@@ -4426,11 +4410,11 @@ mod tests {
             }
         }
 
-        impl kiqi_plugin::UiApi for ParkingUi {
+        impl kiqi_host::UiApi for ParkingUi {
             fn dialog(
                 &self,
                 _: &serde_json::Value,
-            ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
+            ) -> Result<serde_json::Value, kiqi_host::PluginError> {
                 let mut state = self.state.lock().unwrap();
                 state.0 = true;
                 self.wake.notify_all();
@@ -4440,14 +4424,11 @@ mod tests {
                 Ok(serde_json::Value::Null)
             }
 
-            fn set_status(&self, _: &serde_json::Value) -> Result<(), kiqi_plugin::PluginError> {
+            fn set_status(&self, _: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
                 Ok(())
             }
 
-            fn set_editor_text(
-                &self,
-                _: &serde_json::Value,
-            ) -> Result<(), kiqi_plugin::PluginError> {
+            fn set_editor_text(&self, _: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
                 Ok(())
             }
 
@@ -4455,24 +4436,22 @@ mod tests {
                 &self,
                 _: &str,
                 _: &serde_json::Value,
-            ) -> Result<serde_json::Value, kiqi_plugin::PluginError> {
-                Err(kiqi_plugin::PluginError::Failed(
-                    "no components here".into(),
-                ))
+            ) -> Result<serde_json::Value, kiqi_host::PluginError> {
+                Err(kiqi_host::PluginError::Failed("no components here".into()))
             }
         }
 
         let wasm = build_guest("kiqi-conformance-guest");
-        let grants = kiqi_plugin::grants::Grants {
-            provider_request: Some(kiqi_plugin::grants::ProviderRequestGrant {
-                observe: kiqi_plugin::grants::ObserveMode::Requests,
+        let grants = kiqi_host::grants::Grants {
+            provider_request: Some(kiqi_host::grants::ProviderRequestGrant {
+                observe: kiqi_host::grants::ObserveMode::Requests,
                 patch: true,
                 patch_timeout_ms: 100,
                 ..Default::default()
             }),
             ..Default::default()
         };
-        let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants("conformance", &wasm, grants)
+        let plugin = kiqi_host::wasm::WasmPlugin::load_with_grants("conformance", &wasm, grants)
             .expect("load the conformance guest");
         let host = std::sync::Arc::new(PluginHost::new("conformance", Box::new(plugin)));
         let ui = std::sync::Arc::new(ParkingUi::default());
@@ -4487,7 +4466,7 @@ mod tests {
         let patch = dispatch_provider_gate(
             &[host.clone()],
             &caps,
-            kiqi_plugin::EventTag::BeforeProviderRequest,
+            kiqi_host::EventTag::BeforeProviderRequest,
             serde_json::json!({ "model": "m", "gatePark": true }),
         );
         assert!(patch.is_none(), "the parked gate must time out unpatched");
@@ -4527,7 +4506,7 @@ mod tests {
         let next_patch = dispatch_provider_gate(
             &[host],
             &caps,
-            kiqi_plugin::EventTag::BeforeProviderRequest,
+            kiqi_host::EventTag::BeforeProviderRequest,
             serde_json::json!({
                 "model": "m",
                 "gatePatch": { "maxTokens": 16 },
@@ -4539,7 +4518,7 @@ mod tests {
         ui.release();
         assert_eq!(
             probe.expect("a parked gate must not hold the probe instance lock"),
-            Some(kiqi_plugin::Verdict::Block {
+            Some(kiqi_host::Verdict::Block {
                 reason: "conformance blocks this".into()
             })
         );
@@ -4559,10 +4538,10 @@ mod tests {
     #[test]
     fn wasm_non_tool_surfaces_reach_the_session_wiring() {
         let wasm = build_guest("kiqi-conformance-guest");
-        let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants(
+        let plugin = kiqi_host::wasm::WasmPlugin::load_with_grants(
             "conformance",
             &wasm,
-            kiqi_plugin::grants::Grants::default(),
+            kiqi_host::grants::Grants::default(),
         )
         .expect("load the conformance guest");
         let host = std::sync::Arc::new(PluginHost::new("conformance", Box::new(plugin)));
@@ -4580,7 +4559,7 @@ mod tests {
             .expect("the conformance command runs");
         assert_eq!(
             result.body,
-            kiqi_plugin::CommandResultBody::Message("conformance command ran".to_string())
+            kiqi_host::CommandResultBody::Message("conformance command ran".to_string())
         );
 
         // `f8` is routed only because the component declared it.
@@ -4596,7 +4575,7 @@ mod tests {
         );
         assert_eq!(
             blocked,
-            Some(kiqi_plugin::Verdict::Block {
+            Some(kiqi_host::Verdict::Block {
                 reason: "conformance blocks this".into()
             })
         );
@@ -4625,13 +4604,13 @@ mod tests {
         tool: &'static str,
     }
 
-    impl Plugin for FixedTool {
+    impl Extension for FixedTool {
         fn id(&self) -> &str {
             self.id
         }
 
-        fn tools(&self) -> Vec<kiqi_plugin::ToolSpec> {
-            vec![kiqi_plugin::ToolSpec {
+        fn tools(&self) -> Vec<kiqi_host::ToolSpec> {
+            vec![kiqi_host::ToolSpec {
                 name: self.tool.into(),
                 description: self.id.into(),
                 parameters: serde_json::json!({ "type": "object", "properties": {} }),
@@ -4643,9 +4622,9 @@ mod tests {
             _name: &str,
             _arguments: &serde_json::Value,
             _caps: &HostCaps<'_>,
-            _sink: &dyn kiqi_plugin::ProgressSink,
-        ) -> Result<kiqi_plugin::ToolOutcome, kiqi_plugin::PluginError> {
-            Ok(kiqi_plugin::ToolOutcome::text(self.id))
+            _sink: &dyn kiqi_host::ProgressSink,
+        ) -> Result<kiqi_host::ToolOutcome, kiqi_host::PluginError> {
+            Ok(kiqi_host::ToolOutcome::text(self.id))
         }
     }
 
@@ -4749,14 +4728,14 @@ mod tests {
     /// the rebuilt adapters get carry the very mailbox the TUI is attached to.
     #[tokio::test]
     async fn reload_caps_carry_the_session_ui_mailboxes() {
-        use kiqi_plugin::UiApi;
-        let ui_dialog = kiqi_extensions::UiDialogMailbox::new();
+        use kiqi_host::UiApi;
+        let ui_dialog = kiqi_host::UiDialogMailbox::new();
         ui_dialog.attach();
         let caps = reload_caps(
             std::sync::Arc::new(FakeHost::default()),
             ui_dialog.clone(),
-            kiqi_extensions::ExtensionStatusMailbox::new(),
-            kiqi_extensions::EditorTextMailbox::new(),
+            kiqi_host::ExtensionStatusMailbox::new(),
+            kiqi_host::EditorTextMailbox::new(),
         );
         let borrowed = caps.caps();
         let ui = borrowed.ui.expect("the ui capability survives a reload");
@@ -4890,11 +4869,11 @@ mod tests {
         );
         assert_eq!(
             policy.max_items,
-            kiqi_plugin::grants::RESOURCES_MAX_ITEMS_DEFAULT
+            kiqi_host::grants::RESOURCES_MAX_ITEMS_DEFAULT
         );
         assert_eq!(
             policy.max_bytes,
-            kiqi_plugin::grants::RESOURCES_MAX_BYTES_DEFAULT
+            kiqi_host::grants::RESOURCES_MAX_BYTES_DEFAULT
         );
     }
 

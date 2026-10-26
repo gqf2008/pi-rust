@@ -9,12 +9,11 @@ repository = "https://github.com/gqf2008/pi-rust"
 description = "ki acp serve — a host-level Agent Client Protocol server"
 
 [dependencies]
-kiqi-plugin = { workspace = true }
 kiqi-ai = { workspace = true }
 kiqi-agent = { workspace = true }
 kiqi-harness = { workspace = true }
 kiqi-mcp = { workspace = true }
-kiqi-extensions = { workspace = true }
+kiqi-host = { workspace = true }
 agent-client-protocol = { workspace = true }
 tokio = { workspace = true, features = ["signal", "io-std", "net"] }
 tokio-util = { workspace = true, features = ["compat"] }

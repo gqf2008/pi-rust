@@ -482,7 +482,7 @@ pub async fn rpc(
     harness: &AgentHarness,
     mut agent_events: Option<tokio::sync::broadcast::Receiver<AgentEvent>>,
     model_catalog: Vec<kiqi_ai::Model>,
-    ui_dialog: kiqi_extensions::UiDialogMailbox,
+    ui_dialog: kiqi_host::UiDialogMailbox,
     mcp: Arc<kiqi_mcp::McpManager>,
 ) -> i32 {
     rpc_with_io(
@@ -501,7 +501,7 @@ async fn rpc_with_io<R, W>(
     harness: &AgentHarness,
     mut agent_events: Option<tokio::sync::broadcast::Receiver<AgentEvent>>,
     model_catalog: Vec<kiqi_ai::Model>,
-    ui_dialog: kiqi_extensions::UiDialogMailbox,
+    ui_dialog: kiqi_host::UiDialogMailbox,
     mcp: Arc<kiqi_mcp::McpManager>,
     input: R,
     output: W,
@@ -1070,7 +1070,7 @@ pub async fn interactive(
     // extension subscribes.
     if let Some(reason) = crate::session::dispatch_session_event_async(
         reload_context,
-        kiqi_plugin::EventTag::BeforeTuiStart,
+        kiqi_host::EventTag::BeforeTuiStart,
     )
     .await
     {
@@ -1291,7 +1291,7 @@ mod tests {
 
     fn start_test_rpc(
         harness: AgentHarness,
-        ui: kiqi_extensions::UiDialogMailbox,
+        ui: kiqi_host::UiDialogMailbox,
     ) -> (
         tokio::io::DuplexStream,
         RpcOutput,
@@ -1319,7 +1319,7 @@ mod tests {
     async fn rpc_eof_waits_for_accepted_prompt() {
         use tokio::io::AsyncWriteExt;
         let (harness, _) = rpc_test_harness("completed", 100.0).await;
-        let ui = kiqi_extensions::UiDialogMailbox::new();
+        let ui = kiqi_host::UiDialogMailbox::new();
         let (mut client, output, task) = start_test_rpc(harness, ui.clone());
         client
             .write_all(b"{\"type\":\"prompt\",\"id\":1,\"content\":\"test\"}\n")
@@ -1356,7 +1356,7 @@ mod tests {
             &harness,
             Some(rx),
             vec![],
-            kiqi_extensions::UiDialogMailbox::new(),
+            kiqi_host::UiDialogMailbox::new(),
             Arc::new(kiqi_mcp::McpManager::empty()),
             tokio::io::BufReader::new(&b""[..]),
             output.clone(),
@@ -1465,7 +1465,7 @@ mod tests {
             &harness,
             Some(events),
             vec![],
-            kiqi_extensions::UiDialogMailbox::new(),
+            kiqi_host::UiDialogMailbox::new(),
             Arc::new(kiqi_mcp::McpManager::empty()),
             tokio::io::BufReader::new(
                 &b"{\"type\":\"prompt\",\"id\":1,\"content\":\"test\"}\n"[..],
@@ -1508,7 +1508,7 @@ mod tests {
         }
         let harness = AgentHarness::create(Default::default()).await.unwrap();
         let (_client, input) = tokio::io::duplex(4096);
-        let ui = kiqi_extensions::UiDialogMailbox::new();
+        let ui = kiqi_host::UiDialogMailbox::new();
         let code = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             rpc_with_io(
@@ -1532,8 +1532,7 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         let (harness, provider) = rpc_test_harness("still streaming the response", 20.0).await;
         let lane = harness.lane("main");
-        let (mut client, output, task) =
-            start_test_rpc(harness, kiqi_extensions::UiDialogMailbox::new());
+        let (mut client, output, task) = start_test_rpc(harness, kiqi_host::UiDialogMailbox::new());
         client
             .write_all(b"{\"type\":\"prompt\",\"id\":1,\"content\":\"test\"}\n")
             .await
@@ -1581,8 +1580,7 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         let (harness, _) = rpc_test_harness("not completed", 20.0).await;
         let lane = harness.lane("main");
-        let (mut client, output, task) =
-            start_test_rpc(harness, kiqi_extensions::UiDialogMailbox::new());
+        let (mut client, output, task) = start_test_rpc(harness, kiqi_host::UiDialogMailbox::new());
         client.write_all(b"{\"type\":\"prompt\",\"id\":1,\"content\":\"test\"}\n{\"type\":\"stop\",\"id\":2}\n").await.unwrap();
         assert_eq!(
             tokio::time::timeout(std::time::Duration::from_secs(3), task)
@@ -1608,7 +1606,7 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         let (harness, _) =
             rpc_test_harness("the streamed response finishes after the dialog", 30.0).await;
-        let ui = kiqi_extensions::UiDialogMailbox::new();
+        let ui = kiqi_host::UiDialogMailbox::new();
         let (mut client, output, task) = start_test_rpc(harness, ui.clone());
         output.wait_for(|m| m["type"] == "ready").await;
         client
@@ -1646,7 +1644,7 @@ mod tests {
     async fn rpc_notifies_client_when_an_approval_is_cancelled() {
         use tokio::io::AsyncWriteExt;
         let harness = AgentHarness::create(Default::default()).await.unwrap();
-        let ui = kiqi_extensions::UiDialogMailbox::new();
+        let ui = kiqi_host::UiDialogMailbox::new();
         let (mut client, output, task) = start_test_rpc(harness, ui.clone());
         output.wait_for(|m| m["type"] == "ready").await;
         ui.handle(serde_json::json!({"requestId":"cancelled", "toolCallId":"c", "ui":{}}))
@@ -1667,7 +1665,7 @@ mod tests {
         use crate::remote::protocol::RemoteCommand;
         use tokio::io::AsyncWriteExt;
         let harness = AgentHarness::create(Default::default()).await.unwrap();
-        let ui = kiqi_extensions::UiDialogMailbox::new();
+        let ui = kiqi_host::UiDialogMailbox::new();
         let (mut client, output, task) = start_test_rpc(harness, ui.clone());
         output.wait_for(|m| m["type"] == "ready").await;
         for (request_id, answer, response_id) in [
@@ -1831,17 +1829,16 @@ mod tests {
     /// a lifecycle dispatch resolves a live handler list. Everything else is
     /// inert defaults — the one-shot modes only read the cell for the dispatch.
     fn shutdown_test_context(
-        registry: kiqi_extensions::ExtensionRegistry,
+        registry: kiqi_host::ExtensionRegistry,
     ) -> crate::session::ReloadContext {
-        let session =
-            kiqi_extensions::ExtensionSession::from_parts(Arc::new(registry.snapshot()), None);
+        let session = kiqi_host::ExtensionSession::from_parts(Arc::new(registry.snapshot()), None);
         let (emitter, _) = kiqi_agent::CollectorEmitter::new();
         crate::session::ReloadContext {
             extension_session: Arc::new(Mutex::new(session)),
-            tool_context: kiqi_extensions::ToolCallContext::default(),
+            tool_context: kiqi_host::ToolCallContext::default(),
             action_bridge: Arc::new(Mutex::new(None)),
-            ext_status: kiqi_extensions::ExtensionStatusMailbox::default(),
-            editor_text: kiqi_extensions::EditorTextMailbox::default(),
+            ext_status: kiqi_host::ExtensionStatusMailbox::default(),
+            editor_text: kiqi_host::EditorTextMailbox::default(),
             catalog: Vec::new(),
             providers: Vec::new(),
             runtime: tokio::runtime::Handle::current(),
@@ -1856,8 +1853,8 @@ mod tests {
                 "",
             ),
             broadcast: Arc::new(emitter),
-            mailbox: kiqi_extensions::ReloadMailbox::default(),
-            ui_dialog: kiqi_extensions::UiDialogMailbox::default(),
+            mailbox: kiqi_host::ReloadMailbox::default(),
+            ui_dialog: kiqi_host::UiDialogMailbox::default(),
             signal_host: Arc::new(crate::signal_host::SignalHost::new()),
             mcp: Arc::new(kiqi_mcp::McpManager::empty()),
         }
@@ -1869,19 +1866,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn print_mode_dispatches_session_shutdown_to_plugins() {
         use std::sync::atomic::AtomicUsize;
-        extern "C" fn record(
-            _: kiqi_extensions::StablePluginEvent,
-            data: *mut std::ffi::c_void,
-        ) -> i32 {
+        extern "C" fn record(_: kiqi_host::StablePluginEvent, data: *mut std::ffi::c_void) -> i32 {
             unsafe { &*(data as *const AtomicUsize) }
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             0
         }
         let hits = AtomicUsize::new(0);
-        let mut registry = kiqi_extensions::ExtensionRegistry::new();
+        let mut registry = kiqi_host::ExtensionRegistry::new();
         registry.register_event_handler(
             "recorder".into(),
-            kiqi_plugin::EventTag::SessionShutdown,
+            kiqi_host::EventTag::SessionShutdown,
             record,
             &hits as *const _ as *mut std::ffi::c_void,
         );
@@ -1911,19 +1905,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn json_mode_dispatches_session_shutdown_to_plugins() {
         use std::sync::atomic::AtomicUsize;
-        extern "C" fn record(
-            _: kiqi_extensions::StablePluginEvent,
-            data: *mut std::ffi::c_void,
-        ) -> i32 {
+        extern "C" fn record(_: kiqi_host::StablePluginEvent, data: *mut std::ffi::c_void) -> i32 {
             unsafe { &*(data as *const AtomicUsize) }
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             0
         }
         let hits = AtomicUsize::new(0);
-        let mut registry = kiqi_extensions::ExtensionRegistry::new();
+        let mut registry = kiqi_host::ExtensionRegistry::new();
         registry.register_event_handler(
             "recorder".into(),
-            kiqi_plugin::EventTag::SessionShutdown,
+            kiqi_host::EventTag::SessionShutdown,
             record,
             &hits as *const _ as *mut std::ffi::c_void,
         );

@@ -11,6 +11,17 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`kiqi-plugin` + `kiqi-plugin-host` + `kiqi-extensions` → one crate,
+  `kiqi-host` (breaking for Rust consumers).** The `Extension` contract, the
+  event dispatch spine and the wasm backend now live together
+  (`docs/design/kiqi-host-merge.md`). The plugin trait is renamed
+  `Plugin → Extension`; the wasmtime dependencies sit behind the crate's `wasm`
+  feature, which only `kiqi-cli` enables, so `kiqi-tools` / `kiqi-mcp` /
+  `kiqi-acp` stay wasmtime-free. Code paths change: `kiqi_plugin::` and
+  `kiqi_extensions::` → `kiqi_host::`, `kiqi_plugin_host::` → `kiqi_host::wasm::`.
+
 ### Removed
 
 - **The cdylib plugin channel is retired (breaking).** wasm guests

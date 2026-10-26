@@ -32,7 +32,7 @@ pub const EXIT_USAGE: i32 = 2;
 /// run failure). Mirrors TS `process.exitCode` set from `runPrintMode`.
 pub const EXIT_RUNTIME: i32 = 1;
 /// The exit code when an extension **vetoes** startup at a lifecycle event
-/// (e.g. a `BeforeTuiStart` handler returns [`kiqi_extensions::EVENT_HANDLER_ABORT`]).
+/// (e.g. a `BeforeTuiStart` handler returns [`kiqi_host::EVENT_HANDLER_ABORT`]).
 /// Distinct from [`EXIT_RUNTIME`] so scripts can tell "an extension refused to
 /// start" from "the run itself failed".
 pub const EXIT_VETOED: i32 = 3;
@@ -131,7 +131,7 @@ async fn run_inner() -> i32 {
         Some("auth") => {
             // P6: the cdylib extension providers are gone; auth sees an empty
             // registry (wasm plugins surface OAuth through the host instead).
-            let extension_session = kiqi_extensions::ExtensionSession::none();
+            let extension_session = kiqi_host::ExtensionSession::none();
             return crate::auth::run_with_extensions(&argv[1..], extension_session.snapshot_arc())
                 .await;
         }
@@ -430,7 +430,7 @@ async fn run_inner() -> i32 {
             // extension brings up the TCP server.
             let veto = crate::session::dispatch_session_event_async(
                 &reload_context,
-                kiqi_plugin::EventTag::BeforeTuiStart,
+                kiqi_host::EventTag::BeforeTuiStart,
             )
             .await;
             if let Some(reason) = veto {
@@ -443,7 +443,7 @@ async fn run_inner() -> i32 {
             } else {
                 if let Some(reason) = crate::session::dispatch_session_event_async(
                     &reload_context,
-                    kiqi_plugin::EventTag::SessionStart,
+                    kiqi_host::EventTag::SessionStart,
                 )
                 .await
                 {

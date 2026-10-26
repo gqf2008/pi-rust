@@ -10,8 +10,7 @@ Current release: **0.3.0**. Install with `cargo install kiqi-cli`.
 
 `ki` is a Rust-native, library-first coding-agent runtime: the core chain
 (`kiqi-telemetry` → `kiqi-ai` → `kiqi-agent` → `kiqi-tools` → `kiqi-harness` →
-`kiqi-cli`) plus `kiqi-tui`, `kiqi-plugin`, `kiqi-plugin-host` and
-`kiqi-extensions`, and a terminal CLI built on them. Plugins are wasm guests
+`kiqi-cli`) plus `kiqi-tui` and `kiqi-host`, and a terminal CLI built on them. Plugins are wasm guests
 (the cdylib channel was retired on 2026-10-26).
 
 What is solid today:

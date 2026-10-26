@@ -69,7 +69,7 @@ pub struct DriverStatus {
 /// An item pushed from a driver to the TUI.
 #[derive(Debug, Clone)]
 pub enum DriverEvent {
-    UiDialog(kiqi_extensions::UiDialogRequest),
+    UiDialog(kiqi_host::UiDialogRequest),
     UiDialogClosed(String),
     /// A transcript event.
     Ui(UiEvent),
@@ -338,7 +338,7 @@ fn map_remote_driver_event(event: &RemoteEvent) -> Option<DriverEvent> {
             request_id,
             tool_call_id,
             ui,
-        } => Some(DriverEvent::UiDialog(kiqi_extensions::UiDialogRequest {
+        } => Some(DriverEvent::UiDialog(kiqi_host::UiDialogRequest {
             request_id: request_id.clone(),
             tool_call_id: tool_call_id.clone(),
             ui: ui.clone(),

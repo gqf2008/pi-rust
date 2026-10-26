@@ -13,7 +13,7 @@
 给 `ki` 加的插件通道：**插件编译成 wasm 组件**，跑在 wasmtime 沙箱里，按用户授权拿能力。
 2026-10-21 起一方插件也只走 wasm；2026-10-26 起 **cdylib 通道整体退役**（`ki dev`/`ki install`/`kiqi-plugin-sdk` 已删除），wasm 是唯一通道。
 
-一句话：**`plugins/kiqi-plugin.wit` 是 `trait Plugin` 的 wasm 版**；0.8.0 起导出面多出三个
+一句话：**`plugins/kiqi-plugin.wit` 是 `trait Extension` 的 wasm 版**；0.8.0 起导出面多出三个
 贡献面（OAuth / provider / render），不再与 trait 一一对应。
 
 ## 2. 契约
@@ -61,9 +61,9 @@
 
 | 节 | 内容 | 主要代码 |
 |---|---|---|
-| §6.39 | 授权模型：五个新 key（`oauth`/`provider`/`render`/`resources`/`provider-request`），全部 deny-by-default、授权自带策略、`--yes` 不授予 | `crates/kiqi-plugin/src/grants.rs`、`crates/kiqi-cli/src/plugin_cli.rs` |
-| §6.40 | 宿主归因 OAuth：token 不进沙箱，URL 不由 guest 提供 | `crates/kiqi-plugin-host/src/oauth.rs`、`crates/kiqi-cli/src/wasm_oauth.rs` |
-| §6.41 | provider：grant 是唯一书目、专用实例、`provider-http` 请求过滤、带索引 delta | `crates/kiqi-plugin-host/src/lib.rs` |
+| §6.39 | 授权模型：五个新 key（`oauth`/`provider`/`render`/`resources`/`provider-request`），全部 deny-by-default、授权自带策略、`--yes` 不授予 | `crates/kiqi-host/src/grants.rs`、`crates/kiqi-cli/src/plugin_cli.rs` |
+| §6.40 | 宿主归因 OAuth：token 不进沙箱，URL 不由 guest 提供 | `crates/kiqi-host/src/wasm/oauth.rs`、`crates/kiqi-cli/src/wasm_oauth.rs` |
+| §6.41 | provider：grant 是唯一书目、专用实例、`provider-http` 请求过滤、带索引 delta | `crates/kiqi-host/src/wasm/mod.rs` |
 | §6.42 | render：deny-all 实例、仅定稿转换、输出上限与超时 | `crates/kiqi-cli/src/plugins.rs`（`WasmRenderTransformer`） |
 | §6.43 | resources：`resources.json` 包约定、安装期摘要、first-wins 顺序 | `crates/kiqi-cli/src/plugins.rs` |
 | §6.44 | 类型化命令面、`event.input`、`event-action.patch` | `crates/kiqi-cli/src/interactive_tui/plugin_commands.rs` |
@@ -103,7 +103,7 @@ fail-closed**：解析失败按零授权，某个 key 校验失败只清该 key�
 
 隔离：fuel（可选）、**guest 内存上限 256 MiB**（`Options::max_memory_bytes`）、spin/panic 均 trap 不拖垮宿主。
 `ENFORCED_CAPABILITIES` = 上表十个（五旧 + 五新，可授权集合 == 可实现集合，
-`crates/kiqi-plugin-host/src/lib.rs:294-305`）；`declared_capabilities()` 读组件声明的
+`crates/kiqi-host/src/wasm/mod.rs:294-305`）；`declared_capabilities()` 读组件声明的
 import **与 export**（`oauth-api`/`provider-api`/`render-api` 折叠成 grant key，
 `lib.rs:222-290`）。
 
@@ -113,14 +113,14 @@ import **与 export**（`oauth-api`/`provider-api`/`render-api` 折叠成 grant 
 |---|---|
 | **契约** | `plugins/kiqi-plugin.wit` |
 | 契约 Rust 侧（`trait Plugin`、`Event`/`Verdict`、`grants`） | `crates/kiqi-plugin` |
-| 宿主（wasmtime，把组件包成 `trait Plugin`） | `crates/kiqi-plugin-host` |
+| 宿主（wasmtime，把组件包成 `trait Extension`） | `crates/kiqi-host/src/wasm/` |
 | 插件 SDK（WIT → Rust trait） | `plugins/wasm/kiqi-plugin-guest` |
 | 已移植插件（12） | `plugins/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode,lens,websearch,subagents,goal,codegraph,orchestrator}-guest` |
 | 共享逻辑（编译期与 wasm 共用） | `crates/kiqi-plan-mode-core` |
 | CLI | `crates/kiqi-cli/src/plugin_cli.rs`（`ki plugin …`） |
 | 会话接线（发现/注册/事件 sink/各贡献面） | `crates/kiqi-cli/src/plugins.rs` |
-| 宿主归因 OAuth（端点、表单白名单、设备码轮询） | `crates/kiqi-plugin-host/src/oauth.rs` |
-| provider 请求补丁固定表 | `crates/kiqi-plugin-host/src/provider_patch.rs` |
+| 宿主归因 OAuth（端点、表单白名单、设备码轮询） | `crates/kiqi-host/src/wasm/oauth.rs` |
+| provider 请求补丁固定表 | `crates/kiqi-host/src/wasm/provider_patch.rs` |
 | `ki auth login/refresh/logout` 的 wasm 路径 | `crates/kiqi-cli/src/wasm_oauth.rs` |
 | provider 运行时适配器（惰性 `ProviderHost`、delta 流、取消与每次请求重验 grant） | `crates/kiqi-cli/src/wasm_provider.rs` |
 | 设计文档 | `docs/design/plugin-abi.md`、`docs/design/plugin-trait.md` |
@@ -175,12 +175,12 @@ wasm-tools component wit plugins/kiqi-plugin.wit
 ## 6. 测试与 CI
 
 ```bash
-cargo test -p kiqi-plugin-host --lib --test e2e      # 43 e2e + 5 单测
+cargo test -p kiqi-host --features wasm --lib --test e2e   # e2e + 单测
 cargo test -p kiqi-plan-mode-core                      # 6
 cargo test -p kiqi-lens                                # 3
 cargo test -p kiqi-plugin --lib                       # 7
 cargo test -p kiqi-cli --lib                           # 510
-cargo test -p kiqi-extensions --lib                    # 102
+cargo test -p kiqi-host --lib                          # 契约 + 派发脊柱
 ```
 
 CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows installer）全绿。

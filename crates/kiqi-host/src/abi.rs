@@ -393,7 +393,7 @@ pub type ToolDestroyFn = extern "C" fn(handle: StepHandle);
 // The canonical tag enum lives in `kiqi-plugin` (the wasm contract crate);
 // the ABI layer borrows it so the two faces cannot drift. This crate is
 // scheduled for deletion (P6, cdylib channel retirement).
-pub use kiqi_plugin::EventTag;
+pub use crate::EventTag;
 
 /// No-payload marker for events that carry none (e.g. `session_shutdown`).
 /// Carries a dummy byte so the empty-struct isn't flagged FFI-unsafe by
@@ -1026,9 +1026,9 @@ pub fn guard_or<R>(fallback: R, body: impl FnOnce() -> R) -> R {
 /// registration status code.
 ///
 /// ```ignore
-/// kiqi_extensions::export_plugin!(|api| {
+/// kiqi_host::export_plugin!(|api| {
 ///     if let Some(declare) = api.declare {
-///         declare(kiqi_extensions::StbStringRef::from_str(
+///         declare(kiqi_host::StbStringRef::from_str(
 ///             r#"{"priority":60,"platforms":["linux"]}"#,
 ///         ));
 ///     }
@@ -1299,8 +1299,8 @@ mod tests {
             EventTag::UiPromptEnd,
             EventTag::EditorChange,
         ];
-        assert_eq!(tags.len(), kiqi_plugin::EVENT_TAG_COUNT);
-        assert_eq!(kiqi_plugin::EVENT_TAG_COUNT, 37);
+        assert_eq!(tags.len(), crate::EVENT_TAG_COUNT);
+        assert_eq!(crate::EVENT_TAG_COUNT, 37);
         // Distinct discriminants 0..36.
         let mut discs: Vec<u32> = tags.iter().map(|t| *t as u32).collect();
         discs.sort();

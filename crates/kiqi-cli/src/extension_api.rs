@@ -116,7 +116,7 @@ pub fn native_backend_info() -> ExtensionBackendInfo {
     )
 }
 
-impl ExtensionBackend for kiqi_extensions::ExtensionSession {
+impl ExtensionBackend for kiqi_host::ExtensionSession {
     fn backend_info(&self) -> ExtensionBackendInfo {
         native_backend_info()
     }

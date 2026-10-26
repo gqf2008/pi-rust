@@ -11,7 +11,7 @@
 # dependency order is encoded once and `cargo test` stays the pre-flight.
 #
 # Dependency order (v0.1.4+): telemetry → ai → agent → plugin →
-# extensions → tools → harness → tui → cli. `kiqi-plugin` is a leaf and
+# host → tools → harness → tui → cli. `kiqi-host` is a leaf and
 # extensions depends on plugin + ai + agent, so both land before
 # tools/harness (which are independent of them but published in family order).
 #

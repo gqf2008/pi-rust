@@ -1336,3 +1336,21 @@ C ABI 线格式（`StbString`/`StablePluginEvent`/`EventView`/handler consts）�
 未在本次完成、留作后续（现状为不可达的惰性代码）：registry 注册层的 C-ABI
 回调机器（`HostApi`/vtable/线程局部 `current_api`）仍随脊柱编译，但已无任何
 装载路径能喂给它；把它折叠为纯 serde 事件总线是独立的后续批次。
+
+### 6.46 `kiqi-host`：三 crate 合并 + `Plugin → Extension`（2026-10-26）
+
+按 `docs/design/kiqi-host-merge.md` 执行块 2：
+
+- `crates/kiqi-plugin`（契约）+ `crates/kiqi-plugin-host`（wasmtime 后端，移入
+  `src/wasm/`）+ `crates/kiqi-extensions`（派发脊柱，平铺进 crate 根）
+  → 合并为 **`crates/kiqi-host`**。
+- trait 由 `Plugin` 改名为 **`Extension`**（两轮 Jev 评分定名：`Extension` 0.57 /
+  `HostExtension` 0.05；理由 = Rust 里 `XxxExt` 约定俗成是给已有类型加方法的扩展
+  trait，与「插件实现方契约」语义相反）。`impl Extension for WasmPlugin` /
+  `dyn Extension`。
+- wasmtime 系列依赖挂到 `wasm` feature；契约与派发脊柱恒编译，`kiqi-tools` /
+  `kiqi-mcp` / `kiqi-acp` 无条件依赖它，只有 `kiqi-cli`（`plugin-wasm` feature）
+  打开 `wasm`。
+- crate 级消费路径：`kiqi_host::*`（契约/脊柱），`kiqi_host::wasm::*`（后端，
+  仅 `wasm` feature）。wasm e2e（`tests/e2e.rs`，5,140 行）整体迁移并以
+  `#![cfg(feature = "wasm")]` 门控。

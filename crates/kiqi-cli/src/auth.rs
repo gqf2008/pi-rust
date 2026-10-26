@@ -42,7 +42,7 @@ pub async fn run(args: &[String]) -> i32 {
 /// matching extension session alive until this future completes.
 pub async fn run_with_extensions(
     args: &[String],
-    snapshot: Option<Arc<kiqi_extensions::RegistrySnapshot>>,
+    snapshot: Option<Arc<kiqi_host::RegistrySnapshot>>,
 ) -> i32 {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("");
     match sub {
@@ -64,10 +64,7 @@ pub async fn run_with_extensions(
 }
 
 /// `ki auth login [--provider <id>]` — prompt for a key and persist it.
-async fn run_login(
-    args: &[String],
-    snapshot: Option<&Arc<kiqi_extensions::RegistrySnapshot>>,
-) -> i32 {
+async fn run_login(args: &[String], snapshot: Option<&Arc<kiqi_host::RegistrySnapshot>>) -> i32 {
     let provider = parse_provider(args).unwrap_or(DEFAULT_PROVIDER_ID);
     // The `plugin:` prefix is the plugin credential namespace in `auth.json`
     // (`plugin:<install-id>:<provider-id>`); config::upsert_oauth_token refuses
@@ -171,16 +168,13 @@ async fn run_check(args: &[String]) -> i32 {
 }
 
 /// `ki auth logout [--provider <id>]` — drop the stored credential.
-async fn run_refresh(
-    args: &[String],
-    snapshot: Option<&Arc<kiqi_extensions::RegistrySnapshot>>,
-) -> i32 {
+async fn run_refresh(args: &[String], snapshot: Option<&Arc<kiqi_host::RegistrySnapshot>>) -> i32 {
     let provider = parse_provider(args).unwrap_or(DEFAULT_PROVIDER_ID);
     // Host-only for a wasm provider: the refresh token never enters a guest.
     #[cfg(feature = "plugin-wasm")]
     match crate::wasm_oauth::find_provider(provider) {
         Ok(Some(found)) => {
-            let transport = kiqi_plugin_host::default_transport();
+            let transport = kiqi_host::wasm::default_transport();
             return match crate::wasm_oauth::refresh(
                 &found.install_id,
                 &found.profile,
@@ -221,7 +215,7 @@ async fn run_refresh(
         eprintln!("error: no stored OAuth credentials for \"{provider}\"");
         return EXIT_NOT_READY;
     };
-    let response = match kiqi_extensions::request_oauth(
+    let response = match kiqi_host::request_oauth(
         snapshot,
         provider,
         "refresh",
@@ -233,7 +227,7 @@ async fn run_refresh(
             return EXIT_ERROR;
         }
     };
-    let response = match kiqi_extensions::OAuthActionResponse::parse(response) {
+    let response = match kiqi_host::OAuthActionResponse::parse(response) {
         Ok(response) => response,
         Err(error) => {
             eprintln!("error: invalid OAuth refresh response: {error}");
@@ -260,17 +254,14 @@ async fn run_refresh(
     0
 }
 
-async fn run_logout(
-    args: &[String],
-    snapshot: Option<&Arc<kiqi_extensions::RegistrySnapshot>>,
-) -> i32 {
+async fn run_logout(args: &[String], snapshot: Option<&Arc<kiqi_host::RegistrySnapshot>>) -> i32 {
     let provider = parse_provider(args).unwrap_or(DEFAULT_PROVIDER_ID);
     // Host-only for a wasm provider: revoke through the grant's endpoint, then
     // delete exactly the namespaced key. A bare `auth.json` entry is untouched.
     #[cfg(feature = "plugin-wasm")]
     match crate::wasm_oauth::find_provider(provider) {
         Ok(Some(found)) => {
-            let transport = kiqi_plugin_host::default_transport();
+            let transport = kiqi_host::wasm::default_transport();
             return match crate::wasm_oauth::logout(
                 &found.install_id,
                 &found.profile,
@@ -309,7 +300,7 @@ async fn run_logout(
             eprintln!("error: cannot revoke OAuth credentials: no OAuth extensions are loaded");
             return EXIT_ERROR;
         };
-        let response = match kiqi_extensions::request_oauth(
+        let response = match kiqi_host::request_oauth(
             snapshot,
             provider,
             "revoke",
@@ -321,8 +312,8 @@ async fn run_logout(
                 return EXIT_ERROR;
             }
         };
-        match kiqi_extensions::OAuthActionResponse::parse(response) {
-            Ok(response) if response.kind == kiqi_extensions::OAuthResponseKind::Success => {}
+        match kiqi_host::OAuthActionResponse::parse(response) {
+            Ok(response) if response.kind == kiqi_host::OAuthResponseKind::Success => {}
             Ok(_) => {
                 eprintln!(
                     "error: OAuth revoke did not return success; local credentials were kept"
@@ -358,18 +349,18 @@ async fn run_logout(
 /// Pull the `--provider <id>` value from a subcommand's args (defaults to
 /// `None`). Mirrors the TS `--provider` handshake before it falls back to the
 /// default.
-async fn run_oauth_login(provider: &str, snapshot: &Arc<kiqi_extensions::RegistrySnapshot>) -> i32 {
+async fn run_oauth_login(provider: &str, snapshot: &Arc<kiqi_host::RegistrySnapshot>) -> i32 {
     let mut input = serde_json::json!({});
     let mut action = "begin";
     loop {
-        let raw = match kiqi_extensions::request_oauth(snapshot, provider, action, input) {
+        let raw = match kiqi_host::request_oauth(snapshot, provider, action, input) {
             Ok(value) => value,
             Err(error) => {
                 eprintln!("error: OAuth {action} failed: {error}");
                 return EXIT_ERROR;
             }
         };
-        let response = match kiqi_extensions::OAuthActionResponse::parse(raw) {
+        let response = match kiqi_host::OAuthActionResponse::parse(raw) {
             Ok(response) => response,
             Err(error) => {
                 eprintln!("error: invalid OAuth response: {error}");
@@ -377,7 +368,7 @@ async fn run_oauth_login(provider: &str, snapshot: &Arc<kiqi_extensions::Registr
             }
         };
         match response.kind {
-            kiqi_extensions::OAuthResponseKind::Credential => {
+            kiqi_host::OAuthResponseKind::Credential => {
                 let Some(token) = response.credential().ok().flatten() else {
                     eprintln!("error: OAuth response contained no valid credential");
                     return EXIT_ERROR;
@@ -394,15 +385,15 @@ async fn run_oauth_login(provider: &str, snapshot: &Arc<kiqi_extensions::Registr
                 println!("OAuth credentials saved for \"{provider}\".");
                 return 0;
             }
-            kiqi_extensions::OAuthResponseKind::Error => {
+            kiqi_host::OAuthResponseKind::Error => {
                 eprintln!("error: OAuth provider rejected the request");
                 return EXIT_ERROR;
             }
-            kiqi_extensions::OAuthResponseKind::Success => {
+            kiqi_host::OAuthResponseKind::Success => {
                 eprintln!("error: OAuth login completed without credentials");
                 return EXIT_ERROR;
             }
-            kiqi_extensions::OAuthResponseKind::Interaction => {
+            kiqi_host::OAuthResponseKind::Interaction => {
                 let display = response.payload.get("display").unwrap_or(&response.payload);
                 if let Some(title) = display.get("title").and_then(serde_json::Value::as_str) {
                     println!("{title}");
@@ -439,7 +430,7 @@ async fn run_oauth_login(provider: &str, snapshot: &Arc<kiqi_extensions::Registr
 /// declare is refused here rather than silently driving a broken flow.
 #[cfg(feature = "plugin-wasm")]
 fn run_wasm_oauth_login(found: &crate::wasm_oauth::FoundProvider) -> i32 {
-    use kiqi_plugin::Plugin as _;
+    use kiqi_host::Extension as _;
 
     let plugin = match crate::wasm_oauth::load_guest(found) {
         Ok(plugin) => plugin,
@@ -461,7 +452,7 @@ fn run_wasm_oauth_login(found: &crate::wasm_oauth::FoundProvider) -> i32 {
         return EXIT_ERROR;
     }
 
-    let transport = kiqi_plugin_host::default_transport();
+    let transport = kiqi_host::wasm::default_transport();
     let mut ui = StdinOAuthUi;
     match crate::wasm_oauth::login(
         &found.install_id,
@@ -774,7 +765,7 @@ mod tests {
 
     #[test]
     fn standard_oauth_credential_response_is_parsed() {
-        let response = kiqi_extensions::OAuthActionResponse::parse(serde_json::json!({
+        let response = kiqi_host::OAuthActionResponse::parse(serde_json::json!({
             "version": 1,
             "kind": "credential",
             "payload": {

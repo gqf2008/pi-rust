@@ -12,20 +12,20 @@
 //! * `ki auth refresh` and `ki auth logout` never call a guest at all.
 //!
 //! Deny-by-default is enforced in two places: [`find_provider`] only sees a
-//! provider a `grants.json` names, and [`kiqi_plugin_host::WasmPlugin::oauth_action`]
+//! provider a `grants.json` names, and [`kiqi_host::wasm::WasmPlugin::oauth_action`]
 //! refuses before touching the guest when the grant is absent.
 
 use std::path::{Path, PathBuf};
 
-use kiqi_plugin::grants::{
+use kiqi_host::grants::{
     installed_plugins_at, plugin_dir_at, Grants, OAuthFlow, OAuthGrant, OAuthProviderProfile,
 };
-use kiqi_plugin::{OAuthAction, OAuthResponse};
-use kiqi_plugin_host::{
+use kiqi_host::wasm::{
     ensure_oauth_profile_matches, exchange_authorization_code, oauth_profile_fingerprint,
     poll_device_token, refresh_stored_token, request_device_authorization, revoke_stored_token,
     OAuthRequestBudget, OAuthTransport, StoredOAuthToken,
 };
+use kiqi_host::{OAuthAction, OAuthResponse};
 
 use crate::config::Credential;
 
@@ -57,9 +57,9 @@ pub trait OAuthGuest {
     fn action(&self, provider_id: &str, action: OAuthAction) -> Result<OAuthResponse, String>;
 }
 
-impl OAuthGuest for kiqi_plugin_host::WasmPlugin {
+impl OAuthGuest for kiqi_host::wasm::WasmPlugin {
     fn action(&self, provider_id: &str, action: OAuthAction) -> Result<OAuthResponse, String> {
-        <kiqi_plugin_host::WasmPlugin as kiqi_plugin::Plugin>::oauth_action(
+        <kiqi_host::wasm::WasmPlugin as kiqi_host::Extension>::oauth_action(
             self,
             provider_id,
             action,
@@ -81,7 +81,7 @@ pub trait OAuthUi {
 ///   error with the candidate list rather than a silent first match;
 /// * a plugin whose digest sidecar disagrees is refused before its bytes run.
 pub fn find_provider(provider_id: &str) -> Result<Option<FoundProvider>, String> {
-    let root = kiqi_plugin::grants::agent_dir()
+    let root = kiqi_host::grants::agent_dir()
         .ok_or_else(|| "cannot resolve the agent directory".to_string())?;
     find_provider_at(&root, provider_id)
 }
@@ -135,12 +135,12 @@ pub fn find_provider_at(root: &Path, provider_id: &str) -> Result<Option<FoundPr
 
 /// Load the plugin a [`FoundProvider`] names, with the namespaced credential
 /// sink installed (the guest-facing `oauth-http` path has one route to disk).
-pub fn load_guest(found: &FoundProvider) -> Result<kiqi_plugin_host::WasmPlugin, String> {
-    let options = kiqi_plugin_host::Options {
+pub fn load_guest(found: &FoundProvider) -> Result<kiqi_host::wasm::WasmPlugin, String> {
+    let options = kiqi_host::wasm::Options {
         credential_sink: Some(std::sync::Arc::new(crate::plugins::ConfigCredentialSink)),
         ..Default::default()
     };
-    kiqi_plugin_host::WasmPlugin::load_with_options(
+    kiqi_host::wasm::WasmPlugin::load_with_options(
         &found.install_id,
         &found.wasm,
         found.grants.clone(),
@@ -509,7 +509,7 @@ mod tests {
             url: &str,
             form: &[(String, String)],
             _timeout: std::time::Duration,
-        ) -> Result<kiqi_plugin_host::HttpResponse, String> {
+        ) -> Result<kiqi_host::wasm::HttpResponse, String> {
             let parsed = reqwest::Url::parse(url).map_err(|error| error.to_string())?;
             let path = parsed.path().to_string();
             let body = form
@@ -549,7 +549,7 @@ mod tests {
                 name.eq_ignore_ascii_case("location")
                     .then(|| value.trim().to_string())
             });
-            Ok(kiqi_plugin_host::HttpResponse {
+            Ok(kiqi_host::wasm::HttpResponse {
                 status,
                 location,
                 body: body.to_string(),
@@ -717,13 +717,12 @@ mod tests {
         ]);
         let profile = profile(server.addr.port(), vec![OAuthFlow::DeviceCode]);
         let grant = grant(profile.clone());
-        let guest =
-            FakeGuest::returning(OAuthResponse::Interaction(kiqi_plugin::OAuthInteraction {
-                title: "Conformance".to_string(),
-                url: Some("https://guest.example/never".to_string()),
-                instructions: vec!["the host builds the URL".to_string()],
-                user_code: None,
-            }));
+        let guest = FakeGuest::returning(OAuthResponse::Interaction(kiqi_host::OAuthInteraction {
+            title: "Conformance".to_string(),
+            url: Some("https://guest.example/never".to_string()),
+            instructions: vec!["the host builds the URL".to_string()],
+            user_code: None,
+        }));
         let transport = LocalTransport { addr: server.addr };
         let mut ui = FakeUi::default();
 
@@ -771,13 +770,12 @@ mod tests {
         )]);
         let profile = profile(server.addr.port(), vec![OAuthFlow::AuthorizationCode]);
         let grant = grant(profile.clone());
-        let guest =
-            FakeGuest::returning(OAuthResponse::Interaction(kiqi_plugin::OAuthInteraction {
-                title: String::new(),
-                url: Some("https://guest.example/never".to_string()),
-                instructions: Vec::new(),
-                user_code: None,
-            }));
+        let guest = FakeGuest::returning(OAuthResponse::Interaction(kiqi_host::OAuthInteraction {
+            title: String::new(),
+            url: Some("https://guest.example/never".to_string()),
+            instructions: Vec::new(),
+            user_code: None,
+        }));
         let transport = LocalTransport { addr: server.addr };
         let mut ui = FakeUi {
             answer: Some("the-code".to_string()),
@@ -1003,13 +1001,12 @@ mod tests {
         )]);
         let first_profile = profile(first.addr.port(), vec![OAuthFlow::AuthorizationCode]);
         let first_grant = grant(first_profile.clone());
-        let guest =
-            FakeGuest::returning(OAuthResponse::Interaction(kiqi_plugin::OAuthInteraction {
-                title: String::new(),
-                url: None,
-                instructions: Vec::new(),
-                user_code: None,
-            }));
+        let guest = FakeGuest::returning(OAuthResponse::Interaction(kiqi_host::OAuthInteraction {
+            title: String::new(),
+            url: None,
+            instructions: Vec::new(),
+            user_code: None,
+        }));
         login(
             "install-1",
             &first_profile,

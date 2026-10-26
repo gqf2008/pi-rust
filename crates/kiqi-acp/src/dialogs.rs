@@ -20,7 +20,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Client, ConnectionTo};
 use futures::FutureExt;
-use kiqi_extensions::{UiDialogMailbox, UiDialogRequest};
+use kiqi_host::{UiDialogMailbox, UiDialogRequest};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -61,8 +61,8 @@ pub(crate) fn permission_dialog(
         .tool_call_id
         .as_deref()
         .filter(|id| !id.trim().is_empty())?;
-    kiqi_plugin::dialogs::validate(&request.ui, Some(tool_call_id)).ok()?;
-    let sdk_options = kiqi_plugin::dialogs::permission_options(&request.ui).ok()?;
+    kiqi_host::dialogs::validate(&request.ui, Some(tool_call_id)).ok()?;
+    let sdk_options = kiqi_host::dialogs::permission_options(&request.ui).ok()?;
     let title = request
         .ui
         .get("question")

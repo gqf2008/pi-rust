@@ -172,15 +172,12 @@ kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness
 A few crates sit outside that chain:
 
 - `kiqi-tui` depends on no other `kiqi-*` crate.
-- `kiqi-plugin` is a leaf too (it has no `kiqi-*` deps), but it is not only
-  the host's plugin contract: `kiqi-tools` also reads its env-var names, so the
-  host and its plugins cannot disagree about the strings they exchange across
-  the boundary. That edge is names-only — nothing is linked or called.
-- `kiqi-extensions` is `kiqi-plugin` plus `kiqi-ai`/`kiqi-agent`, since it hosts
-  the dispatch spine every plugin tier registers through.
-- `kiqi-plugin-host` runs wasm guests on wasmtime; `kiqi-cli` depends on both,
-  which is how the `ki` binary gets the TUI, the harness and the plugin runtime
-  at once.
+- `kiqi-host` is the plugin-side crate: the `Extension` contract plus the event
+  dispatch spine (built always, so `kiqi-tools` can read the env-var names and
+  everyone agrees on the boundary strings), with the wasmtime-backed wasm
+  backend behind its `wasm` feature. Only `kiqi-cli` turns that feature on,
+  which is how the `ki` binary gets the plugin runtime while the pure-Rust
+  crates stay wasmtime-free.
 
 | Crate | What it is |
 | ----- | ---------- |
@@ -191,9 +188,7 @@ A few crates sit outside that chain:
 | [`kiqi-harness`](./crates/kiqi-harness) | Session tree, JSONL persistence, compaction, crash recovery, the run loop |
 | [`kiqi-tui`](./crates/kiqi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
 | [`kiqi-cli`](./crates/kiqi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, plugin loading |
-| [`kiqi-plugin`](./crates/kiqi-plugin) | The shared plugin contract: `Plugin` trait, event tags, grants, env-var names and dialog semantics |
-| [`kiqi-plugin-host`](./crates/kiqi-plugin-host) | The wasmtime host that runs wasm plugins against `plugins/kiqi-plugin.wit` |
-| [`kiqi-extensions`](./crates/kiqi-extensions) | Host-side dispatch spine: registry, event funnels, compiled/wasm sink, action mailboxes |
+| [`kiqi-host`](./crates/kiqi-host) | Plugin side of the host: the `Extension` contract (event tags, grants, env-var names, dialog semantics), the dispatch spine (registry, event funnels, compiled/wasm sink, action mailboxes) and — behind the `wasm` feature — the wasmtime host that runs wasm plugins against `plugins/kiqi-plugin.wit` |
 
 Every crate has its own README. The crates are **not** published to crates.io
 (`publish = false` in each manifest), so links above point at the in-repo
@@ -214,10 +209,11 @@ changes what you can build with it:
 - **Durable.** Sessions are a tree with JSONL persistence and per-frame
   progress. A crash mid-tool-call resumes instead of losing the turn or
   double-executing the tool.
-- **Extensible across a stable boundary.** Plugins are Rust `cdylib`s behind a
-  hand-written, panic-contained C ABI with version negotiation — the ABI
-  survives compiler and crate version skew, so extensions do not break on every
-  release.
+- **Extensible across a stable boundary.** Plugins are **wasm components**
+  behind `plugins/kiqi-plugin.wit`, hosted by wasmtime in a sandbox and granted
+  capabilities one by one (`grants.json`, deny-by-default). The WIT contract
+  absorbs compiler and crate version skew; a guest only ever reaches what it was
+  granted.
 - **One implementation, two surfaces.** The global CLI and an embedded agent load
   the same tools. You do not maintain a plugin and a library variant separately.
 - **Scheduled prompts, in-session.** `prompt` or `command` jobs in `.ki/cron.json`
@@ -335,7 +331,7 @@ permission requests bridged to the client. See
 | | |
 | --- | --- |
 | Current release | **[0.4.1](https://github.com/gqf2008/pi-rust/releases/tag/v0.4.1)** (all crates share one workspace version) |
-| Stability | `kiqi-ai`, `kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-plugin` are the intended stable surface |
+| Stability | `kiqi-ai`, `kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-host` are the intended stable surface |
 | MSRV | 1.96 |
 | Platforms | Linux, macOS, Windows (CI runs the suite on Linux) |
 | Binary release targets | Linux (x86_64/aarch64), macOS (Intel/Apple silicon), Windows (x86_64) |

@@ -36,7 +36,7 @@
     "repository": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-tools"
   },
   {
-    "name": "kiqi-extensions",
+    "name": "kiqi-host",
     "type": "crate",
     "age": 5,
     "ageLabel": "v0.4.1 · spine",
@@ -44,8 +44,8 @@
     "author": "ki",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "kiqi-extensions = { path = \"crates/kiqi-extensions\" }",
-    "repository": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-extensions"
+    "install": "kiqi-host = { path = \"crates/kiqi-host\" }",
+    "repository": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-host"
   },
   {
     "name": "kiqi-harness",

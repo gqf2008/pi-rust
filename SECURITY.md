@@ -37,7 +37,7 @@ unless you ask to stay anonymous.
 `ki` is a coding agent that runs with the privileges of the user who starts
 it. The following areas are treated as security-relevant:
 
-- **Plugin loading.** Plugins are **wasm components** run by `kiqi-plugin-host`
+- **Plugin loading.** Plugins are **wasm components** run by `kiqi-host`
   (wasmtime) inside a sandbox: each guest starts with no capability and gets
   only what `$KI_AGENT_DIR/plugins/<id>/grants.json` explicitly grants (fs,
   exec, net, oauth, provider, …), deny-by-default. A missing grants file

@@ -22,18 +22,18 @@ struct PetState {
     meter: String,
 }
 
-fn read_state(mailbox: &kiqi_extensions::ExtensionStatusMailbox) -> Option<PetState> {
+fn read_state(mailbox: &kiqi_host::ExtensionStatusMailbox) -> Option<PetState> {
     let state: PetState = serde_json::from_str(&mailbox.get(PET_KEY)?).ok()?;
     (state.version == 1).then_some(state)
 }
 
-pub(super) fn active(mailbox: &kiqi_extensions::ExtensionStatusMailbox) -> bool {
+pub(super) fn active(mailbox: &kiqi_host::ExtensionStatusMailbox) -> bool {
     read_state(mailbox).is_some()
 }
 
 pub(super) struct PetDocument {
     transcript: Arc<dyn Component>,
-    mailbox: kiqi_extensions::ExtensionStatusMailbox,
+    mailbox: kiqi_host::ExtensionStatusMailbox,
     started: std::time::Instant,
     height: AtomicUsize,
     last_frame: AtomicU64,
@@ -42,7 +42,7 @@ pub(super) struct PetDocument {
 impl PetDocument {
     pub(super) fn new(
         transcript: Arc<dyn Component>,
-        mailbox: kiqi_extensions::ExtensionStatusMailbox,
+        mailbox: kiqi_host::ExtensionStatusMailbox,
     ) -> Self {
         Self {
             transcript,
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn pet_switch_preserves_live_transcript_and_falls_back_on_bad_metadata() {
         let transcript = Arc::new(Text::new("original chat", 0, 0));
-        let mailbox = kiqi_extensions::ExtensionStatusMailbox::new();
+        let mailbox = kiqi_host::ExtensionStatusMailbox::new();
         let doc = PetDocument::new(transcript, mailbox.clone());
         assert!(doc.render(80).join("\n").contains("original chat"));
         mailbox.set(PET_KEY, &snapshot("listen"));
@@ -272,7 +272,7 @@ mod tests {
     }
     #[test]
     fn work_layout_keeps_chat_visible_and_status_data_out_of_footer() {
-        let mailbox = kiqi_extensions::ExtensionStatusMailbox::new();
+        let mailbox = kiqi_host::ExtensionStatusMailbox::new();
         let mut state: serde_json::Value = serde_json::from_str(&snapshot("think")).unwrap();
         state["layout"] = "work".into();
         mailbox.set(PET_KEY, &state.to_string());

@@ -42,10 +42,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use kiqi_ai::types::ThinkingLevel;
-use kiqi_extensions::RuntimeActionHost;
 use kiqi_harness::agent_harness::{AgentHarness, HarnessRunOutcome, NavigationOutcome};
 use kiqi_harness::session::session::Session;
 use kiqi_harness::session::types::{BranchBounds, EntryOrder, EntryQuery};
+use kiqi_host::RuntimeActionHost;
 use tokio::runtime::Handle;
 
 use crate::session::{default_session_dir, open_session_by_id};
@@ -77,7 +77,7 @@ pub struct HarnessActionHost {
     /// the harness serves, and must republish the id here too — a plugin whose
     /// tool state keyed off the old id would otherwise keep serving the session
     /// it named before the swap.
-    tool_context: kiqi_extensions::ToolCallContext,
+    tool_context: kiqi_host::ToolCallContext,
     /// Shared MCP-signal state. The same swap must move this host onto the new
     /// session, or `mcp.signals.muted` and the attention inbox keep landing in
     /// the previous session's JSONL; `set_active_session` owns that move.
@@ -98,7 +98,7 @@ impl HarnessActionHost {
         cwd: PathBuf,
         runtime: Handle,
         cli_flags: BTreeMap<String, serde_json::Value>,
-        tool_context: kiqi_extensions::ToolCallContext,
+        tool_context: kiqi_host::ToolCallContext,
         signal_host: Arc<crate::signal_host::SignalHost>,
     ) -> (Self, Arc<OnceLock<Arc<AgentHarness>>>) {
         let harness = Arc::new(OnceLock::new());
@@ -611,7 +611,7 @@ mod tests {
             cwd.to_path_buf(),
             Handle::current(),
             BTreeMap::new(),
-            kiqi_extensions::ToolCallContext::new(cwd_str.clone()),
+            kiqi_host::ToolCallContext::new(cwd_str.clone()),
             Arc::clone(&signal_host),
         );
         HarnessActionHost::set_harness(&cell, Arc::new(harness));
@@ -690,8 +690,8 @@ mod tests {
         impl Drop for Restore {
             fn drop(&mut self) {
                 for (name, saved) in [
-                    (kiqi_plugin::SESSION_ID_ENV, &self.session),
-                    (kiqi_plugin::AGENT_ID_ENV, &self.agent),
+                    (kiqi_host::SESSION_ID_ENV, &self.session),
+                    (kiqi_host::AGENT_ID_ENV, &self.agent),
                 ] {
                     match saved {
                         Some(value) => std::env::set_var(name, value),
@@ -703,8 +703,8 @@ mod tests {
 
         let _guard = crate::config::test_support::env_lock().lock();
         let _restore = Restore {
-            session: std::env::var_os(kiqi_plugin::SESSION_ID_ENV),
-            agent: std::env::var_os(kiqi_plugin::AGENT_ID_ENV),
+            session: std::env::var_os(kiqi_host::SESSION_ID_ENV),
+            agent: std::env::var_os(kiqi_host::AGENT_ID_ENV),
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -733,7 +733,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            std::env::var(kiqi_plugin::AGENT_ID_ENV).ok().as_deref(),
+            std::env::var(kiqi_host::AGENT_ID_ENV).ok().as_deref(),
             Some(target_id.as_str()),
             "a session swap must republish KI_AGENT_ID, not leave the startup value"
         );

@@ -131,14 +131,14 @@ type MarkdownTransformer = Arc<dyn Fn(&str) -> String + Send + Sync>;
 /// trip (input `{"markdown":…}` → `render_fn` → reclaim `out` via the plugin's
 /// `free_string` → parse `{"markdown":…}`).
 fn build_markdown_transformer(
-    snapshot: Option<std::sync::Arc<kiqi_extensions::RegistrySnapshot>>,
+    snapshot: Option<std::sync::Arc<kiqi_host::RegistrySnapshot>>,
 ) -> Option<MarkdownTransformer> {
     // Pre-check: if nothing can transform, return None so the component uses
     // the identity path (no closure allocation, no cache lookup). The renderers
     // list is a per-call `renderers_of` clone; snapshotting it once here keeps
     // the closure cheap on the hot path.
     let cdylib = snapshot.and_then(|snapshot| {
-        let renderers = snapshot.renderers_of(kiqi_extensions::RegisteredRendererKind::Markdown);
+        let renderers = snapshot.renderers_of(kiqi_host::RegisteredRendererKind::Markdown);
         (!renderers.is_empty()).then_some((snapshot, renderers))
     });
     // Wasm renderers hold a `render` grant. The chain runs them after the
@@ -179,8 +179,8 @@ fn build_markdown_transformer(
 /// an inactive snapshot — the chain short-circuits to the current text
 /// unchanged (per-handler skip-on-error, mirroring pi's `runner.ts` fan-out).
 fn transform_markdown_chain(
-    snapshot: &kiqi_extensions::RegistrySnapshot,
-    renderers: &[kiqi_extensions::RegisteredRenderer],
+    snapshot: &kiqi_host::RegistrySnapshot,
+    renderers: &[kiqi_host::RegisteredRenderer],
     raw: &str,
 ) -> String {
     // A stale snapshot (post-/reload) must not drive a swapped-out registry.
@@ -207,10 +207,10 @@ fn transform_markdown_chain(
         // panic must not unwind across the FFI boundary (same policy as the
         // tool partial cb + the runtime_action trampoline).
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut out = kiqi_extensions::StbString::empty();
+            let mut out = kiqi_host::StbString::empty();
             let rc = (renderer.render_fn)(
-                kiqi_extensions::StbStringRef::from_str(&input),
-                &mut out as *mut kiqi_extensions::StbString,
+                kiqi_host::StbStringRef::from_str(&input),
+                &mut out as *mut kiqi_host::StbString,
                 renderer.user_data,
             );
             let text = if rc == 0 {
@@ -394,22 +394,22 @@ impl CommandRegistry {
 
 /// Dispatch a ui_prompt_start event to extensions.
 fn dispatch_ui_prompt_event(state: &TuiState) {
-    use kiqi_plugin::EventTag;
+    use kiqi_host::EventTag;
 
     if let Ok(session) = state.extension_session.lock() {
         if let Some(snapshot) = session.snapshot_arc() {
-            kiqi_extensions::dispatch_empty_event(&snapshot, EventTag::UiPromptStart);
+            kiqi_host::dispatch_empty_event(&snapshot, EventTag::UiPromptStart);
         }
     }
 }
 
 /// Dispatch a ui_prompt_end event to extensions.
 fn dispatch_ui_prompt_event_end(state: &TuiState) {
-    use kiqi_plugin::EventTag;
+    use kiqi_host::EventTag;
 
     if let Ok(session) = state.extension_session.lock() {
         if let Some(snapshot) = session.snapshot_arc() {
-            kiqi_extensions::dispatch_empty_event(&snapshot, EventTag::UiPromptEnd);
+            kiqi_host::dispatch_empty_event(&snapshot, EventTag::UiPromptEnd);
         }
     }
 }
@@ -458,7 +458,7 @@ fn char_shortcut_name(ch: char) -> Option<String> {
 /// what lets a push-to-talk extension measure how long a key was held — the
 /// normal editor path deliberately drops Release.
 fn dispatch_key_event(state: &TuiState, key: &KeyEvent, editor: &Editor) -> bool {
-    use kiqi_plugin::EventTag;
+    use kiqi_host::EventTag;
 
     let owned_release = key.kind == KeyEventKind::Release
         && state
@@ -528,7 +528,7 @@ fn dispatch_key_event(state: &TuiState, key: &KeyEvent, editor: &Editor) -> bool
     // registered-but-disabled shortcut (push-to-talk toggled off) still lets the
     // key reach the editor normally. Compiled plugins answer through the same
     // call — the funnel fans the event to them and folds in their verdict.
-    let claimed = kiqi_extensions::dispatch_data_event_claiming(
+    let claimed = kiqi_host::dispatch_data_event_claiming(
         snapshot.as_deref(),
         EventTag::Input,
         &payload.to_string(),
@@ -2891,7 +2891,7 @@ pub async fn interactive_tui(
     // continue. No-op when no extension subscribes.
     if let Some(reason) = crate::session::dispatch_session_event_async(
         reload_context,
-        kiqi_plugin::EventTag::SessionStart,
+        kiqi_host::EventTag::SessionStart,
     )
     .await
     {

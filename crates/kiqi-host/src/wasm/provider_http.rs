@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use kiqi_plugin::grants::ProviderProfile;
+use crate::grants::ProviderProfile;
 use serde_json::Value;
 
 /// One already-checked request handed to a transport.
@@ -71,7 +71,7 @@ pub(crate) struct ProviderCallState {
     pub profile: ProviderProfile,
     pub credential: Option<ResolvedCredential>,
     pub transport: Arc<dyn ProviderHttpTransport>,
-    pub cancel: Option<Arc<dyn kiqi_plugin::CancelProbe>>,
+    pub cancel: Option<Arc<dyn crate::CancelProbe>>,
 }
 
 /// Headers a guest may never supply. Auth/framing headers are host-owned: the
@@ -121,8 +121,8 @@ impl ProviderHttpError {
         Self::Failed(message.into())
     }
 
-    pub(crate) fn into_capability(self) -> crate::kiqi::plugin::types::CapabilityError {
-        use crate::kiqi::plugin::types::CapabilityError;
+    pub(crate) fn into_capability(self) -> crate::wasm::kiqi::plugin::types::CapabilityError {
+        use crate::wasm::kiqi::plugin::types::CapabilityError;
         match self {
             Self::Denied(message) => CapabilityError::Denied(message),
             Self::Failed(message) => CapabilityError::Failed(message),
@@ -227,7 +227,7 @@ pub(crate) fn checked_request(
     let timeout = std::time::Duration::from_secs(
         profile
             .timeout_seconds
-            .clamp(1, kiqi_plugin::grants::PROVIDER_TIMEOUT_MAX_SECONDS),
+            .clamp(1, crate::grants::PROVIDER_TIMEOUT_MAX_SECONDS),
     );
 
     Ok(ProviderHttpRequest {
@@ -444,7 +444,7 @@ pub(crate) fn resolve_credential(
         Some(auth) => (auth.header.clone(), auth.prefix.clone()),
         None => (
             "authorization".to_string(),
-            kiqi_plugin::grants::PROVIDER_AUTH_PREFIX_DEFAULT.to_string(),
+            crate::grants::PROVIDER_AUTH_PREFIX_DEFAULT.to_string(),
         ),
     };
     Ok(Some(ResolvedCredential {
@@ -532,7 +532,7 @@ impl ProviderHttpTable {
         handle: u32,
         max_bytes: u64,
         max_response_bytes: u64,
-        cancel: Option<&dyn kiqi_plugin::CancelProbe>,
+        cancel: Option<&dyn crate::CancelProbe>,
     ) -> Result<Option<Vec<u8>>, ProviderHttpError> {
         if cancel.is_some_and(|probe| probe.is_cancelled()) {
             return Err(ProviderHttpError::failed("provider-http read cancelled"));
@@ -668,7 +668,7 @@ impl ProviderHttpStream for ReqwestStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiqi_plugin::grants::{
+    use crate::grants::{
         ProviderEndpoint, ProviderModel, PROVIDER_MAX_HANDLES_DEFAULT,
         PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
     };

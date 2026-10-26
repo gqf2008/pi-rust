@@ -106,7 +106,7 @@ pub(super) async fn switch_to_session(
     cwd: &std::path::Path,
     chat: &Arc<Container>,
     state: &Arc<TuiState>,
-    tool_context: &kiqi_extensions::ToolCallContext,
+    tool_context: &kiqi_host::ToolCallContext,
     reload_context: &crate::session::ReloadContext,
 ) -> bool {
     if *state.status.lock().unwrap() == RunStatus::Working {
@@ -162,7 +162,7 @@ pub(super) async fn import_session(
     cwd: &std::path::Path,
     chat: &Arc<Container>,
     state: &Arc<TuiState>,
-    tool_context: &kiqi_extensions::ToolCallContext,
+    tool_context: &kiqi_host::ToolCallContext,
     reload_context: &crate::session::ReloadContext,
 ) {
     use std::path::Path as FsPath;
@@ -213,7 +213,7 @@ pub(super) async fn fork_session(
     cwd: &std::path::Path,
     chat: &Arc<Container>,
     state: &Arc<TuiState>,
-    tool_context: &kiqi_extensions::ToolCallContext,
+    tool_context: &kiqi_host::ToolCallContext,
     reload_context: &crate::session::ReloadContext,
 ) {
     use kiqi_harness::session::jsonl::{JsonlSessionRepo, JsonlSessionRepoOptions};
@@ -490,17 +490,17 @@ pub(super) async fn render_session_history(
 
 pub(super) fn invoke_extension_renderer(
     session: &crate::session::ExtensionSessionCell,
-    kind: kiqi_extensions::RegisteredRendererKind,
+    kind: kiqi_host::RegisteredRendererKind,
     payload: &serde_json::Value,
 ) -> Option<serde_json::Value> {
     let snapshot = session.lock().ok()?.snapshot_arc()?;
     let input = serde_json::to_string(payload).ok()?;
     for renderer in snapshot.renderers_of(kind) {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut out = kiqi_extensions::StbString::empty();
+            let mut out = kiqi_host::StbString::empty();
             let rc = (renderer.render_fn)(
-                kiqi_extensions::StbStringRef::from_str(&input),
-                &mut out as *mut kiqi_extensions::StbString,
+                kiqi_host::StbStringRef::from_str(&input),
+                &mut out as *mut kiqi_host::StbString,
                 renderer.user_data,
             );
             let text = if rc == 0 {
@@ -550,11 +550,8 @@ pub(super) fn extension_message_component(
     payload: &serde_json::Value,
     transformer: Option<MarkdownTransformer>,
 ) -> Option<Arc<dyn kiqi_tui::Component>> {
-    let value = invoke_extension_renderer(
-        session,
-        kiqi_extensions::RegisteredRendererKind::Message,
-        payload,
-    )?;
+    let value =
+        invoke_extension_renderer(session, kiqi_host::RegisteredRendererKind::Message, payload)?;
     if value.get("markdown").and_then(|v| v.as_bool()) == Some(true) {
         let text = value.get("text").and_then(|v| v.as_str())?;
         let component = Arc::new(AssistantMessageComponent::new(
@@ -583,7 +580,7 @@ pub(super) fn extension_usage_text(
     });
     let value = invoke_extension_renderer(
         session,
-        kiqi_extensions::RegisteredRendererKind::Message,
+        kiqi_host::RegisteredRendererKind::Message,
         &payload,
     )?;
     value
@@ -602,11 +599,8 @@ pub(super) fn extension_entry_component(
         "customType": custom_type,
         "data": data,
     });
-    let value = invoke_extension_renderer(
-        session,
-        kiqi_extensions::RegisteredRendererKind::Entry,
-        &payload,
-    )?;
+    let value =
+        invoke_extension_renderer(session, kiqi_host::RegisteredRendererKind::Entry, &payload)?;
     extension_text_component(&value)
 }
 

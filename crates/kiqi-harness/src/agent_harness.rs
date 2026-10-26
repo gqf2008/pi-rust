@@ -1732,7 +1732,7 @@ impl AgentHarness {
     /// with (base + append + context; the `<available_skills>` listing is added
     /// at run time from the resource skills, so this returns the *base* prompt
     /// the plugin's `runtime_action(GetSystemPrompt)` sees). B5a: backs the
-    /// [`kiqi_extensions::RuntimeActionHost::get_system_prompt`] action.
+    /// [`kiqi_host::RuntimeActionHost::get_system_prompt`] action.
     pub async fn get_system_prompt(&self) -> HarnessResult<Option<String>> {
         let inner = self.inner.lock().unwrap();
         if inner.closed {

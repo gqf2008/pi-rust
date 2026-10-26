@@ -191,9 +191,9 @@ fn pasted_images_accept_multiple_quoted_paths_without_consuming_normal_text() {
 
 #[test]
 fn modal_inputs_keep_registered_plugin_shortcuts_until_closed() {
-    use kiqi_extensions::{ExtensionRegistry, ExtensionSession};
-    use kiqi_extensions::{StablePluginEvent, EVENT_HANDLER_CLAIMED};
-    use kiqi_plugin::EventTag;
+    use kiqi_host::EventTag;
+    use kiqi_host::{ExtensionRegistry, ExtensionSession};
+    use kiqi_host::{StablePluginEvent, EVENT_HANDLER_CLAIMED};
     use std::sync::atomic::{AtomicUsize, Ordering};
     extern "C" fn claim(_: StablePluginEvent, user_data: *mut std::ffi::c_void) -> i32 {
         // The counter outlives the session and all synchronous dispatch calls.
@@ -389,9 +389,9 @@ fn test_tui_state() -> Arc<TuiState> {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
-        ext_status: kiqi_extensions::ExtensionStatusMailbox::new(),
+        ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
-        editor_text: kiqi_extensions::EditorTextMailbox::new(),
+        editor_text: kiqi_host::EditorTextMailbox::new(),
         auto_send: std::sync::Mutex::new(None),
         last_editor_text: std::sync::Mutex::new(String::new()),
         programmatic_editor_write: std::sync::atomic::AtomicBool::new(false),
@@ -426,9 +426,7 @@ fn test_tui_state() -> Arc<TuiState> {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(
-            kiqi_extensions::ExtensionSession::none(),
-        )),
+        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -456,9 +454,9 @@ fn editor_change_source_separates_tui_writes_from_typing() {
     assert!(state.take_editor_change().is_none());
 
     // The render tick applies an extension's draft…
-    state.editor_text.push(kiqi_extensions::EditorTextEdit {
+    state.editor_text.push(kiqi_host::EditorTextEdit {
         text: "你好".to_string(),
-        mode: kiqi_extensions::EditorTextMode::Replace,
+        mode: kiqi_host::EditorTextMode::Replace,
         auto_send_ms: Some(2000),
     });
     assert!(state.drain_editor_text(), "the queued draft must land");
@@ -500,16 +498,16 @@ fn programmatic_mark_is_consumed_even_with_no_subscriber() {
             .snapshot_arc()
             .expect("a dylib-free session carries an empty registry");
         snapshot
-            .handlers_for(kiqi_plugin::EventTag::SessionStart)
+            .handlers_for(kiqi_host::EventTag::SessionStart)
             .is_empty()
             && snapshot.before_agent_start().is_empty()
             && snapshot.resources_discover().is_empty()
     };
     assert!(nobody_subscribes, "this test relies on nobody subscribing");
 
-    state.editor_text.push(kiqi_extensions::EditorTextEdit {
+    state.editor_text.push(kiqi_host::EditorTextEdit {
         text: "draft".to_string(),
-        mode: kiqi_extensions::EditorTextMode::Replace,
+        mode: kiqi_host::EditorTextMode::Replace,
         auto_send_ms: None,
     });
     state.drain_editor_text();
@@ -1483,9 +1481,9 @@ fn test_agent_event_mapping_creates_assistant_and_tool() {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
-        ext_status: kiqi_extensions::ExtensionStatusMailbox::new(),
+        ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
-        editor_text: kiqi_extensions::EditorTextMailbox::new(),
+        editor_text: kiqi_host::EditorTextMailbox::new(),
         auto_send: std::sync::Mutex::new(None),
         last_editor_text: std::sync::Mutex::new(String::new()),
         programmatic_editor_write: std::sync::atomic::AtomicBool::new(false),
@@ -1520,9 +1518,7 @@ fn test_agent_event_mapping_creates_assistant_and_tool() {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(
-            kiqi_extensions::ExtensionSession::none(),
-        )),
+        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -1962,9 +1958,9 @@ fn test_autocomplete_slash_suggestions_render() {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
-        ext_status: kiqi_extensions::ExtensionStatusMailbox::new(),
+        ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
-        editor_text: kiqi_extensions::EditorTextMailbox::new(),
+        editor_text: kiqi_host::EditorTextMailbox::new(),
         auto_send: std::sync::Mutex::new(None),
         last_editor_text: std::sync::Mutex::new(String::new()),
         programmatic_editor_write: std::sync::atomic::AtomicBool::new(false),
@@ -1999,9 +1995,7 @@ fn test_autocomplete_slash_suggestions_render() {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(
-            kiqi_extensions::ExtensionSession::none(),
-        )),
+        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -2051,9 +2045,9 @@ fn test_select_list_swap_restores_editor() {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
-        ext_status: kiqi_extensions::ExtensionStatusMailbox::new(),
+        ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
-        editor_text: kiqi_extensions::EditorTextMailbox::new(),
+        editor_text: kiqi_host::EditorTextMailbox::new(),
         auto_send: std::sync::Mutex::new(None),
         last_editor_text: std::sync::Mutex::new(String::new()),
         programmatic_editor_write: std::sync::atomic::AtomicBool::new(false),
@@ -2088,9 +2082,7 @@ fn test_select_list_swap_restores_editor() {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(
-            kiqi_extensions::ExtensionSession::none(),
-        )),
+        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -2143,9 +2135,9 @@ fn test_message_history_browse_restores_draft() {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
-        ext_status: kiqi_extensions::ExtensionStatusMailbox::new(),
+        ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
-        editor_text: kiqi_extensions::EditorTextMailbox::new(),
+        editor_text: kiqi_host::EditorTextMailbox::new(),
         auto_send: std::sync::Mutex::new(None),
         last_editor_text: std::sync::Mutex::new(String::new()),
         programmatic_editor_write: std::sync::atomic::AtomicBool::new(false),
@@ -2180,9 +2172,7 @@ fn test_message_history_browse_restores_draft() {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(
-            kiqi_extensions::ExtensionSession::none(),
-        )),
+        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -2238,9 +2228,9 @@ fn test_accept_top_suggestion_replaces_prefix() {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
-        ext_status: kiqi_extensions::ExtensionStatusMailbox::new(),
+        ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
-        editor_text: kiqi_extensions::EditorTextMailbox::new(),
+        editor_text: kiqi_host::EditorTextMailbox::new(),
         auto_send: std::sync::Mutex::new(None),
         last_editor_text: std::sync::Mutex::new(String::new()),
         programmatic_editor_write: std::sync::atomic::AtomicBool::new(false),
@@ -2275,9 +2265,7 @@ fn test_accept_top_suggestion_replaces_prefix() {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(
-            kiqi_extensions::ExtensionSession::none(),
-        )),
+        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -2319,9 +2307,9 @@ fn autocomplete_test_state(max_visible: usize) -> Arc<TuiState> {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
-        ext_status: kiqi_extensions::ExtensionStatusMailbox::new(),
+        ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
-        editor_text: kiqi_extensions::EditorTextMailbox::new(),
+        editor_text: kiqi_host::EditorTextMailbox::new(),
         auto_send: std::sync::Mutex::new(None),
         last_editor_text: std::sync::Mutex::new(String::new()),
         programmatic_editor_write: std::sync::atomic::AtomicBool::new(false),
@@ -2356,9 +2344,7 @@ fn autocomplete_test_state(max_visible: usize) -> Arc<TuiState> {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(
-            kiqi_extensions::ExtensionSession::none(),
-        )),
+        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -2787,7 +2773,7 @@ fn paste_probe_ignores_the_enter_keys_own_release() {
 
 #[test]
 fn ask_user_prompt_parser_supports_flat_and_questions_shapes() {
-    let flat = kiqi_extensions::UiDialogRequest {
+    let flat = kiqi_host::UiDialogRequest {
         request_id: "r1".into(),
         tool_call_id: Some("c1".into()),
         ui: serde_json::json!({
@@ -2811,7 +2797,7 @@ fn ask_user_prompt_parser_supports_flat_and_questions_shapes() {
     assert!(!prompt.allow_freeform);
     assert_eq!(prompt.suggest.as_deref(), Some("1080"));
 
-    let alias = kiqi_extensions::UiDialogRequest {
+    let alias = kiqi_host::UiDialogRequest {
         ui: serde_json::json!({
             "questions": [{"id": "q", "question": "Q?", "options": []}]
         }),
@@ -2821,7 +2807,7 @@ fn ask_user_prompt_parser_supports_flat_and_questions_shapes() {
     assert_eq!(prompt.question_id, "q");
     assert!(prompt.allow_freeform, "no options defaults to freeform");
 
-    let confirm = kiqi_extensions::UiDialogRequest {
+    let confirm = kiqi_host::UiDialogRequest {
         ui: serde_json::json!({"kind": "confirm", "question": "Go?"}),
         ..flat.clone()
     };
@@ -2833,7 +2819,7 @@ fn ask_user_prompt_parser_supports_flat_and_questions_shapes() {
 
 #[test]
 fn ask_user_bridge_answers_and_cancels_by_request_id() {
-    let mailbox = kiqi_extensions::UiDialogMailbox::new();
+    let mailbox = kiqi_host::UiDialogMailbox::new();
     mailbox.attach();
     let bridge = AskUserBridge::new(mailbox.clone());
 
@@ -2946,7 +2932,7 @@ fn the_tui_runtime_never_writes_diagnostics_to_stderr() {
 
 struct FlowTestPlugin;
 
-impl kiqi_plugin::Plugin for FlowTestPlugin {
+impl kiqi_host::Extension for FlowTestPlugin {
     fn id(&self) -> &str {
         "flow-host"
     }

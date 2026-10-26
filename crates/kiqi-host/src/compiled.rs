@@ -1,6 +1,6 @@
 //! Plugin event fan-out.
 //!
-//! Plugins observe events through [`kiqi_plugin::Plugin::on_event`] rather than
+//! Plugins observe events through [`crate::Plugin::on_event`] rather than
 //! the C ABI. This module is the seam: the native dispatch funnels call
 //! [`dispatch`], and the host installs a [`CompiledEventSink`] whose closure
 //! translates the stable event to the plugin contract and calls every loaded
@@ -16,7 +16,7 @@ use serde_json::Value;
 /// What the compiled plugins decided about one event.
 ///
 /// The claim channel mirrors the native ABI's `EVENT_HANDLER_CLAIMED` / `0`:
-/// `kiqi_plugin::EventAction::Replace` maps to [`Self::Claimed`] (the plugin
+/// `crate::EventAction::Replace` maps to [`Self::Claimed`] (the plugin
 /// took the event) because no rewrite can propagate down the native path.
 ///
 /// [`Self::Patch`] is the one mutation channel: it exists only for the
@@ -121,7 +121,7 @@ fn dispatch_with(mode: DispatchMode, event: &StablePluginEvent) -> CompiledVerdi
 /// Mirrors what `EventView`'s typed accessors expose to a cdylib handler, as a
 /// `serde_json::Value`: data/message payloads were JSON *strings* on the native
 /// side and are parsed here, tool payloads become the camelCase object the
-/// `kiqi_plugin::Event::tool_result` accessor already understands.
+/// `crate::Event::tool_result` accessor already understands.
 fn event_payload(event: &StablePluginEvent) -> Value {
     // SAFETY: `event` is the live event the host is dispatching; the view only
     // reads borrows of its payload and copies out before it returns.
@@ -155,8 +155,8 @@ fn event_payload(event: &StablePluginEvent) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EventTag;
     use crate::StbString;
-    use kiqi_plugin::EventTag;
     use std::sync::Mutex;
 
     /// Serializes the sink tests across the crate; the sink is process-global.

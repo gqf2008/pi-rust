@@ -192,13 +192,13 @@ pub(super) struct TuiState {
     pub(super) status: std::sync::Mutex<RunStatus>,
     /// Extension status registry (`SetStatus` runtime action). The render tick
     /// repaints the footer only when `ext_status_revision` moved.
-    pub(super) ext_status: kiqi_extensions::ExtensionStatusMailbox,
+    pub(super) ext_status: kiqi_host::ExtensionStatusMailbox,
     /// Revision of `ext_status` as of the last footer write.
     pub(super) ext_status_revision: std::sync::atomic::AtomicU64,
     /// Session editor-text queue (`SetEditorText`, runtime action 19). The
     /// render tick drains it into the prompt editor; a voice plugin drops a
     /// transcription in as an editable draft rather than sending it.
-    pub(super) editor_text: kiqi_extensions::EditorTextMailbox,
+    pub(super) editor_text: kiqi_host::EditorTextMailbox,
     /// Pending auto-send for an injected draft (see [`AutoSendPending`]).
     /// `None` when no countdown is running.
     pub(super) auto_send: std::sync::Mutex<Option<AutoSendPending>>,
@@ -1152,8 +1152,8 @@ impl TuiState {
         while let Some(edit) = self.editor_text.take_pending() {
             let current = self.editor.get_text();
             let text = match edit.mode {
-                kiqi_extensions::EditorTextMode::Replace => edit.text,
-                kiqi_extensions::EditorTextMode::Append => {
+                kiqi_host::EditorTextMode::Replace => edit.text,
+                kiqi_host::EditorTextMode::Append => {
                     if current.is_empty() {
                         edit.text
                     } else {
@@ -1236,7 +1236,7 @@ impl TuiState {
     /// runs while the editor's callback lock is held, where re-entering
     /// extension code is needlessly risky.
     pub(super) fn sync_editor_change(&self) {
-        use kiqi_plugin::EventTag;
+        use kiqi_host::EventTag;
 
         let Some(payload) = self.take_editor_change() else {
             return;
@@ -1252,11 +1252,7 @@ impl TuiState {
         if snapshot.handlers_for(EventTag::EditorChange).is_empty() {
             return;
         }
-        kiqi_extensions::dispatch_data_event(
-            &snapshot,
-            EventTag::EditorChange,
-            &payload.to_string(),
-        );
+        kiqi_host::dispatch_data_event(&snapshot, EventTag::EditorChange, &payload.to_string());
     }
 
     /// Build the `EditorChange` payload when the draft changed since the last

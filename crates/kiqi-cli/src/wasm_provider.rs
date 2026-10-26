@@ -7,7 +7,7 @@
 //!
 //! * **The grant is the only authority.** The catalog entry comes from
 //!   `grants.json` (`crate::provider::granted_plugin_models`); this adapter
-//!   re-reads the grant on first use and [`kiqi_plugin_host::ProviderHost`]
+//!   re-reads the grant on first use and [`kiqi_host::wasm::ProviderHost`]
 //!   refuses to instantiate the guest when no profile names this install id.
 //! * **Nothing is built until a request arrives.** The grant and the component
 //!   are read/compiled lazily on the first `stream_simple`, on a blocking
@@ -18,7 +18,7 @@
 //! The provider call itself runs synchronously inside the host; the event
 //! stream is produced by a tokio task that drains `provider-stream` deltas as
 //! they arrive and assembles the same partial messages the built-in mappers
-//! emit. Cancellation is a [`kiqi_plugin::CancelProbe`] backed by the harness's
+//! emit. Cancellation is a [`kiqi_host::CancelProbe`] backed by the harness's
 //! `CancellationToken`, so aborting a run reaches the guest and
 //! `provider-http` between chunks instead of merely dropping the consumer.
 
@@ -62,7 +62,7 @@ struct ProviderSlot {
     agent_root: Option<PathBuf>,
     /// Built on the first request, never at resolve time. A trapped/dead host
     /// is replaced on the next request.
-    host: std::sync::Mutex<Option<Arc<kiqi_plugin_host::ProviderHost>>>,
+    host: std::sync::Mutex<Option<Arc<kiqi_host::wasm::ProviderHost>>>,
 }
 
 impl WasmProvider {
@@ -221,7 +221,7 @@ struct SignalProbe {
 }
 
 #[cfg(feature = "plugin-wasm")]
-impl kiqi_plugin::CancelProbe for SignalProbe {
+impl kiqi_host::CancelProbe for SignalProbe {
     fn is_cancelled(&self) -> bool {
         self.caller.is_cancelled() || self.local.is_cancelled()
     }
@@ -262,11 +262,11 @@ async fn run_request(
     model_id: String,
     timestamp: i64,
 ) {
-    use kiqi_plugin_host::ProviderDeltaEvent;
+    use kiqi_host::wasm::ProviderDeltaEvent;
 
     let (tx, mut rx) =
         tokio::sync::mpsc::channel::<ProviderDeltaEvent>(PROVIDER_DELTA_CHANNEL_CAPACITY);
-    let request_probe: Arc<dyn kiqi_plugin::CancelProbe> = probe.clone();
+    let request_probe: Arc<dyn kiqi_host::CancelProbe> = probe.clone();
     let sink_local = local.clone();
     let mut blocking = tokio::task::spawn_blocking(move || {
         let host = ensure_host(&slot)?;
@@ -385,9 +385,9 @@ async fn run_request(
 /// failure, not backpressure that an untrusted guest can use to stall the host.
 #[cfg(feature = "plugin-wasm")]
 fn forward_delta(
-    tx: &tokio::sync::mpsc::Sender<kiqi_plugin_host::ProviderDeltaEvent>,
+    tx: &tokio::sync::mpsc::Sender<kiqi_host::wasm::ProviderDeltaEvent>,
     local: &tokio_util::sync::CancellationToken,
-    event: kiqi_plugin_host::ProviderDeltaEvent,
+    event: kiqi_host::wasm::ProviderDeltaEvent,
 ) -> Result<(), String> {
     tx.try_send(event).map_err(|error| {
         local.cancel();
@@ -402,7 +402,7 @@ fn forward_delta(
     })
 }
 
-/// Create (or reuse) the dedicated [`kiqi_plugin_host::ProviderHost`].
+/// Create (or reuse) the dedicated [`kiqi_host::wasm::ProviderHost`].
 ///
 /// Runs on the blocking thread that owns the request. `Ok(None)` from
 /// `ProviderHost::load_bytes_with_options` — no provider grant (or no profile
@@ -410,8 +410,8 @@ fn forward_delta(
 /// guest is never instantiated. The bytes are digest-gated here on every
 /// load/rebuild, not just at catalog construction.
 #[cfg(feature = "plugin-wasm")]
-fn ensure_host(slot: &ProviderSlot) -> Result<Arc<kiqi_plugin_host::ProviderHost>, String> {
-    use kiqi_plugin_host::{ProviderHost, ProviderHostOptions};
+fn ensure_host(slot: &ProviderSlot) -> Result<Arc<kiqi_host::wasm::ProviderHost>, String> {
+    use kiqi_host::wasm::{ProviderHost, ProviderHostOptions};
 
     let mut guard = slot
         .host
@@ -421,8 +421,8 @@ fn ensure_host(slot: &ProviderSlot) -> Result<Arc<kiqi_plugin_host::ProviderHost
     // or narrowed profile must stop the very next request, even though the
     // adapter and its credential outlive a `/model` reload.
     let grants = match &slot.agent_root {
-        Some(root) => kiqi_plugin::grants::Grants::load_for_at(root, &slot.id),
-        None => kiqi_plugin::grants::Grants::load_for(&slot.id),
+        Some(root) => kiqi_host::grants::Grants::load_for_at(root, &slot.id),
+        None => kiqi_host::grants::Grants::load_for(&slot.id),
     };
     let current_profile = grants
         .provider
@@ -499,10 +499,10 @@ impl PartialBuilder {
     /// Apply one delta. `Ok(false)` means the consumer dropped the stream.
     fn apply(
         &mut self,
-        event: kiqi_plugin_host::ProviderDeltaEvent,
+        event: kiqi_host::wasm::ProviderDeltaEvent,
         producer: &mut AssistantMessageEventStreamProducer,
     ) -> Result<bool, String> {
-        use kiqi_plugin_host::{DeltaKind, DeltaPhase};
+        use kiqi_host::wasm::{DeltaKind, DeltaPhase};
 
         let index = event.content_index;
         match event.phase {
@@ -605,22 +605,22 @@ impl PartialBuilder {
         }
     }
 
-    fn append(&mut self, position: usize, kind: kiqi_plugin_host::DeltaKind, text: &str) {
+    fn append(&mut self, position: usize, kind: kiqi_host::wasm::DeltaKind, text: &str) {
         if text.is_empty() {
             return;
         }
         match kind {
-            kiqi_plugin_host::DeltaKind::Text => {
+            kiqi_host::wasm::DeltaKind::Text => {
                 if let Some(Content::Text(slot)) = self.message.content.get_mut(position) {
                     slot.text.push_str(text);
                 }
             }
-            kiqi_plugin_host::DeltaKind::Thinking => {
+            kiqi_host::wasm::DeltaKind::Thinking => {
                 if let Some(Content::Thinking(slot)) = self.message.content.get_mut(position) {
                     slot.thinking.push_str(text);
                 }
             }
-            kiqi_plugin_host::DeltaKind::ToolCall => {
+            kiqi_host::wasm::DeltaKind::ToolCall => {
                 let buffer = self.tool_text.entry(position).or_default();
                 buffer.push_str(text);
                 // Keep the partial renderable while the object is still
@@ -799,7 +799,7 @@ fn now_millis() -> i64 {
 mod tests {
     use super::*;
     use kiqi_ai::SimpleStreamOptions;
-    use kiqi_plugin::grants::{
+    use kiqi_host::grants::{
         Grants, ProviderEndpoint, ProviderGrant, ProviderModel, ProviderProfile,
         PROVIDER_MAX_HANDLES_DEFAULT, PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
     };
@@ -1198,7 +1198,7 @@ mod tests {
                     "source": "auth-json:anthropic",
                     "provider": "anthropic",
                     "display": "Anthropic",
-                    "fingerprint": kiqi_plugin_host::fingerprint_credential(
+                    "fingerprint": kiqi_host::wasm::fingerprint_credential(
                         "sk-revocation-secret"
                     ),
                 }
@@ -1258,9 +1258,9 @@ mod tests {
     fn live_delta_queue_overflow_cancels_and_fails() {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let local = tokio_util::sync::CancellationToken::new();
-        let event = || kiqi_plugin_host::ProviderDeltaEvent {
-            kind: kiqi_plugin_host::DeltaKind::Text,
-            phase: kiqi_plugin_host::DeltaPhase::Delta,
+        let event = || kiqi_host::wasm::ProviderDeltaEvent {
+            kind: kiqi_host::wasm::DeltaKind::Text,
+            phase: kiqi_host::wasm::DeltaPhase::Delta,
             content_index: 0,
             text: "x".to_string(),
         };
@@ -1430,7 +1430,7 @@ mod tests {
         let model = conformance_model("conformance-park");
         let opts = || SimpleStreamOptions::default();
         reset_hosts_built();
-        let cap = kiqi_plugin_host::PROVIDER_MAX_ABANDONED_WORKERS;
+        let cap = kiqi_host::wasm::PROVIDER_MAX_ABANDONED_WORKERS;
 
         for expected in 1..=cap {
             let mut stream = provider
@@ -1449,7 +1449,7 @@ mod tests {
                 other => panic!("a parked guest must not succeed: {other:?}"),
             }
             assert_eq!(
-                kiqi_plugin_host::abandoned_worker_count("conformance", &plugin_dir),
+                kiqi_host::wasm::abandoned_worker_count("conformance", &plugin_dir),
                 expected,
                 "the deadline must register its abandoned worker"
             );

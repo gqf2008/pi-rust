@@ -3,7 +3,7 @@
 //! A provider call is different in kind from a tool call: it streams for
 //! minutes, it needs its own HTTP channel, and it must never hold the mutex a
 //! tool call, an event dispatch or a shortcut lookup needs. [`ProviderHost`] is
-//! therefore **not** a [`crate::WasmPlugin`]: it loads the same component onto
+//! therefore **not** a [`crate::wasm::WasmPlugin`]: it loads the same component onto
 //! its own [`Engine`]/[`Store`] with a deny-all [`Grants`] and only the one
 //! `provider` profile, and it installs the credential-backed HTTP state for the
 //! duration of each `provider-api.request`.
@@ -14,7 +14,7 @@
 //!   * the store's grants are `Grants::default()`, so `fs`/`exec`/`net-http`/
 //!     `oauth` are all denied regardless of what the guest imports;
 //!   * `provider-http` is reachable only while a request call is on the stack
-//!     (the thread-local [`crate::CallKind::ProviderRequest`] plus the
+//!     (the thread-local [`crate::wasm::CallKind::ProviderRequest`] plus the
 //!     grant-backed call state);
 //!   * each call runs on a fresh thread with an epoch deadline, and the caller
 //!     also waits with a wall-clock timeout, so a spinning guest cannot pin the
@@ -26,18 +26,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
-use kiqi_plugin::grants::{Grants, ProviderModel, ProviderProfile};
-use kiqi_plugin::{CancelProbe, HostCaps, Log, LogLevel, PluginError};
+use crate::grants::{Grants, ProviderModel, ProviderProfile};
+use crate::{CancelProbe, HostCaps, Log, LogLevel, PluginError};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::WasiCtxBuilder;
 
-use crate::kiqi::plugin::types::{
+use crate::wasm::kiqi::plugin::types::{
     DeltaKind as WitDeltaKind, DeltaPhase as WitDeltaPhase, ProviderDelta as WitDelta,
     ProviderSpec as WitProviderSpec,
 };
-use crate::provider_http::{ProviderCallState, ProviderHttpTable, ProviderHttpTransport};
-use crate::{CallKind, HostState, World};
+use crate::wasm::provider_http::{ProviderCallState, ProviderHttpTable, ProviderHttpTransport};
+use crate::wasm::{CallKind, HostState, World};
 
 /// Which part of the response a delta belongs to (host-side mirror of the WIT
 /// enum, so callers do not depend on the generated bindings).
@@ -451,14 +451,14 @@ impl ProviderHost {
         }
         let plugin_dir = wasm.parent().unwrap_or_else(|| Path::new("."));
         refuse_when_abandoned_workers_overflow(&id, plugin_dir)?;
-        let ticker = crate::render_ticker().ok_or_else(|| {
+        let ticker = crate::wasm::render_ticker().ok_or_else(|| {
             PluginError::Failed(format!("{id}: provider epoch ticker is unavailable"))
         })?;
 
-        let mut config = crate::wasmtime_config(&crate::Options {
-            fuel: Some(options.fuel.unwrap_or(crate::DISCOVERY_FUEL)),
+        let mut config = crate::wasm::wasmtime_config(&crate::wasm::Options {
+            fuel: Some(options.fuel.unwrap_or(crate::wasm::DISCOVERY_FUEL)),
             max_memory_bytes: options.max_memory_bytes,
-            ..crate::Options::default()
+            ..crate::wasm::Options::default()
         });
         config.epoch_interruption(true);
         let engine = Arc::new(
@@ -479,7 +479,7 @@ impl ProviderHost {
             .memory_size(
                 options
                     .max_memory_bytes
-                    .unwrap_or(crate::DEFAULT_MAX_MEMORY_BYTES),
+                    .unwrap_or(crate::wasm::DEFAULT_MAX_MEMORY_BYTES),
             )
             .build();
         let state = HostState {
@@ -498,14 +498,14 @@ impl ProviderHost {
             procs: HashMap::new(),
             next_proc: 1,
             limits,
-            oauth: crate::OAuthState::default(),
+            oauth: crate::wasm::OAuthState::default(),
             provider_http: ProviderHttpTable::default(),
             provider_call: None,
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|state| &mut state.limits);
         let (store, guest) =
-            crate::instantiate_bounded(&id, "provider", store, component.clone(), linker)?;
+            crate::wasm::instantiate_bounded(&id, "provider", store, component.clone(), linker)?;
 
         Ok(Some(Self {
             id,
@@ -514,7 +514,7 @@ impl ProviderHost {
             timeout: std::time::Duration::from_secs(
                 profile
                     .timeout_seconds
-                    .clamp(1, kiqi_plugin::grants::PROVIDER_TIMEOUT_MAX_SECONDS),
+                    .clamp(1, crate::grants::PROVIDER_TIMEOUT_MAX_SECONDS),
             ),
             fuel: options.fuel.unwrap_or(u64::MAX),
             profile,
@@ -522,7 +522,7 @@ impl ProviderHost {
             agent_root: options.agent_root,
             transport: options
                 .transport
-                .unwrap_or_else(|| Arc::new(crate::provider_http::ReqwestTransport)),
+                .unwrap_or_else(|| Arc::new(crate::wasm::provider_http::ReqwestTransport)),
             inner: Mutex::new(Some(ProviderInner { store, guest })),
             disabled: AtomicBool::new(false),
         }))
@@ -562,7 +562,8 @@ impl ProviderHost {
             .spawn(move || {
                 inner.store.data_mut().provider_http.reap();
                 // Bound the metadata call too: `list-providers` is guest code.
-                let ticks = (crate::DISCOVERY_WAIT.as_millis() / crate::RENDER_TICK_MS as u128)
+                let ticks = (crate::wasm::DISCOVERY_WAIT.as_millis()
+                    / crate::wasm::RENDER_TICK_MS as u128)
                     .max(1) as u64;
                 inner.store.set_epoch_deadline(ticks);
                 let caps = HostCaps {
@@ -573,12 +574,13 @@ impl ProviderHost {
                     cancel: None,
                     log: &PROVIDER_LOG,
                 };
-                let _context = crate::install_context_kind(None, &caps, CallKind::Metadata, None);
+                let _context =
+                    crate::wasm::install_context_kind(None, &caps, CallKind::Metadata, None);
                 let outcome = inner
                     .guest
                     .kiqi_plugin_provider_api()
                     .call_list_providers(&mut inner.store);
-                crate::clear_context();
+                crate::wasm::clear_context();
                 inner.store.data_mut().reap_call_scoped();
                 let _ = tx.send((outcome, inner));
             }) {
@@ -591,7 +593,7 @@ impl ProviderHost {
                 ));
             }
         };
-        match rx.recv_timeout(crate::DISCOVERY_WAIT) {
+        match rx.recv_timeout(crate::wasm::DISCOVERY_WAIT) {
             Ok((outcome, inner)) => {
                 *guard = Some(inner);
                 let specs = outcome
@@ -606,19 +608,19 @@ impl ProviderHost {
                 Err(format!(
                     "{}: list-providers did not finish within {}s",
                     self.id,
-                    crate::DISCOVERY_WAIT.as_secs()
+                    crate::wasm::DISCOVERY_WAIT.as_secs()
                 ))
             }
         }
     }
 
     fn narrow(&self, specs: Vec<WitProviderSpec>) -> Result<Vec<ProviderModel>, String> {
-        if specs.len() > crate::DISCOVERY_MAX_ENTRIES {
+        if specs.len() > crate::wasm::DISCOVERY_MAX_ENTRIES {
             return Err(format!(
                 "{}: list-providers returned {} entries (cap {})",
                 self.id,
                 specs.len(),
-                crate::DISCOVERY_MAX_ENTRIES
+                crate::wasm::DISCOVERY_MAX_ENTRIES
             ));
         }
         let Some(spec) = specs.into_iter().find(|spec| spec.provider_id == self.id) else {
@@ -688,14 +690,14 @@ impl ProviderHost {
                 self.id
             ));
         }
-        let credential = crate::provider_http::resolve_credential(
+        let credential = crate::wasm::provider_http::resolve_credential(
             &self.profile,
             &self.plugin_dir,
             self.agent_root.as_deref(),
         )
         .map_err(|error| match error {
-            crate::provider_http::ProviderHttpError::Denied(message)
-            | crate::provider_http::ProviderHttpError::Failed(message) => {
+            crate::wasm::provider_http::ProviderHttpError::Denied(message)
+            | crate::wasm::provider_http::ProviderHttpError::Failed(message) => {
                 format!("{}: {message}", self.id)
             }
         })?;
@@ -721,7 +723,7 @@ impl ProviderHost {
         let ticks = self
             .timeout
             .as_millis()
-            .div_ceil(crate::RENDER_TICK_MS as u128)
+            .div_ceil(crate::wasm::RENDER_TICK_MS as u128)
             .max(1) as u64;
         let request = request.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -743,7 +745,7 @@ impl ProviderHost {
                     cancel: cancel.as_deref(),
                     log: &PROVIDER_LOG,
                 };
-                let _context = crate::install_context_kind(
+                let _context = crate::wasm::install_context_kind(
                     None,
                     &caps,
                     CallKind::ProviderRequest,
@@ -753,7 +755,7 @@ impl ProviderHost {
                     .guest
                     .kiqi_plugin_provider_api()
                     .call_request(&mut inner.store, &request);
-                crate::clear_context();
+                crate::wasm::clear_context();
                 inner.store.data_mut().provider_call = None;
                 inner.store.data_mut().reap_call_scoped();
                 let overflowed = assembler.overflowed;
@@ -924,7 +926,7 @@ fn finalize_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiqi_plugin::grants::{
+    use crate::grants::{
         ProviderEndpoint, PROVIDER_MAX_HANDLES_DEFAULT, PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
     };
 
@@ -952,14 +954,23 @@ mod tests {
     fn emit_is_a_noop_without_a_call_or_outside_a_provider_call() {
         let mut assembler = DeltaAssembler::default();
         // No context at all.
-        crate::emit_provider_delta(delta(WitDeltaKind::Text, WitDeltaPhase::Start, 0, "x"));
+        crate::wasm::emit_provider_delta(delta(WitDeltaKind::Text, WitDeltaPhase::Start, 0, "x"));
         {
             // A tool call: the delta must be dropped, not assembled.
             let caps = caps();
-            let _context =
-                crate::install_context_kind(None, &caps, CallKind::Tool, Some(&mut assembler));
-            crate::emit_provider_delta(delta(WitDeltaKind::Text, WitDeltaPhase::Start, 0, "x"));
-            crate::clear_context();
+            let _context = crate::wasm::install_context_kind(
+                None,
+                &caps,
+                CallKind::Tool,
+                Some(&mut assembler),
+            );
+            crate::wasm::emit_provider_delta(delta(
+                WitDeltaKind::Text,
+                WitDeltaPhase::Start,
+                0,
+                "x",
+            ));
+            crate::wasm::clear_context();
         }
         assert!(assembler.finish().unwrap().is_empty());
     }
@@ -969,16 +980,31 @@ mod tests {
         let mut assembler = DeltaAssembler::default();
         {
             let caps = caps();
-            let _context = crate::install_context_kind(
+            let _context = crate::wasm::install_context_kind(
                 None,
                 &caps,
                 CallKind::ProviderRequest,
                 Some(&mut assembler),
             );
-            crate::emit_provider_delta(delta(WitDeltaKind::Text, WitDeltaPhase::Start, 0, ""));
-            crate::emit_provider_delta(delta(WitDeltaKind::Text, WitDeltaPhase::Delta, 0, "Hello"));
-            crate::emit_provider_delta(delta(WitDeltaKind::Text, WitDeltaPhase::End, 0, " world"));
-            crate::clear_context();
+            crate::wasm::emit_provider_delta(delta(
+                WitDeltaKind::Text,
+                WitDeltaPhase::Start,
+                0,
+                "",
+            ));
+            crate::wasm::emit_provider_delta(delta(
+                WitDeltaKind::Text,
+                WitDeltaPhase::Delta,
+                0,
+                "Hello",
+            ));
+            crate::wasm::emit_provider_delta(delta(
+                WitDeltaKind::Text,
+                WitDeltaPhase::End,
+                0,
+                " world",
+            ));
+            crate::wasm::clear_context();
         }
         let segments = assembler.finish().unwrap();
         assert_eq!(segments.len(), 1);

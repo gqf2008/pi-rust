@@ -1356,7 +1356,7 @@ mod tests {
     fn dialog_factory(
         text: &'static str,
         tokens_per_second: f64,
-        mailbox: kiqi_extensions::UiDialogMailbox,
+        mailbox: kiqi_host::UiDialogMailbox,
     ) -> SessionFactory {
         Arc::new(
             move |_cwd, _params: sessions::SessionParams, _request: sessions::SessionRequest| {
@@ -1387,7 +1387,7 @@ mod tests {
 
     /// Open a dialog through the plugin envelope (`op=open`), exactly as the
     /// runtime action would.
-    fn open_dialog(mailbox: &kiqi_extensions::UiDialogMailbox, request_id: &str) {
+    fn open_dialog(mailbox: &kiqi_host::UiDialogMailbox, request_id: &str) {
         mailbox
             .handle(serde_json::json!({
                 "op": "open", "requestId": request_id, "toolCallId": "call-1", "ui": permission_ui(),
@@ -1399,7 +1399,7 @@ mod tests {
     /// a terminal state (`poll` reclaims terminal states, mirroring the
     /// plugin's own loop).
     async fn wait_for_terminal(
-        mailbox: &kiqi_extensions::UiDialogMailbox,
+        mailbox: &kiqi_host::UiDialogMailbox,
         request_id: &str,
         deadline_ms: u64,
     ) -> serde_json::Value {
@@ -3022,7 +3022,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn permission_round_trip_answers_the_plugin_and_the_turn_continues() {
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mailbox = kiqi_extensions::UiDialogMailbox::new();
+        let mailbox = kiqi_host::UiDialogMailbox::new();
         let (hook, mut requests_rx) = dialog_hook(vec![Decision::Answer(selected("1"))]);
         let result = run_client_hooked(
             dialog_factory("after the dialog", 1000.0, mailbox.clone()),
@@ -3072,7 +3072,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn question_purpose_is_cancelled_and_never_relabeled() {
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mailbox = kiqi_extensions::UiDialogMailbox::new();
+        let mailbox = kiqi_host::UiDialogMailbox::new();
         let (hook, mut requests_rx) = dialog_hook(vec![]);
         let result = run_client_hooked(
             dialog_factory("ok", 1000.0, mailbox.clone()),
@@ -3119,7 +3119,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn unknown_option_id_and_client_cancel_are_treated_as_cancelled() {
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mailbox = kiqi_extensions::UiDialogMailbox::new();
+        let mailbox = kiqi_host::UiDialogMailbox::new();
         let (hook, mut requests_rx) = dialog_hook(vec![
             Decision::Answer(selected("999")),
             Decision::Answer(RequestPermissionOutcome::Cancelled),
@@ -3153,7 +3153,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn session_cancel_releases_a_never_answered_permission() {
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mailbox = kiqi_extensions::UiDialogMailbox::new();
+        let mailbox = kiqi_host::UiDialogMailbox::new();
         // The client stalls far longer than the cancel needs: if the poll
         // unblocked only via a client answer, the deadline below would fire.
         let (hook, mut requests_rx) = dialog_hook(vec![Decision::Stall(Duration::from_secs(2))]);
@@ -3203,7 +3203,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn session_cancel_tells_the_client_over_the_wire() {
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mailbox = kiqi_extensions::UiDialogMailbox::new();
+        let mailbox = kiqi_host::UiDialogMailbox::new();
         let told = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (hook, mut requests_rx) = dialog_hook(vec![Decision::AwaitPeerCancel {
             timeout: Duration::from_secs(5),
@@ -3262,7 +3262,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn eof_detaches_the_mailbox_and_cancels_pending_dialogs() {
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mailbox = kiqi_extensions::UiDialogMailbox::new();
+        let mailbox = kiqi_host::UiDialogMailbox::new();
         let (hook, mut requests_rx) = dialog_hook(vec![]);
         let release = hook.release.clone();
         let session_mailbox = mailbox.clone();
@@ -3293,7 +3293,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn closed_dialog_does_not_block_prompt_nor_leave_a_pending_request() {
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mailbox = kiqi_extensions::UiDialogMailbox::new();
+        let mailbox = kiqi_host::UiDialogMailbox::new();
         let (hook, mut requests_rx) = dialog_hook(vec![]);
         let release = hook.release.clone();
         let result = run_client_hooked(
@@ -3330,7 +3330,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn late_answer_to_a_closed_dialog_cannot_answer_the_next_dialog() {
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mailbox = kiqi_extensions::UiDialogMailbox::new();
+        let mailbox = kiqi_host::UiDialogMailbox::new();
         let (hook, mut requests_rx) = dialog_hook(vec![
             Decision::Answer(selected("0")),
             Decision::Answer(selected("1")),
@@ -3370,7 +3370,7 @@ mod tests {
         let tmp = tempdir("load-dialogs");
         let fixture_id = write_fixture_session(&tmp).await;
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mailbox = kiqi_extensions::UiDialogMailbox::new();
+        let mailbox = kiqi_host::UiDialogMailbox::new();
         let (hook, mut requests_rx) = dialog_hook(vec![Decision::Answer(selected("1"))]);
         let factory_mailbox = mailbox.clone();
         let factory_cwd = tmp.clone();

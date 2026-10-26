@@ -136,7 +136,7 @@ impl ActiveDialog {
 }
 
 pub(super) struct ShellDialogs {
-    pending: VecDeque<kiqi_extensions::UiDialogRequest>,
+    pending: VecDeque<kiqi_host::UiDialogRequest>,
     active: Option<ActiveDialog>,
     actions: mpsc::UnboundedSender<DialogAction>,
     dirty: bool,
@@ -156,7 +156,7 @@ impl ShellDialogs {
         self.active.is_some()
     }
 
-    pub(super) fn push(&mut self, request: kiqi_extensions::UiDialogRequest) {
+    pub(super) fn push(&mut self, request: kiqi_host::UiDialogRequest) {
         if self
             .active
             .as_ref()
@@ -299,8 +299,8 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
     use kiqi_tui::Component;
 
-    fn request(id: &str, ui: Value) -> kiqi_extensions::UiDialogRequest {
-        kiqi_extensions::UiDialogRequest {
+    fn request(id: &str, ui: Value) -> kiqi_host::UiDialogRequest {
+        kiqi_host::UiDialogRequest {
             request_id: id.into(),
             tool_call_id: Some(format!("call-{id}")),
             raw: ui.clone(),

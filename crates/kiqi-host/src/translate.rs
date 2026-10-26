@@ -12,10 +12,10 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
+use crate::EventTag;
 use crate::{StablePluginEvent, StbString};
 use futures::future::BoxFuture;
 use kiqi_agent::events::{AgentEmitter, AgentEvent};
-use kiqi_plugin::EventTag;
 use serde_json::Value;
 
 use crate::host_free_string;
@@ -689,7 +689,7 @@ pub fn dispatch_data_event_claiming(
 /// exceeds its budget is logged + skipped (it keeps running on its blocking
 /// thread, but no longer gates startup/shutdown).
 pub fn lifecycle_timeout_for(tag: EventTag) -> std::time::Duration {
-    use kiqi_plugin::EventTag as T;
+    use crate::EventTag as T;
     match tag {
         T::BeforeTuiStart => std::time::Duration::from_secs(5),
         T::SessionShutdown => std::time::Duration::from_secs(15),
@@ -949,7 +949,7 @@ impl AgentEmitter for TeeEmitter {
 /// host's `free_string`. Called by [`ExtensionEmitter::dispatch`] after the
 /// fan-out completes. Handlers MUST NOT free event strings (host owns cleanup).
 fn free_dispatched_event(event: &StablePluginEvent) {
-    use kiqi_plugin::EventTag as T;
+    use crate::EventTag as T;
     match event.tag {
         T::MessageStart | T::MessageUpdate | T::MessageEnd => {
             // SAFETY: tag matches the message variant.
@@ -1024,10 +1024,10 @@ fn free_dispatched_event(event: &StablePluginEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EventTag;
     use kiqi_agent::message::AgentMessage;
     use kiqi_agent::types::AgentToolResult;
     use kiqi_ai::types::{AssistantMessage, AssistantMessageEvent, Usage};
-    use kiqi_plugin::EventTag;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 

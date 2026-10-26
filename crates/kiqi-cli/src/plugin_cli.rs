@@ -1,7 +1,7 @@
 //! `ki plugin` — inspect and edit the user's per-plugin capability grants.
 //!
 //! The grant store is the user's authorization (see
-//! [`kiqi_plugin::grants`]); the host enforces it and this command is how the
+//! [`kiqi_host::grants`]); the host enforces it and this command is how the
 //! user sets it. Nothing here is wasm-specific: the same files govern a wasm
 //! plugin's `HostCaps`.
 
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use kiqi_plugin::grants::{
+use kiqi_host::grants::{
     agent_dir, grants_path, installed_plugins, plugin_dir_at, ExecCwd, GrantOptions, Grants,
     HeadersMode, MessagesMode, OAuthFlow, OAuthGrant, OAuthProviderProfile, ObserveMode,
     ProviderEndpoint, ProviderGrant, ProviderModel, ProviderProfile, ProviderRequestGrant,
@@ -100,7 +100,7 @@ fn show(id: Option<&str>) -> i32 {
 /// Print the component's recorded digest and whether the file still matches.
 /// Compiled-in plugins have no `plugin.wasm`, so nothing is printed for them.
 fn print_digest(id: &str) {
-    let Some(dir) = kiqi_plugin::grants::plugin_dir(id) else {
+    let Some(dir) = kiqi_host::grants::plugin_dir(id) else {
         return;
     };
     let wasm = dir.join("plugin.wasm");
@@ -415,7 +415,7 @@ fn print_declared(id: &str) {
 
 /// Render the surfaces a plugin declares. Split from the printing so it can be
 /// asserted on.
-fn declared_surfaces(plugin: &dyn kiqi_plugin::Plugin) -> String {
+fn declared_surfaces(plugin: &dyn kiqi_host::Extension) -> String {
     let mut out = String::new();
     let mut section = |label: &str, items: Vec<String>| {
         if items.is_empty() {
@@ -481,7 +481,7 @@ fn validate_id(id: &str) -> Result<(), String> {
         // The uninstall marker is reserved: the loader skips any directory
         // carrying it, so an id that contained it would install a plugin that
         // can never load (the two ends must agree).
-        && !kiqi_plugin::grants::is_uninstalled_dir_name(id)
+        && !kiqi_host::grants::is_uninstalled_dir_name(id)
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'));
@@ -503,7 +503,7 @@ fn validate_id(id: &str) -> Result<(), String> {
 /// build fail to compile, so both entry points go through these shims.
 #[cfg(feature = "plugin-wasm")]
 fn declared_capabilities(wasm: &Path) -> Result<Vec<String>, String> {
-    kiqi_plugin_host::declared_capabilities(wasm)
+    kiqi_host::wasm::declared_capabilities(wasm)
 }
 
 #[cfg(not(feature = "plugin-wasm"))]
@@ -530,7 +530,7 @@ fn declared_capabilities_in(wasm: &Path, package_dir: &Path) -> Result<Vec<Strin
 
 #[cfg(feature = "plugin-wasm")]
 fn capability_is_enforced(name: &str) -> bool {
-    kiqi_plugin_host::capability_is_enforced(name)
+    kiqi_host::wasm::capability_is_enforced(name)
 }
 
 #[cfg(not(feature = "plugin-wasm"))]
@@ -750,9 +750,9 @@ fn build_provider(target: &Target, root: &Path) -> Result<ProviderGrant, String>
             timeout_seconds: target
                 .options
                 .timeout_seconds
-                .unwrap_or(kiqi_plugin::grants::PROVIDER_TIMEOUT_DEFAULT_SECONDS),
-            max_response_bytes: kiqi_plugin::grants::PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
-            max_handles: kiqi_plugin::grants::PROVIDER_MAX_HANDLES_DEFAULT,
+                .unwrap_or(kiqi_host::grants::PROVIDER_TIMEOUT_DEFAULT_SECONDS),
+            max_response_bytes: kiqi_host::grants::PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
+            max_handles: kiqi_host::grants::PROVIDER_MAX_HANDLES_DEFAULT,
         }],
     })
 }
@@ -877,7 +877,7 @@ fn build_provider_request(target: &Target) -> Result<ProviderRequestGrant, Strin
         patch: flags.patch,
         patch_timeout_ms: flags
             .patch_timeout_ms
-            .unwrap_or(kiqi_plugin::grants::PROVIDER_REQUEST_PATCH_TIMEOUT_MS_DEFAULT),
+            .unwrap_or(kiqi_host::grants::PROVIDER_REQUEST_PATCH_TIMEOUT_MS_DEFAULT),
     })
 }
 
@@ -885,9 +885,9 @@ fn build_provider_request(target: &Target) -> Result<ProviderRequestGrant, Strin
 /// scope/budget: grant REPLACES the whole policy, so an unstated `--cwd` /
 /// `--timeout` reverts to the defaults — visible beats silent.
 fn exec_reset_note(
-    old: &kiqi_plugin::grants::ExecGrant,
+    old: &kiqi_host::grants::ExecGrant,
     options: &GrantOptions,
-    new: &kiqi_plugin::grants::ExecGrant,
+    new: &kiqi_host::grants::ExecGrant,
 ) -> Option<String> {
     let reset = (old.cwd != new.cwd && options.cwd.is_none())
         || (old.timeout_seconds != new.timeout_seconds && options.timeout_seconds.is_none());
@@ -979,13 +979,13 @@ fn revoke_oauth_credentials(
     root: &Path,
     install_id: &str,
     grant: Option<&OAuthGrant>,
-    transport: Option<&dyn kiqi_plugin_host::OAuthTransport>,
+    transport: Option<&dyn kiqi_host::wasm::OAuthTransport>,
 ) -> OAuthRevocation {
     let default;
     let transport = match transport {
         Some(transport) => transport,
         None => {
-            default = kiqi_plugin_host::default_transport();
+            default = kiqi_host::wasm::default_transport();
             &*default
         }
     };
@@ -998,7 +998,7 @@ fn revoke_oauth_credentials_with(
     root: &Path,
     install_id: &str,
     grant: Option<&OAuthGrant>,
-    transport: &dyn kiqi_plugin_host::OAuthTransport,
+    transport: &dyn kiqi_host::wasm::OAuthTransport,
 ) -> OAuthRevocation {
     let mut report = OAuthRevocation::default();
     let Some(grant) = grant else {
@@ -1012,7 +1012,7 @@ fn revoke_oauth_credentials_with(
                 refresh,
                 expires,
                 profile_fingerprint,
-            })) => Some(kiqi_plugin_host::StoredOAuthToken {
+            })) => Some(kiqi_host::wasm::StoredOAuthToken {
                 access,
                 refresh,
                 expires,
@@ -1028,9 +1028,9 @@ fn revoke_oauth_credentials_with(
         };
         if let Some(token) = &stored {
             if profile.revocation_endpoint.is_some() {
-                let mut budget = kiqi_plugin_host::OAuthRequestBudget::for_grant(grant);
+                let mut budget = kiqi_host::wasm::OAuthRequestBudget::for_grant(grant);
                 if let Err(error) =
-                    kiqi_plugin_host::revoke_stored_token(profile, token, &mut budget, transport)
+                    kiqi_host::wasm::revoke_stored_token(profile, token, &mut budget, transport)
                 {
                     report
                         .failures
@@ -1161,9 +1161,9 @@ struct Target {
 /// so the fallback only shapes the message).
 fn timeout_max_for(capability: &str) -> u64 {
     if capability == "proc" {
-        kiqi_plugin::grants::PROC_TIMEOUT_MAX_SECONDS
+        kiqi_host::grants::PROC_TIMEOUT_MAX_SECONDS
     } else {
-        kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS
+        kiqi_host::grants::EXEC_TIMEOUT_MAX_SECONDS
     }
 }
 
@@ -1885,12 +1885,12 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
         let max = declared
             .iter()
             .filter_map(|cap| match cap.as_str() {
-                "exec" => Some(kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS),
-                "proc" => Some(kiqi_plugin::grants::PROC_TIMEOUT_MAX_SECONDS),
+                "exec" => Some(kiqi_host::grants::EXEC_TIMEOUT_MAX_SECONDS),
+                "proc" => Some(kiqi_host::grants::PROC_TIMEOUT_MAX_SECONDS),
                 _ => None,
             })
             .min()
-            .unwrap_or(kiqi_plugin::grants::EXEC_TIMEOUT_MAX_SECONDS);
+            .unwrap_or(kiqi_host::grants::EXEC_TIMEOUT_MAX_SECONDS);
         if seconds > max {
             eprintln!("error: --timeout must be 1..={max} seconds, got {seconds}");
             return 2;
@@ -1939,7 +1939,7 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
         .iter()
         .any(|cap| cap == "oauth" || cap == "provider")
     {
-        let discovery = kiqi_plugin_host::discover_providers(&target);
+        let discovery = kiqi_host::wasm::discover_providers(&target);
         for diagnostic in &discovery.diagnostics {
             eprintln!("note: {diagnostic}");
         }
@@ -2250,7 +2250,7 @@ mod tests {
     /// actually unstated.
     #[test]
     fn regrant_reset_is_announced() {
-        use kiqi_plugin::grants::ExecGrant;
+        use kiqi_host::grants::ExecGrant;
 
         let old = ExecGrant {
             commands: vec!["cargo".to_string()],
@@ -2412,7 +2412,7 @@ mod tests {
         assert!(grants.allows_socket_host("127.0.0.1"));
         assert!(grants.allows_command("echo"));
         let exec = grants.exec.as_ref().expect("exec was granted");
-        assert_eq!(exec.cwd, kiqi_plugin::grants::ExecCwd::Project);
+        assert_eq!(exec.cwd, kiqi_host::grants::ExecCwd::Project);
         assert_eq!(exec.timeout_seconds, 120);
 
         let code = uninstall_into(&["conformance".into()], Some(root));
@@ -2635,10 +2635,10 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let wasm = build_guest(&root.join("plugins/wasm/kiqi-conformance-guest"))
             .expect("build the conformance guest");
-        let plugin = kiqi_plugin_host::WasmPlugin::load_with_grants(
+        let plugin = kiqi_host::wasm::WasmPlugin::load_with_grants(
             "conformance",
             &wasm,
-            kiqi_plugin::grants::Grants::default(),
+            kiqi_host::grants::Grants::default(),
         )
         .expect("load the conformance guest");
 
@@ -2959,8 +2959,8 @@ mod tests {
                     credential: Some("pc-0123456789abcdef".to_string()),
                     auth: None,
                     timeout_seconds: 600,
-                    max_response_bytes: kiqi_plugin::grants::PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
-                    max_handles: kiqi_plugin::grants::PROVIDER_MAX_HANDLES_DEFAULT,
+                    max_response_bytes: kiqi_host::grants::PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
+                    max_handles: kiqi_host::grants::PROVIDER_MAX_HANDLES_DEFAULT,
                 }],
             })
             .unwrap();
@@ -3092,11 +3092,11 @@ mod tests {
         // declared ones: the manifest is not the authorization.
         assert_eq!(
             resources.max_items,
-            kiqi_plugin::grants::RESOURCES_MAX_ITEMS_DEFAULT
+            kiqi_host::grants::RESOURCES_MAX_ITEMS_DEFAULT
         );
         assert_eq!(
             resources.max_bytes,
-            kiqi_plugin::grants::RESOURCES_MAX_BYTES_DEFAULT
+            kiqi_host::grants::RESOURCES_MAX_BYTES_DEFAULT
         );
 
         let resolved = crate::plugins::resolve_package_resources(&package, resources)
@@ -3201,17 +3201,17 @@ mod tests {
                     .find(|profile| profile.id == provider_id)
             })
             .expect("granted OAuth profile");
-        kiqi_plugin_host::oauth_profile_fingerprint(profile).unwrap()
+        kiqi_host::wasm::oauth_profile_fingerprint(profile).unwrap()
     }
 
     #[cfg(feature = "plugin-wasm")]
-    impl kiqi_plugin_host::OAuthTransport for FailingTransport {
+    impl kiqi_host::wasm::OAuthTransport for FailingTransport {
         fn post_form(
             &self,
             _url: &str,
             _form: &[(String, String)],
             _timeout: std::time::Duration,
-        ) -> Result<kiqi_plugin_host::HttpResponse, String> {
+        ) -> Result<kiqi_host::wasm::HttpResponse, String> {
             Err("connection refused".to_string())
         }
     }

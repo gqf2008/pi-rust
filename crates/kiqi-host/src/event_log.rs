@@ -158,7 +158,7 @@ fn global() -> &'static RwLock<Option<EventLogger>> {
 /// Record one handler invocation on the global logger. No-op when logging is
 /// disabled (the common case).
 pub fn log_handler_invocation(
-    tag: kiqi_plugin::EventTag,
+    tag: crate::EventTag,
     plugin: &str,
     result: &'static str,
     duration_ms: u64,

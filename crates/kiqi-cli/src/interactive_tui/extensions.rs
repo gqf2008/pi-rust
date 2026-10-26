@@ -49,10 +49,10 @@ pub(super) fn invoke_extension_command(
     let input = serde_json::json!({ "args": args, "command": name });
     let input = serde_json::to_string(&input).ok()?;
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut out = kiqi_extensions::StbString::empty();
+        let mut out = kiqi_host::StbString::empty();
         let rc = (command.handler)(
-            kiqi_extensions::StbStringRef::from_str(&input),
-            &mut out as *mut kiqi_extensions::StbString,
+            kiqi_host::StbStringRef::from_str(&input),
+            &mut out as *mut kiqi_host::StbString,
             command.user_data,
         );
         let text = if rc == 0 {
@@ -60,7 +60,7 @@ pub(super) fn invoke_extension_command(
         } else {
             None
         };
-        kiqi_extensions::host_free_string(out);
+        kiqi_host::host_free_string(out);
         text
     }))
     .ok()
@@ -498,16 +498,16 @@ const ASK_USER_FREEFORM: &str = "\u{0}ask-user-freeform";
 
 /// One in-flight `ask_user` request being shown in the TUI. Unlike
 /// [`JsDialogBridge`], the plugin side is a synchronous `poll` loop that reads
-/// answers back through the shared [`kiqi_extensions::UiDialogMailbox`], so this
+/// answers back through the shared [`kiqi_host::UiDialogMailbox`], so this
 /// bridge only tracks which request id currently occupies the input slot.
 #[derive(Clone)]
 pub(super) struct AskUserBridge {
-    pub(super) mailbox: kiqi_extensions::UiDialogMailbox,
+    pub(super) mailbox: kiqi_host::UiDialogMailbox,
     pub(super) visible: Arc<Mutex<Option<String>>>,
 }
 
 impl AskUserBridge {
-    pub(super) fn new(mailbox: kiqi_extensions::UiDialogMailbox) -> Self {
+    pub(super) fn new(mailbox: kiqi_host::UiDialogMailbox) -> Self {
         Self {
             mailbox,
             visible: Arc::new(Mutex::new(None)),
@@ -522,7 +522,7 @@ impl AskUserBridge {
     /// Take the next pending request and mark it visible. Only the single key
     /// loop calls this while no other dialog is open, so the visible-id
     /// bookkeeping is race-free without a separate lock.
-    pub(super) fn take_pending(&self) -> Option<kiqi_extensions::UiDialogRequest> {
+    pub(super) fn take_pending(&self) -> Option<kiqi_host::UiDialogRequest> {
         let mut visible = self.visible.lock().ok()?;
         if visible.is_some() {
             return None;
@@ -636,7 +636,7 @@ pub(super) fn ask_user_options(value: &serde_json::Value) -> Vec<(String, Option
     options
 }
 
-pub(crate) fn parse_ask_user_prompt(request: &kiqi_extensions::UiDialogRequest) -> AskUserPrompt {
+pub(crate) fn parse_ask_user_prompt(request: &kiqi_host::UiDialogRequest) -> AskUserPrompt {
     let ui = &request.ui;
     let kind = ui
         .get("kind")
@@ -728,7 +728,7 @@ pub(crate) fn ask_user_frame(
 pub(super) fn open_ask_user_dialog(
     ctx: &CommandContext,
     bridge: AskUserBridge,
-    request: kiqi_extensions::UiDialogRequest,
+    request: kiqi_host::UiDialogRequest,
 ) {
     let prompt = parse_ask_user_prompt(&request);
     if prompt.kind == "input" || prompt.options.is_empty() {
@@ -741,7 +741,7 @@ pub(super) fn open_ask_user_dialog(
 pub(super) fn open_ask_user_selector(
     ctx: &CommandContext,
     bridge: AskUserBridge,
-    request: kiqi_extensions::UiDialogRequest,
+    request: kiqi_host::UiDialogRequest,
     prompt: AskUserPrompt,
 ) {
     let multi = prompt.allow_multiple && prompt.kind != "confirm";
@@ -863,7 +863,7 @@ pub(super) fn open_ask_user_selector(
 pub(super) fn open_ask_user_input(
     ctx: &CommandContext,
     bridge: AskUserBridge,
-    request: kiqi_extensions::UiDialogRequest,
+    request: kiqi_host::UiDialogRequest,
     prompt: AskUserPrompt,
 ) {
     let placeholder = prompt
