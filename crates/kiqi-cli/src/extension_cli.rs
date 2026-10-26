@@ -1527,30 +1527,50 @@ fn install(args: &[String]) -> i32 {
 /// `pub(crate)` so the wasm tests in [`crate::extensions`] build their fixtures the
 /// same way: a hard-coded `extensions/wasm/target/...` silently breaks on a
 /// machine whose cargo config points `build.target-dir` elsewhere.
-/// Serialises `build_guest` inside one test binary.
-///
-/// Several tests build the *same* guest (four do for `kiqi-conformance`), and
-/// they run concurrently under the default `--test-threads`. They share one
-/// `cargo --target-dir`, so while one `cargo build` rewrites the artifact another
-/// test can be told "already fresh" and open the file mid-write — observed as
-/// `failed to read from …/kiqi_conformance.wasm`. The same shape appears across
-/// processes when two `cargo test -p kiqi-cli` runs share a target dir.
-///
-/// The mutex makes the in-binary case deterministic; the retry below covers the
-/// cross-process window. Both keep the shared target dir, so `cargo`'s incremental
-/// cache still applies — a per-process `--target-dir` would rebuild every guest.
-static BUILD_GUEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 pub(crate) fn build_guest(dir: &Path) -> Result<PathBuf, String> {
-    // A poisoned lock means an earlier build panicked; that says nothing about the
-    // filesystem, so carry on rather than propagating the panic.
-    let _guard = BUILD_GUEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    build_guest_in_cache(dir, &guest_build_cache(None))
+}
+
+fn guest_build_cache(root: Option<&Path>) -> PathBuf {
+    root.map(Path::to_path_buf)
+        .or_else(agent_dir)
+        .map(|root| root.join("cache/guest-build"))
+        .unwrap_or_else(|| std::env::temp_dir().join("kiqi-guest-build"))
+}
+
+/// Build in a dedicated cache rather than the caller's `CARGO_TARGET_DIR`.
+///
+/// The canonical manifest path keys a persistent per-crate target directory, so
+/// incremental builds remain fast and no temporary products land in the source
+/// tree. A lock file beside that target serialises builders across processes;
+/// the lock stays held until the reported component has been copied to a unique
+/// snapshot. Snapshots are retained in the cache because returning only a path
+/// gives us no reliable point at which to clean one up, and keeping it prevents
+/// a later build from replacing an artifact an earlier caller is still reading.
+fn build_guest_in_cache(dir: &Path, cache: &Path) -> Result<PathBuf, String> {
     let manifest = dir.join("Cargo.toml");
     if !manifest.is_file() {
         return Err(format!("{} has no Cargo.toml", dir.display()));
     }
+    let canonical_manifest = manifest
+        .canonicalize()
+        .map_err(|error| format!("resolve {}: {error}", manifest.display()))?;
+    let key = sha256_hex(canonical_manifest.to_string_lossy().as_bytes());
+    let build_dir = cache.join(key);
+    let target_dir = build_dir.join("target");
+    std::fs::create_dir_all(&build_dir)
+        .map_err(|error| format!("create {}: {error}", build_dir.display()))?;
+    let lock_path = build_dir.join("build.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| format!("open {}: {error}", lock_path.display()))?;
+    fs2::FileExt::lock_exclusive(&lock_file)
+        .map_err(|error| format!("lock {}: {error}", lock_path.display()))?;
+
     let output = std::process::Command::new(env!("CARGO"))
         .args(["build", "--manifest-path"])
         .arg(&manifest)
@@ -1559,7 +1579,9 @@ pub(crate) fn build_guest(dir: &Path) -> Result<PathBuf, String> {
             "wasm32-wasip2",
             "--release",
             "--message-format=json",
+            "--target-dir",
         ])
+        .arg(&target_dir)
         .output()
         .map_err(|error| format!("run cargo for {}: {error}", dir.display()))?;
     if !output.status.success() {
@@ -1600,25 +1622,37 @@ pub(crate) fn build_guest(dir: &Path) -> Result<PathBuf, String> {
         )
     })?;
 
-    // Another process sharing this target dir may have been mid-write when cargo
-    // reported the artifact fresh, so the bytes on disk can be a truncated component.
-    // Checking the 4-byte module header (`\0asm`) catches that; a plain length check
-    // would not, because a half-written file is non-empty.
+    // A bad header means this build did not produce a readable component. Other
+    // builders cannot be writing it concurrently: they need the same lock.
     if !has_wasm_header(&artifact) {
-        let _ = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--manifest-path"])
-            .arg(&manifest)
-            .args(["--target", "wasm32-wasip2", "--release"])
-            .output();
+        return Err(format!(
+            "cargo reported an unreadable .wasm component: {}",
+            artifact.display()
+        ));
     }
-    Ok(artifact)
+    let file_name = artifact.file_name().ok_or_else(|| {
+        format!(
+            "cargo reported an invalid artifact path: {}",
+            artifact.display()
+        )
+    })?;
+    let snapshot_dir = build_dir
+        .join("artifacts")
+        .join(uuid::Uuid::new_v4().simple().to_string());
+    std::fs::create_dir_all(&snapshot_dir)
+        .map_err(|error| format!("create {}: {error}", snapshot_dir.display()))?;
+    let snapshot = snapshot_dir.join(file_name);
+    std::fs::copy(&artifact, &snapshot).map_err(|error| {
+        format!(
+            "copy {} to {}: {error}",
+            artifact.display(),
+            snapshot.display()
+        )
+    })?;
+    Ok(snapshot)
 }
 
 /// Whether `path` starts with the WebAssembly module magic (`\0asm`).
-///
-/// A component that is still being written by another process reads as empty or as a
-/// prefix, and loading it fails with a bare "failed to read"; this predicate lets
-/// `build_guest` tell "complete artifact" from "torn write".
 fn has_wasm_header(path: &Path) -> bool {
     use std::io::Read;
     let Ok(mut file) = std::fs::File::open(path) else {
@@ -1809,7 +1843,7 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
     // positional `.wasm` path is the alternative.
     let built;
     let wasm: &Path = match (&build_dir, &wasm) {
-        (Some(dir), _) => match build_guest(Path::new(dir)) {
+        (Some(dir), _) => match build_guest_in_cache(Path::new(dir), &guest_build_cache(root)) {
             Ok(path) => {
                 built = path;
                 &built
@@ -2486,6 +2520,55 @@ mod tests {
             moved,
             "rmmod moves the module aside rather than deleting it"
         );
+    }
+
+    /// Concurrent builders of one crate share only its locked, reusable cache.
+    /// Each caller receives a stable snapshot rather than the file a later build
+    /// could replace, and neither builder uses the source tree or outer target.
+    #[test]
+    fn concurrent_guest_builds_are_isolated_and_stable() {
+        let guest = tempfile::tempdir().unwrap();
+        std::fs::create_dir(guest.path().join("src")).unwrap();
+        std::fs::write(
+            guest.path().join("Cargo.toml"),
+            "[package]\nname = \"guest-build-race\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            guest.path().join("src/lib.rs"),
+            "pub fn answer() -> u32 { 42 }\n",
+        )
+        .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+
+        let mut builders = Vec::new();
+        for _ in 0..2 {
+            let guest = guest.path().to_path_buf();
+            let cache = cache.path().to_path_buf();
+            builders.push(std::thread::spawn(move || {
+                build_guest_in_cache(&guest, &cache)
+            }));
+        }
+        let first = builders.remove(0).join().unwrap().expect("first build");
+        let second = builders.remove(0).join().unwrap().expect("second build");
+
+        assert_ne!(first, second, "each caller owns its artifact snapshot");
+        assert_eq!(first.file_name(), second.file_name());
+        assert_eq!(
+            std::fs::read(&first).unwrap(),
+            std::fs::read(&second).unwrap()
+        );
+        for artifact in [&first, &second] {
+            assert!(artifact.starts_with(cache.path()));
+            assert!(has_wasm_header(artifact));
+        }
+        let entries: Vec<_> = std::fs::read_dir(cache.path())
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1, "both builders reuse one per-crate cache");
+        assert!(entries[0].path().join("target").is_dir());
+        assert!(entries[0].path().join("build.lock").is_file());
     }
 
     /// `--build <guest-dir>` compiles the guest and installs the component
