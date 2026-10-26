@@ -32,6 +32,11 @@ use serde_json::Value;
 
 pub mod dialogs;
 
+/// Largest accepted serialized provider patch (mirrors the wasm backend's
+/// `wasm::MAX_ENVELOPE_BYTES`; lives at the crate root so the dispatch spine and
+/// lean `ki` builds without the `wasm` feature can enforce it too).
+pub const PROVIDER_PATCH_MAX_ENVELOPE_BYTES: usize = 32 * 1024;
+
 /// Wasm (component model) extension backend — the only extension channel.
 #[cfg(feature = "wasm")]
 pub mod wasm;

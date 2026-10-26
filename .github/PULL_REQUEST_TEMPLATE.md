@@ -18,8 +18,9 @@ it works. Delete any section that does not apply.
 - [ ] `kiqi-harness`
 - [ ] `kiqi-tui`
 - [ ] `kiqi-cli`
-- [ ] `kiqi-extension`
-- [ ] `kiqi-extensions`
+- [ ] `kiqi-host` (extension contract + dispatch spine)
+- [ ] `kiqi-host::wasm` (wasm backend)
+- [ ] `kiqi-acp` / `kiqi-mcp`
 - [ ] docs / website / CI only
 
 ## Type of change

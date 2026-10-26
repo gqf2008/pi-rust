@@ -254,6 +254,7 @@ pub struct Registered {
 /// 把 extension-host 的 guest 失败诊断接进 ki 自己的运行时日志
 /// （`<agent_dir>/logs/ki.log`）。进程级一次：首次设置生效；之后任何
 /// WasmExtension guest 的 trap/失败都会出现在 ki 的诊断日志里。
+#[cfg(feature = "extension-wasm")]
 pub(crate) fn install_guest_error_sink() {
     kiqi_host::wasm::set_guest_error_sink(std::sync::Arc::new(
         |extension: &str, op: &str, error: &str| {
@@ -261,6 +262,11 @@ pub(crate) fn install_guest_error_sink() {
         },
     ));
 }
+
+/// Lean build (the `extension-wasm` feature off): there is no wasm backend, so
+/// there is no guest error sink to install.
+#[cfg(not(feature = "extension-wasm"))]
+pub(crate) fn install_guest_error_sink() {}
 
 pub fn load_all() -> Vec<Registered> {
     Vec::new()
@@ -612,10 +618,10 @@ pub(crate) fn dispatch_provider_gate(
         let size = serde_json::to_vec(value)
             .map(|bytes| bytes.len())
             .unwrap_or(0);
-        if size > kiqi_host::wasm::MAX_ENVELOPE_BYTES {
+        if size > kiqi_host::PROVIDER_PATCH_MAX_ENVELOPE_BYTES {
             tracing::warn!(
                 bytes = size,
-                cap = kiqi_host::wasm::MAX_ENVELOPE_BYTES,
+                cap = kiqi_host::PROVIDER_PATCH_MAX_ENVELOPE_BYTES,
                 "merged provider patch is over the envelope cap; request proceeds unpatched"
             );
             return None;

@@ -175,12 +175,12 @@ wasm-tools component wit extensions/kiqi-extension.wit
 ## 6. 测试与 CI
 
 ```bash
-cargo test -p kiqi-host --features wasm --lib --test e2e   # e2e + 单测
-cargo test -p kiqi-plan-mode                     # 6（在 extensions/wasm 工作区）
-cargo test -p kiqi-lens                                # 3
-cargo test -p kiqi-extension --lib                       # 7
-cargo test -p kiqi-cli --lib                           # 510
-cargo test -p kiqi-host --lib                          # 契约 + 派发脊柱
+cargo test -p kiqi-host --features wasm --lib --test e2e   # wasm e2e + 单测
+cargo test -p kiqi-host --lib                              # 契约 + 派发脊柱
+cargo test -p kiqi-cli --lib                               # CLI
+# guest 单测（宿主目标，需在 guest 工作区内）：
+(cd extensions/wasm && cargo test -p kiqi-plan-mode --locked)   # 6
+(cd extensions/wasm && cargo test -p kiqi-lens --locked)        # 3
 ```
 
 CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows installer）全绿。

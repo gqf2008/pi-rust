@@ -88,7 +88,14 @@ pub const EXEC_TIMEOUT_MAX_SECONDS: u64 = 300;
 #[serde(rename_all = "kebab-case")]
 pub enum ExecCwd {
     /// Inside `extensions/<id>/data/` — the default, and the same jail `fs` uses.
+    ///
+    /// **Deliberate legacy trace**: grant files written before the 2026-10-26
+    /// rename spell this as `"plugin-data"`. Without the alias serde rejects the
+    /// whole document, `load_for_at` falls back to empty grants, and the next
+    /// save would rewrite the file without every capability. The alias is
+    /// transient: the first save after upgrade rewrites the new spelling.
     #[default]
+    #[serde(alias = "plugin-data")]
     ExtensionData,
     /// The project directory the session runs in (the host process's working
     /// directory). Needed by diagnostic extensions that run `cargo`/`clippy`
@@ -1474,7 +1481,19 @@ impl Grants {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        let grants: Grants = serde_json::from_str(&text).unwrap_or_default();
+        // A file this build cannot parse must not silently become "no grants":
+        // the user would lose every capability with no diagnostic, and the next
+        // save would persist that. Say so loudly; the caller still fails closed.
+        let grants: Grants = match serde_json::from_str(&text) {
+            Ok(grants) => grants,
+            Err(error) => {
+                eprintln!(
+                    "warning: {} is unreadable ({error}); treating every capability as ungranted",
+                    path.display()
+                );
+                Self::default()
+            }
+        };
         // A hand-edited file must not buy policy the CLI would refuse, so the
         // same validation the constructors use runs here. An invalid policy is
         // treated as absent (that one capability is cleared, the rest of the

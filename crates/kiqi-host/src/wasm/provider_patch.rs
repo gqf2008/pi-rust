@@ -27,7 +27,7 @@ use serde_json::Value;
 
 /// Largest accepted serialized patch. A patch is a small override record, not a
 /// second request body.
-pub const MAX_ENVELOPE_BYTES: usize = 32 * 1024;
+pub const MAX_ENVELOPE_BYTES: usize = crate::PROVIDER_PATCH_MAX_ENVELOPE_BYTES;
 
 pub const MAX_HEADER_ENTRIES: usize = 32;
 pub const MAX_METADATA_ENTRIES: usize = 64;

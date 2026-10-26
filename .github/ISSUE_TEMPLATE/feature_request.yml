@@ -23,7 +23,7 @@ body:
         - kiqi-ai (providers, streaming)
         - kiqi-tools (read/write/edit/bash and friends)
         - kiqi-harness (sessions, persistence, compaction)
-        - kiqi-extension / kiqi-extensions (extensions)
+        - kiqi-host (extension contract / wasm backend)
         - Remote mode (--server / --connect)
         - Website or documentation
         - Not sure

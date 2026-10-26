@@ -22,7 +22,9 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   `$KI_AGENT_DIR/extensions/<id>/` and the component file is `extension.wasm`.
   The guest directories and packages drop their `-guest` suffix too
   (`extensions/wasm/kiqi-todo/`, crate `kiqi-todo`); the shared bindings crate
-  is `kiqi-wasm-bindings`.
+  is `kiqi-wasm-bindings`. Machine-readable values that carried the old word
+  changed with it — notably `ki auth check --json` now reports
+  `"source": "extension-oauth"`.
   No compatibility shims: installed guests must be re-installed with
   `ki insmod`. Notes in `docs/design/extension-abi.md` §6.48.
 - **The host-side crates are merged.** The three former host crates (contract,
