@@ -11,6 +11,26 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Removed
+
+- **The cdylib plugin channel is retired (breaking).** wasm guests
+  (`plugins/wasm/kiqi-*-guest`, `ki insmod`) are the only plugin channel now.
+  Gone: the `kiqi-plugin-sdk` crate (C ABI types), `examples/plugin-stub`, the
+  `libloading` loader inside `kiqi-extensions`, `ki dev` / `ki dev-local` (hot
+  reload), `ki install` / `ki uninstall` (crates.io cdylib extensions) and
+  `ki package link|unlink`. The native-package update checks went with them.
+  Anything declaring `#[repr(C)]` handler vtables no longer loads; port the
+  plugin to a wasm guest against `plugins/kiqi-plugin.wit`. `kiqi-extensions`
+  survives as the host-side dispatch spine (registry, `translate` funnels,
+  compiled/wasm sink, action mailboxes); its C-ABI bus types moved to
+  `kiqi-extensions::abi` and the shared contract constants live in
+  `kiqi-plugin`.
+- **`kiqi-acp` is a crate now.** The ACP server moved out of `kiqi-cli`
+  (`crates/kiqi-cli/src/acp/`) into `crates/kiqi-acp`; the host keeps the
+  assembly roots (`SessionFactory`, `session/load` pre-check) in
+  `crates/kiqi-cli/src/acp.rs` and injects them through `RunOptions`. The MCP
+  boundary glue moved to `kiqi-mcp::boundary` (shared by both).
+
 ### Added
 
 - **Session-scoped scheduled jobs.** `.ki/cron.json` in the session working directory can

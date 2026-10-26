@@ -12,10 +12,10 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
+use crate::{StablePluginEvent, StbString};
 use futures::future::BoxFuture;
 use kiqi_agent::events::{AgentEmitter, AgentEvent};
 use kiqi_plugin::EventTag;
-use kiqi_plugin_sdk::{StablePluginEvent, StbString};
 use serde_json::Value;
 
 use crate::host_free_string;
@@ -307,22 +307,12 @@ fn free_event_strings(_event: &StablePluginEvent) {
 /// `spawn_blocking` cross-FFI where recovery is unsafe.
 pub struct ExtensionEmitter {
     snapshot: Arc<RegistrySnapshot>,
-    /// Keeps the loaded cdylibs mapped for as long as this emitter (installed
-    /// into `AgentHarnessOptions.agent_emitter`) may dispatch to handler fn
-    /// pointers that live inside them. Cloned from the load session; the
-    /// libraries unload only when every holder (adapter + emitter) drops.
-    #[allow(dead_code)]
-    keepalive: Arc<crate::PluginKeepalive>,
 }
 
 impl ExtensionEmitter {
-    /// Build an emitter over a snapshot. The `keepalive` keeps the cdylibs that
-    /// own the snapshot's handler fn pointers mapped for the emitter's lifetime.
-    pub fn new(snapshot: Arc<RegistrySnapshot>, keepalive: Arc<crate::PluginKeepalive>) -> Self {
-        Self {
-            snapshot,
-            keepalive,
-        }
+    /// Build an emitter over a snapshot.
+    pub fn new(snapshot: Arc<RegistrySnapshot>) -> Self {
+        Self { snapshot }
     }
 
     /// Dispatch one stable event to all handlers for its tag. Each handler call
@@ -383,7 +373,7 @@ fn dispatch_native_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEve
             // `CLAIMED` from an ordinary observe dispatch is not an error — the
             // handler simply consumed the event. Only routing dispatchers act on
             // it (`dispatch_data_event_claiming`).
-            Ok(rc) if rc == kiqi_plugin_sdk::EVENT_HANDLER_CLAIMED => {
+            Ok(rc) if rc == crate::EVENT_HANDLER_CLAIMED => {
                 crate::event_log::log_handler_invocation(
                     event.tag,
                     &h.plugin,
@@ -554,12 +544,10 @@ async fn dispatch_tool_call_event_with_timeout(
         let id = tool_call_id.to_string();
         let name = tool_name.to_string();
         let payload = params.to_string();
-        let keepalive = session.keepalive();
         let started = std::time::Instant::now();
         // Capture the whole RegisteredHandler rather than its raw user_data.
-        // The callback's own keepalive also survives timeout/cancellation.
         let mut task = tokio::task::spawn_blocking(move || {
-            let _keepalive = keepalive;
+            let _ = &h;
             call_tool_call_handler(h, id, name, payload)
         });
         let outcome = tokio::select! {
@@ -577,8 +565,8 @@ async fn dispatch_tool_call_event_with_timeout(
         };
         let duration_ms = started.elapsed().as_millis() as u64;
         let (status, error) = match outcome {
-            Ok(Ok(Ok(rc))) if rc == kiqi_plugin_sdk::EVENT_HANDLER_CONTINUE => ("Continue", None),
-            Ok(Ok(Ok(rc))) if rc == kiqi_plugin_sdk::EVENT_HANDLER_ABORT => (
+            Ok(Ok(Ok(rc))) if rc == crate::EVENT_HANDLER_CONTINUE => ("Continue", None),
+            Ok(Ok(Ok(rc))) if rc == crate::EVENT_HANDLER_ABORT => (
                 "Abort",
                 Some(format!(
                     "extension `{plugin_name}` blocked tool `{tool_name}`"
@@ -684,7 +672,7 @@ pub fn dispatch_data_event_claiming(
         // and its user_data are safe to call from this thread.
         let outcome = catch_unwind(AssertUnwindSafe(|| (h.handler)(event, h.user_data)));
         match outcome {
-            Ok(rc) if rc == kiqi_plugin_sdk::EVENT_HANDLER_CLAIMED => claimed = true,
+            Ok(rc) if rc == crate::EVENT_HANDLER_CLAIMED => claimed = true,
             Ok(rc) if rc != 0 => {
                 tracing::warn!(tag = ?tag, rc, "extension event handler returned nonzero");
             }
@@ -815,7 +803,7 @@ pub async fn dispatch_lifecycle_event(
         .await;
         let duration_ms = started.elapsed().as_millis() as u64;
         match outcome {
-            Ok(Ok(Ok(rc))) if rc == kiqi_plugin_sdk::EVENT_HANDLER_ABORT => {
+            Ok(Ok(Ok(rc))) if rc == crate::EVENT_HANDLER_ABORT => {
                 tracing::warn!(
                     tag = ?tag,
                     plugin = %plugin_name,
@@ -1223,7 +1211,7 @@ mod tests {
             std::ptr::null_mut(),
         );
         let snap = Arc::new(reg.snapshot());
-        let emitter = ExtensionEmitter::new(snap, crate::loader::PluginKeepalive::empty());
+        let emitter = ExtensionEmitter::new(snap);
 
         let am = AgentMessage::Assistant(Box::new(AssistantMessage {
             role: kiqi_ai::types::AssistantRole,
@@ -1290,7 +1278,7 @@ mod tests {
             std::ptr::null_mut(),
         );
         let snap = Arc::new(reg.snapshot());
-        let ext = ExtensionEmitter::new(snap, crate::loader::PluginKeepalive::empty());
+        let ext = ExtensionEmitter::new(snap);
 
         let tee = TeeEmitter::new(vec![
             Arc::new(collector_a),
@@ -1380,17 +1368,17 @@ mod tests {
 
     /// A lifecycle handler that vetoes (returns the SDK abort code).
     extern "C" fn aborting_handler(_ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
-        kiqi_plugin_sdk::EVENT_HANDLER_ABORT
+        crate::EVENT_HANDLER_ABORT
     }
 
     /// A lifecycle handler that returns success (`0`) — no veto.
     extern "C" fn continue_handler(_ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
-        kiqi_plugin_sdk::EVENT_HANDLER_CONTINUE
+        crate::EVENT_HANDLER_CONTINUE
     }
 
     /// A lifecycle handler that returns a generic handled error — no veto.
     extern "C" fn error_handler(_ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
-        kiqi_plugin_sdk::EVENT_HANDLER_ERROR
+        crate::EVENT_HANDLER_ERROR
     }
 
     #[test]
@@ -1452,12 +1440,7 @@ mod tests {
     }
 
     fn tool_call_session(reg: &crate::ExtensionRegistry) -> crate::ExtensionSession {
-        crate::ExtensionSession::from_parts(
-            Arc::new(reg.snapshot()),
-            crate::PluginKeepalive::empty(),
-            Vec::new(),
-            None,
-        )
+        crate::ExtensionSession::from_parts(Arc::new(reg.snapshot()), None)
     }
 
     #[tokio::test]
@@ -1519,7 +1502,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         state.finished.notify_one();
-        kiqi_plugin_sdk::EVENT_HANDLER_ABORT
+        crate::EVENT_HANDLER_ABORT
     }
 
     async fn check_interrupted_approval(cancel: bool) {
@@ -1550,14 +1533,7 @@ mod tests {
             waiting_approval,
             Arc::into_raw(state.clone()) as *mut std::ffi::c_void,
         );
-        let keepalive = crate::PluginKeepalive::empty();
-        let weak = Arc::downgrade(&keepalive);
-        let session = crate::ExtensionSession::from_parts(
-            Arc::new(reg.snapshot()),
-            keepalive,
-            Vec::new(),
-            None,
-        );
+        let session = crate::ExtensionSession::from_parts(Arc::new(reg.snapshot()), None);
         let signal = tokio_util::sync::CancellationToken::new();
         let task_signal = signal.clone();
         let task_ui = ui.clone();
@@ -1592,31 +1568,20 @@ mod tests {
             reason.contains(if cancel { "cancelled" } else { "timed out" }),
             "{reason}"
         );
-        assert!(
-            weak.upgrade().is_some(),
-            "running callback must keep its library mapped"
-        );
         assert_eq!(ui.poll("other").unwrap()["status"], "pending");
         state.release.store(true, Ordering::SeqCst);
         tokio::time::timeout(std::time::Duration::from_secs(2), state.finished.notified())
             .await
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while weak.upgrade().is_some() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
     }
 
     #[tokio::test]
-    async fn tool_call_approval_cancel_releases_waiter_and_retains_running_library() {
+    async fn tool_call_approval_cancel_releases_waiter() {
         check_interrupted_approval(true).await;
     }
 
     #[tokio::test]
-    async fn tool_call_approval_timeout_blocks_and_retains_running_library() {
+    async fn tool_call_approval_timeout_blocks() {
         check_interrupted_approval(false).await;
     }
 
@@ -1761,9 +1726,9 @@ mod tests {
         let seen = unsafe { ev.payload.data.data.to_string_lossy() };
         assert!(seen.contains("space"), "payload not delivered: {seen}");
         if CLAIM_ROUTING.load(Ordering::SeqCst) {
-            kiqi_plugin_sdk::EVENT_HANDLER_CLAIMED
+            crate::EVENT_HANDLER_CLAIMED
         } else {
-            kiqi_plugin_sdk::EVENT_HANDLER_CONTINUE
+            crate::EVENT_HANDLER_CONTINUE
         }
     }
 
@@ -1853,6 +1818,6 @@ mod tests {
         if seen.contains("chars") && seen.contains("empty") {
             EDITOR_CHANGE_SEEN.store(true, Ordering::SeqCst);
         }
-        kiqi_plugin_sdk::EVENT_HANDLER_CONTINUE
+        crate::EVENT_HANDLER_CONTINUE
     }
 }

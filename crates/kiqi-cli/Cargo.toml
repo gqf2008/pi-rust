@@ -29,7 +29,6 @@ agent-client-protocol = { workspace = true }
 kiqi-tools = { workspace = true }
 kiqi-harness = { workspace = true }
 kiqi-tui = { workspace = true }
-kiqi-plugin-sdk = { workspace = true }
 kiqi-extensions = { workspace = true }
 kiqi-mcp = { workspace = true }
 kiqi-acp = { workspace = true }

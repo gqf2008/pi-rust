@@ -1,25 +1,27 @@
-//! Rust-native (cdylib) plugin loader + `AgentTool` adapter for ki.
+//! Host-side extension dispatch spine for ki.
 //!
-//! This is Part B1 of the extension-alignment plan. `ki` loads extensions as
-//! **compiled Rust cdylibs** (`.dll`/`.so`/`.dylib`) via `libloading` — **not**
-//! TS/jiti — because we control both sides and the plugin is Rust
-//! (`动态加载可以加载rs 的代码 没必要是 ts`). The ABI contract lives in
-//! [`kiqi_plugin_sdk`]; this crate is the **host side** that loads plugins and
-//! bridges their tools/events into ki's native async types.
+//! P6 (2026-10-26): the cdylib channel is retired — this crate no longer loads
+//! anything. Plugins are wasm guests (`kiqi-plugin-host`); what survives here
+//! is the machinery every event, tool and resource registration rides on:
+//! the registry (`registry`), the `AgentEvent → StablePluginEvent` funnels and
+//! the emitter (`translate`), the compiled/wasm fan-out sink (`compiled`), the
+//! action bridge + UI mailboxes (`actions`), the stdio lifecycle, and the C-ABI
+//! bus types in [`abi`] (now the *internal* wire format, no `libloading`).
+//! `ExtensionSession` is the per-harness holder; with no loader it always
+//! presents an empty registry, which keeps the funnels reaching the wasm sink.
 //!
 //! ## Crate DAG position
 //!
-//! Depends on **`kiqi-plugin-sdk` + `kiqi-ai` + `kiqi-agent` only** (NOT
+//! Depends on **`kiqi-plugin` + `kiqi-ai` + `kiqi-agent` only** (NOT
 //! `kiqi-harness`). The harness consumes this crate's adapters as trait objects
 //! via `AgentHarnessOptions` injection, so `kiqi-harness` never imports
-//! `kiqi-extensions` — cycle-free (verified by adversarial review of the first
-//! draft, which wrongly added a `kiqi-harness` dep).
+//! `kiqi-extensions` — cycle-free. (`libloading` went with the cdylib loader.)
 //!
 //! ## The async-across-ABI bridge (load-bearing — corrected vs first draft)
 //!
 //! A plugin tool drives an execution through **four** plugin-exported fns
 //! (`execute`→handle, `poll`, `cancel`, `destroy`) — see
-//! [`kiqi_plugin_sdk::ToolExecuteFn`] etc. The host's [`PluginToolAdapter`]
+//! [`crate::ToolExecuteFn`] etc. The host's [`PluginToolAdapter`]
 //! impls `AgentTool::execute` by:
 //!
 //! 1. **NOT owning a runtime.** Acquire the ambient runtime
@@ -51,7 +53,7 @@
 //!
 //! [`ExtensionEmitter`] impls `AgentEmitter` by subscribing to the host's
 //! `broadcast::Sender<AgentEvent>`, translating each `AgentEvent` → a
-//! [`kiqi_plugin_sdk::StablePluginEvent`], and dispatching to every registered
+//! [`crate::StablePluginEvent`], and dispatching to every registered
 //! handler for the event's tag — all dispatch wrapped in `catch_unwind`. The
 //! 33-category `on()` surface (B3) is driven through this emitter; the
 //! 10 already-emitted `AgentEvent` variants fold into the matching tags now,
@@ -61,11 +63,6 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
 use kiqi_plugin::EventTag;
-use kiqi_plugin_sdk::{
-    BeforeAgentStartFn, EventHandlerFn, FreeStringFn, OAuthRequestFn, ProviderRequestFn, RenderFn,
-    ResourcesDiscoverFn, RuntimeActionFn, StablePluginEvent, StableToolSchema, StbString,
-    StbStringRef, ToolCancelFn, ToolDestroyFn, ToolExecuteFn, ToolPollFn,
-};
 use thiserror::Error;
 
 pub use actions::{
@@ -78,10 +75,7 @@ pub use compiled::{
 };
 pub use editor_text::{EditorTextEdit, EditorTextMailbox, EditorTextMode};
 pub use event_log::{event_log_path, log_handler_invocation, EventLogger};
-pub use loader::{
-    load_dir, load_one, load_session, load_session_mixed, merge_registries, ExtensionSession,
-    LoadedPlugin, PluginKeepalive, PluginLoadError,
-};
+pub use loader::ExtensionSession;
 pub use oauth::{
     list as list_oauth_providers, request as request_oauth, OAuthActionResponse,
     OAuthExtensionError, OAuthProviderInfo, OAuthResponseKind,
@@ -112,7 +106,9 @@ pub use translate::{
     dispatch_lifecycle_event, dispatch_tool_call_event, ExtensionEmitter, TeeEmitter,
 };
 
+pub use abi::*;
 pub use stdio::StdioLifecycle;
+pub mod abi;
 mod actions;
 mod compiled;
 mod editor_text;
@@ -280,7 +276,7 @@ impl HostApi {
     /// `ActionBridge` (the SDK-designated "host's opaque context"). The bridge's
     /// scoped `Arc` is retained by the loaded plugin and session keepalive, so
     /// the pointer a plugin stores during register stays valid.
-    pub fn build_vtable(self: &Arc<Self>) -> kiqi_plugin_sdk::PluginApi {
+    pub fn build_vtable(self: &Arc<Self>) -> crate::PluginApi {
         // When a bridge is present, user_data carries it (post-register action
         // recovery). Otherwise keep the register-path HostApi pointer (harmless
         // — register trampolines use the thread-local and ignore user_data).
@@ -298,9 +294,9 @@ impl HostApi {
                 Arc::as_ptr(self) as *mut c_void,
             ),
         };
-        kiqi_plugin_sdk::PluginApi {
-            abi_version: kiqi_plugin_sdk::KI_PLUGIN_ABI_VERSION_UNIFIED,
-            struct_size: std::mem::size_of::<kiqi_plugin_sdk::PluginApi>() as u32,
+        crate::PluginApi {
+            abi_version: crate::KI_PLUGIN_ABI_VERSION_UNIFIED,
+            struct_size: std::mem::size_of::<crate::PluginApi>() as u32,
             free_string: host_free_string,
             register_tool: Some(trampoline_register_tool),
             register_command: Some(trampoline_register_command),
@@ -438,7 +434,7 @@ extern "C" fn trampoline_register_tool(
 extern "C" fn trampoline_register_command(
     name: StbStringRef,
     description: StbStringRef,
-    handler: kiqi_plugin_sdk::CommandHandlerFn,
+    handler: crate::CommandHandlerFn,
 ) -> i32 {
     if !current_api_present() {
         return -1;

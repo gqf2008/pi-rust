@@ -25,12 +25,12 @@
 //! Results are concatenated (bare strings; ki does NOT track per-extension
 //! `extensionPath` — v1 documented divergence: paths are unattributed).
 //!
-//! [`EventHandlerFn`]: kiqi_plugin_sdk::EventHandlerFn
-//! [`RuntimeActionFn`]: kiqi_plugin_sdk::RuntimeActionFn
+//! [`EventHandlerFn`]: crate::EventHandlerFn
+//! [`RuntimeActionFn`]: crate::RuntimeActionFn
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use kiqi_plugin_sdk::{StbString, StbStringRef};
+use crate::{StbString, StbStringRef};
 
 use crate::registry::{assert_active, RegistrySnapshot};
 
@@ -180,7 +180,7 @@ fn parse_discover_payload(json: &str) -> DiscoveredResources {
 mod tests {
     use super::*;
     use crate::registry::ExtensionRegistry;
-    use kiqi_plugin_sdk::{ResourcesDiscoverFn, StbString};
+    use crate::{ResourcesDiscoverFn, StbString};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Plugin-side `free_string` for the test handlers: reconstructs the

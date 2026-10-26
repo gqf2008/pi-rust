@@ -28,7 +28,7 @@ cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
 cargo check --workspace --all-targets --all-features --locked
 # 被 feature 挡住的测试必须单跑 --all-features 才可见：
-cargo test  -p kiqi-ai -p kiqi-tools -p kiqi-plugin-sdk --lib --locked --all-features
+cargo test  -p kiqi-ai -p kiqi-tools --lib --locked --all-features
 cargo test  --workspace --locked
 
 # 脚本门禁（改到对应文件后必须重跑）：
@@ -65,8 +65,8 @@ MSRV 1.96（由 wasmtime 49 拉高，见根 `Cargo.toml` 的注释）。全部 c
 ## 架构
 
 `ki` 是终端编码代理，`kiqi-*` 是拆开的 SDK；同一套实现既能嵌入自己的进程
-（`examples/minimal`、`examples/tools`），也能作为插件扩展每个会话
-（`examples/plugin-stub`）。架构总览：`docs/architecture/overview.md`。
+（`examples/minimal`、`examples/tools`），也能作为 wasm 插件扩展每个会话
+（`plugins/wasm/kiqi-*-guest`）。架构总览：`docs/architecture/overview.md`。
 
 ### crate 分层（依赖边自各 Cargo.toml 实核）
 
@@ -79,9 +79,8 @@ kiqi-telemetry            # 遥测接口与 span/event 合约（零内部依赖�
 kiqi-tui                  # 终端组件、编辑器、渲染（零内部依赖）
 kiqi-plugin               # trait Plugin 定义（零内部依赖；外部仅 serde/serde_json）
 ├─ kiqi-plugin-host       # wasmtime 宿主，跑 wasm 组件
-kiqi-plugin-sdk           # 第三方 cdylib 的 C ABI 类型（零内部依赖；默认 feature 带 serde_json）
 └─ kiqi-extensions         # 宿主侧扩展加载与桥接（另依赖 agent+ai）
-kiqi-mcp                  # MCP 客户端集成（依赖 ai+agent+harness+plugin-sdk；boundary.rs 是与 harness 的接缝）
+kiqi-mcp                  # MCP 客户端集成（依赖 ai+agent+harness；boundary.rs 是与 harness 的接缝）
 kiqi-acp                  # `ki acp serve` 协议服务器（依赖 acp 协议 crate + agent/harness/mcp/extensions；会话组装根留在 kiqi-cli 注入）
 kiqi-plan-mode-core       # 计划模式核心逻辑（零内部依赖；只被 plugins/wasm/kiqi-plan-mode-guest 链接）
 kiqi-cli                  # 组合以上（plan-mode-core、kiqi-acp 除外）：配置、认证、CLI/TUI；acp 的 factory/precheck 宿主侧在 src/acp.rs
@@ -111,10 +110,12 @@ TUI Enter → `interactive_tui/run.rs::run_prompt_streaming` →
   契约 `plugins/kiqi-plugin.wit`（当前 `kiqi:plugin@0.7.1`）。授权文件
   `$KI_AGENT_DIR/plugins/<id>/grants.json`，缺失 = 什么都不授予。
   安装：`ki insmod --build plugins/wasm/kiqi-<name>-guest`。
-  **改能力时 trait 面（`kiqi_plugin`/`kiqi-plugin-sdk`）与 WIT 面必须一起改**，
+  **改能力时 trait 面（`kiqi_plugin`）与 WIT 面必须一起改**，
   差异写进 guest README。
-- 第三方 cdylib 通道保留（`kiqi_plugin::Plugin` + `ki dev` 热载）；
-  编译期一方插件通道已于 2026-10-21 退役。
+- 编译期一方插件通道已于 2026-10-21 退役；**cdylib 通道（`kiqi-plugin-sdk` /
+  `ki dev` / `ki install` / `ki package` / `libloading` 装载）已于 2026-10-26 整体退役**——
+  wasm 是唯一插件通道。`kiqi-extensions` 保留为宿主侧派发脊柱（registry/translate/
+  compiled sink/mailboxes），`src/abi.rs` 是内部事件总线的线格式。
 - **wasm guest crate 里不写单测**：guest 只对 `wasm32-wasip2` 链接，行为一律由
   `crates/kiqi-plugin-host/tests/e2e.rs` 从宿主侧验证。
 

@@ -64,10 +64,9 @@ cargo check --workspace --all-targets --locked
 cargo check --workspace --all-targets --all-features --locked
 # 测试被非默认 feature 挡住的 crate：`cargo test -p kiqi-ai` 只编译 47 条而不是 206 条
 # （整个 anthropic provider 在 `cfg(feature = "providers")` 下），单跑该包会静默跳过。
-# `kiqi-plugin-sdk` 同理：`process`/`stdio` 挡住 2 条（partial-UTF-8 行拼装、无 reader 线程
-# 的 pipe poll 到 EOF），32 → 34，而默认集从不启用这两个 feature；上面的
-# `--all-features` 那一步只 `check` 整仓，编译不过或跑挂的feature 门测试在那一步是隐形的。
-cargo test  -p kiqi-ai -p kiqi-tools -p kiqi-plugin-sdk --lib --locked --all-features
+# 上面的 `--all-features` 那一步只 `check` 整仓，编译不过或跑挂的 feature 门测试
+# 在那一步是隐形的。（`kiqi-plugin-sdk` 的同类提示随 cdylib 通道退役删除。）
+cargo test  -p kiqi-ai -p kiqi-tools --lib --locked --all-features
 cargo test  --workspace --locked
 # Cargo.lock 必须覆盖全部 feature 的依赖（离线可解析）；CI 在线跑，
 # 缺项的后果只会是「CI 卡下载 / 本地离线报错」，两边都不像根因
@@ -142,19 +141,20 @@ CARGO_TARGET_DIR=/tmp/ki-base-target cargo test -p kiqi-cli --lib --locked   # �
 契约，跑在 wasmtime 沙箱里，按授权拿能力；契约版本见 WIT 的 `package` 行。
 
 **编译期一方插件通道已于 2026-10-21 退役**：`plugins/kiqi-*` crate、`plugin-kiqi-*`
-feature、CI 的 opt-in feature 测试与 cdylib 构建都已删除。`kiqi_plugin::Plugin` trait
-与 `ki dev` 的 cdylib 热载仍保留给第三方扩展，但不再有编入二进制的一方插件。
+feature、CI 的 opt-in feature 测试与 cdylib 构建都已删除。**cdylib 通道已于 2026-10-26
+整体退役**（`kiqi-plugin-sdk`、`ki dev`、`ki install`、`ki package`、`libloading` 装载与
+`kiqi_voice`/plugin-stub 的 e2e 随之下线）——wasm 是唯一插件通道。
 权限策略由宿主拥有（`crates/kiqi-cli/src/permissions.rs`）。
 
 安装 wasm 版：`ki insmod --build plugins/wasm/kiqi-<name>-guest`。**新增/改插件能力时，
-trait 面（`kiqi_plugin`/`kiqi-plugin-sdk`）与 WIT 面必须一起改**，差异要写进 guest README。
+trait 面（`kiqi_plugin`）与 WIT 面必须一起改**，差异要写进 guest README。
 
 ## 设计文档在哪
 
 - `docs/design/plugin-abi.md`：wasm 契约与能力模型的**唯一真源**；每轮改动加一节 `### 6.x`，
   §7 是待定项。
-- `docs/design/plugin-trait.md`：编译期 trait 契约（**历史存档**；一方编译期通道已退役，
-  trait/cdylib 面仍供第三方扩展）。
+- `docs/design/plugin-trait.md`：编译期 trait 契约（**历史存档**；编译期与 cdylib
+  通道均已退役）。
 - `docs/design/plugin-abi-handover.md`：**接手先读这个**（现状/能力表/上手命令/已知限制/提交轨迹）。
 - 未落地的大改走单独方案文件（如 `docs/design/plugin-process-capability.md`）。
 

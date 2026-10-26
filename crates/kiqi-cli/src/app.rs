@@ -32,7 +32,7 @@ pub const EXIT_USAGE: i32 = 2;
 /// run failure). Mirrors TS `process.exitCode` set from `runPrintMode`.
 pub const EXIT_RUNTIME: i32 = 1;
 /// The exit code when an extension **vetoes** startup at a lifecycle event
-/// (e.g. a `BeforeTuiStart` handler returns [`kiqi_plugin_sdk::EVENT_HANDLER_ABORT`]).
+/// (e.g. a `BeforeTuiStart` handler returns [`kiqi_extensions::EVENT_HANDLER_ABORT`]).
 /// Distinct from [`EXIT_RUNTIME`] so scripts can tell "an extension refused to
 /// start" from "the run itself failed".
 pub const EXIT_VETOED: i32 = 3;
@@ -129,11 +129,9 @@ async fn run_inner() -> i32 {
             return crate::acp::run(&argv[1..]).await;
         }
         Some("auth") => {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-            let dirs = crate::resource_dirs::extension_dirs(&cwd);
-            let diagnostics: std::sync::Arc<dyn kiqi_extensions::PluginDiagnostics> =
-                std::sync::Arc::new(kiqi_extensions::NullDiagnostics);
-            let extension_session = kiqi_extensions::load_session(&dirs, diagnostics, None);
+            // P6: the cdylib extension providers are gone; auth sees an empty
+            // registry (wasm plugins surface OAuth through the host instead).
+            let extension_session = kiqi_extensions::ExtensionSession::none();
             return crate::auth::run_with_extensions(&argv[1..], extension_session.snapshot_arc())
                 .await;
         }
@@ -141,15 +139,14 @@ async fn run_inner() -> i32 {
         Some("configure") => return crate::configure::run(&argv[1..]).await,
         Some("update") => return crate::updates::run_self_update(&argv[1..]),
         Some("plugin") => return crate::plugin_cli::run(&argv[1..]),
-        // Kernel-flavoured spellings for the wasm tier (`ki install`/`uninstall`
-        // are the cdylib/extension pair, a different artifact).
+        // Kernel-flavoured spellings for the wasm tier.
         Some("insmod") => return crate::plugin_cli::insmod(&argv[1..]),
         Some("rmmod") => return crate::plugin_cli::rmmod(&argv[1..]),
         // These historical aliases are intentionally rejected instead of
         // falling through to the prompt path.
         Some(removed @ ("pi-package" | "pi-update" | "install-pi" | "uninstall-pi")) => {
             eprintln!(
-                "error: `ki {removed}` is not available; use `ki package`, `ki install`, or `ki update`."
+                "error: `ki {removed}` is not available; use `ki insmod` (wasm plugins) or `ki update`."
             );
             return EXIT_USAGE;
         }

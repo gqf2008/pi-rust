@@ -1,76 +1,15 @@
-//! Stable `#[repr(C)]` ABI contract for ki **Rust-native (cdylib) plugins**.
+//! The C-ABI bus types ki's extension layer speaks.
 //!
-//! ki loads extensions as compiled Rust cdylibs (`.dll`/`.so`/`.dylib`) via
-//! `libloading` — **not** TS/jiti. Because we control both sides, the plugin is
-//! Rust, but the *boundary* is still a hand-defined C ABI: the two sides may be
-//! compiled with different Rust versions / crate versions, so no Rust type with
-//! a non-`C` repr or a `Drop` impl may cross. This crate defines exactly those
-//! crossing types and the registration contract.
-//!
-//! ## Soundness rules (load-bearing — verified by an adversarial review)
-//!
-//! 1. **Every crossing type is `#[repr(C)]`.** Enums used in unions carry
-//!    `#[repr(u32)]` so the discriminant width is pinned.
-//! 2. **No `Drop` type crosses.** `Vec`/`String`/`serde_json::Value`/`Option` of
-//!    those / `Result` never appear in the ABI. Owned data crosses as
-//!    [`StbString`] (ptr+len) with an **explicit `free_string`** the producer
-//!    exports. [`StbString`] is `Copy` (raw pointers are `Copy`); copying
-//!    duplicates the *pointer*, not the allocation, so each allocation is freed
-//!    **exactly once** by the side that received it (see [`StbString`] docs).
-//! 3. **Owned → JSON round-trip.** Structured host data ([`StableJsonValue`],
-//!    tool params, `AgentToolResult`, events) crosses as a JSON string in a
-//!    [`StbString`]. `serde_json` with `preserve_order` + `arbitrary_precision`
-//!    must be enabled **consistently on host AND plugin** or integers >
-//!    `u64`/`i64` lose precision and object keys may reorder — documented as a
-//!    an ABI-wide limit. Tool args from the model rarely carry overflow ints, but it is
-//!    never silent.
-//! 4. **Unions are all-`Copy` payloads.** [`EventPayload`] / [`StepResultPayload`]
-//!    variants are `#[repr(C)]` structs of primitives or [`StbString`] only, so
-//!    the union is `Copy`-able and a wrong-variant read is `unsafe` (caller
-//!    discriminates by `tag`).
-//! 5. **Unwinding never crosses the ABI.** Every host→plugin and plugin→host
-//!    call is `extern "C"`; both sides wrap dispatch in `catch_unwind`
-//!    (abort-on-unwind / log-and-drop). A poisoned mutex or panicking emitter
-//!    cannot unwind into the other side.
-//!
-//! ## Lifetime: the 4-function handle
-//!
-//! A registered tool drives an execution through **four** plugin-exported
-//! functions (see [`ToolExecuteFn`] / [`ToolPollFn`] / [`ToolCancelFn`] /
-//! [`ToolDestroyFn`]) — `execute`→[`StepHandle`] (plugin-allocates), `poll`
-//! (non-blocking, **borrows** the handle, returns [`StepResult`]), `cancel`
-//! (sets an internal `AtomicBool` flag; **idempotent; does NOT free;
-//! thread-safe**), `destroy` (frees; **idempotent; called exactly once by the
-//! blocking driver**). `cancel` ≠ `destroy`: conflating them is a UAF /
-//! double-free. The adapter's blocking driver calls `poll` in a loop until
-//! `Done`/`Err`, forwards `Pending` partials, and calls `destroy` once on exit.
-//!
-//! `poll` is **non-blocking** and MUST observe the cancel flag and return
-//! `Done`/`Err` within a bounded number of polls; otherwise a cancelled call
-//! leaks a `spawn_blocking` thread forever (those tasks run to completion
-//! regardless of outer-future drop).
-//!
-//! The crate is `std` (not `no_std`): the ABI *types* are `#[repr(C)]` POD with
-//! no `Drop` — that is what makes the boundary sound — but plugins and the host
-//! are ordinary binaries with `std`, so the constructor/reader helpers and tests
-//! use `String`/`Vec`/`serde_json` directly. The `json` feature keeps
-//! `serde_json` optional for a plugin that wants to skip it.
+//! P6 note: the **loading** half of this ABI (libloading discovery, the
+//! `kiqi_plugin_register` entrypoint contract, `ki install`/`ki dev`) is
+//! retired — plugins ship as wasm guests. What survives here is the wire
+//! format the host's event funnels (`translate`, `compiled` sink, registry
+//! tier) use internally, kept `#[repr(C)]`-shaped so a future re-plumbing to
+//! plain serde events stays a purely internal refactor.
 
 use core::ffi::c_char;
 use core::ffi::c_void;
 use core::ptr;
-
-pub mod callbacks;
-#[cfg(feature = "json")]
-#[cfg(feature = "json")]
-pub mod dialogs;
-#[cfg(feature = "json")]
-pub mod events;
-pub mod handles;
-#[cfg(feature = "process")]
-pub mod process;
-#[cfg(feature = "stdio")]
-pub mod stdio;
 
 // ---------------------------------------------------------------------------
 // StbString — owned UTF-8 crossing as ptr+len with an explicit free
@@ -133,7 +72,6 @@ impl StbString {
 // makes the boundary sound. These helpers are available whenever `std` is (the
 // crate is std-using). When the `json` feature is off a plugin still gets these
 // because the crate links std; the gate here keeps `serde_json` truly optional.
-#[cfg(any(feature = "json", test))]
 impl StbString {
     /// Wrap an allocation the caller already boxed. The `StbString` takes
     /// ownership: a later `free_with(free_fn)` will deallocate it via the
@@ -251,40 +189,6 @@ impl StbString {
                 free_fn(self);
             }
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// StableJsonValue — JSON round-trip helpers (json feature)
-// ---------------------------------------------------------------------------
-
-/// Helpers to cross structured data as JSON-in-`StbString`. See the module docs
-/// for the precision/order limit.
-#[cfg(feature = "json")]
-pub mod json {
-    use super::StbString;
-    use serde_json::Value;
-
-    /// Serialize a `serde_json::Value` into an owning [`StbString`] the receiver
-    /// must `free` via the producer's `free_string`.
-    pub fn to_stable(value: &Value, free_fn: Option<super::FreeStringFn>) -> StbString {
-        let s = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
-        let stb = StbString::from_string(s);
-        // `free_fn` is advisory metadata the receiver needs; the StbString
-        // itself carries only ptr+len. Stash nothing — the receiver must know
-        // which free fn to use (host's vs plugin's) by direction.
-        let _ = free_fn;
-        stb
-    }
-
-    /// Parse a received [`StbString`] back into a `Value`. Does **not** free the
-    /// input — the caller still owns it.
-    pub fn from_stable(s: &StbString) -> Value {
-        let text = s.to_string_lossy();
-        if text.is_empty() {
-            return Value::Null;
-        }
-        serde_json::from_str(&text).unwrap_or(Value::Null)
     }
 }
 
@@ -1554,5 +1458,243 @@ mod tests {
         let rc = unsafe { register_entrypoint(core::ptr::null(), |_| 0) };
         assert_ne!(rc, 0);
         let _ = reset_freed();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Borrowed ABI event views with tag-checked, owned payload copies.
+// ---------------------------------------------------------------------------
+
+pub struct EventView<'a> {
+    raw: &'a StablePluginEvent,
+}
+
+pub struct ToolCall {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub params: String,
+}
+
+pub struct ToolResult {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub result: String,
+    pub is_error: bool,
+}
+
+impl<'a> EventView<'a> {
+    /// Create a view at an ABI callback boundary.
+    ///
+    /// # Safety
+    /// The host must initialize the payload variant specified by `tag` and
+    /// keep every payload buffer valid until the callback returns. The view
+    /// borrows the event; accessors copy strings and never free host memory.
+    pub unsafe fn from_raw(raw: &'a StablePluginEvent) -> Self {
+        Self { raw }
+    }
+
+    pub fn tag(&self) -> EventTag {
+        self.raw.tag
+    }
+
+    pub fn message_text(&self) -> Option<String> {
+        if !matches!(
+            self.tag(),
+            EventTag::MessageStart | EventTag::MessageUpdate | EventTag::MessageEnd
+        ) {
+            return None;
+        }
+        // SAFETY: from_raw's invariant and the tag check select the live arm.
+        Some(unsafe { self.raw.payload.message.message }.to_string_lossy())
+    }
+
+    pub fn data_text(&self) -> Option<String> {
+        // NOTE: this list must agree with the host's no-payload set
+        // (`kiqi-extensions::translate::free_dispatched_event`): a tag listed
+        // here but dispatched `empty` reads the union's `data` arm at a
+        // garbage pointer (SIGBUS). `SessionTree`/`SessionBeforeTree` are
+        // no-payload today (the WIT `session-tree` variant is unit), and the
+        // TUI's `UiPromptStart`/`UiPromptEnd` are dispatched empty
+        // (`dispatch_empty_event`), so none of them may appear here.
+        if !matches!(
+            self.tag(),
+            EventTag::SessionBeforeSwitch
+                | EventTag::SessionInfoChanged
+                | EventTag::SessionBeforeFork
+                | EventTag::SessionBeforeCompact
+                | EventTag::SessionCompact
+                | EventTag::Context
+                | EventTag::BeforeProviderRequest
+                | EventTag::BeforeProviderHeaders
+                | EventTag::AfterProviderResponse
+                | EventTag::BeforeAgentStart
+                | EventTag::ModelSelect
+                | EventTag::ThinkingLevelSelect
+                | EventTag::UserBash
+                | EventTag::Input
+                | EventTag::EditorChange
+        ) {
+            return None;
+        }
+        // SAFETY: from_raw's invariant and the tag check select the live arm.
+        Some(unsafe { self.raw.payload.data.data }.to_string_lossy())
+    }
+
+    pub fn tool_call(&self) -> Option<ToolCall> {
+        if !matches!(
+            self.tag(),
+            EventTag::ToolCall | EventTag::ToolExecutionStart | EventTag::ToolExecutionUpdate
+        ) {
+            return None;
+        }
+        // SAFETY: from_raw's invariant and the tag check select the live arm.
+        let payload = unsafe { self.raw.payload.tool_call };
+        Some(ToolCall {
+            tool_call_id: payload.tool_call_id.to_string_lossy(),
+            tool_name: payload.tool_name.to_string_lossy(),
+            params: payload.params.to_string_lossy(),
+        })
+    }
+
+    pub fn tool_result(&self) -> Option<ToolResult> {
+        if !matches!(
+            self.tag(),
+            EventTag::ToolResult | EventTag::ToolExecutionEnd
+        ) {
+            return None;
+        }
+        // SAFETY: from_raw's invariant and the tag check select the live arm.
+        let payload = unsafe { self.raw.payload.tool_result };
+        Some(ToolResult {
+            tool_call_id: payload.tool_call_id.to_string_lossy(),
+            tool_name: payload.tool_name.to_string_lossy(),
+            result: payload.result.to_string_lossy(),
+            is_error: payload.is_error != 0,
+        })
+    }
+}
+
+/// Define an ABI event handler whose body uses an `EventView`.
+///
+/// The generated trampoline contains the host's ABI validity assumption and
+/// catches panics before they can unwind across `extern "C"`. Payload strings
+/// copied by the view may safely be retained after the callback returns.
+#[macro_export]
+macro_rules! event_handler {
+    ($(#[$attr:meta])* fn $name:ident($event:ident, $data:ident) $body:block) => {
+        $(#[$attr])*
+        extern "C" fn $name(raw: $crate::StablePluginEvent, $data: *mut std::ffi::c_void) -> i32 {
+            $crate::guard_or($crate::EVENT_HANDLER_ERROR, || {
+                // SAFETY: this is the host-owned ABI callback; its event and
+                // buffers remain valid for the duration of this invocation.
+                let $event = unsafe { $crate::EventView::from_raw(&raw) };
+                $body
+            })
+        }
+    };
+}
+
+#[cfg(test)]
+mod event_view_tests {
+    use super::*;
+    use crate::StbStringRef;
+
+    // Borrowing a Rust string gives this test a live buffer without allocating
+    // or leaking an ABI string that would need an unsafe deallocator.
+    fn borrowed_string(text: &str) -> crate::StbString {
+        let borrowed = StbStringRef::from_str(text);
+        crate::StbString {
+            ptr: borrowed.ptr as *mut _,
+            len: borrowed.len,
+        }
+    }
+
+    #[test]
+    fn wrong_accessors_do_not_read_inactive_union_arms() {
+        let raw = StablePluginEvent::empty(EventTag::AgentStart);
+        let view = unsafe { EventView::from_raw(&raw) };
+        assert!(view.message_text().is_none());
+        assert!(view.data_text().is_none());
+        assert!(view.tool_call().is_none());
+        assert!(view.tool_result().is_none());
+    }
+
+    /// `SessionTree` is dispatched **empty** (the WIT `session-tree` variant is
+    /// unit; the host's `free_dispatched_event` files it under no-payload), so
+    /// `data_text` must not claim it — reading the union's `data` arm of an
+    /// empty event dereferences a garbage pointer (SIGBUS, not a panic).
+    #[test]
+    fn session_tree_is_no_payload_so_data_text_must_not_claim_it() {
+        for tag in [EventTag::SessionTree, EventTag::SessionBeforeTree] {
+            let raw = StablePluginEvent::empty(tag);
+            let view = unsafe { EventView::from_raw(&raw) };
+            assert!(
+                view.data_text().is_none(),
+                "{tag:?} carries no payload; data_text must return None"
+            );
+        }
+    }
+
+    #[test]
+    fn copied_message_outlives_the_borrowed_event_buffer() {
+        let copy = {
+            let text = String::from("消息");
+            let raw = StablePluginEvent::message(EventTag::MessageEnd, borrowed_string(&text));
+            let view = unsafe { EventView::from_raw(&raw) };
+            assert!(view.tool_result().is_none());
+            view.message_text().unwrap()
+        };
+        assert_eq!(copy, "消息");
+    }
+
+    #[test]
+    fn tool_payloads_are_copied_with_the_error_flag() {
+        let raw = StablePluginEvent::tool_result(
+            EventTag::ToolExecutionEnd,
+            borrowed_string("call"),
+            borrowed_string("tool"),
+            borrowed_string("{}"),
+            true,
+        );
+        let view = unsafe { EventView::from_raw(&raw) };
+        let result = view.tool_result().unwrap();
+        assert_eq!(result.tool_call_id, "call");
+        assert_eq!(result.tool_name, "tool");
+        assert_eq!(result.result, "{}");
+        assert!(result.is_error);
+        assert!(view.tool_call().is_none());
+    }
+
+    event_handler! { fn panicking(_event, _data) { panic!("handler panic") } }
+
+    #[test]
+    fn data_and_call_accessors_select_only_their_own_payloads() {
+        let raw = StablePluginEvent::data(EventTag::BeforeProviderRequest, borrowed_string("{}"));
+        let view = unsafe { EventView::from_raw(&raw) };
+        assert_eq!(view.data_text().as_deref(), Some("{}"));
+        assert!(view.message_text().is_none());
+        let raw = StablePluginEvent::tool_call(
+            EventTag::ToolCall,
+            borrowed_string("call"),
+            borrowed_string("tool"),
+            borrowed_string("{}"),
+        );
+        let view = unsafe { EventView::from_raw(&raw) };
+        let call = view.tool_call().unwrap();
+        assert_eq!(call.tool_call_id, "call");
+        assert_eq!(call.tool_name, "tool");
+        assert_eq!(call.params, "{}");
+        assert!(view.data_text().is_none());
+    }
+
+    #[test]
+    fn handler_panic_returns_error_without_crossing_abi() {
+        assert_eq!(
+            panicking(
+                StablePluginEvent::empty(EventTag::AgentStart),
+                std::ptr::null_mut()
+            ),
+            crate::EVENT_HANDLER_ERROR
+        );
     }
 }

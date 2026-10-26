@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use kiqi_plugin_sdk::{StbString, StbStringRef};
+use crate::{StbString, StbStringRef};
 use serde_json::Value;
 
 use crate::registry::{RegisteredOAuthProvider, RegistrySnapshot};

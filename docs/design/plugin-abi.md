@@ -1313,3 +1313,26 @@ Store，绝不借用共享工具/事件实例的 `inner`。调用方有 `patch-t
 继续兜底纯 CPU 自旋；返回或超时后该专用实例不再复用。guest 即使停在阻塞 WASI host import，
 被放弃的也是专用 worker 与 Store，不会持有共享互斥锁，因此后续 probe、工具调用和下一次 gate
 都能继续。
+
+### 6.45 cdylib 通道退役（2026-10-26）
+
+wasm 成为唯一插件通道。删除面（用户已批准清单 ①②③）：
+
+- `crates/kiqi-plugin-sdk`（C ABI 类型）、`examples/plugin-stub`、
+  `crates/kiqi-extensions/tests/{plugin_stub_smoke,voice_ptt_smoke}.rs`；
+- `ki dev` / `ki dev-local` / `__kiqi_dev_cleanup`（`dev_extension.rs`），
+  `ki install` / `ki uninstall`（`install.rs`），`ki package link|unlink`
+  （`packages.rs`），以及 `updates` 里的 native 包检查/缓存维度；
+- `kiqi-extensions` 的 `libloading` 装载机（`load_one`/`load_dir`/`load_session*`/
+  `merge_registries`/`LoadedPlugin`/`PluginKeepalive`/`PluginLoadError`）。
+
+留下的脊柱：`ExtensionSession`（无装载机、恒为空 registry 的会话持有者）、
+`registry` 注册面、`translate` 派发漏斗、`compiled` sink（wasm fan-out）、
+`actions`/mailboxes/`ToolCallContext`、`stdio`（runtime action 21）。
+C ABI 线格式（`StbString`/`StablePluginEvent`/`EventView`/handler consts）从 sdk
+搬进 `kiqi-extensions::abi`，共享常量（`HOST_*`/`*_ENV`/`EVENT_TAG_COUNT`）与
+`EventTag`、`dialogs` 归一到 `kiqi-plugin`。
+
+未在本次完成、留作后续（现状为不可达的惰性代码）：registry 注册层的 C-ABI
+回调机器（`HostApi`/vtable/线程局部 `current_api`）仍随脊柱编译，但已无任何
+装载路径能喂给它；把它折叠为纯 serde 事件总线是独立的后续批次。

@@ -13,7 +13,7 @@ set -uo pipefail
 
 REPO="gqf2008/pi-rust"
 CRATES=(
-  kiqi-telemetry kiqi-ai kiqi-agent kiqi-plugin-sdk kiqi-extensions
+  kiqi-telemetry kiqi-ai kiqi-agent kiqi-extensions
   kiqi-tools kiqi-harness kiqi-tui kiqi-cli
 )
 # crates.io returns 403 without a User-Agent, so every request carries one.

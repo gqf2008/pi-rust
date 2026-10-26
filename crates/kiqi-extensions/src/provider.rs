@@ -1,7 +1,7 @@
 //! B5c — `PluggableProvider`: the host-side `Provider` impl wrapping a plugin's
 //! `ProviderRequestFn`.
 //!
-//! A plugin's [`ProviderRequestFn`](kiqi_plugin_sdk::ProviderRequestFn) is a
+//! A plugin's [`ProviderRequestFn`](crate::ProviderRequestFn) is a
 //! **synchronous one-shot**: given a borrowed JSON request envelope it writes a
 //! **plugin-owned** `out` [`StbString`] (a full assistant-message JSON). It
 //! cannot drive a chunked `stream_simple` without blocking, so the v1
@@ -46,7 +46,6 @@ use tokio::runtime::Handle;
 
 use crate::loader::ExtensionSession;
 use crate::registry::{RegisteredProvider, RegistrySnapshot};
-use crate::PluginKeepalive;
 
 /// A `Provider` backed by a plugin's sync `ProviderRequestFn`.
 ///
@@ -60,7 +59,6 @@ pub struct PluggableProvider {
     /// Shared staleness flag (a `/reload` invalidate flows through here).
     snapshot: Arc<RegistrySnapshot>,
     /// Keeps the cdylib mapped so `request_fn` stays callable.
-    _keepalive: Arc<PluginKeepalive>,
     /// Captured at build time — `spawn_blocking` works from the async context.
     runtime: Handle,
 }
@@ -69,13 +67,11 @@ impl PluggableProvider {
     fn new(
         record: RegisteredProvider,
         snapshot: Arc<RegistrySnapshot>,
-        keepalive: Arc<PluginKeepalive>,
         runtime: Handle,
     ) -> Arc<Self> {
         Arc::new(Self {
             record,
             snapshot,
-            _keepalive: keepalive,
             runtime,
         })
     }
@@ -90,18 +86,12 @@ impl PluggableProvider {
         let Some(snapshot) = session.snapshot_arc() else {
             return Vec::new();
         };
-        let keepalive = session.keepalive();
         snapshot
             .providers()
             .iter()
             .cloned()
             .map(|record| {
-                Self::new(
-                    record,
-                    Arc::clone(&snapshot),
-                    Arc::clone(&keepalive),
-                    runtime.clone(),
-                ) as Arc<dyn Provider>
+                Self::new(record, Arc::clone(&snapshot), runtime.clone()) as Arc<dyn Provider>
             })
             .collect()
     }
@@ -363,7 +353,7 @@ fn options_json(opts: &SimpleStreamOptions) -> serde_json::Value {
     })
 }
 
-use kiqi_plugin_sdk::{StbString, StbStringRef};
+use crate::{StbString, StbStringRef};
 
 #[cfg(test)]
 mod tests {

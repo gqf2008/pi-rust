@@ -15,6 +15,10 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
+use crate::{
+    FreeStringFn, StbString, StbStringRef, StepHandle, StepResultTag, ToolCancelFn, ToolDestroyFn,
+    ToolExecuteFn, ToolPollFn,
+};
 use async_trait::async_trait;
 use kiqi_agent::agent_tool::AgentTool;
 use kiqi_agent::error::AgentError;
@@ -22,16 +26,11 @@ use kiqi_agent::types::{
     AgentToolResult, TextContentOrImage, ToolExecutionMode, ToolResultPartial,
 };
 use kiqi_ai::types::Tool;
-use kiqi_plugin_sdk::{
-    FreeStringFn, StbString, StbStringRef, StepHandle, StepResultTag, ToolCancelFn, ToolDestroyFn,
-    ToolExecuteFn, ToolPollFn,
-};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::host_free_string;
-use crate::loader::PluginKeepalive;
 
 // ---------------------------------------------------------------------------
 // PluginToolHandle — the 4-fn bundle + the plugin's free_string
@@ -313,22 +312,19 @@ pub struct PluginToolAdapter {
     // fine to drop in any order (fn pointers are Copy, the real call sites are
     // all inside `execute` which holds `&self`, so the adapter is never dropped
     // mid-call), this is belt-and-suspenders.
-    #[allow(dead_code)]
-    keepalive: Arc<PluginKeepalive>,
 }
 
 impl PluginToolAdapter {
     /// Build an adapter from the registered schema + handle + the session's
     /// keepalive. `label` defaults to the tool name. The keepalive clone keeps
     /// the owning cdylib mapped for the adapter's lifetime.
-    pub fn new(schema: Tool, handle: PluginToolHandle, keepalive: Arc<PluginKeepalive>) -> Self {
+    pub fn new(schema: Tool, handle: PluginToolHandle) -> Self {
         let label = schema.name.clone();
         Self {
             schema,
             label,
             handle,
             context: ToolCallContext::default(),
-            keepalive,
         }
     }
 
@@ -582,7 +578,7 @@ impl AgentTool for PluginToolAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiqi_plugin_sdk::{StepResult, ToolPartialCb};
+    use crate::{StepResult, ToolPartialCb};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -699,7 +695,7 @@ mod tests {
             parameters: kiqi_ai::types::Schema::new(serde_json::json!({})),
             constrained_sampling: None,
         };
-        PluginToolAdapter::new(tool, stub_handle(), PluginKeepalive::empty())
+        PluginToolAdapter::new(tool, stub_handle())
     }
 
     fn reset_counters() {
@@ -816,7 +812,7 @@ mod tests {
             destroy_fn: slow_destroy,
             plugin_free_string: stub_free,
         };
-        let adapter = PluginToolAdapter::new(tool, handle, PluginKeepalive::empty());
+        let adapter = PluginToolAdapter::new(tool, handle);
         let on_update: Arc<dyn Fn(ToolResultPartial) + Send + Sync> = Arc::new(|_| {});
         let signal = CancellationToken::new();
         let signal_clone = signal.clone();

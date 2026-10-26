@@ -12,13 +12,13 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use kiqi_agent::error::AgentError;
-use kiqi_ai::types::Tool;
-use kiqi_plugin::{EventTag, EVENT_TAG_COUNT};
-use kiqi_plugin_sdk::{
+use crate::{
     BeforeAgentStartFn, CommandHandlerFn, EventHandlerFn, FreeStringFn, OAuthRequestFn,
     ProviderRequestFn, RenderFn, ResourcesDiscoverFn,
 };
+use kiqi_agent::error::AgentError;
+use kiqi_ai::types::Tool;
+use kiqi_plugin::{EventTag, EVENT_TAG_COUNT};
 
 use crate::tool::PluginToolHandle;
 
@@ -837,6 +837,20 @@ impl RegistrySnapshot {
     /// Whether any loaded plugin claimed ownership of the host process's stdio
     /// (`declare {"ownsStdio":true}`). The host uses this to defer
     /// `read_piped_stdin` and run the headless `Rpc` lifecycle.
+    /// Whether the snapshot carries no entries of any tier.
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+            && self.commands.is_empty()
+            && self.flags.is_empty()
+            && self.shortcuts.is_empty()
+            && self.handlers.iter().all(Vec::is_empty)
+            && self.resources_discover.is_empty()
+            && self.before_agent_start.is_empty()
+            && self.providers.is_empty()
+            && self.oauth_providers.is_empty()
+            && self.renderers.is_empty()
+    }
+
     pub fn owns_stdio(&self) -> bool {
         self.owns_stdio
     }
@@ -1015,10 +1029,7 @@ mod tests {
         assert_eq!(flags[1].name, "port");
     }
 
-    extern "C" fn noop_handler(
-        _ev: kiqi_plugin_sdk::StablePluginEvent,
-        _ud: *mut std::ffi::c_void,
-    ) -> i32 {
+    extern "C" fn noop_handler(_ev: crate::StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
         0
     }
 
@@ -1134,14 +1145,14 @@ mod tests {
     }
 
     extern "C" fn noop_oauth(
-        _request: kiqi_plugin_sdk::StbStringRef,
-        _out: *mut kiqi_plugin_sdk::StbString,
+        _request: crate::StbStringRef,
+        _out: *mut crate::StbString,
         _user_data: *mut std::ffi::c_void,
     ) -> i32 {
         0
     }
 
-    extern "C" fn noop_free(_value: kiqi_plugin_sdk::StbString) {}
+    extern "C" fn noop_free(_value: crate::StbString) {}
 
     #[test]
     fn oauth_manifest_registers_and_deduplicates() {

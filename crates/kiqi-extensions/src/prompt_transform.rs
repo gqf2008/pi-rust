@@ -32,7 +32,7 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use kiqi_plugin_sdk::{StbString, StbStringRef};
+use crate::{StbString, StbStringRef};
 
 use crate::registry::{assert_active, BeforeAgentStartHandler, RegistrySnapshot};
 

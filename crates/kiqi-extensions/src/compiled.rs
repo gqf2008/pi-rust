@@ -13,8 +13,8 @@
 
 use std::sync::{Arc, OnceLock, RwLock};
 
-use kiqi_plugin_sdk::events::EventView;
-use kiqi_plugin_sdk::StablePluginEvent;
+use crate::EventView;
+use crate::StablePluginEvent;
 use serde_json::Value;
 
 /// What the compiled plugins decided about one event.
@@ -159,8 +159,8 @@ fn event_payload(event: &StablePluginEvent) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StbString;
     use kiqi_plugin::EventTag;
-    use kiqi_plugin_sdk::StbString;
     use std::sync::Mutex;
 
     /// Serializes the sink tests across the crate; the sink is process-global.

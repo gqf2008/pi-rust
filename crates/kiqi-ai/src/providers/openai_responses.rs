@@ -3022,7 +3022,10 @@ mod tests {
             &SimpleStreamOptions::default(),
         );
         let content = body["input"][0]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 5);
+        // text, image, image, text — one wire item per block, no placeholder
+        // substitution and no coalescing.
+        assert_eq!(content.len(), 4);
+        assert_eq!(content[0]["type"], "input_text");
         assert_eq!(content[1]["type"], "input_image");
         assert_eq!(content[2]["type"], "input_image");
         assert_eq!(content[3]["type"], "input_text");

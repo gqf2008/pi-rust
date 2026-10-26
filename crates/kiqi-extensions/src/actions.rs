@@ -39,7 +39,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
-use kiqi_plugin_sdk::{RuntimeActionId, StbString, StbStringRef};
+use crate::{RuntimeActionId, StbString, StbStringRef};
 use tokio::runtime::Handle;
 
 /// A pending host UI request emitted by a plugin runtime action.

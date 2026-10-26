@@ -49,10 +49,10 @@ pub(super) fn invoke_extension_command(
     let input = serde_json::json!({ "args": args, "command": name });
     let input = serde_json::to_string(&input).ok()?;
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut out = kiqi_plugin_sdk::StbString::empty();
+        let mut out = kiqi_extensions::StbString::empty();
         let rc = (command.handler)(
-            kiqi_plugin_sdk::StbStringRef::from_str(&input),
-            &mut out as *mut kiqi_plugin_sdk::StbString,
+            kiqi_extensions::StbStringRef::from_str(&input),
+            &mut out as *mut kiqi_extensions::StbString,
             command.user_data,
         );
         let text = if rc == 0 {

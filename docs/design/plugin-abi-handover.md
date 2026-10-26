@@ -11,7 +11,7 @@
 ## 1. 这是什么
 
 给 `ki` 加的插件通道：**插件编译成 wasm 组件**，跑在 wasmtime 沙箱里，按用户授权拿能力。
-2026-10-21 起一方插件也只走 wasm；`trait Plugin` 与 cdylib 热载（`ki dev`）仅服务第三方扩展。
+2026-10-21 起一方插件也只走 wasm；2026-10-26 起 **cdylib 通道整体退役**（`ki dev`/`ki install`/`kiqi-plugin-sdk` 已删除），wasm 是唯一通道。
 
 一句话：**`plugins/kiqi-plugin.wit` 是 `trait Plugin` 的 wasm 版**；0.8.0 起导出面多出三个
 贡献面（OAuth / provider / render），不再与 trait 一一对应。
@@ -128,21 +128,25 @@ import **与 export**（`oauth-api`/`provider-api`/`render-api` 折叠成 grant 
 `ki` 通过 `plugin-wasm` feature（**默认开**）加载 `$KI_AGENT_DIR/plugins/<id>/plugin.wasm`；
 读同目录 `grants.json`。组件自报的 `id` **只用于核对**，install 目录才是身份与授权键。
 
-### cdylib 面 vs wasm 权威路径（0.8.0）
+### cdylib 面 vs wasm 权威路径（0.8.0 → P6 已收口）
 
-OAuth / provider / renderer / resources 在 cdylib 通道里仍有**旧注册槽位**；0.8.0 起它们
-**不再是权威路径**。P6 会删掉 cdylib 代码，文档从这一轮起就认 wasm 侧：
+OAuth / provider / renderer / resources 在 cdylib 通道里曾有**旧注册槽位**；0.8.0 起
+wasm 就是权威路径，**2026-10-26 的 P6 把 cdylib 装载机整体删除**（`kiqi-plugin-sdk`、
+`libloading` loader、`ki dev`/`ki install`/`ki package`）。现在没有任何装载路径能喂给
+这些旧槽位——registry 类型仍在（脊柱保留），但恒为空：
 
-| cdylib 面（旧） | 现状 | 权威 wasm 路径 |
+| cdylib 面（已退役） | 现状 | 权威 wasm 路径 |
 |---|---|---|
-| `register_oauth_provider`（`crates/kiqi-plugin-sdk/src/lib.rs:1265`、`crates/kiqi-extensions/src/registry.rs:580`） | wasm grant 优先；无匹配 wasm provider 时 `ki auth` 仍回退到 cdylib registry；P6 待删 | `oauth-api` + `oauth-http`（§6.40） |
-| `register_provider`（`sdk/src/lib.rs:1186`、`registry.rs:565`） | 旧 `PluggableProvider` 仍随 `ExtensionSession` 注入，与 `WasmProvider` 并存；P6 待删 | `provider-api` + `provider-http`/`provider-stream`（§6.41） |
-| `register_message_renderer` / `register_markdown_transformer` / `register_entry_renderer`（`sdk/src/lib.rs:1196-1212`、`registry.rs:228-229`） | cdylib tier 仍先于 wasm 运行（`crates/kiqi-cli/src/interactive_tui.rs:131-160`）；P6 删除 | `render-api`（§6.42）。0.8.0 **只有 markdown**，消息/entry renderer 不提供 |
-| `register_resources_discover`（`sdk/src/lib.rs:1223`） | cdylib 的 startup/reload 发现仍在运行；wasm 包不经过它；P6 待删 | `resources.json` + `resources` grant（§6.43） |
+| `register_oauth_provider` | 死面：`ki auth` 的 extension session 恒为 `ExtensionSession::none()`，不再回退到 cdylib registry | `oauth-api` + `oauth-http`（§6.40） |
+| `register_provider` | 死面：`ExtensionSession` 恒空，`PluggableProvider` 不再注入模型链 | `provider-api` + `provider-http`/`provider-stream`（§6.41） |
+| `register_message_renderer` / `register_markdown_transformer` / `register_entry_renderer` | 死面：renderer tier 对空 registry 恒无命中 | `render-api`（§6.42）。0.8.0 **只有 markdown**，消息/entry renderer 不提供 |
+| `register_resources_discover` | 死面：startup/reload 发现对空 registry 恒无输出 | `resources.json` + `resources` grant（§6.43） |
 
-P6 的 cdylib 面删除仍未完成，所以上表是有意的**并存边界**，不是「旧槽位已不存在」。另一个
-遗留全局态是进程级 `compiled_event_sink`：每次 session build 调用
-`install_compiled_event_sink` 都替换同一槽位，仍是 **last-writer-wins**，不是每会话独立注册。
+遗留（惰性，不可达）：C ABI 注册回调机器（`HostApi`/vtable/线程局部 `current_api`）与
+`PluginToolAdapter` 仍随脊柱编译，但无装载路径；折叠成纯 serde 事件总线是独立后续批次
+（`plugin-abi.md` §6.45）。另一个遗留全局态是进程级 `compiled_event_sink`：每次 session
+build 调用 `install_compiled_event_sink` 都替换同一槽位，仍是 **last-writer-wins**，
+不是每会话独立注册。
 
 ## 5. 上手
 
@@ -199,7 +203,7 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 | **内建 provider 不自动消费 OAuth entry** | 内建链路的 `stored_api_key` 仍只匹配 `ApiKey`；但 wasm provider 已能通过显式 `--credential-from` 使用 OAuth access token，并在每次请求重算凭据指纹，不能再概括为「OAuth 没有模型请求消费者」（§6.40/§6.41）。 |
 | **O17 残余风险仍在，告警已落地** | 同时持有 `exec`/`fs`/`net-sockets` 与 `oauth`/`provider` 时，`credential_capability_warning` 会在授权后警告并给出 revoke/logout 命令；它不拒绝授权，也不能消除插件经其它能力读取 `auth.json` 的爆炸半径（§6.39）。 |
 | **同意面仍不对称** | `probe`/`verdict.replace`、`before-agent-start`、`session-read`/`session-control`/`inject`/`ui` 在 0.8.0 仍不需要 grant（业主决定，§6.39 记录）。 |
-| **cdylib 的 OAuth/provider/renderer/resources 槽位待删** | 权威路径已切到 wasm；P6 删除仍未做。本页 §4 记录并存边界；进程级 compiled event sink 也仍是 last-writer-wins。 |
+| ~~cdylib 的 OAuth/provider/renderer/resources 槽位待删~~ | ✅ 已解（2026-10-26 P6）：装载机与 `kiqi-plugin-sdk`/`ki dev`/`ki install`/`ki package` 全部删除，旧槽位不可达；进程级 compiled event sink 仍是 last-writer-wins（见上节）。 |
 | 装完需重启 | `compiled_plugin_hosts()` 是进程级 `OnceLock` |
 | ~~e2e 的 `exec_does_not_hang_when_the_command_leaves_a_background_child` 满负载偶发超时~~ | ✅ 已在 `dce1216` 缓解：把 `fixture_wasm()` 移到计时窗口**之外**（`e2e.rs:2425-2428` 的注释写明理由），15s 窗口里不再包含 wasmtime 编译时间。阈值未动，因为根因是窗口里混入了无关工作而非窗口太小。实测：e2e 单跑 3 次全绿；再与整个 workspace 测试**并行**跑一次，0 失败 |
 | ~~**acp 不迁，宿主级立项**~~ | ✅ 已落地：`ki acp serve`（批次 1/2 于 2026-10-16 完成；批次 3 为 abb 对接与文档销账）。裁定与方案见 `plugin-abi.md` §6.2 与 `ki-acp-serve.md`（进程内驱动 AgentHarness、协议层用官方 `agent-client-protocol` crate、abb-agent 做语义层参照） |

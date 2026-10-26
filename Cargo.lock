@@ -2086,7 +2086,6 @@ dependencies = [
  "kiqi-harness",
  "kiqi-mcp",
  "kiqi-plugin",
- "kiqi-plugin-sdk",
  "kiqi-tools",
  "serde",
  "serde_json",
@@ -2159,7 +2158,6 @@ dependencies = [
  "kiqi-mcp",
  "kiqi-plugin",
  "kiqi-plugin-host",
- "kiqi-plugin-sdk",
  "kiqi-telemetry",
  "kiqi-tools",
  "kiqi-tui",
@@ -2191,8 +2189,6 @@ dependencies = [
  "kiqi-agent",
  "kiqi-ai",
  "kiqi-plugin",
- "kiqi-plugin-sdk",
- "libloading",
  "serde",
  "serde_json",
  "tempfile",
@@ -2237,7 +2233,6 @@ dependencies = [
  "kiqi-ai",
  "kiqi-harness",
  "kiqi-plugin",
- "kiqi-plugin-sdk",
  "nix 0.31.3",
  "process-wrap",
  "reqwest",
@@ -2284,16 +2279,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kiqi-plugin-sdk"
-version = "0.4.1"
-dependencies = [
- "kiqi-plugin",
- "libc",
- "serde_json",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "kiqi-telemetry"
 version = "0.4.1"
 dependencies = [
@@ -2316,7 +2301,6 @@ dependencies = [
  "kiqi-agent",
  "kiqi-ai",
  "kiqi-plugin",
- "kiqi-plugin-sdk",
  "nix 0.29.0",
  "regex",
  "schemars 0.8.22",
@@ -2388,16 +2372,6 @@ checksum = "a9fd2f41a1cba099f79a0b6b6c35656cf7c03351a7bae8ff0f28f25270f929d2"
 dependencies = [
  "arbitrary",
  "cc",
-]
-
-[[package]]
-name = "libloading"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
 ]
 
 [[package]]
@@ -2942,14 +2916,6 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
-
-[[package]]
-name = "plugin-stub"
-version = "0.1.11"
-dependencies = [
- "kiqi-plugin-sdk",
- "serde_json",
-]
 
 [[package]]
 name = "png"

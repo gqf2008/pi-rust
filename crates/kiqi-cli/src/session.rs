@@ -453,18 +453,14 @@ pub async fn build_with_selection(
     // apply to the merged set), and keep the loaded `Library` handles alive for
     // the harness lifetime via the returned session guard. `--no-extensions`
     // skips discovery entirely (no dirs scanned, no plugins loaded).
-    let extension_session = if args.no_extensions {
-        ExtensionSession::none()
-    } else {
-        load_extensions(args, cwd, project_trusted, Some(Arc::clone(&action_bridge)))
-    };
+    //
+    // P6: the cdylib loader is gone — the extension session is always the
+    // empty registry, which keeps the dispatch funnels (compiled/wasm sink)
+    // live while carrying no native tools/providers/renderers.
+    let extension_session = ExtensionSession::none();
     if args.verbose {
-        if let Some(s) = extension_session.summary() {
-            eprintln!("extensions: {s}");
-        }
         report_deferred_renderers(&extension_session);
     }
-    merge_extension_tools(&mut tools, &extension_session, args, &tool_context);
     // The same capabilities serve tools and events; install the event sink
     // before anything can dispatch (the first `SessionStart` is still ahead).
     let plugin_caps = crate::plugins::owned_caps(
@@ -886,7 +882,7 @@ pub async fn build_with_selection(
     // one-child passthrough), so the TUI path is unchanged.
     let emitter: Arc<dyn kiqi_agent::AgentEmitter> = match extension_session.snapshot_arc() {
         Some(snapshot) => {
-            let ext = ExtensionEmitter::new(snapshot, extension_session.keepalive());
+            let ext = ExtensionEmitter::new(snapshot);
             Arc::new(TeeEmitter::new(vec![broadcast_emitter, Arc::new(ext)]))
         }
         None => broadcast_emitter,
@@ -1335,7 +1331,7 @@ pub struct ReloadContext {
 /// Resolves the **current** extension session from the reload cell so a
 /// `/reload`-swapped session is honored. Each handler runs on a blocking thread
 /// with a per-event timeout ([`kiqi_extensions::lifecycle_timeout_for`]); a
-/// handler returning [`kiqi_plugin_sdk::EVENT_HANDLER_ABORT`] vetoes the phase
+/// handler returning [`kiqi_extensions::EVENT_HANDLER_ABORT`] vetoes the phase
 /// and this returns `Some(reason)`. No-op (`None`) when no plugins loaded, no
 /// handler subscribes, or the registry is stale.
 ///
@@ -1346,20 +1342,15 @@ pub async fn dispatch_session_event_async(
     reload_context: &ReloadContext,
     tag: kiqi_plugin::EventTag,
 ) -> Option<String> {
-    // Take the snapshot Arc + keepalive, drop the session lock, then dispatch —
-    // we must not hold the session cell's mutex across the await (a handler
-    // could re-enter a reload path that locks it). Holding the keepalive across
-    // the await keeps the cdylibs (owning the handler fn pointers) mapped even
-    // if a concurrent `/reload` swaps the session cell out.
-    let (snapshot, keepalive) = {
+    // Take the snapshot Arc, drop the session lock, then dispatch — we must
+    // not hold the session cell's mutex across the await (a handler could
+    // re-enter a reload path that locks it).
+    let snapshot = {
         let session = reload_context.extension_session.lock().unwrap();
-        (session.snapshot_arc(), session.keepalive())
+        session.snapshot_arc()
     };
     match snapshot {
-        Some(snapshot) => {
-            let _keepalive = keepalive;
-            kiqi_extensions::dispatch_lifecycle_event(&snapshot, tag).await
-        }
+        Some(snapshot) => kiqi_extensions::dispatch_lifecycle_event(&snapshot, tag).await,
         None => None,
     }
 }
@@ -1413,11 +1404,9 @@ pub async fn dispatch_session_shutdown_advisory(reload_context: &ReloadContext) 
 /// could still execute code in the old DLL, so it cannot safely permit a swap.
 async fn shutdown_extensions_for_reload(
     snapshot: Option<Arc<kiqi_extensions::RegistrySnapshot>>,
-    keepalive: Arc<kiqi_extensions::PluginKeepalive>,
 ) -> Result<(), String> {
     if let Some(snapshot) = snapshot {
         tokio::task::spawn_blocking(move || {
-            let _keepalive = keepalive;
             kiqi_extensions::dispatch_empty_event(
                 &snapshot,
                 kiqi_plugin::EventTag::SessionShutdown,
@@ -1432,8 +1421,8 @@ async fn shutdown_extensions_for_reload(
 /// The outcome of a reload: a human-readable status line for the transcript
 /// (counts of what reloaded), and whether any load diagnostics appeared.
 pub struct ReloadOutcome {
-    /// One-line summary for the transcript note (e.g. "Reloaded 2 plugin(s),
-    /// 5 skill(s), 1 prompt(s).").
+    /// One-line summary for the transcript note (e.g. "Reloaded 5 skill(s),
+    /// 1 prompt(s).").
     pub summary: String,
     /// True iff at least one extension load warning fired (ABI mismatch / skip).
     pub had_warnings: bool,
@@ -1528,12 +1517,11 @@ where
     // Shutdown callbacks must finish before a replacement can unload old DLLs.
     // Ordinary lifecycle dispatch can time out or stop on a veto; unload cleanup
     // instead joins every handler while keeping its module mapped.
-    let (shutdown_snapshot, shutdown_keepalive) = {
+    let shutdown_snapshot = {
         let session = ctx.extension_session.lock().unwrap();
-        (session.snapshot_arc(), session.keepalive())
+        session.snapshot_arc()
     };
-    if let Err(reason) = shutdown_extensions_for_reload(shutdown_snapshot, shutdown_keepalive).await
-    {
+    if let Err(reason) = shutdown_extensions_for_reload(shutdown_snapshot).await {
         return ReloadOutcome {
             summary: "Reload failed during extension shutdown".into(),
             had_warnings: true,
@@ -1581,23 +1569,10 @@ where
         ctx.editor_text.clone(),
     );
 
-    let extension_session = if effective_args.no_extensions {
-        kiqi_extensions::ExtensionSession::none()
-    } else {
-        load_extensions_from_dirs(
-            &effective_args,
-            &extension_dirs,
-            Some(Arc::clone(&fresh_bridge)),
-        )
-    };
-    if extension_session.is_empty() && !effective_args.no_extensions {
-        // The fresh session may be empty if no cdylibs are present — not a
-        // warning per se, but note it.
-    }
+    // P6: the cdylib loader is gone — the fresh session is always the empty
+    // registry (wasm guests reload through `plugins::reload_caps`, not here).
+    let extension_session = kiqi_extensions::ExtensionSession::none();
     if effective_args.verbose {
-        if let Some(s) = extension_session.summary() {
-            eprintln!("reload: {s}");
-        }
         report_deferred_renderers(&extension_session);
     }
 
@@ -1757,16 +1732,10 @@ where
     let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
     let tool_ctx = kiqi_tools::ExecutionToolContext::new(env_dyn.clone(), Some(mut_env));
     let mut tools = build_tools(&tool_ctx, &effective_args, &ctx.cwd, &ctx.signal_host);
-    merge_extension_tools(
-        &mut tools,
-        &extension_session,
-        &effective_args,
-        &ctx.tool_context,
-    );
     // ---- Rebuild the emitter (TeeEmitter over fresh ExtensionEmitter) ----
     let emitter: Arc<dyn kiqi_agent::AgentEmitter> = match extension_session.snapshot_arc() {
         Some(snapshot) => {
-            let ext = ExtensionEmitter::new(snapshot, extension_session.keepalive());
+            let ext = ExtensionEmitter::new(snapshot);
             Arc::new(TeeEmitter::new(vec![ctx.broadcast.clone(), Arc::new(ext)]))
         }
         None => ctx.broadcast.clone(),
@@ -1774,13 +1743,7 @@ where
 
     // ---- 5. Push the rebuilt state into the live harness via the B5d setters ----
     let _ = harness.set_agent_emitter(Some(emitter)).await;
-    let _ = harness
-        .set_models(build_models_with_extensions_for_reload(
-            &ctx.providers,
-            &extension_session,
-            ctx.runtime.clone(),
-        ))
-        .await;
+    let _ = harness.set_models(ctx.providers.clone()).await;
     let _ = harness
         .set_provider_hooks(Some(crate::plugins::compiled_prompt_hooks(
             kiqi_extensions::ExtensionProviderHooks::from_session(&extension_session)
@@ -1910,8 +1873,7 @@ where
     let _ = harness.set_tools(tools, Some(active)).await;
 
     let summary = format!(
-        "Reloaded {} plugin(s), {} skill(s), {} prompt(s).",
-        extension_session.loaded_paths().len(),
+        "Reloaded {} skill(s), {} prompt(s).",
         skills.len(),
         prompt_templates.len(),
     );
@@ -2141,76 +2103,6 @@ pub(crate) fn resolve_project_trust(args: &Args, cwd: &Path) -> bool {
         .ok()
         .flatten()
         .unwrap_or(true)
-}
-
-/// Resolve the extension dirs to scan and load the cdylib plugins, returning
-/// the loaded session guard (keeps the `Library` handles alive for the harness
-/// lifetime). Scan order: configured project paths, project `.ki/extensions`,
-/// configured/global conventional paths, then any
-/// `--extensions-dir` flags (scanned after the defaults — `args.rs`).
-/// Diagnostics are a no-op sink for now; load skips/ABI mismatches surface via
-/// the `--verbose` summary.
-fn load_extensions(
-    args: &Args,
-    cwd: &Path,
-    project_trusted: bool,
-    action_bridge: Option<Arc<kiqi_extensions::ActionBridge>>,
-) -> ExtensionSession {
-    let mut dirs = if args.dev_local_only {
-        Vec::new()
-    } else if args.project_only {
-        project_extension_dirs(cwd)
-    } else if project_trusted {
-        extension_dirs(cwd)
-    } else {
-        global_extension_dirs()
-    };
-    dirs.extend(args.extensions_dir.iter().cloned());
-    load_extensions_from_dirs(args, &dirs, action_bridge)
-}
-
-fn load_extensions_from_dirs(
-    args: &Args,
-    dirs: &[PathBuf],
-    action_bridge: Option<Arc<kiqi_extensions::ActionBridge>>,
-) -> ExtensionSession {
-    let diagnostics: Arc<dyn PluginDiagnostics> = Arc::new(NullDiagnostics);
-    // B5a: the action bridge is cloned into every loaded plugin's vtable
-    // `user_data` so post-register `runtime_action` calls recover the harness
-    // host from any thread. The call site already gates `load_extensions` behind
-    // `!no_extensions` and threads `Some(bridge)`; `None` is only passed by the
-    // `--no-extensions` branch (which calls `ExtensionSession::none()` directly)
-    // and tests. Explicit `--extension`/`-e` files load after the dirs.
-    kiqi_extensions::load_session_mixed(dirs, &args.extension, diagnostics, action_bridge)
-}
-
-/// Merge the loaded extension tools into the built-in set. An extension tool
-/// overrides a same-named built-in; first-extension-wins across plugins is
-/// already guaranteed by the registry (`register_tool` keeps the prior). The
-/// explicit `--tools` allowlist / `--exclude-tools` denylist apply to the
-/// merged set (the built-ins were already filtered in [`build_tools`]).
-fn merge_extension_tools(
-    tools: &mut Vec<HarnessTool>,
-    session: &ExtensionSession,
-    args: &Args,
-    tool_context: &kiqi_extensions::ToolCallContext,
-) {
-    let Some(snapshot) = session.snapshot() else {
-        return;
-    };
-    for et in snapshot.tools() {
-        let name = &et.tool.name;
-        if !tool_name_allowed(name, args) {
-            continue;
-        }
-        let adapter = PluginToolAdapter::new(et.tool.clone(), et.handle(), session.keepalive())
-            .with_context(tool_context.clone());
-        let harness_tool = HarnessTool::new(Arc::new(adapter));
-        match tools.iter_mut().find(|t| t.tool.schema().name == *name) {
-            Some(slot) => *slot = harness_tool,
-            None => tools.push(harness_tool),
-        }
-    }
 }
 
 /// Build the tool list per `--tools`/`--exclude-tools`/`--no-tools`/
@@ -3831,10 +3723,10 @@ mod tests {
     }
 
     extern "C" fn deny_test_tool_call(
-        _event: kiqi_plugin_sdk::StablePluginEvent,
+        _event: kiqi_extensions::StablePluginEvent,
         _data: *mut std::ffi::c_void,
     ) -> i32 {
-        kiqi_plugin_sdk::EVENT_HANDLER_ABORT
+        kiqi_extensions::EVENT_HANDLER_ABORT
     }
 
     async fn invoke_tool_hook(
@@ -4008,12 +3900,7 @@ mod tests {
                 deny_test_tool_call,
                 std::ptr::null_mut(),
             );
-            let fresh = ExtensionSession::from_parts(
-                Arc::new(registry.snapshot()),
-                kiqi_extensions::PluginKeepalive::empty(),
-                Vec::new(),
-                None,
-            );
+            let fresh = ExtensionSession::from_parts(Arc::new(registry.snapshot()), None);
             {
                 let mut current = sessions.lock().unwrap();
                 if let Some(snapshot) = current.snapshot() {
@@ -4562,10 +4449,7 @@ mod tests {
         .await;
 
         assert!(!outcome.summary.contains("Settings reload failed"));
-        assert_eq!(
-            outcome.summary,
-            "Reloaded 0 plugin(s), 1 skill(s), 0 prompt(s)."
-        );
+        assert_eq!(outcome.summary, "Reloaded 1 skill(s), 0 prompt(s).");
         let resources = harness.get_resources().await.unwrap();
         let skills = resources.skills.as_ref().unwrap();
         assert_eq!(skills.len(), 1);
@@ -4995,14 +4879,14 @@ mod tests {
 
     #[tokio::test]
     async fn reload_shutdown_joins_all_handlers_even_after_veto() {
+        use kiqi_extensions::StablePluginEvent;
         use kiqi_plugin::EventTag;
-        use kiqi_plugin_sdk::StablePluginEvent;
         use std::sync::atomic::AtomicUsize;
         extern "C" fn stop(_: StablePluginEvent, data: *mut std::ffi::c_void) -> i32 {
             let calls = unsafe { &*(data as *const AtomicUsize) };
             std::thread::sleep(std::time::Duration::from_millis(20));
             if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                kiqi_plugin_sdk::EVENT_HANDLER_ABORT
+                kiqi_extensions::EVENT_HANDLER_ABORT
             } else {
                 0
             }
@@ -5017,12 +4901,9 @@ mod tests {
                 &calls as *const _ as *mut std::ffi::c_void,
             );
         }
-        super::shutdown_extensions_for_reload(
-            Some(Arc::new(registry.snapshot())),
-            kiqi_extensions::PluginKeepalive::empty(),
-        )
-        .await
-        .unwrap();
+        super::shutdown_extensions_for_reload(Some(Arc::new(registry.snapshot())))
+            .await
+            .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -5036,12 +4917,12 @@ mod tests {
     async fn session_tree_notification_dispatches_and_veto_is_advisory() {
         use std::sync::atomic::AtomicUsize;
         extern "C" fn veto(
-            _: kiqi_plugin_sdk::StablePluginEvent,
+            _: kiqi_extensions::StablePluginEvent,
             data: *mut std::ffi::c_void,
         ) -> i32 {
             unsafe { &*(data as *const AtomicUsize) }
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            kiqi_plugin_sdk::EVENT_HANDLER_ABORT
+            kiqi_extensions::EVENT_HANDLER_ABORT
         }
         let calls = AtomicUsize::new(0);
         let mut registry = kiqi_extensions::ExtensionRegistry::new();
@@ -5054,8 +4935,6 @@ mod tests {
         let reload_context = ReloadContext {
             extension_session: Arc::new(Mutex::new(kiqi_extensions::ExtensionSession::from_parts(
                 Arc::new(registry.snapshot()),
-                kiqi_extensions::PluginKeepalive::empty(),
-                Vec::new(),
                 None,
             ))),
             tool_context: kiqi_extensions::ToolCallContext::default(),

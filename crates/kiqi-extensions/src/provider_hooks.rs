@@ -22,14 +22,10 @@ use crate::loader::ExtensionSession;
 use crate::prompt_transform::emit_before_agent_start;
 use crate::registry::RegistrySnapshot;
 use crate::translate::{dispatch_before_provider_request, dispatch_data_event};
-use crate::PluginKeepalive;
 
 /// A [`ProviderHooks`] that dispatches to the registered extension handlers.
-/// Keeps the cdylib mappings alive via the keepalive (the handler fn pointers
-/// live inside the plugins).
 pub struct ExtensionProviderHooks {
     snapshot: Arc<RegistrySnapshot>,
-    _keepalive: Arc<PluginKeepalive>,
     /// Timestamp of the last user message we emitted `BeforeAgentStart` for.
     /// The hook fires once per provider call, but `before_agent_start` must
     /// fire once per prompt, so the prompt timestamp is the dedupe key.
@@ -85,7 +81,6 @@ impl ExtensionProviderHooks {
         }
         Some(Self {
             snapshot,
-            _keepalive: session.keepalive(),
             last_before_agent_start: Mutex::new(None),
             last_forced_prompt: Mutex::new(None),
         })
@@ -416,8 +411,8 @@ fn user_content_image_count(content: &UserContent) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StablePluginEvent;
     use kiqi_plugin::EventTag;
-    use kiqi_plugin_sdk::StablePluginEvent;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
@@ -477,7 +472,6 @@ mod tests {
         let snapshot = Arc::new(registry.snapshot());
         let hooks = ExtensionProviderHooks {
             snapshot: Arc::clone(&snapshot),
-            _keepalive: Arc::new(crate::PluginKeepalive::new(Vec::new(), None)),
             last_before_agent_start: Mutex::new(None),
             last_forced_prompt: Mutex::new(None),
         };
@@ -597,7 +591,6 @@ mod tests {
         let registry = crate::registry::ExtensionRegistry::new();
         let hooks = ExtensionProviderHooks {
             snapshot: Arc::new(registry.snapshot()),
-            _keepalive: Arc::new(crate::PluginKeepalive::new(Vec::new(), None)),
             last_before_agent_start: Mutex::new(None),
             last_forced_prompt: Mutex::new(None),
         };
@@ -667,7 +660,6 @@ mod tests {
         );
         let hooks = ExtensionProviderHooks {
             snapshot: Arc::new(registry.snapshot()),
-            _keepalive: Arc::new(crate::PluginKeepalive::new(Vec::new(), None)),
             last_before_agent_start: Mutex::new(None),
             last_forced_prompt: Mutex::new(None),
         };
@@ -721,7 +713,7 @@ mod tests {
         PROVIDER_HITS.store(0, Ordering::SeqCst);
 
         let mut registry = crate::registry::ExtensionRegistry::new();
-        let handler: kiqi_plugin_sdk::EventHandlerFn = counting_provider_handler;
+        let handler: crate::EventHandlerFn = counting_provider_handler;
         registry.register_event_handler(
             "test-plugin".to_string(),
             EventTag::BeforeProviderRequest,
@@ -751,7 +743,6 @@ mod tests {
         // counts it regardless (see counting_provider_handler).
         let hooks = ExtensionProviderHooks {
             snapshot: Arc::clone(&snapshot),
-            _keepalive: Arc::new(crate::PluginKeepalive::new(Vec::new(), None)),
             last_before_agent_start: Mutex::new(None),
             last_forced_prompt: Mutex::new(None),
         };
@@ -792,8 +783,8 @@ mod tests {
     /// Handler that returns `<marker>` + whatever prompt it was handed, so a
     /// test can observe the chain by the markers accumulating in order.
     extern "C" fn append_marker(
-        event_json: kiqi_plugin_sdk::StbStringRef,
-        out: *mut kiqi_plugin_sdk::StbString,
+        event_json: crate::StbStringRef,
+        out: *mut crate::StbString,
         user_data: *mut std::ffi::c_void,
     ) -> i32 {
         // SAFETY: host guarantees the ref for this call; the marker arrives as
@@ -806,15 +797,15 @@ mod tests {
             .unwrap_or_default();
         let json = serde_json::json!({ "systemPrompt": format!("{current}{marker}") });
         unsafe {
-            *out = kiqi_plugin_sdk::StbString::from_string(json.to_string());
+            *out = crate::StbString::from_string(json.to_string());
         }
         0
     }
 
     /// Handler that declines to change anything (empty object ⇒ no-op).
     extern "C" fn declines(
-        _event_json: kiqi_plugin_sdk::StbStringRef,
-        _out: *mut kiqi_plugin_sdk::StbString,
+        _event_json: crate::StbStringRef,
+        _out: *mut crate::StbString,
         _user_data: *mut std::ffi::c_void,
     ) -> i32 {
         0
@@ -822,8 +813,8 @@ mod tests {
 
     /// Handler that reports a handled error.
     extern "C" fn fails(
-        _event_json: kiqi_plugin_sdk::StbStringRef,
-        _out: *mut kiqi_plugin_sdk::StbString,
+        _event_json: crate::StbStringRef,
+        _out: *mut crate::StbString,
         _user_data: *mut std::ffi::c_void,
     ) -> i32 {
         7
@@ -839,7 +830,6 @@ mod tests {
         }
         ExtensionProviderHooks {
             snapshot: Arc::new(registry.snapshot()),
-            _keepalive: Arc::new(crate::PluginKeepalive::new(Vec::new(), None)),
             last_before_agent_start: Mutex::new(None),
             last_forced_prompt: Mutex::new(None),
         }
@@ -980,7 +970,7 @@ mod tests {
     /// Minimal free fn for handlers whose `out` is built by the SDK (they never
     /// hand back a plugin allocation in these tests, but the registry requires
     /// the field).
-    extern "C" fn noop_free(_s: kiqi_plugin_sdk::StbString) {}
+    extern "C" fn noop_free(_s: crate::StbString) {}
 
     /// The `BeforeAgentStart` observer sees the **post-transform** prompt.
     ///
@@ -1007,7 +997,6 @@ mod tests {
         registry.register_before_agent_start(append_marker, noop_free, leaked);
         let hooks = ExtensionProviderHooks {
             snapshot: Arc::new(registry.snapshot()),
-            _keepalive: Arc::new(crate::PluginKeepalive::new(Vec::new(), None)),
             last_before_agent_start: Mutex::new(None),
             last_forced_prompt: Mutex::new(None),
         };

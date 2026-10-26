@@ -1833,12 +1833,8 @@ mod tests {
     fn shutdown_test_context(
         registry: kiqi_extensions::ExtensionRegistry,
     ) -> crate::session::ReloadContext {
-        let session = kiqi_extensions::ExtensionSession::from_parts(
-            Arc::new(registry.snapshot()),
-            kiqi_extensions::PluginKeepalive::empty(),
-            Vec::new(),
-            None,
-        );
+        let session =
+            kiqi_extensions::ExtensionSession::from_parts(Arc::new(registry.snapshot()), None);
         let (emitter, _) = kiqi_agent::CollectorEmitter::new();
         crate::session::ReloadContext {
             extension_session: Arc::new(Mutex::new(session)),
@@ -1874,7 +1870,7 @@ mod tests {
     async fn print_mode_dispatches_session_shutdown_to_plugins() {
         use std::sync::atomic::AtomicUsize;
         extern "C" fn record(
-            _: kiqi_plugin_sdk::StablePluginEvent,
+            _: kiqi_extensions::StablePluginEvent,
             data: *mut std::ffi::c_void,
         ) -> i32 {
             unsafe { &*(data as *const AtomicUsize) }
@@ -1916,7 +1912,7 @@ mod tests {
     async fn json_mode_dispatches_session_shutdown_to_plugins() {
         use std::sync::atomic::AtomicUsize;
         extern "C" fn record(
-            _: kiqi_plugin_sdk::StablePluginEvent,
+            _: kiqi_extensions::StablePluginEvent,
             data: *mut std::ffi::c_void,
         ) -> i32 {
             unsafe { &*(data as *const AtomicUsize) }

@@ -29,7 +29,6 @@ kiqi-ai = { workspace = true }
 # depends on serde_json directly (below), so turning it off saves nothing and
 # only invites the "default-features is ignored" warning. The point of this edge
 # is the shared names, not the dependency size.
-kiqi-plugin-sdk = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }

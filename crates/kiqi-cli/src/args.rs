@@ -678,19 +678,10 @@ pub fn print_help() {
                                 ~/.ki/agent/models.json (see `ki configure --help`)
   events path|tail               Inspect the extension event journal (needs
                                 KI_EVENT_LOG=1; see `ki events --help`)
-  install <crate>                Build and install a Rust cdylib extension
-                                (see `ki install --help`)
-  uninstall <crate>              Remove an installed Rust cdylib extension
   insmod <path.wasm>             Install a wasm plugin (capabilities and policy
                                 ride the grants; `--build <guest-crate-dir>`
                                 compiles one first; see `ki plugin --help`)
   rmmod <id>                     Uninstall a wasm plugin (moves it aside)
-  package link|list|update|unlink Manage project-local Rust extension packages
-                                (see `ki package --help`)
-  dev [options]                  Build, watch, and hot-reload a Rust extension
-                                (see `ki dev --help`)
-  dev-local [options]            Debug only the current Rust extension
-                                (shortcut for `ki dev --local-only`)
 
 {u}Built-in Tools:{r}
   {builtin}  (enabled by default)
@@ -1297,8 +1288,8 @@ mod tests {
 
     #[test]
     fn local_only_flag_is_honored_on_the_regular_parser() {
-        // The plain `ki --local-only` form sets the same scope `ki dev
-        // --local-only` uses, without the build/watch layer.
+        // The plain `ki --local-only` form narrows discovery to the project
+        // (kept after the `ki dev` channel retired).
         let a = parse_args(&s(&["--local-only"]));
         assert!(a.errors.is_empty());
         assert!(a.dev_local_only);
