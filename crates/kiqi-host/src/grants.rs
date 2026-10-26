@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -101,7 +102,8 @@ pub enum ExecCwd {
     /// rename spell this as `"plugin-data"`. Without the alias serde rejects the
     /// whole document, `load_for_at` falls back to empty grants, and the next
     /// save would rewrite the file without every capability. The alias is
-    /// transient: a successful load migrates it to the new spelling.
+    /// transient: the file is read for compatibility, and the next explicit
+    /// save writes the current spelling.
     #[default]
     #[serde(alias = "plugin-data")]
     ExtensionData,
@@ -138,20 +140,77 @@ fn grants_file_version(value: &Value) -> Result<u32, String> {
     }
 }
 
-/// Detect the legacy cwd spelling that serde accepts through `ExecCwd`'s alias.
-/// Checking the raw JSON lets a successful read trigger an explicit migration
-/// back to the current spelling instead of silently carrying the alias forever.
-fn legacy_cwd_capabilities(value: &Value) -> Vec<&'static str> {
-    ["fs", "exec", "proc"]
-        .into_iter()
-        .filter(|capability| {
-            value
-                .get(*capability)
-                .and_then(|grant| grant.get("cwd"))
-                .and_then(Value::as_str)
-                == Some("plugin-data")
-        })
-        .collect()
+/// A structural pass over the raw JSON that rejects duplicated object keys at
+/// any depth. `serde_json::Value` keeps only the last duplicate, so parsing a
+/// grants file through `Value` would let a second `"exec"` (or a second nested
+/// `"cwd"`) silently overwrite the first — a duplicated capability key could
+/// widen a grant from `["safe"]` to `["*"]`. Running this visitor on the
+/// original text makes the file fail closed like any other malformed input.
+struct RejectDuplicateKeys;
+
+impl<'de> Deserialize<'de> for RejectDuplicateKeys {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Keys;
+
+        impl<'de> Visitor<'de> for Keys {
+            type Value = RejectDuplicateKeys;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("any JSON value without duplicated object keys")
+            }
+
+            fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(RejectDuplicateKeys)
+            }
+
+            fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(RejectDuplicateKeys)
+            }
+
+            fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(RejectDuplicateKeys)
+            }
+
+            fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(RejectDuplicateKeys)
+            }
+
+            fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(RejectDuplicateKeys)
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(RejectDuplicateKeys)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while seq.next_element::<RejectDuplicateKeys>()?.is_some() {}
+                Ok(RejectDuplicateKeys)
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut seen = std::collections::HashSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !seen.insert(key.clone()) {
+                        return Err(de::Error::custom(format!("duplicate key `{key}`")));
+                    }
+                    map.next_value::<RejectDuplicateKeys>()?;
+                }
+                Ok(RejectDuplicateKeys)
+            }
+        }
+
+        deserializer.deserialize_any(Keys)
+    }
 }
 
 fn default_exec_timeout() -> u64 {
@@ -1515,8 +1574,11 @@ impl Grants {
     }
 
     /// Load with an injectable diagnostic sink so tests can prove that parse
-    /// failures and migrations are loud. Only successfully parsed, supported
-    /// versions are eligible for migration write-back.
+    /// failures are loud. The read path never writes: a malformed file, an
+    /// invalid capability, or an unknown field is left exactly as the user
+    /// wrote it, so a concurrent grant/revoke can never be overwritten by a
+    /// stale read. Upgrading the document format is a side effect of an
+    /// explicit save ([`Self::save_for_at`]), not of loading.
     fn load_for_at_with(
         root: &std::path::Path,
         extension_id: &str,
@@ -1555,11 +1617,16 @@ impl Grants {
             ));
             return Self::default();
         }
-        let legacy_cwds = legacy_cwd_capabilities(&value);
-        // A file this build cannot parse must not silently become "no grants":
-        // the user would lose every capability with no diagnostic, and an
-        // automatic migration must never overwrite the unreadable original.
-        let mut grants: Grants = match serde_json::from_value(value) {
+        // `Value` keeps only the last of a duplicated key, so reject duplicates
+        // on the original text before any capability is interpreted.
+        if let Err(error) = serde_json::from_str::<RejectDuplicateKeys>(&text) {
+            warn(format!(
+                "warning: {} is unreadable ({error}); treating every capability as ungranted and leaving the file unchanged",
+                path.display()
+            ));
+            return Self::default();
+        }
+        let mut grants: Grants = match serde_json::from_str(&text) {
             Ok(grants) => grants,
             Err(error) => {
                 warn(format!(
@@ -1572,29 +1639,20 @@ impl Grants {
         // A hand-edited file must not buy policy the CLI would refuse, so the
         // same validation the constructors use runs here. An invalid policy is
         // treated as absent (that one capability is cleared, the rest of the
-        // file still loads): the caller sees only what survived.
+        // file still loads): the caller sees only what survived, and the file
+        // is left untouched so nothing the user wrote is silently deleted.
+        let before: Vec<&'static str> = grants.granted();
         grants = grants.validated();
-
-        if version < GRANTS_VERSION || !legacy_cwds.is_empty() {
-            let reason = match (version < GRANTS_VERSION, !legacy_cwds.is_empty()) {
-                (true, true) => "old version and legacy cwd spelling",
-                (true, false) => "old version",
-                (false, true) => "legacy cwd spelling",
-                (false, false) => unreachable!(),
-            };
+        let dropped: Vec<&'static str> = before
+            .into_iter()
+            .filter(|capability| !grants.granted().contains(capability))
+            .collect();
+        if !dropped.is_empty() {
             warn(format!(
-                "warning: {} needs grants.json migration ({reason}); writing version {GRANTS_VERSION} with current capability spellings",
-                path.display()
+                "warning: {} has invalid policy for {}; ignoring those capabilities for this load and leaving the file unchanged",
+                path.display(),
+                dropped.join(", ")
             ));
-            grants.version = Some(GRANTS_VERSION);
-            if let Err(error) =
-                Self::save_for_at_with_cwds(root, extension_id, &grants, &legacy_cwds)
-            {
-                warn(format!(
-                    "warning: could not migrate {}: {error}; using the parsed grants for this load and leaving migration for a later load",
-                    path.display()
-                ));
-            }
         }
         grants
     }
@@ -1605,23 +1663,13 @@ impl Grants {
         Self::save_for_at(&root, extension_id, grants)
     }
 
-    /// [`Self::save_for`] against an explicit agent root.
+    /// [`Self::save_for`] against an explicit agent root. This is the only
+    /// writer: every explicit save upgrades the document to [`GRANTS_VERSION`]
+    /// and writes the current capability spellings (defaults stay omitted).
     pub fn save_for_at(
         root: &std::path::Path,
         extension_id: &str,
         grants: &Grants,
-    ) -> Result<(), String> {
-        Self::save_for_at_with_cwds(root, extension_id, grants, &[])
-    }
-
-    /// Serialize with the current version. Migration also re-inserts default
-    /// cwd values that were present with their legacy spelling, because normal
-    /// serialization omits defaults and must stay minimal for ordinary saves.
-    fn save_for_at_with_cwds(
-        root: &std::path::Path,
-        extension_id: &str,
-        grants: &Grants,
-        explicit_cwds: &[&str],
     ) -> Result<(), String> {
         let path = grants_path_at(root, extension_id);
         let mut current = grants.clone();
@@ -1630,16 +1678,7 @@ impl Grants {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("create {}: {error}", parent.display()))?;
         }
-        let mut value = serde_json::to_value(&current).map_err(|error| error.to_string())?;
-        for capability in explicit_cwds {
-            if let Some(grant) = value.get_mut(*capability).and_then(Value::as_object_mut) {
-                grant.insert(
-                    "cwd".to_string(),
-                    Value::String("extension-data".to_string()),
-                );
-            }
-        }
-        let text = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+        let text = serde_json::to_string_pretty(&current).map_err(|error| error.to_string())?;
         std::fs::write(&path, format!("{text}\n"))
             .map_err(|error| format!("write {}: {error}", path.display()))
     }
@@ -3002,24 +3041,23 @@ mod tests {
         }
     }
 
+    /// A legacy cwd spelling is read for compatibility, but loading is a pure
+    /// read: the file is only rewritten when the user explicitly saves.
     #[test]
-    fn legacy_cwd_spelling_keeps_capabilities_and_migrates_to_current_json() {
+    fn legacy_cwd_spelling_loads_without_rewriting_and_saves_current_json() {
         let root = tempfile::tempdir().unwrap();
         let dir = extension_dir_at(root.path(), "legacy");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("grants.json");
         // Deliberate legacy compatibility fixture: this was the pre-rename cwd
-        // value, and all three cwd-scoped capabilities must survive migration.
-        std::fs::write(
-            &path,
-            r#"{
+        // value, and all three cwd-scoped capabilities must survive the load.
+        let original = r#"{
                 "net-http": {"hosts": ["api.example.test"]},
                 "fs": {"cwd": "plugin-data"},
                 "exec": {"commands": ["echo"], "cwd": "plugin-data"},
                 "proc": {"commands": ["server"], "cwd": "plugin-data"}
-            }"#,
-        )
-        .unwrap();
+            }"#;
+        std::fs::write(&path, original).unwrap();
 
         let mut warnings = Vec::new();
         let grants =
@@ -3027,46 +3065,65 @@ mod tests {
         assert!(grants.allows_host("api.example.test"));
         assert!(grants.allows_command("echo"));
         assert!(grants.allows_proc_command("server"));
-        assert_eq!(grants.fs.unwrap().cwd, ExecCwd::ExtensionData);
-        assert_eq!(grants.exec.unwrap().cwd, ExecCwd::ExtensionData);
-        assert_eq!(grants.proc.unwrap().cwd, ExecCwd::ExtensionData);
-        assert_eq!(grants.version, Some(GRANTS_VERSION));
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("old version and legacy cwd spelling"));
+        assert_eq!(grants.fs.as_ref().unwrap().cwd, ExecCwd::ExtensionData);
+        assert_eq!(grants.exec.as_ref().unwrap().cwd, ExecCwd::ExtensionData);
+        assert_eq!(grants.proc.as_ref().unwrap().cwd, ExecCwd::ExtensionData);
+        assert!(
+            grants.version.is_none(),
+            "the load reports the on-disk version; only an explicit save upgrades it"
+        );
+        assert!(
+            warnings.is_empty(),
+            "a supported legacy file loads quietly: {warnings:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "loading must not rewrite the user's file"
+        );
 
-        let migrated = std::fs::read_to_string(&path).unwrap();
-        assert!(!migrated.contains("plugin-data"));
-        let migrated: Value = serde_json::from_str(&migrated).unwrap();
-        assert_eq!(migrated["version"], GRANTS_VERSION);
-        for capability in ["fs", "exec", "proc"] {
-            assert_eq!(migrated[capability]["cwd"], "extension-data");
+        // An explicit save is where the document moves to the current format.
+        Grants::save_for_at(root.path(), "legacy", &grants).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("plugin-data"));
+        let saved: Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved["version"], GRANTS_VERSION);
+        // `fs` always spells its scope; `exec`/`proc` omit the default one.
+        assert_eq!(saved["fs"]["cwd"], "extension-data");
+        for capability in ["exec", "proc"] {
+            assert!(
+                saved[capability].get("cwd").is_none(),
+                "the default cwd is omitted in the current minimal encoding"
+            );
         }
     }
 
+    /// An explicit legacy version is accepted without touching the file; a
+    /// later explicit save writes the current version.
     #[test]
-    fn explicit_legacy_version_is_migrated_even_without_legacy_cwd() {
+    fn explicit_legacy_version_loads_read_only_and_save_upgrades_it() {
         let root = tempfile::tempdir().unwrap();
         let dir = extension_dir_at(root.path(), "version-one");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("grants.json");
-        std::fs::write(
-            &path,
-            r#"{"version":1,"net-http":{"hosts":["api.example.test"]}}"#,
-        )
-        .unwrap();
+        let original = r#"{"version":1,"net-http":{"hosts":["api.example.test"]}}"#;
+        std::fs::write(&path, original).unwrap();
 
         let mut warnings = Vec::new();
         let grants =
             Grants::load_for_at_with(root.path(), "version-one", |warning| warnings.push(warning));
         assert!(grants.allows_host("api.example.test"));
-        assert_eq!(grants.version, Some(GRANTS_VERSION));
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("old version"));
+        assert_eq!(grants.version, Some(GRANTS_VERSION_LEGACY));
+        assert!(
+            warnings.is_empty(),
+            "a supported legacy file loads quietly: {warnings:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
 
-        let migrated: Value =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(migrated["version"], GRANTS_VERSION);
-        assert_eq!(migrated["net-http"]["hosts"][0], "api.example.test");
+        Grants::save_for_at(root.path(), "version-one", &grants).unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"], GRANTS_VERSION);
+        assert_eq!(saved["net-http"]["hosts"][0], "api.example.test");
     }
 
     #[test]
@@ -3111,6 +3168,49 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     }
 
+    /// Duplicate keys must fail closed. A two-phase `Value` parse keeps only
+    /// the last duplicate, so `{"exec": safe, "exec": any}` would silently
+    /// widen the grant; parsing the original text sees the duplicate.
+    #[test]
+    fn duplicate_grant_keys_fail_closed_without_rewriting() {
+        let root = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                "top-level",
+                r#"{
+            "version": 2,
+            "exec": {"commands": ["safe"]},
+            "exec": {"commands": ["*"]}
+        }"#,
+                "duplicate key `exec`",
+            ),
+            (
+                "nested",
+                r#"{"version":2,"exec":{"commands":["safe"],"commands":["*"]}}"#,
+                "duplicate key `commands`",
+            ),
+        ];
+        for (id, original, expected) in cases {
+            let dir = extension_dir_at(root.path(), id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("grants.json");
+            std::fs::write(&path, original).unwrap();
+
+            let mut warnings = Vec::new();
+            let grants =
+                Grants::load_for_at_with(root.path(), id, |warning| warnings.push(warning));
+            assert!(
+                grants.exec.is_none(),
+                "{id}: a duplicated capability key grants nothing"
+            );
+            assert!(grants.granted().is_empty(), "{id}");
+            assert_eq!(warnings.len(), 1, "{id}: {warnings:?}");
+            assert!(warnings[0].contains(expected), "{id}: {}", warnings[0]);
+            assert!(warnings[0].contains("leaving the file unchanged"), "{id}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original, "{id}");
+        }
+    }
+
     #[test]
     fn every_save_writes_the_current_version() {
         let root = tempfile::tempdir().unwrap();
@@ -3126,15 +3226,16 @@ mod tests {
     }
 
     /// A hand-edited file cannot smuggle invalid policy in: the offending
-    /// capability loads as absent while the rest of the file survives.
+    /// capability loads as absent, the rest of the file survives, and the file
+    /// is left exactly as written (invalid policy and unknown keys included).
     #[test]
     fn a_hand_edited_invalid_policy_is_treated_as_absent() {
-        let root = std::env::temp_dir().join(format!("kiqi-invalid-grants-{}", std::process::id()));
-        let dir = extension_dir_at(&root, "invalid");
+        let root = tempfile::tempdir().unwrap();
+        let dir = extension_dir_at(root.path(), "invalid");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("grants.json"),
-            r#"{
+        let path = dir.join("grants.json");
+        let original = r#"{
+                "user-note": "keep this",
                 "net-http": {"hosts": ["api.example.test"]},
                 "provider": {
                     "providers": [{
@@ -3143,11 +3244,12 @@ mod tests {
                         "endpoint": {"host": "api.example.test", "path-prefix": "/v1"}
                     }]
                 }
-            }"#,
-        )
-        .unwrap();
+            }"#;
+        std::fs::write(&path, original).unwrap();
 
-        let grants = Grants::load_for_at(&root, "invalid");
+        let mut warnings = Vec::new();
+        let grants =
+            Grants::load_for_at_with(root.path(), "invalid", |warning| warnings.push(warning));
         assert!(
             grants.provider.is_none(),
             "an api outside the typed wire set is dropped"
@@ -3157,8 +3259,18 @@ mod tests {
             "unrelated valid grants survive the bad one"
         );
         assert_eq!(grants.granted(), vec!["net-http"]);
-
-        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("invalid policy for provider"),
+            "{}",
+            warnings[0]
+        );
+        assert!(warnings[0].contains("leaving the file unchanged"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "the read path must not delete the invalid policy or unknown keys"
+        );
     }
 
     /// The interface map is what a consent prompt uses to turn a component's
