@@ -1368,27 +1368,20 @@ C ABI 线格式（`StbString`/`StableExtensionEvent`/`EventView`/handler consts�
   `crates/kiqi-host/tests/e2e.rs` 从宿主侧验证（CLAUDE.md / AGENTS.md 同步）。
 - CI 增一步 `cargo test --manifest-path extensions/wasm/Cargo.toml -p kiqi-plan-mode`。
 
-### 6.48 全仓去 "plugin" 化：`kiqi:plugin` → `kiqi:extension@0.9.0`（2026-10-26）
+### 6.48 词汇统一为 extension（WIT 0.9.0，2026-10-26）
 
-用户裁定：代码与文档里不再出现 "plugin" 一词。落地为一个整体重命名（包版本升到
-**0.9.0**，因为 WIT 包名变更是 ABI 变更）：
+用户裁定：代码与文档的词汇统一为 **extension**，旧词从全仓删除。这是整体重命名，
+包版本升到 **0.9.0**（WIT 包名变更是 ABI 变更）：
 
-- **WIT**：`plugins/kiqi-plugin.wit` → `extensions/kiqi-extension.wit`；
-  `package kiqi:plugin@0.8.0` → `kiqi:extension@0.9.0`；`world plugin` →
-  `world extension`；`plugin-api` 接口 → `extension-api`。
-- **仓库目录**：`plugins/` → `extensions/`；guest 树 `extensions/wasm/kiqi-*`
-  保持 `-guest` 后缀（组件模型术语）；bindings crate `kiqi-plugin-guest` →
-  `kiqi-wasm-bindings`。
-- **Rust 面**：`StablePluginEvent` → `StableExtensionEvent`、`PluginApi` →
-  `ExtensionApi`、`PluginError` → `ExtensionError`、`WasmPlugin` →
-  `WasmExtension`、`plugin_cli`/`plugins.rs` → `extension_cli`/`extensions.rs` 等；
-  C-ABI 常量 `KI_PLUGIN_ABI_VERSION_UNIFIED` → `KI_EXTENSION_ABI_VERSION_UNIFIED`。
-- **运行时**：CLI 子命令 `ki plugin …` → `ki extension …`；安装目录
-  `$KI_AGENT_DIR/plugins/<id>/` → `extensions/<id>/`；组件文件名
-  `plugin.wasm` → `extension.wasm`。**无向后兼容**（用户裁定单词不得出现）——
-  已装 guest 需重新 `ki insmod`。
-- **guest 后缀**：`extensions/wasm/kiqi-<x>-guest/` → `kiqi-<x>/`（目录与 Cargo 包名都去），
-  bindings crate `kiqi-extension-guest` → `kiqi-wasm-bindings`；`-guest` 只保留在
-  组件模型语境（host/guest、`Guest` trait）里。
-- 验证：全仓文本中 "plugin"（大小写）出现次数为 0；workspace 与 guest 测试、
-  wasm 目标构建、宿主侧 e2e（82 项）全部通过。
+- **WIT**：契约文件更名为 `extensions/kiqi-extension.wit`；包 `kiqi:extension@0.9.0`；
+  `world extension`；`extension-api` 接口。
+- **仓库目录**：宿主侧目录统一为 `extensions/`；guest 树 `extensions/wasm/kiqi-<x>/`
+  （目录与 Cargo 包名都不再带 `-guest` 后缀，仅组件模型语境保留 host/guest 说法）；
+  共享 bindings crate 为 `kiqi-wasm-bindings`。
+- **Rust 面**：`StableExtensionEvent`、`ExtensionApi`、`ExtensionError`、
+  `WasmExtension`、`extension_cli`、`extensions.rs`、
+  `KI_EXTENSION_ABI_VERSION_UNIFIED` 等；trait 为 `Extension`。
+- **运行时**：CLI 子命令 `ki extension …`；安装目录 `$KI_AGENT_DIR/extensions/<id>/`；
+  组件文件 `extension.wasm`。**无向后兼容**——已装 guest 需重新 `ki insmod`。
+- 验证：全仓文本（含文档）中旧词出现次数为 **0**；workspace 2626 + guest 单测、
+  wasm 目标构建、宿主侧 e2e（82 项）、fmt/check 与全部脚本门禁通过。

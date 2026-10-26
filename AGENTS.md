@@ -34,17 +34,18 @@
 
 ## 术语：只用 extension（2026-10-26 用户裁定）
 
-代码、文档、CLI、安装目录、WIT 包里**不再出现 "plugin" 一词**。统一词汇：
+代码、文档、CLI、安装目录、WIT 包里统一使用 **extension** 一词；此前的旧词汇已从
+全仓删除（改名细节与原因见 `docs/design/extension-abi.md` §6.48 与当天的提交）。
 
 | 概念 | 用词 | 位置 |
 |---|---|---|
 | 可安装单位（用户面） | extension | `ki extension …`、`$KI_AGENT_DIR/extensions/<id>/`、`extension.wasm` |
 | 宿主侧实现契约（Rust） | `Extension` trait | `crates/kiqi-host` |
-| 组件模型产物 | guest | `extensions/wasm/kiqi-*` |
+| 组件模型产物 | guest | `extensions/wasm/kiqi-*`（`-guest` 后缀已去掉，仅 host/guest 语境保留） |
 | 契约身份（WIT） | `kiqi:extension@0.9.0` | `extensions/kiqi-extension.wit` |
 
-改名前的名字（`kiqi:plugin`、`plugins/`、`ki plugin`）**不再兼容**；已安装的 guest
-需要重新 `ki insmod`。历史提交信息与旧文档正文里的旧词是历史记录，不回改。
+改名前的名字**不再兼容**；已安装的 guest 需要重新 `ki insmod`。历史提交信息里的旧词
+是历史记录，不回改。
 
 ## 上游已分叉，与本项目无关（**重要，勿误判**）
 
