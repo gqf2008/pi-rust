@@ -86,7 +86,7 @@ pub async fn run() -> i32 {
 async fn run_inner() -> i32 {
     // argv[0] is the program name; skip it (TS `main(args)` receives the same,
     // already sliced by the Node CLI entry).
-    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    let argv: Vec<String> = std::env::args().skip(1).collect();
 
     // P6: the cdylib dev channel (`ki dev`, `__kiqi_dev_cleanup`) is retired —
     // wasm guests (`ki insmod`) are the only plugin channel.
@@ -142,8 +142,16 @@ async fn run_inner() -> i32 {
         // Kernel-flavoured spellings for the wasm tier.
         Some("insmod") => return crate::plugin_cli::insmod(&argv[1..]),
         Some("rmmod") => return crate::plugin_cli::rmmod(&argv[1..]),
-        // These historical aliases are intentionally rejected instead of
-        // falling through to the prompt path.
+        // These removed commands are intentionally rejected instead of falling
+        // through to the prompt path: a retired command must never silently
+        // become a prompt run (that is exactly the `ki package` hang the
+        // fall-through guard was added for).
+        Some(removed @ ("install" | "uninstall" | "package")) => {
+            eprintln!(
+                "error: `ki {removed}` is not available; the cdylib extension channel was removed — wasm plugins install via `ki insmod --build plugins/wasm/<guest>`"
+            );
+            return EXIT_USAGE;
+        }
         Some(removed @ ("pi-package" | "pi-update" | "install-pi" | "uninstall-pi")) => {
             eprintln!(
                 "error: `ki {removed}` is not available; use `ki insmod` (wasm plugins) or `ki update`."
@@ -295,7 +303,7 @@ async fn run_inner() -> i32 {
     }
 
     // ---- harness build ----
-    let (harness, event_rx, mut reload_context) =
+    let (harness, event_rx, reload_context) =
         match build(&resolved, &parsed, &cwd, project_trusted).await {
             Ok(triple) => triple,
             Err(e) => {

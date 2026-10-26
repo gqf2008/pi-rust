@@ -1,15 +1,11 @@
-//! Compile-time plugin event fan-out.
+//! Plugin event fan-out.
 //!
-//! First-party plugins are compiled into `ki` and observe events through
-//! [`kiqi_plugin::Plugin::on_event`](kiqi_plugin) rather than the cdylib ABI.
-//! This module is the seam: the native dispatch funnels call [`dispatch`], and
-//! the host installs a [`CompiledEventSink`] whose closure translates the
-//! stable event to the compile-time contract and calls every compiled plugin.
-//!
-//! `kiqi-extensions` deliberately does **not** depend on `kiqi-plugin`: the sink
-//! receives the wire tag plus an owned JSON payload, which is all the host
-//! needs to build a `kiqi_plugin::Event`. No sink installed (a bare
-//! `kiqi-extensions` build, or tests) makes every call a no-op.
+//! Plugins observe events through [`kiqi_plugin::Plugin::on_event`] rather than
+//! the C ABI. This module is the seam: the native dispatch funnels call
+//! [`dispatch`], and the host installs a [`CompiledEventSink`] whose closure
+//! translates the stable event to the plugin contract and calls every loaded
+//! host (wasm guests today). No sink installed (a bare `kiqi-extensions` build,
+//! or tests) makes every call a no-op.
 
 use std::sync::{Arc, OnceLock, RwLock};
 

@@ -546,10 +546,8 @@ async fn dispatch_tool_call_event_with_timeout(
         let payload = params.to_string();
         let started = std::time::Instant::now();
         // Capture the whole RegisteredHandler rather than its raw user_data.
-        let mut task = tokio::task::spawn_blocking(move || {
-            let _ = &h;
-            call_tool_call_handler(h, id, name, payload)
-        });
+        let mut task =
+            tokio::task::spawn_blocking(move || call_tool_call_handler(h, id, name, payload));
         let outcome = tokio::select! {
             biased;
             _ = signal.cancelled() => {

@@ -807,8 +807,10 @@ pub struct RegistrySnapshot {
     oauth_providers: Vec<RegisteredOAuthProvider>,
     renderers: Vec<RegisteredRenderer>,
     /// A plugin's `{"ownsStdio":true}` claim (merged OR across plugins). The
-    /// host reads this after `load_session` to defer `read_piped_stdin` and run
-    /// the headless `Rpc` lifecycle. See [`ExtensionRegistry::declared_owns_stdio`].
+    /// host read this after loading a session to defer `read_piped_stdin` and
+    /// run the headless `Rpc` lifecycle. See
+    /// [`ExtensionRegistry::declared_owns_stdio`]. Nothing can set it now that
+    /// the cdylib registration path is gone.
     owns_stdio: bool,
     active: Arc<AtomicBool>,
 }
@@ -834,9 +836,6 @@ impl RegistrySnapshot {
         &self.flags
     }
 
-    /// Whether any loaded plugin claimed ownership of the host process's stdio
-    /// (`declare {"ownsStdio":true}`). The host uses this to defer
-    /// `read_piped_stdin` and run the headless `Rpc` lifecycle.
     /// Whether the snapshot carries no entries of any tier.
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
@@ -851,6 +850,13 @@ impl RegistrySnapshot {
             && self.renderers.is_empty()
     }
 
+    /// Whether any loaded plugin claimed ownership of the host process's stdio
+    /// (`declare {"ownsStdio":true}`). The host uses this to defer
+    /// `read_piped_stdin` and run the headless `Rpc` lifecycle.
+    ///
+    /// With the cdylib channel retired nothing can set this flag any more (the
+    /// declaration trampoline is unreachable), so a production session always
+    /// answers `false`.
     pub fn owns_stdio(&self) -> bool {
         self.owns_stdio
     }

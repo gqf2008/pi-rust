@@ -37,11 +37,15 @@ unless you ask to stay anonymous.
 `ki` is a coding agent that runs with the privileges of the user who starts
 it. The following areas are treated as security-relevant:
 
-- **Plugin loading.** `kiqi-plugin-sdk` defines a `#[repr(C)]` ABI and
-  `kiqi-extensions` loads `cdylib`s into the host process with `libloading`.
-  A plugin is **trusted native code** — it can do anything the host can. There
-  is no sandbox. Loading a plugin from an untrusted source is equivalent to
-  running an arbitrary binary.
+- **Plugin loading.** Plugins are **wasm components** run by `kiqi-plugin-host`
+  (wasmtime) inside a sandbox: each guest starts with no capability and gets
+  only what `$KI_AGENT_DIR/plugins/<id>/grants.json` explicitly grants (fs,
+  exec, net, oauth, provider, …), deny-by-default. A missing grants file
+  grants nothing. Installing a guest is still a trust decision — an over-broad
+  grant (e.g. `exec` + `fs` + `net`) lets it act as the user — but the guest
+  itself cannot reach anything outside the sandbox. The old cdylib channel
+  (trusted native code, `libloading`, no sandbox) was **retired on
+  2026-10-26**: a `.dylib`/`.so`/`.dll` no longer loads.
 - **Remote mode.** `ki --server` exposes a JSONL agent protocol over TCP.
   Token authentication is connection-level. Do not bind it to a public
   interface without a token and a trusted network path; the protocol has no

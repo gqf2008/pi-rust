@@ -17,7 +17,7 @@ ki --version
 ki --help
 ```
 
-`cargo install` 安装的是可执行文件；它不等同于 `ki install`。后者用于安装由 `kiqi-plugin-sdk` 构建的 Rust 动态库扩展。
+`cargo install` 安装的是可执行文件。曾经的 `ki install`（安装 `kiqi-plugin-sdk` 构建的 Rust 动态库扩展）已随 cdylib 通道于 2026-10-26 退役；现在插件只有 wasm 一条通道，用 `ki insmod` 安装。
 
 ### 从源码启动与构建
 
@@ -184,11 +184,9 @@ ANTHROPIC_AUTH_TOKEN=token
 ```text
 ki auth login|check|logout
 ki events path|tail    检查扩展事件日志（需 KI_EVENT_LOG=1）
-ki install <crate>
-ki uninstall <crate>
 ki update                 # 更新 ki CLI 自身
-ki dev [options]          # 开发 Rust 扩展：编译、watch、热重载
-ki dev-local [options]    # 只调试当前 Rust 扩展（隔离模式）
+ki insmod <path.wasm>     # 安装 wasm 插件（--build 先编译 guest）
+ki rmmod <id>             # 卸载 wasm 插件
 ```
 
 ### TUI 历史消息滚动
@@ -330,35 +328,21 @@ KI_AGENTS_DIR=/work/shared-agents ki
 
 注意：设了 `KI_CODING_AGENT_DIR` 后就不再回退读真实的 `~/.agents`——重定位配置目录意味着「用这套布局、不用用户那套」。想让重定位的运行也用共享目录，显式设 `KI_AGENTS_DIR`。
 
-## 6. Rust 插件
+## 6. 插件（wasm）
 
-Rust 原生插件是 `cdylib`，只依赖 `kiqi-plugin-sdk`，由 `kiqi-extensions` 动态加载：
-
-```bash
-cargo build -p plugin-stub
-ki --extensions-dir target/debug -p 'echo "hi"'
-```
-
-本仓库的 crate 全部 `publish = false`，crates.io 上没有可解析的同名包：`ki install <name>`（不带 `--path`）必然失败，第三方扩展要从源码路径安装。一方能力不走 cdylib 通道——它们是 wasm 组件，用 `ki insmod --build plugins/wasm/kiqi-<name>-guest` 安装，可用清单见 `website/data/packages.json`。
-
-本地开发：
+**cdylib 通道已于 2026-10-26 退役**：`ki install` / `ki uninstall` / `ki dev` / `ki dev-local` 与 `kiqi-plugin-sdk` 均已删除，`--extension` / `--extensions-dir` 仅为兼容而接受、不再加载任何东西。现在唯一的插件通道是 wasm 组件（契约 `plugins/kiqi-plugin.wit`），跑在 wasmtime 沙箱里，按授权文件 `$KI_AGENT_DIR/plugins/<id>/grants.json` 拿能力：
 
 ```bash
-ki install my-extension --path ../my-kiqi-extension --force
+# 从仓库内 guest 源码构建并安装
+ki insmod --build plugins/wasm/kiqi-todo-guest
+# 安装已构建的组件
+ki insmod path/to/component.wasm --yes
+# 查看/卸载
+ki plugin list
+ki rmmod <id>
 ```
 
-开发扩展项目时使用 watch 模式：
-
-```bash
-cd ../my-kiqi-extension
-ki dev
-# 多扩展 workspace：ki dev --package my-extension
-# 只调试当前扩展：ki dev-local（隔离模式，不加载全局扩展）
-```
-
-`ki dev` 会自动识别 Cargo `cdylib`、首次编译并从 `.ki/extensions/.dev` 加载版本化产物。源码变化会触发重新编译和热重载；手工执行 `/reload` 也会先重新编译。编译失败时继续保留当前已经加载的版本。完整模板和边界规则见在线扩展作者指南：<https://ki.laofu.online/extension-authoring.md>，调试技巧见 `docs` 的 `debugging` 主题。
-
-安装后的动态库位于 `~/.ki/agent/extensions`（或 `KI_CODING_AGENT_DIR` 指定的目录），下次启动 ki 时加载。插件通过稳定 ABI 注册工具、Provider、事件处理器和资源处理器；不要直接依赖 `kiqi-cli` 的私有模块。
+一方能力清单见 `website/data/packages.json`；契约与能力模型见 `docs/design/plugin-abi.md`。改写旧 cdylib 扩展请以 `plugins/wasm/kiqi-todo-guest` 为模板。
 
 ## 7. SDK 集成
 
@@ -392,7 +376,7 @@ while let Some(event) = events.recv().await {
 
 ### 扩展加载失败
 
-确认 Rust 插件是 `cdylib` 并与当前平台匹配；临时使用 `--extensions-dir` 指向生成目录。加载失败时保留宿主输出的完整错误信息，检查扩展是否声明了宿主未提供的能力。
+确认插件目录下有 `plugin.wasm` 与 `grants.json`（`ki insmod` 会写好两者），并用 `ki plugin list` 查看宿主报错。加载失败时保留宿主输出的完整错误信息，检查授权是否覆盖插件声明的能力（缺失 = 什么都不授予）。
 
 ### 扩展事件处理器没触发或启动被中止
 
@@ -429,8 +413,8 @@ cargo test --workspace
 发布 crate 时按依赖顺序：
 
 ```text
-kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness →
-kiqi-plugin-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
+kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-plugin → kiqi-extensions →
+kiqi-tools → kiqi-harness → kiqi-tui → kiqi-cli
 ```
 
 发布前更新版本号和 `docs/release-vX.Y.Z.md`，确认 README、官网 `website/data/docs.json` 和本手册中的命令一致。官网是静态站点，文档文件提交到仓库后仍需按项目部署流程重新部署。
@@ -439,7 +423,7 @@ kiqi-plugin-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
 
 - 在线文档：<https://ki.laofu.online/docs.html>
 - 源码仓库：<https://github.com/gqf2008/pi-rust>
-- Rust API：<https://docs.rs/kiqi-agent>、<https://docs.rs/kiqi-plugin-sdk>
+- Rust API：<https://docs.rs/kiqi-agent>
 
 - Package 与扩展作者指南：<https://ki.laofu.online/extension-authoring.md>
 - 远程模式：<docs/remote/user-guide.md>

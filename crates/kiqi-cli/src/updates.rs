@@ -4,20 +4,17 @@
 //! them, each registry request uses a short timeout, and cached values are
 //! retained only as a fallback for temporary registry failures.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 const CACHE_FILE: &str = "update-check.json";
 const CACHE_FALLBACK_MAX_AGE_MS: i64 = 6 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT_MS: u64 = 1800;
-const UPDATE_CHECK_CONCURRENCY: usize = 4;
 /// Releases are cut from this fork only: the CLI is not published to crates.io
 /// and `ki update` must never install an upstream build over this one.
 const RELEASES_REPO: &str = "gqf2008/pi-rust";
@@ -2459,11 +2456,8 @@ mod tests {
         super::normalize_windows_path(std::fs::canonicalize(path).unwrap())
     }
 
-    use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
     #[cfg(unix)]
     use super::{activate_direct_update, build_direct_update_plan};
@@ -2475,7 +2469,6 @@ mod tests {
     use super::{
         cargo_home_is_project_local, cargo_install_command, create_self_update_command_dir,
         is_newer, parse_kiqi_version_output, path_is_within, validate_staged_kiqi_version_output,
-        RegistryLookup, CACHE_FALLBACK_MAX_AGE_MS,
     };
 
     struct RestoreConfigDir(Option<OsString>);

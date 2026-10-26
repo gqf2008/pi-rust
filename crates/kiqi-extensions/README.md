@@ -3,13 +3,11 @@
 [![crates.io](https://img.shields.io/crates/v/kiqi-extensions.svg)](https://crates.io/crates/kiqi-extensions)
 [![docs.rs](https://docs.rs/kiqi-extensions/badge.svg)](https://docs.rs/kiqi-extensions)
 
-The host side of the plugin system: discovers, loads and drives Rust `cdylib`
-plugins, and bridges their tools and events into the runtime's native async
-types.
-
-The ABI contract itself lives in
-[`kiqi-plugin-sdk`](https://crates.io/crates/kiqi-plugin-sdk); this crate is the
-other half.
+The host-side dispatch spine for `ki` plugins: the registry every tier
+registers through, the event funnels that translate runtime events into plugin
+events, and the compiled/wasm sink the host installs. Plugins now ship as wasm
+guests (`kiqi-plugin-host`); the cdylib loader this crate used to carry was
+retired on 2026-10-26.
 
 ## Install
 
@@ -23,53 +21,35 @@ harness consumes its adapters through injection.
 
 ## What it does
 
-- **Loading.** `load_one` loads a single library, `load_dir` scans a directory,
-  and `load_session` resolves the whole set for a session. Entrypoints are
-  resolved through the single `kiqi_plugin_register` symbol. Plugins must use
-  the unified ABI; incompatible registrations are reported as load failures.
-- **Registry.** `ExtensionRegistry` holds what plugins registered: tools,
+- **Registry.** `ExtensionRegistry` holds what a plugin registered: tools,
   providers, handlers, renderers and resource-discovery callbacks, with a
   deterministic snapshot the runtime can read.
-- **Tool bridge.** `PluginToolAdapter` implements the agent's `AgentTool` trait
-  on top of a plugin's four-function lifecycle (`execute` → `poll` → `cancel` →
-  `destroy`). The blocking `poll` loop runs on `spawn_blocking` inside the
-  ambient runtime — the adapter does not own a runtime of its own.
-- **Partial results.** Tool progress flows back through an unbounded channel and
-  is forwarded to `on_update`, behind a `catch_unwind` trampoline so a panicking
-  callback cannot unwind across the FFI boundary.
 - **Lifecycle events.** Dispatch wrappers for data, empty and lifecycle events,
   a veto path that lets a handler refuse startup, and a tee emitter so a plugin
   can observe events without stealing them from the TUI.
-- **Providers.** `PluggableProvider` and `ExtensionProviderHooks` let a plugin
-  serve a model or patch request options.
+- **Provider hooks.** `ExtensionProviderHooks` lets a plugin observe (and patch)
+  provider requests; `PluggableProvider` is the retired cdylib provider adapter.
+- **C-ABI bus types.** `kiqi-extensions::abi` carries `StbString`,
+  `StablePluginEvent`/`EventView` and the handler constants as the host's
+  internal wire format (no `libloading` any more).
 
 ## Crate dependencies
 
-`kiqi-extensions` depends on `kiqi-plugin-sdk`, `kiqi-ai` and `kiqi-agent` only —
+`kiqi-extensions` depends on `kiqi-plugin`, `kiqi-ai` and `kiqi-agent` only —
 never on `kiqi-harness`. The harness receives these adapters as trait objects, so
 the dependency graph stays acyclic.
 
-## Where plugins are discovered
-
-| Location | Scope |
-| -------- | ----- |
-| `.ki/extensions` | Project (preferred) |
-| `~/.ki/agent/extensions` | Global |
-| `--extensions-dir <path>` | Explicit, added by the CLI |
-
 ## Installing and developing
 
-```bash
-ki install my-extension                  # build from crates.io and install
-ki install my-extension --path ../local  # local development
-ki dev                                   # build + watch + live reload
-```
+wasm guests install with `ki insmod` (see
+[`plugins/kiqi-plugin.wit`](../../plugins/kiqi-plugin.wit)); the cdylib
+`ki install` / `ki dev` workflow no longer exists.
 
 ## Docs
 
 - Crate docs: <https://docs.rs/kiqi-extensions>
 - [Extension authoring guide](https://github.com/gqf2008/pi-rust/blob/main/docs/extensions/authoring.md)
-- [Plugin ABI contract](https://docs.rs/kiqi-plugin-sdk)
+- [Plugin contract](https://github.com/gqf2008/pi-rust/blob/main/docs/design/plugin-abi.md)
 - [Ready-to-install extensions](https://github.com/pi-rust/rpi-package)
 
 ## License

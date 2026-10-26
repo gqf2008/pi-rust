@@ -170,22 +170,23 @@ pub struct Args {
     /// `--no-context-files`/`-nc`: skip context-file (`AGENTS.md`/`CLAUDE.md`)
     /// discovery + the `<project_context>` system-prompt block.
     pub no_context_files: bool,
-    /// `--no-extensions`/`-ne`: skip Rust cdylib extension loading.
-    /// Honored by `session.rs`: when set, no extension directory is scanned.
+    /// `--no-extensions`/`-ne`: accepted for compatibility. The cdylib loader
+    /// this flag used to gate is gone (2026-10-26), so it no longer changes
+    /// plugin loading; wasm plugins are managed by `ki insmod`/`ki rmmod`.
     pub no_extensions: bool,
     /// `--no-themes`: disable custom theme discovery and loading.
     /// Built-in presets remain available unless a custom `--theme` is given.
     pub no_themes: bool,
-    /// `--extensions-dir`/`-ed`: an extra directory to scan for cdylib plugins
-    /// (`.dll`/`.so`/`.dylib`), in addition to project `.ki/extensions`
-    /// and global
-    /// `agent_dir()/extensions` defaults. May be repeated; scanned after
-    /// the defaults (so a same-named tool in a default dir wins first, mirroring
-    /// pi's registration order). `KI_EXTENSIONS_DIR` (colon-separated on Unix,
-    /// semicolon on Windows) provides the same list via env.
+    /// `--extensions-dir`/`-ed`: retained for compatibility. It used to add
+    /// cdylib scan directories; the cdylib channel was removed on 2026-10-26,
+    /// so the value is collected (and warned about under `--verbose`) but never
+    /// loaded. `KI_EXTENSIONS_DIR` (colon-separated on Unix, semicolon on
+    /// Windows) is the env-var spelling.
     pub extensions_dir: Vec<PathBuf>,
-    /// `--extension`/`-e <path>`: load an explicit extension cdylib file (may
-    /// be repeated). Loaded in addition to the discovered dirs.
+    /// `--extension`/`-e <path>`: retained for compatibility. It used to load
+    /// an explicit cdylib file; the cdylib channel was removed on 2026-10-26,
+    /// so the value is collected (and warned about under `--verbose`) but never
+    /// loaded.
     pub extension: Vec<PathBuf>,
     /// `--skill <path>`: load an explicit skill file or directory (repeated).
     pub skill: Vec<PathBuf>,
@@ -280,9 +281,9 @@ fn file_arg(arg: &str) -> Option<PathBuf> {
 pub fn parse_args(args: &[String]) -> Args {
     let mut result = Args::default();
     result.offline = offline_env_enabled();
-    // `KI_EXTENSIONS_DIR` env: an extra list of plugin dirs prepended to any
-    // `--extensions-dir` flags. Semicolon-separated on Windows, colon-separated
-    // on Unix (PATH-style). Empty entries skipped. `--no-extensions` still wins.
+    // `KI_EXTENSIONS_DIR` env: retained for compatibility with scripts written
+    // for the retired cdylib channel; the value is parsed but no longer loads
+    // anything (wasm plugins live in `$KI_AGENT_DIR/plugins/<id>/`).
     if let Ok(raw) = std::env::var("KI_EXTENSIONS_DIR") {
         if !raw.is_empty() {
             let sep = if cfg!(windows) { ';' } else { ':' };
@@ -292,6 +293,10 @@ pub fn parse_args(args: &[String]) -> Args {
                     result.extensions_dir.push(PathBuf::from(trimmed));
                 }
             }
+            result.ignored.push(
+                "KI_EXTENSIONS_DIR is accepted for compatibility, but the cdylib channel was removed (wasm plugins install with `ki insmod`)"
+                    .to_string(),
+            );
         }
     }
     let mut i = 0;
@@ -387,6 +392,10 @@ pub fn parse_args(args: &[String]) -> Args {
             "--extensions-dir" | "-ed" => {
                 if let Some(v) = take_value(&mut result, &flag_key) {
                     result.extensions_dir.push(PathBuf::from(v));
+                    result.ignored.push(
+                        "--extensions-dir is accepted for compatibility, but the cdylib channel was removed (wasm plugins install with `ki insmod`)"
+                            .to_string(),
+                    );
                 }
             }
             "--verbose" => result.verbose = true,
@@ -425,6 +434,10 @@ pub fn parse_args(args: &[String]) -> Args {
             "--extension" | "-e" => {
                 if let Some(v) = take_value(&mut result, &flag_key) {
                     result.extension.push(PathBuf::from(v));
+                    result.ignored.push(
+                        "--extension is accepted for compatibility, but the cdylib channel was removed (wasm plugins install with `ki insmod`)"
+                            .to_string(),
+                    );
                 }
             }
             "--skill" => {
@@ -657,14 +670,15 @@ pub fn print_help() {
   --no-skills, -ns               Skip skill discovery (no <available_skills> block)
   --no-prompt-templates, -np     Skip prompt-template discovery (/expand templates)
   --no-context-files, -nc        Skip AGENTS.md/CLAUDE.md discovery (no <project_context>)
-  --no-extensions, -ne           Skip Rust cdylib extension loading
-  --extensions-dir, -ed <dir>    Extra dir to scan for plugins (.dll/.so/.dylib); repeatable
-                                 (also via KI_EXTENSIONS_DIR env: ';' on Windows, ':' on Unix)
-  --local-only                   Skip automatic extension discovery: load only
-                                 --extensions-dir / --extension paths (no project
-                                 .ki/extensions, no global extensions)
-  --package-only, --project-only Load project skills/prompts/extensions/packages
-                                 from the active project; exclude global resources
+  --no-extensions, -ne           Accepted for compatibility (no-op: the cdylib
+                                 channel was removed; wasm plugins use `ki insmod`)
+  --extensions-dir, -ed <dir>    Accepted for compatibility only; no longer loads
+                                 plugins (wasm guests live in $KI_AGENT_DIR/plugins)
+  --local-only                   Restrict skills/prompt templates to the project
+                                 (no global discovery; explicit --skill/--prompt-template
+                                 paths still load)
+  --package-only, --project-only Load project skills/prompts from the active
+                                 project; exclude global resources
   --debug-system-prompt          Print the resolved system-prompt sections to stderr (verification)
   --verbose                      Show startup warnings (e.g. ignored flags)
   --help, -h                     Show this help
@@ -1307,13 +1321,21 @@ mod tests {
     }
 
     #[test]
-    fn extensions_dir_flag_collects_dirs() {
+    fn extensions_dir_flag_collects_dirs_and_warns_it_is_inert() {
         let a = parse_args(&s(&["--extensions-dir", "/a/b", "-ed", "/c/d"]));
         assert_eq!(
             a.extensions_dir,
             vec![PathBuf::from("/a/b"), PathBuf::from("/c/d")]
         );
-        assert!(a.ignored.is_empty());
+        // The cdylib channel is gone: the flag must say so instead of pretending
+        // it still loads plugins.
+        assert!(
+            a.ignored
+                .iter()
+                .any(|note| note.contains("--extensions-dir")),
+            "the retired flag must be reported as ignored: {:?}",
+            a.ignored
+        );
     }
 
     #[test]

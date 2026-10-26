@@ -14,7 +14,7 @@ ki 是 Rust 原生 Agent SDK 与终端应用。当前 workspace 包含十三个 
 | `kiqi-tui` | 终端组件、编辑器、布局、Markdown 与 transcript 渲染 |
 | `kiqi-plugin` | `trait Plugin` 定义（第三方编译期扩展面） |
 | `kiqi-plugin-host` | wasm 组件宿主（wasmtime 沙箱、能力授权） |
-| `kiqi-plugin-sdk` | 动态库扩展使用的 C ABI 类型与注册接口 |
+| `kiqi-plugin` | 插件共享契约：`Plugin` trait、事件标签、grants、环境变量名与 dialog 语义 |
 | `kiqi-extensions` | 宿主扩展加载与跨 ABI 调用桥接 |
 | `kiqi-mcp` | MCP 客户端集成（宿主侧客户端，非服务端） |
 | `kiqi-plan-mode-core` | 计划模式核心逻辑（只被 wasm guest 链接，CLI 不依赖） |

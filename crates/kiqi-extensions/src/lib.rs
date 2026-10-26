@@ -17,9 +17,14 @@
 //! via `AgentHarnessOptions` injection, so `kiqi-harness` never imports
 //! `kiqi-extensions` — cycle-free. (`libloading` went with the cdylib loader.)
 //!
-//! ## The async-across-ABI bridge (load-bearing — corrected vs first draft)
+//! ## The async-across-ABI bridge (retained machinery — no loader)
 //!
-//! A plugin tool drives an execution through **four** plugin-exported fns
+//! P6: nothing constructs a [`PluginToolAdapter`] any more — the cdylib loader
+//! that owned such tools is gone. The bridge below survives as the C-ABI wire
+//! format and the seam a future re-plumbing would build on (see
+//! `docs/design/plugin-abi.md` §6.45).
+//!
+//! A plugin tool drove an execution through **four** plugin-exported fns
 //! (`execute`→handle, `poll`, `cancel`, `destroy`) — see
 //! [`crate::ToolExecuteFn`] etc. The host's [`PluginToolAdapter`]
 //! impls `AgentTool::execute` by:
@@ -62,7 +67,6 @@
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
-use kiqi_plugin::EventTag;
 use thiserror::Error;
 
 pub use actions::{
@@ -321,7 +325,9 @@ impl HostApi {
 }
 
 // Thread-local "current host api" for the duration of a plugin register call.
-// Set by [`load_one`] before calling register, cleared after. This is the
+// Set by the retired `load_one` loader before calling register, cleared after.
+// The loader is gone, so nothing sets it today; kept with the rest of the
+// unreachable C-ABI spine. This is the
 // sound way to let `extern "C" fn` trampolines (which cannot capture) reach the
 // host's registry: the register call is synchronous and single-threaded per
 // plugin, so a thread-local is unambiguous.

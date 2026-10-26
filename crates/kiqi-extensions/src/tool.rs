@@ -292,12 +292,11 @@ fn inject_tool_context(params: Value, context: &ToolCallContext) -> Value {
 /// per registered tool (`schema` copied from the registration) and inserted into
 /// the session's tool set in B2.
 ///
-/// Holds a clone of the session's [`PluginKeepalive`] so the cdylib that owns
-/// `handle`'s fn pointers stays mapped for as long as the adapter (and thus any
-/// in-flight `execute`) may call them. Without this the `Library` could drop
-/// (unload the cdylib) while a fn pointer is still callable → UAF. The keepalive
-/// is `Arc`-shared with every other adapter built from the same session, so the
-/// last drop — which can only happen once the harness's tool vec drops — unloads.
+/// P6: the cdylib loader is retired, so the host no longer builds these
+/// adapters; the type is kept with the rest of the C-ABI spine (see
+/// `docs/design/plugin-abi.md` §6.45). It used to hold the session's
+/// `PluginKeepalive` so the owning library stayed mapped while `handle`'s fn
+/// pointers were callable.
 pub struct PluginToolAdapter {
     schema: Tool,
     label: String,

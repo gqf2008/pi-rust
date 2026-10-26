@@ -36,23 +36,11 @@
     "repository": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-tools"
   },
   {
-    "name": "kiqi-plugin-sdk",
-    "type": "crate",
-    "age": 4,
-    "ageLabel": "v0.4.1 · SDK",
-    "description": "Rust cdylib 插件的稳定 #[repr(C)] ABI 合约，插件只依赖这一层边界。",
-    "author": "ki",
-    "downloads": 0,
-    "downloadsLabel": "0",
-    "install": "kiqi-plugin-sdk = { path = \"crates/kiqi-plugin-sdk\" }",
-    "repository": "https://github.com/gqf2008/pi-rust/tree/main/crates/kiqi-plugin-sdk"
-  },
-  {
     "name": "kiqi-extensions",
     "type": "crate",
     "age": 5,
-    "ageLabel": "v0.4.1 · loader",
-    "description": "宿主侧动态插件加载器，将 ABI 插件适配为 AgentTool 并管理生命周期。",
+    "ageLabel": "v0.4.1 · spine",
+    "description": "宿主侧扩展派发脊柱：注册表、事件漏斗、wasm 事件汇与动作信箱。",
     "author": "ki",
     "downloads": 0,
     "downloadsLabel": "0",

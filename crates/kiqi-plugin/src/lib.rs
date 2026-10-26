@@ -1,37 +1,34 @@
-//! kiqi plugin SDK — the **compile-time** plugin contract.
+//! kiqi's shared plugin contract.
 //!
-//! A plugin is a Rust crate that implements [`Plugin`] and is compiled into the
-//! `ki` binary behind a cargo feature. There is no dynamic ABI, no `unsafe`,
-//! no `dlopen`, and no ABI version to break: the compiler checks the whole
-//! plugin surface at build time.
+//! This crate is the single source of truth for the surface every plugin tier
+//! agrees on:
 //!
-//! # Why not the wasm component model
+//! - the [`Plugin`] trait — the host-side shape a plugin presents (tools,
+//!   commands, events, runtime actions). `kiqi-plugin-host` implements it for
+//!   wasm guests, which is the only supported loader today;
+//! - the event vocabulary ([`EventTag`], [`Event`], [`EventAction`]) and the
+//!   37-tag count;
+//! - the host identity and environment-variable contract (`HOST_NAME`,
+//!   `HOST_VERSION`, `SESSION_ID_ENV`, `AGENT_ID_ENV`, the
+//!   `SUBAGENT_PARENT_*` family);
+//! - `grants` (the capability/authorization model) and `dialogs` (transport-
+//!   independent permission-dialog validation).
 //!
-//! An earlier draft defined this contract in WIT. It was dropped because the
-//! constraints that shape WIT — cross-language guests, no stable ABI, a
-//! canonical ABI that cannot express recursion — do not apply to a contract
-//! that only Rust implements. Tools that stream partial output, events that can
-//! be claimed, and 23 typed runtime actions all become awkward in WIT and
-//! trivial here.
+//! # Only wasm guests load
 //!
-//! The wasm path is not gone, it is **deferred**: the same [`Plugin`] trait is
-//! the seam a future `WasmPlugin` adapter would implement, for the one case
-//! this design cannot serve — running *untrusted third-party* plugins in a
-//! sandbox.
+//! As of 2026-10-26 the cdylib channel is retired: `ki dev`, `ki install`,
+//! `ki package` and the `kiqi-plugin-sdk` C ABI crate are gone, and plugins
+//! ship as wasm components (`ki insmod --build plugins/wasm/kiqi-<name>-guest`)
+//! governed by `plugins/kiqi-plugin.wit` plus `grants.json`. The trait here is
+//! the seam the wasm host adapts a guest onto; it is not a second loading
+//! channel.
 //!
 //! # What a plugin can reach
 //!
 //! Nothing it is not handed. The host passes a [`HostCaps`] per call, built
-//! from exactly the capabilities that plugin is allowed to use. This mirrors
-//! the wasm model's "an import that is not linked is not reachable", expressed
-//! as Rust types instead of a linker.
-//!
-//! # Native plugins are still supported
-//!
-//! The `cdylib` (`kiqi-plugin-sdk`) channel stays for the **development loop**
-//! (`ki dev` + watch + `/reload`): compile-time plugins cannot be hot-swapped,
-//! so the dylib channel keeps serving iteration while first-party plugins ship
-//! compiled in.
+//! from exactly the capabilities that plugin's grants allow. This mirrors the
+//! wasm model's "an import that is not linked is not reachable", expressed as
+//! Rust types at the host boundary.
 
 use serde_json::Value;
 
@@ -43,7 +40,7 @@ pub mod dialogs;
 ///
 /// The model never writes this field and never sees it: the host injects it
 /// after the model's arguments are parsed and before the plugin's
-/// [`ToolExecuteFn`] runs, so a plugin can tell *which* project and *which*
+/// host's tool-execution hook runs, so a plugin can tell *which* project and *which*
 /// session it is serving without the model having to supply either. (Built-in
 /// tools do not need it — they receive the host's `ExecutionToolContext`
 /// directly. A plugin tool has no such channel.)

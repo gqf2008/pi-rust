@@ -30,7 +30,7 @@ struct DocPage {
 static DOCS: &[DocPage] = &[
     DocPage {
         topic: "authoring",
-        description: "Rust cdylib 扩展开发最佳实践：统一 C ABI 入口、工具生命周期、事件处理器、资源发现、ki dev 开发与发布检查清单",
+        description: "扩展开发（cdylib 通道已退役，保留为历史规范）：统一 C ABI 入口、工具生命周期、事件处理器、资源发现、ki dev 旧流程与发布检查清单；wasm 见 ki insmod 与 plugins/kiqi-plugin.wit",
         content: include_str!("../embedded-docs/extension-authoring.md"),
         aliases: &["package-authoring", "extension-authoring", "create-package", "create-extension"],
     },
@@ -66,7 +66,7 @@ static DOCS: &[DocPage] = &[
     },
     DocPage {
         topic: "debugging",
-        description: "Rust cdylib 扩展编写（统一 C ABI、工具生命周期、事件处理器）与 agent/扩展调试（事件日志、ki dev-local、常见失败定位）",
+        description: "扩展调试（cdylib 通道已退役，保留为历史规范）：事件日志、ki dev-local 旧流程、常见失败定位；wasm 插件见 ki insmod 与 ki plugin list",
         content: include_str!("../embedded-docs/rust-debugging.md"),
         aliases: &["rust", "rust-debug", "extension-debug", "troubleshoot", "debug"],
     },

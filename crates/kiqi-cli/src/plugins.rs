@@ -1,8 +1,11 @@
-//! Compile-time plugin registry.
+//! Host-side plugin registry.
 //!
-//! Plugins are cargo features rather than dynamically loaded libraries, so
-//! there is no ABI to version and no `unsafe` at the boundary. The `cdylib`
-//! channel (`kiqi-extensions`) is untouched and keeps serving `ki dev`.
+//! First-party plugins ship as wasm guests; the compiled-in cargo-feature
+//! channel was retired on 2026-10-21 and the cdylib channel (`ki dev`) on
+//! 2026-10-26, so nothing is linked into the binary here. What remains is the
+//! host plumbing every tier shares: the capability bundle (`HostCaps`), the
+//! process-wide event sink that fans events into `PluginHost`s, and the
+//! registry of loaded hosts.
 
 use std::path::{Path, PathBuf};
 
@@ -243,9 +246,9 @@ pub struct Registered {
 /// Every first-party plugin compiled into this binary.
 ///
 /// Empty since the compiled-in channel was retired (2026-10-21): first-party
-/// plugins ship as wasm guests (`plugins/wasm/kiqi-*-guest`). The cdylib host
-/// surface (`kiqi_plugin::Plugin`, `ki dev`) remains for third-party
-/// extensions, but no crate is linked into the binary here. The historical
+/// plugins ship as wasm guests (`plugins/wasm/kiqi-*-guest`), and the cdylib
+/// channel was retired on 2026-10-26, so no crate is linked into the binary
+/// here. The historical
 /// `plugin-kiqi-*` cfg blocks below stay as design history; those features no
 /// longer exist, so they can never be enabled.
 /// 把 plugin-host 的 guest 失败诊断接进 ki 自己的运行时日志
@@ -350,8 +353,8 @@ pub fn reload_caps(
 /// per session build with that session's capabilities; last writer wins, so a
 /// second build (or a test) simply replaces the sink.
 ///
-/// The tag discriminant maps straight through: the two `EventTag` enums are
-/// pinned together by `event_tags_match_the_native_abi`.
+/// The tag discriminant maps straight through (`EventTag` is the single shared
+/// enum; its numbering is pinned by `kiqi-extensions`'s ABI tests).
 ///
 /// Test builds serialise installs through [`TEST_SINK_LOCK`]: a test that has
 /// installed its own sink and is about to dispatch must not have a session
@@ -2511,58 +2514,6 @@ mod tests {
             }),
         )
         .expect("component registration reaches the status mailbox");
-    }
-
-    #[test]
-    fn event_tags_mirror_the_native_abi_exactly() {
-        use kiqi_plugin::EventTag as K;
-        use kiqi_plugin::EventTag as N;
-        let pairs: [(K, N); 37] = [
-            (K::ProjectTrust, N::ProjectTrust),
-            (K::ResourcesDiscover, N::ResourcesDiscover),
-            (K::SessionStart, N::SessionStart),
-            (K::SessionInfoChanged, N::SessionInfoChanged),
-            (K::SessionBeforeSwitch, N::SessionBeforeSwitch),
-            (K::SessionBeforeFork, N::SessionBeforeFork),
-            (K::SessionBeforeCompact, N::SessionBeforeCompact),
-            (K::SessionCompact, N::SessionCompact),
-            (K::SessionShutdown, N::SessionShutdown),
-            (K::SessionBeforeTree, N::SessionBeforeTree),
-            (K::SessionTree, N::SessionTree),
-            (K::Context, N::Context),
-            (K::BeforeProviderRequest, N::BeforeProviderRequest),
-            (K::BeforeProviderHeaders, N::BeforeProviderHeaders),
-            (K::AfterProviderResponse, N::AfterProviderResponse),
-            (K::BeforeAgentStart, N::BeforeAgentStart),
-            (K::AgentStart, N::AgentStart),
-            (K::AgentEnd, N::AgentEnd),
-            (K::AgentSettled, N::AgentSettled),
-            (K::TurnStart, N::TurnStart),
-            (K::TurnEnd, N::TurnEnd),
-            (K::MessageStart, N::MessageStart),
-            (K::MessageUpdate, N::MessageUpdate),
-            (K::MessageEnd, N::MessageEnd),
-            (K::ToolExecutionStart, N::ToolExecutionStart),
-            (K::ToolExecutionUpdate, N::ToolExecutionUpdate),
-            (K::ToolExecutionEnd, N::ToolExecutionEnd),
-            (K::ModelSelect, N::ModelSelect),
-            (K::ThinkingLevelSelect, N::ThinkingLevelSelect),
-            (K::ToolCall, N::ToolCall),
-            (K::ToolResult, N::ToolResult),
-            (K::UserBash, N::UserBash),
-            (K::Input, N::Input),
-            (K::BeforeTuiStart, N::BeforeTuiStart),
-            (K::UiPromptStart, N::UiPromptStart),
-            (K::UiPromptEnd, N::UiPromptEnd),
-            (K::EditorChange, N::EditorChange),
-        ];
-        for (ours, theirs) in pairs {
-            assert_eq!(
-                ours.as_u32(),
-                theirs as u32,
-                "{ours:?} drifted from the native ABI"
-            );
-        }
     }
 
     #[test]

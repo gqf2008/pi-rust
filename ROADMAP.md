@@ -8,10 +8,11 @@ Current release: **0.3.0**. Install with `cargo install kiqi-cli`.
 
 ## Where the project is now
 
-`ki` is a Rust-native, library-first coding-agent runtime: nine published
-crates (`kiqi-telemetry` → `kiqi-ai` → `kiqi-agent` → `kiqi-tools` →
-`kiqi-harness` → `kiqi-cli`, plus `kiqi-tui`, `kiqi-plugin-sdk` and
-`kiqi-extensions`) and a terminal CLI built on them.
+`ki` is a Rust-native, library-first coding-agent runtime: the core chain
+(`kiqi-telemetry` → `kiqi-ai` → `kiqi-agent` → `kiqi-tools` → `kiqi-harness` →
+`kiqi-cli`) plus `kiqi-tui`, `kiqi-plugin`, `kiqi-plugin-host` and
+`kiqi-extensions`, and a terminal CLI built on them. Plugins are wasm guests
+(the cdylib channel was retired on 2026-10-26).
 
 What is solid today:
 
@@ -20,8 +21,8 @@ What is solid today:
 - Anthropic Messages and OpenAI-compatible providers, plus custom gateways via
   `models.json`.
 - Durable JSONL sessions with branching, compaction and crash recovery.
-- A stable `#[repr(C)]` plugin ABI with a dynamic loader, lifecycle events and
-  veto support.
+- A sandboxed wasm plugin channel (`plugins/kiqi-plugin.wit`) with grants,
+  lifecycle events and veto support.
 - Remote mode: a headless `--server` and a zero-local-resource `--connect`
   client.
 - Resource layout: `.ki/` project resources and `settings.json` keys.

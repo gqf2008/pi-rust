@@ -99,8 +99,8 @@ pkg-fmt = "zip"
 # First-party plugins are wasm guests only (`plugins/wasm/kiqi-*-guest`,
 # installed with `ki insmod`). The compiled-in channel was retired on
 # 2026-10-21: its crates, `plugin-kiqi-*` features and cdylib CI builds are
-# gone. The cdylib host surface (`kiqi_plugin::Plugin`, `ki dev`) remains for
-# third-party extensions.
+# gone. The cdylib channel was retired on 2026-10-26 (`ki dev`/`ki install`/
+# `kiqi-plugin-sdk` removed); wasm is the only plugin channel.
 default = ["clipboard", "plugin-wasm"]
 # Loads `plugins/<id>/plugin.wasm` through `kiqi-plugin-host` (wasmtime). Off
 # only for builds that want the leaner binary without the wasm tier.

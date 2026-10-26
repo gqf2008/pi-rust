@@ -490,11 +490,25 @@ pub struct StablePluginEvent {
 
 impl StablePluginEvent {
     /// Build a no-payload event.
+    ///
+    /// The union is initialized through its **largest** arm
+    /// ([`EventToolResult`]: three empty `StbString`s plus `is_error`) rather
+    /// than through a smaller one: a union assignment only initializes the
+    /// assigned field, so any smaller arm would leave the tail bytes
+    /// uninitialized — and an [`EventView`] accessor reached for a tag the host
+    /// dispatches empty (`data_text` claims every tag that *can* carry a data
+    /// payload) would read a garbage pointer. With the largest arm every
+    /// accessor sees a null/empty string instead.
     pub fn empty(tag: EventTag) -> Self {
         Self {
             tag,
             payload: EventPayload {
-                empty: EventEmpty::INSTANCE,
+                tool_result: EventToolResult {
+                    tool_call_id: StbString::empty(),
+                    tool_name: StbString::empty(),
+                    result: StbString::empty(),
+                    is_error: 0,
+                },
             },
         }
     }
@@ -1012,9 +1026,9 @@ pub fn guard_or<R>(fallback: R, body: impl FnOnce() -> R) -> R {
 /// registration status code.
 ///
 /// ```ignore
-/// kiqi_plugin_sdk::export_plugin!(|api| {
+/// kiqi_extensions::export_plugin!(|api| {
 ///     if let Some(declare) = api.declare {
-///         declare(kiqi_plugin_sdk::StbStringRef::from_str(
+///         declare(kiqi_extensions::StbStringRef::from_str(
 ///             r#"{"priority":60,"platforms":["linux"]}"#,
 ///         ));
 ///     }
@@ -1169,15 +1183,39 @@ mod tests {
         assert_eq!(freed_count(), 0);
     }
 
-    #[cfg(feature = "json")]
+    /// Every accessor a tag can reach must be safe on an `empty()` event: the
+    /// union is initialized through its largest arm, so a "wrong" arm read sees
+    /// a null `StbString` (→ `""`) instead of an uninitialized pointer.
     #[test]
-    fn json_round_trip_preserves_structure() {
-        let val = serde_json::json!({ "name": "echo", "args": [1, 2, 3], "ok": true });
-        let stb = json::to_stable(&val, None);
-        let back = json::from_stable(&stb);
-        assert_eq!(val, back);
-        stb.free_with(Some(test_free));
-        let _ = reset_freed();
+    fn empty_events_initialize_the_largest_payload_arm() {
+        use std::mem::size_of;
+        // The initializer in `StablePluginEvent::empty` must name the largest
+        // arm; if a bigger one is added, update `empty` with it.
+        assert!(size_of::<EventToolResult>() >= size_of::<EventMessage>());
+        assert!(size_of::<EventToolResult>() >= size_of::<EventToolCall>());
+        assert!(size_of::<EventToolResult>() >= size_of::<EventError>());
+        assert!(size_of::<EventToolResult>() >= size_of::<EventData>());
+        assert!(size_of::<EventToolResult>() >= size_of::<EventEmpty>());
+        assert_eq!(size_of::<EventPayload>(), size_of::<EventToolResult>());
+
+        for tag in [
+            EventTag::ModelSelect,
+            EventTag::SessionStart,
+            EventTag::SessionTree,
+            EventTag::MessageUpdate,
+            EventTag::ToolExecutionEnd,
+            EventTag::BeforeProviderRequest,
+        ] {
+            let event = StablePluginEvent::empty(tag);
+            // SAFETY: the event is live for the whole view.
+            let view = unsafe { EventView::from_raw(&event) };
+            assert_eq!(view.tag(), tag);
+            // None of these may dereference a garbage pointer.
+            let _ = view.data_text();
+            let _ = view.message_text();
+            let _ = view.tool_call();
+            let _ = view.tool_result();
+        }
     }
 
     #[test]

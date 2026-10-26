@@ -9,7 +9,6 @@ const RELEASE_CRATES: &[(&str, &str)] = &[
     ("kiqi-telemetry", "crates/kiqi-telemetry/Cargo.toml"),
     ("kiqi-ai", "crates/kiqi-ai/Cargo.toml"),
     ("kiqi-agent", "crates/kiqi-agent/Cargo.toml"),
-    ("kiqi-plugin-sdk", "crates/kiqi-plugin-sdk/Cargo.toml"),
     ("kiqi-extensions", "crates/kiqi-extensions/Cargo.toml"),
     ("kiqi-tools", "crates/kiqi-tools/Cargo.toml"),
     ("kiqi-harness", "crates/kiqi-harness/Cargo.toml"),
@@ -21,7 +20,6 @@ const INTERNAL_DEPENDENCIES: &[&str] = &[
     "kiqi-telemetry",
     "kiqi-ai",
     "kiqi-agent",
-    "kiqi-plugin-sdk",
     "kiqi-extensions",
     "kiqi-tools",
     "kiqi-harness",
@@ -576,7 +574,7 @@ mod tests {
         let manifest = r#"
 [dependencies]
 kiqi-telemetry = { workspace = true }
-kiqi-plugin-sdk = { version = "0.1.12" }
+kiqi-extensions = { version = "0.1.12" }
 serde = { version = "1" }
 "#;
         let args = dry_run_args("kiqi-ai", manifest, Path::new("workspace")).unwrap();
@@ -595,7 +593,7 @@ serde = { version = "1" }
                 "--config",
                 "patch.crates-io.kiqi-telemetry.path=\"workspace/crates/kiqi-telemetry\"",
                 "--config",
-                "patch.crates-io.kiqi-plugin-sdk.path=\"workspace/crates/kiqi-plugin-sdk\"",
+                "patch.crates-io.kiqi-extensions.path=\"workspace/crates/kiqi-extensions\"",
             ]
         );
     }

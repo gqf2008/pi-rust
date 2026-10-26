@@ -29,10 +29,9 @@
 //!
 //! `PluggableProvider` mirrors [`ExtensionProviderHooks`]: it holds an
 //! `Arc<RegistrySnapshot>` (the staleness flag is shared — a `/reload`
-//! invalidate marks it stale) + an `Arc<PluginKeepalive>` (keeps the cdylib
-//! mapped so `request_fn` stays callable) + the [`RegisteredProvider`] record +
-//! a `Handle` captured at build time (the host is on the runtime when it
-//! constructs providers from the session).
+//! invalidate marks it stale) + the [`RegisteredProvider`] record + a `Handle`
+//! captured at build time. With the cdylib loader retired the session snapshot
+//! is always empty, so no provider is ever built in production.
 
 use std::sync::Arc;
 

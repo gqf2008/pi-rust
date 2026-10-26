@@ -48,23 +48,19 @@ use kiqi_harness::types::{
     HarnessTool, HarnessToolExecution, ToolReplay,
 };
 use kiqi_tools::{
-    create_bash_tool, create_edit_tool, create_powershell_tool, create_read_tool,
-    create_write_tool, ExecutionToolContext, MutationQueueRegistry, OsExecutionEnv,
+    create_bash_tool, create_edit_tool, create_read_tool, create_write_tool, ExecutionToolContext,
+    MutationQueueRegistry, OsExecutionEnv,
 };
 
 use crate::args::Args;
 use crate::docs_tool::create_docs_tool;
 use crate::provider::ResolvedModel;
 use crate::resource_dirs::{
-    discover_append_system_prompt_file, discover_system_prompt_file, extension_dirs,
-    global_extension_dirs, global_prompt_template_dirs, global_skill_dirs,
-    load_prompt_templates_with_precedence, load_skills_with_precedence, project_extension_dirs,
+    discover_append_system_prompt_file, discover_system_prompt_file, global_prompt_template_dirs,
+    global_skill_dirs, load_prompt_templates_with_precedence, load_skills_with_precedence,
     project_prompt_template_dirs, project_skill_dirs, prompt_template_dirs, skill_dirs,
 };
-use kiqi_extensions::{
-    emit_resources_discover, ExtensionEmitter, ExtensionSession, NullDiagnostics,
-    PluginDiagnostics, PluginToolAdapter, TeeEmitter,
-};
+use kiqi_extensions::{emit_resources_discover, ExtensionEmitter, ExtensionSession, TeeEmitter};
 
 /// The coding tools registered by the CLI by default.
 pub const BUILTIN_TOOL_NAMES: &[&str] = &[
@@ -458,9 +454,6 @@ pub async fn build_with_selection(
     // empty registry, which keeps the dispatch funnels (compiled/wasm sink)
     // live while carrying no native tools/providers/renderers.
     let extension_session = ExtensionSession::none();
-    if args.verbose {
-        report_deferred_renderers(&extension_session);
-    }
     // The same capabilities serve tools and events; install the event sink
     // before anything can dispatch (the first `SessionStart` is still ahead).
     let plugin_caps = crate::plugins::owned_caps(
@@ -1438,7 +1431,6 @@ pub struct ReloadOutcome {
 }
 
 struct PreparedReloadInputs {
-    extension_dirs: Vec<PathBuf>,
     skill_base_dirs: Vec<PathBuf>,
     prompt_base_dirs: Vec<PathBuf>,
 }
@@ -1490,7 +1482,7 @@ where
     // Resolve the arguments once for this reload: every subsequent loader and
     // policy decision must observe the same effective set rather than the
     // pre-reload snapshot held in `ctx.args`.
-    let mut effective_args = ctx.args.clone();
+    let effective_args = ctx.args.clone();
     let cwd_str = ctx.cwd.to_string_lossy().to_string();
     let project_trusted = resolve_project_trust(&effective_args, &ctx.cwd);
     let prepared = match prepare_reload_inputs(&effective_args, &ctx.cwd, project_trusted) {
@@ -1508,7 +1500,6 @@ where
     };
     after_prepare();
     let PreparedReloadInputs {
-        extension_dirs,
         skill_base_dirs,
         prompt_base_dirs,
     } = prepared;
@@ -1572,9 +1563,6 @@ where
     // P6: the cdylib loader is gone — the fresh session is always the empty
     // registry (wasm guests reload through `plugins::reload_caps`, not here).
     let extension_session = kiqi_extensions::ExtensionSession::none();
-    if effective_args.verbose {
-        report_deferred_renderers(&extension_session);
-    }
 
     // ---- 2. Invalidate the old session + bridge BEFORE the swap ----
     // The old registry's `active` flag flips false so any in-flight
@@ -1968,19 +1956,6 @@ where
 {
     let settings_before = load_reload_settings_snapshot(args, cwd, project_trusted)?;
 
-    let mut extension_dirs = if args.no_extensions || args.dev_local_only {
-        Vec::new()
-    } else if args.project_only {
-        project_extension_dirs(cwd)
-    } else if project_trusted {
-        extension_dirs(cwd)
-    } else {
-        global_extension_dirs()
-    };
-    if !args.no_extensions {
-        extension_dirs.extend(args.extensions_dir.iter().cloned());
-    }
-
     let skill_base_dirs = if args.no_skills {
         Vec::new()
     } else if args.dev_local_only || args.project_only {
@@ -2010,54 +1985,9 @@ where
     }
 
     Ok(PreparedReloadInputs {
-        extension_dirs,
         skill_base_dirs,
         prompt_base_dirs,
     })
-}
-
-/// `build_models_with_extensions` for the reload path: the resolved provider
-/// runtimes (NOT `resolved` — the reload context carries the `Arc<dyn Provider>`
-/// list directly, since provider/auth did not change) first, then one
-/// `PluggableProvider` per registered extension provider in the fresh session.
-fn build_models_with_extensions_for_reload(
-    providers: &[Arc<dyn Provider>],
-    extension_session: &ExtensionSession,
-    runtime: tokio::runtime::Handle,
-) -> Vec<Arc<dyn Provider>> {
-    let mut models: Vec<Arc<dyn Provider>> = providers.to_vec();
-    let pluggable = kiqi_extensions::PluggableProvider::from_session(extension_session, runtime);
-    models.extend(pluggable);
-    models
-}
-
-/// Diagnostic for registered TUI renderers. All three renderer kinds are
-/// consumed by the interactive TUI's JSON component adapter; this line remains
-/// useful under `--verbose` for extension authors.
-fn report_deferred_renderers(session: &ExtensionSession) {
-    let Some(snap) = session.snapshot_arc() else {
-        return;
-    };
-    let all = snap.renderers();
-    let markdown = all
-        .iter()
-        .filter(|r| r.kind == kiqi_extensions::RegisteredRendererKind::Markdown)
-        .count();
-    let message = all
-        .iter()
-        .filter(|r| r.kind == kiqi_extensions::RegisteredRendererKind::Message)
-        .count();
-    let entry = all
-        .iter()
-        .filter(|r| r.kind == kiqi_extensions::RegisteredRendererKind::Entry)
-        .count();
-    if markdown + message + entry == 0 {
-        return;
-    }
-    eprintln!(
-        "renderers: {} markdown-transform, {} message-render, {} entry-render (active)",
-        markdown, message, entry
-    );
 }
 
 /// A harness-build error.
@@ -2894,7 +2824,7 @@ fn publish_session_identity(tool_context: &kiqi_extensions::ToolCallContext, id:
 
 /// The session id a `--no-session` run carries (see [`ephemeral_session`]).
 ///
-/// Not unique across runs, so it never identifies a writer; `kiqi-plugin-sdk`'s
+/// Not unique across runs, so it never identifies a writer; `kiqi-plugin`'s
 /// `AGENT_ID_ENV` docs name the same literal as "no session". Declared here so
 /// the two places that care (the session itself and [`session_id_from`]) cannot
 /// drift apart.
@@ -4767,7 +4697,7 @@ mod tests {
 
     /// The exclusion policy, checked against the constants rather than copies.
     ///
-    /// `kiqi-tools` builds its exclusion from `kiqi-plugin-sdk`'s declarations, so
+    /// `kiqi-tools` builds its exclusion from `kiqi-plugin`'s declarations, so
     /// within this repo a rename is a compile error — this test is not the link
     /// between those two crates any more. What it still guards is the part the
     /// compiler cannot see:

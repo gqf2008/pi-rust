@@ -18,7 +18,7 @@ it works. Delete any section that does not apply.
 - [ ] `kiqi-harness`
 - [ ] `kiqi-tui`
 - [ ] `kiqi-cli`
-- [ ] `kiqi-plugin-sdk`
+- [ ] `kiqi-plugin`
 - [ ] `kiqi-extensions`
 - [ ] docs / website / CI only
 

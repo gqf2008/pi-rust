@@ -1,5 +1,12 @@
 # ki Agent 项目结构创建指南
 
+> **P6 状态（2026-10-26）：cdylib 通道已整体退役。** 本文保留为历史规范，
+> 其中 `kiqi-plugin-sdk`、`ki install`、`ki dev`、`ki dev-local`、`--extensions-dir`
+> 与 `examples/plugin-stub` 均已删除，照做会失败。当前唯一插件通道是 wasm 组件：
+> 契约见 `plugins/kiqi-plugin.wit`，模板见 `plugins/wasm/kiqi-todo-guest`，
+> 安装用 `ki insmod --build plugins/wasm/kiqi-<name>-guest`。
+
+
 本指南是模型可读的默认规范。当任务是用 ki SDK"创建一个自己的 Agent"、
 "把 Agent 结构搭起来"或"给现有项目加 ki 入口"时，按本文组织项目。默认推荐单 crate：
 内嵌 Agent 与全局 `ki` 扩展共用同一套工具（见 §1），其余形态按需裁剪。

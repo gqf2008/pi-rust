@@ -5,7 +5,7 @@
 The terminal coding-agent CLI — the `ki` binary — built on the `kiqi-*` library
 crates. It is the ready-to-run surface of the
 [ki](https://github.com/gqf2008/pi-rust) project: an interactive TUI, a
-one-shot `-p` mode, a JSON event mode, durable sessions, and Rust `cdylib`
+one-shot `-p` mode, a JSON event mode, durable sessions, and sandboxed wasm
 plugin loading.
 
 ## Install
@@ -78,24 +78,23 @@ endpoint overrides also honour `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`.
 - Project resources are discovered from `.ki/` (skills, prompts, themes, and
   `SYSTEM.md`), with `~/.ki/agent/` as the global layer. When both define the
   same skill or prompt name, the project copy wins.
-- Plugins are loaded from project `.ki/extensions`, global
-  `~/.ki/agent/extensions`, and `--extensions-dir`.
+- Plugins are wasm guests under `$KI_AGENT_DIR/plugins/<id>/`, installed and
+  removed with `ki insmod` / `ki rmmod` (the cdylib channel was retired on
+  2026-10-26).
 
 ## Plugins
 
 ```bash
-ki insmod --build plugins/wasm/kiqi-todo-guest           # first-party: a wasm capability
-ki install my-extension --path ../my-extension --force   # local, for development
-ki dev                                                   # build + watch a local extension
+ki insmod --build plugins/wasm/kiqi-todo-guest   # build a guest and install it
+ki insmod path/to/component.wasm --yes           # install an already-built component
+ki plugin list                                   # what is installed
 ```
 
-No crate in this repository is published to crates.io, so `ki install <name>`
-without `--path` has nothing to resolve — install third-party extensions from
-their source path (see `docs/extensions/authoring.md`). `ki install` builds the
-crate in release mode with Cargo and copies the resulting `.dll` / `.so` /
-`.dylib` into `~/.ki/agent/extensions`. The capabilities that ship with this
-repository are wasm components instead: `ki insmod --build` compiles a guest for
-`wasm32-wasip2` and installs it.
+Every plugin is a wasm component (`plugins/kiqi-plugin.wit` is the contract),
+sandboxed by wasmtime and granted only what its `grants.json` approves. The
+capabilities that ship with this repository are all built this way;
+`ki insmod --build` compiles a guest for `wasm32-wasip2` and installs it.
+`ki install` / `ki dev` (the old cdylib workflow) no longer exist.
 
 ## Remote mode
 

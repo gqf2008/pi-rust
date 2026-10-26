@@ -1,5 +1,12 @@
 # ki Rust 扩展与 Agent 调试指引
 
+> **P6 状态（2026-10-26）：cdylib 通道已整体退役。** 本文保留为历史规范，
+> 其中 `kiqi-plugin-sdk`、`ki install`、`ki dev`、`ki dev-local`、`--extensions-dir`
+> 与 `examples/plugin-stub` 均已删除，照做会失败。当前唯一插件通道是 wasm 组件：
+> 契约见 `plugins/kiqi-plugin.wit`，模板见 `plugins/wasm/kiqi-todo-guest`，
+> 安装用 `ki insmod --build plugins/wasm/kiqi-<name>-guest`。
+
+
 本文覆盖两条主线：**如何编写 Rust `cdylib` 扩展**（统一 C ABI、工具生命周期、
 事件处理器、资源发现、Provider/渲染器），以及**如何调试 agent 与扩展**（事件日志、
 开发宿主、系统提示词检查、常见失败定位）。创建完整 Agent 项目的默认结构见 `docs` 的 `agent` 主题。

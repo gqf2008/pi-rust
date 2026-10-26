@@ -33,12 +33,13 @@ Website: <https://ki.laofu.online/> · Docs: <https://ki.laofu.online/docs.html>
 | -------- | --------- | -------- |
 | A working terminal coding agent | nothing | `scripts/install.sh` (see below) |
 | Your own agent inside your process | `kiqi-agent` (+ `kiqi-ai`, `kiqi-tools`) | [`examples/minimal`](examples/minimal) |
-| A tool/provider that extends every session | `kiqi-plugin-sdk` | [`examples/plugin-stub`](examples/plugin-stub) |
+| A tool/provider that extends every session | `plugins/kiqi-plugin.wit` | [`plugins/wasm/kiqi-todo-guest`](plugins/wasm/kiqi-todo-guest) |
 
 The three share one implementation. Build your tools once, debug them inside an
-embedded agent, and ship the same code as a `cdylib` plugin that the global `ki`
-loads. See [`docs/agent/project-structure.md`](docs/agent/project-structure.md) for the recommended
-project layout.
+embedded agent, and ship the same code as a wasm guest that the global `ki`
+loads — or keep it in-process. See
+[`docs/agent/project-structure.md`](docs/agent/project-structure.md) for the
+recommended project layout.
 
 ## Install
 
@@ -168,17 +169,18 @@ and enforced in review:
 kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness
 ```
 
-Three crates sit outside that chain:
+A few crates sit outside that chain:
 
 - `kiqi-tui` depends on no other `kiqi-*` crate.
-- `kiqi-plugin-sdk` is a leaf too (it has no `kiqi-*` deps), but it is not only
+- `kiqi-plugin` is a leaf too (it has no `kiqi-*` deps), but it is not only
   the host's plugin contract: `kiqi-tools` also reads its env-var names, so the
   host and its plugins cannot disagree about the strings they exchange across
-  the ABI. That edge is names-only — nothing is linked or called.
-- `kiqi-extensions` is `kiqi-plugin-sdk` plus `kiqi-ai`/`kiqi-agent`, since it hosts
-  plugins that run tools.
-- `kiqi-cli` depends on all eight of the others, which is how the `ki` binary
-gets the TUI, the harness and the plugin loader at once.
+  the boundary. That edge is names-only — nothing is linked or called.
+- `kiqi-extensions` is `kiqi-plugin` plus `kiqi-ai`/`kiqi-agent`, since it hosts
+  the dispatch spine every plugin tier registers through.
+- `kiqi-plugin-host` runs wasm guests on wasmtime; `kiqi-cli` depends on both,
+  which is how the `ki` binary gets the TUI, the harness and the plugin runtime
+  at once.
 
 | Crate | What it is |
 | ----- | ---------- |
@@ -189,8 +191,9 @@ gets the TUI, the harness and the plugin loader at once.
 | [`kiqi-harness`](./crates/kiqi-harness) | Session tree, JSONL persistence, compaction, crash recovery, the run loop |
 | [`kiqi-tui`](./crates/kiqi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
 | [`kiqi-cli`](./crates/kiqi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, plugin loading |
-| [`kiqi-plugin-sdk`](./crates/kiqi-plugin-sdk) | The stable `#[repr(C)]` ABI contract for plugins. No `kiqi-*` deps; only `serde_json`, behind a default `json` feature that can be turned off |
-| [`kiqi-extensions`](./crates/kiqi-extensions) | Host-side plugin loader and the async-across-ABI tool bridge |
+| [`kiqi-plugin`](./crates/kiqi-plugin) | The shared plugin contract: `Plugin` trait, event tags, grants, env-var names and dialog semantics |
+| [`kiqi-plugin-host`](./crates/kiqi-plugin-host) | The wasmtime host that runs wasm plugins against `plugins/kiqi-plugin.wit` |
+| [`kiqi-extensions`](./crates/kiqi-extensions) | Host-side dispatch spine: registry, event funnels, compiled/wasm sink, action mailboxes |
 
 Every crate has its own README. The crates are **not** published to crates.io
 (`publish = false` in each manifest), so links above point at the in-repo
@@ -292,40 +295,17 @@ ki insmod path/to/component.wasm --yes            # install an already-built com
 [`website/data/packages.json`](website/data/packages.json) lists which
 capabilities are available this way, with the exact command for each.
 
-**Third-party extensions are Rust `cdylib` libraries** behind a stable
-`#[repr(C)]` ABI. An extension can register tools, providers, slash commands,
-event handlers, markdown renderers and discovered resources.
+**The cdylib channel is retired.** Up to 2026-10-26 a third-party extension
+could be a Rust `cdylib` behind a `#[repr(C)]` ABI, installed with `ki install`
+and hot-reloaded with `ki dev`. Those commands, the `kiqi-plugin-sdk` crate and
+the loader are gone; a cdylib no longer loads. Port the extension to a wasm
+guest against [`plugins/kiqi-plugin.wit`](plugins/kiqi-plugin.wit) (contract
+notes in [`docs/design/plugin-abi.md`](docs/design/plugin-abi.md)) and install
+it with `ki insmod`.
 
-```bash
-ki install my-ext --path ../my-ext     # local, for development
-ki dev                                 # build + watch + live reload
-```
-
-No crate in this repository is published to crates.io, so `ki install <name>`
-without `--path` has nothing to resolve — build from source. The host loads
-project `.ki/extensions`, then global `~/.ki/agent/extensions`, then any
-`--extensions-dir`.
-
-Ready-to-install third-party extensions live in the companion
+Ready-to-install wasm extensions live in the companion
 [`pi-rust/rpi-package`](https://github.com/pi-rust/rpi-package) repository, with
 an [online catalog](https://ki.laofu.online/packages.html).
-
-```rust
-use kiqi_plugin_sdk::{export_plugin, StbStringRef};
-
-export_plugin!(|api| {
-    if let Some(declare) = api.declare {
-        declare(StbStringRef::from_str(r#"{"priority":60,"platforms":["linux"]}"#));
-    }
-    // register tools / handlers through `api`
-    0
-});
-```
-
-Start from [`examples/plugin-stub`](examples/plugin-stub) — a complete plugin
-with the full `execute`→`poll`→`cancel`→`destroy` lifecycle — and read
-[`docs/extensions/authoring.md`](docs/extensions/authoring.md) for the safety
-rules, which are load-bearing rather than stylistic.
 
 ## Remote mode
 
@@ -355,7 +335,7 @@ permission requests bridged to the client. See
 | | |
 | --- | --- |
 | Current release | **[0.4.1](https://github.com/gqf2008/pi-rust/releases/tag/v0.4.1)** (all crates share one workspace version) |
-| Stability | `kiqi-ai`, `kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-plugin-sdk` are the intended stable surface |
+| Stability | `kiqi-ai`, `kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-plugin` are the intended stable surface |
 | MSRV | 1.96 |
 | Platforms | Linux, macOS, Windows (CI runs the suite on Linux) |
 | Binary release targets | Linux (x86_64/aarch64), macOS (Intel/Apple silicon), Windows (x86_64) |

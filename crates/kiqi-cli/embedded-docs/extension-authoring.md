@@ -1,5 +1,12 @@
 # ki Rust 扩展开发最佳实践
 
+> **P6 状态（2026-10-26）：cdylib 通道已整体退役。** 本文保留为历史规范，
+> 其中 `kiqi-plugin-sdk`、`ki install`、`ki dev`、`ki dev-local`、`--extensions-dir`
+> 与 `examples/plugin-stub` 均已删除，照做会失败。当前唯一插件通道是 wasm 组件：
+> 契约见 `plugins/kiqi-plugin.wit`，模板见 `plugins/wasm/kiqi-todo-guest`，
+> 安装用 `ki insmod --build plugins/wasm/kiqi-<name>-guest`。
+
+
 本文是 ki 创建 Rust `cdylib` 扩展的模型可读规范。扩展是 Rust 原生动态库，
 通过稳定 C ABI（`kiqi-plugin-sdk`）注册工具、事件处理器、资源发现、Provider
 与渲染器，宿主（`ki` CLI）负责加载与生命周期。创建完整 Agent 项目的默认结构见

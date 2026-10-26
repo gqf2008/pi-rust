@@ -24,8 +24,9 @@
 //! - **`app`** ([`app`]) — argument dispatch, model resolution, harness build,
 //!   mode dispatch, exit codes.
 //!
-//! Resources load from `.ki/` and `~/.ki/agent/`; extensions are Rust
-//! `cdylib` plugins installed and developed with `ki install` / `ki dev`.
+//! Resources load from `.ki/` and `~/.ki/agent/`; plugins are wasm guests
+//! installed with `ki insmod` (the cdylib channel and its `ki install` /
+//! `ki dev` commands were retired on 2026-10-26).
 
 pub mod acp;
 pub mod agent_session;

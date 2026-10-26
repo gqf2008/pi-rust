@@ -89,10 +89,9 @@ impl ExtensionSession {
     /// stdio (`declare {"ownsStdio":true}`). When `true`, the host (pi-cli)
     /// must run the headless `Rpc` lifecycle (dispatch BeforeTuiStart +
     /// SessionStart, then park) instead of Print/TUI so it never writes to the
-    /// plugin's stdio. `false` unless a registry entry declared it — with the
-    /// cdylib channel gone nothing sets it today, but the wasm runtime-action
-    /// surface (`RuntimeActionId::StdioLifecycle`) can still claim through the
-    /// same registry flag.
+    /// plugin's stdio. With the cdylib channel gone nothing sets it any more
+    /// (the wasm contract has no stdio claim), so this is always `false` in
+    /// production.
     pub fn owns_stdio(&self) -> bool {
         self.snapshot
             .as_ref()

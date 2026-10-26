@@ -79,7 +79,7 @@ crate name; the directory name is not part of the public API.
 | `crates/kiqi-harness`                | `kiqi-harness`    |
 | `crates/kiqi-cli`                    | `kiqi-cli`        |
 | `crates/kiqi-tui`                    | `kiqi-tui`        |
-| `crates/kiqi-plugin-sdk`            | `kiqi-plugin-sdk` |
+| `crates/kiqi-plugin`                | `kiqi-plugin`     |
 | `crates/kiqi-extensions`            | `kiqi-extensions` |
 
 Dependency direction is one-way and must stay that way:
@@ -88,7 +88,7 @@ Dependency direction is one-way and must stay that way:
 kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli
 ```
 
-`kiqi-plugin-sdk` is a zero-dependency leaf so that plugins do not pull the
+`kiqi-plugin` is a zero-internal-dependency leaf so that plugins do not pull the
 whole runtime; `kiqi-extensions` sits on top of it. Adding a dependency that
 points backwards (for example `kiqi-agent` depending on `kiqi-cli`) will be
 rejected.
@@ -137,9 +137,10 @@ keep the type prefix and scope in the conventional form.
 4. Expect review comments on API additions; the public surface of these crates
    is intended to be small and stable.
 
-If your change touches the plugin ABI (`kiqi-plugin-sdk`), call it out
-explicitly in the PR description. ABI changes affect every already-built
-extension and require a documented negotiation story.
+If your change touches the plugin contract (`plugins/kiqi-plugin.wit`,
+`kiqi-plugin`), call it out explicitly in the PR description. Contract changes
+affect every already-built wasm plugin and require a documented negotiation
+story (`docs/design/plugin-abi.md`).
 
 If your change touches session persistence (`kiqi-harness`), describe the
 recovery behaviour for a crash in the middle of the affected operation.
