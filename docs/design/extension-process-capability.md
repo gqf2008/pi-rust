@@ -46,7 +46,7 @@ stdio 会话：
 
 ### 3.2 句柄用 `u32` + 宿主 map，而不是 WIT `resource`
 
-- 与 `net-sockets` 完全一致（`HashMap<u32, TcpStream>`，`crates/kiqi-extension-host/src/lib.rs:218-219`），
+- 与 `net-sockets` 完全一致（`HashMap<u32, TcpStream>`，`crates/kiqi-host/src/wasm/mod.rs:775`），
   一致性能让 SDK 与文档只讲一套心智模型。
 - `resource` 的类型安全与自动 drop 更漂亮，但会引入这个 ABI 尚未使用的第二种句柄习语；
   且**真正的生命周期保障来自调用结束时的统一收尸**（§5），不来自句柄的 drop。

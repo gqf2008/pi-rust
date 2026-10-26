@@ -82,3 +82,56 @@ printf '%s\n' "$out" | grep -qF 'docs/nested/current.md:2: missing repository pa
     exit 1
 }
 echo "ok: merely citing an archive does not skip current documentation"
+
+# Leave a clean fixture before the next cases.
+rm "$fixture/docs/nested/current.md" "$fixture/docs/nested/valid.md"
+
+# A retirement note that scopes only named paths must exempt those globs but
+# keep checking the rest of the document.
+cat > "$fixture/docs/nested/scoped.md" <<'EOF'
+> 注：文中 `extensions/kiqi-*` 路径是历史记录，现行实现在 `extensions/wasm/kiqi-*`。
+
+Current: `crates/kiqi-host`; retired: `extensions/kiqi-retired/src/lib.rs`.
+EOF
+if ! sh "$fixture/scripts/check-doc-paths.sh" >/dev/null 2>&1; then
+    echo "FAIL: a scoped retirement note exempted a current path" >&2
+    exit 1
+fi
+echo "ok: a scoped retirement note exempts only its named historical globs"
+
+printf 'Missing `crates/no-such-scoped`.\n' >> "$fixture/docs/nested/scoped.md"
+line=$(wc -l < "$fixture/docs/nested/scoped.md" | tr -d ' ')
+if out=$(sh "$fixture/scripts/check-doc-paths.sh" 2>&1); then
+    echo "FAIL: a scoped retirement note exempted the whole document" >&2
+    exit 1
+fi
+printf '%s\n' "$out" | grep -qF "docs/nested/scoped.md:$line: missing repository path: crates/no-such-scoped" || {
+    echo "FAIL: scoped-document diagnostic is wrong: $out" >&2
+    exit 1
+}
+echo "ok: paths outside a retirement note's scope still fail"
+rm "$fixture/docs/nested/scoped.md"
+
+# The embedded documentation snapshot is scanned, and its repo-root-style
+# links resolve from the repository root rather than the copy's directory.
+mkdir -p "$fixture/crates/kiqi-cli/embedded-docs"
+cat > "$fixture/crates/kiqi-cli/embedded-docs/README.md" <<'EOF'
+[host](crates/kiqi-host) and [guest](extensions/wasm/kiqi-todo) are root-relative.
+EOF
+if ! sh "$fixture/scripts/check-doc-paths.sh" >/dev/null 2>&1; then
+    echo "FAIL: embedded-docs root-relative links did not resolve" >&2
+    exit 1
+fi
+echo "ok: embedded-docs copies are scanned with root-relative links"
+
+printf '\n[gone](crates/no-such-embedded)\n' >> "$fixture/crates/kiqi-cli/embedded-docs/README.md"
+line=$(wc -l < "$fixture/crates/kiqi-cli/embedded-docs/README.md" | tr -d ' ')
+if out=$(sh "$fixture/scripts/check-doc-paths.sh" 2>&1); then
+    echo "FAIL: a missing path in the embedded docs copy passed" >&2
+    exit 1
+fi
+printf '%s\n' "$out" | grep -qF "crates/kiqi-cli/embedded-docs/README.md:$line: missing repository path: crates/no-such-embedded" || {
+    echo "FAIL: embedded-docs diagnostic is wrong: $out" >&2
+    exit 1
+}
+echo "ok: a missing path in the embedded docs copy fails"

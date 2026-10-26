@@ -221,7 +221,7 @@ Jev 的答案只作为决策依据，不能绕过权限门。删除/合并类如
 | 同上 | `truncate_on_char_boundary`：中文问题 3 字节/字，按字节直接切会 panic；有 `"删".repeat(100)` 的测试 |
 | 同上 | `KI_DEBUG_DECISION` → `<temp>/kiqi-decision.log`，一行一个超时 |
 | `extensions/wasm/kiqi-ask-user/src/lib.rs` | 同样三处逐一对应；`ask_one` 返回 `AskOne::{Answered, Unanswered}`，超时不进 `Err` |
-| `crates/kiqi-extension-host/tests/e2e.rs` | `ask_user_honours_timeout` 从「断言 `is_error` + 文案含 timed out」改为「断言非错误 + `details.status==unanswered` + 无 `answer` 键」 |
+| `crates/kiqi-host/tests/e2e.rs` | `ask_user_honours_timeout` 从「断言 `is_error` + 文案含 timed out」改为「断言非错误 + `details.status==unanswered` + 无 `answer` 键」 |
 
 两条**不可回退**的判断：
 

@@ -1,11 +1,14 @@
 #!/bin/sh
 # Check concrete crate/extension repository paths cited by current documentation.
 #
-# Scope: the root README/CLAUDE/AGENTS files and docs/**/*.md. CHANGELOG files
-# and documents with an explicit self-description as historical records are
-# skipped: "文中…历史记录", "本文…历史存档/历史契约/设计存档", or a
-# leading "历史存档:" / "historical archive:" note. Merely citing an archived
-# document does not exempt the citing file.
+# Scope: the root README/CLAUDE/AGENTS files, docs/**/*.md, and the embedded
+# documentation snapshot under crates/kiqi-cli/embedded-docs (which `ki docs`
+# serves). CHANGELOG files are skipped, as are documents that describe
+# themselves as historical records: a leading "历史存档:" / "historical archive:"
+# note, or a "本文…历史存档/历史契约/设计存档" self-description. A retirement
+# note that only scopes named paths ("文中 `X` … 是历史记录") exempts just the
+# backticked globs before that marker; the rest of the document is still
+# checked. Merely citing an archived document does not exempt the citing file.
 #
 # Only paths which must exist are checked:
 #   * wildcards (`extensions/wasm/kiqi-*`) and placeholders (`extensions/<id>`,
@@ -14,7 +17,9 @@
 #     `extensions/wasm/target` are runtime/test/build output, not source files;
 #   * paths below another directory (`.ki/extensions/...`, `docs/extensions/...`,
 #     `abb/crates/...`) and crates.io/shields URLs are not root-relative claims.
-# Markdown link destinations are resolved from the document's directory; paths
+# Markdown link destinations are resolved from the document's directory, falling
+# back to the repository root when the destination has no `./` or `../` prefix:
+# the embedded copies and the root-style READMEs link repo-root-relative. Paths
 # in commands and inline code are resolved from the repository root. examples/
 # is intentionally outside this check because its examples need not all exist.
 set -eu
@@ -33,19 +38,40 @@ trap 'rm -rf "$tmp"' EXIT
 : > "$tmp/docs"
 : > "$tmp/refs"
 : > "$tmp/missing"
+: > "$tmp/hist_globs"
 
 for doc in README.md CLAUDE.md AGENTS.md; do
     [ ! -f "$doc" ] || printf '%s\n' "$doc" >> "$tmp/docs"
 done
 find docs -type f -name '*.md' -print | sort >> "$tmp/docs"
+if [ -d crates/kiqi-cli/embedded-docs ]; then
+    find crates/kiqi-cli/embedded-docs -type f -name '*.md' -print | sort >> "$tmp/docs"
+fi
 
 while IFS= read -r doc; do
     case "$doc" in
         CHANGELOG.md|*/CHANGELOG.md|changelog.md|*/changelog.md) continue ;;
     esac
-    if grep -qiE '文中.*历史记录|本文.*(历史存档|历史契约|设计存档)|^>[[:space:]]*(历史存档：|historical archive:)' "$doc"; then
+
+    # A document that describes itself as an archive is historical throughout.
+    if grep -qiE '^>[[:space:]]*(历史存档：|historical archive:)|本文.*(历史存档|历史契约|设计存档)' "$doc"; then
         continue
     fi
+
+    # A retirement note may scope only the paths it names. Record the backticked
+    # globs before "历史记录" as exemptions; anything after that marker describes
+    # the current layout and stays checked.
+    grep -E '文中.*历史记录' "$doc" 2>/dev/null \
+        | sed 's/历史记录.*//' \
+        | grep -oE '`[^`]*[*][^`]*`' 2>/dev/null \
+        | tr -d '`' \
+        | while IFS= read -r glob; do
+            case "$glob" in
+                crates/*|extensions/*)
+                    printf '%s|%s\n' "$doc" "$glob" >> "$tmp/hist_globs"
+                    ;;
+            esac
+        done
 
     # Find every candidate, including several on one line. AWK lets us reject
     # candidates embedded in a longer path without requiring non-POSIX grep.
@@ -73,6 +99,19 @@ done < "$tmp/docs"
     exit 1
 }
 
+# Test a candidate against the historical globs recorded for its document.
+is_scoped_historical() {
+    [ -s "$tmp/hist_globs" ] || return 1
+    while IFS='|' read -r glob_doc glob; do
+        [ "$glob_doc" = "$1" ] || continue
+        # Unquoted on purpose: the recorded glob is a case pattern.
+        case "$2" in
+            $glob) return 0 ;;
+        esac
+    done < "$tmp/hist_globs"
+    return 1
+}
+
 while IFS='|' read -r doc line candidate is_link; do
     case "$candidate" in
         *'*'*|*'<'*|*'>'*|crates/CRATE|extensions/wasm/kiqi-)
@@ -84,14 +123,21 @@ while IFS='|' read -r doc line candidate is_link; do
             continue
             ;;
     esac
+    if is_scoped_historical "$doc" "$candidate"; then
+        continue
+    fi
 
     # ../ and ./ are explicitly document-relative. A plain path is normally a
-    # root-relative source pointer, except when used as a Markdown link target.
+    # root-relative source pointer, except when used as a Markdown link target;
+    # there, prefer the document-relative reading and fall back to the root.
     case "$candidate" in
         ../*|./*) target="$ROOT/$(dirname "$doc")/$candidate" ;;
         *)
             if [ "$is_link" -eq 1 ]; then
                 target="$ROOT/$(dirname "$doc")/$candidate"
+                if [ ! -e "$target" ] && [ -e "$ROOT/$candidate" ]; then
+                    target="$ROOT/$candidate"
+                fi
             else
                 target="$ROOT/$candidate"
             fi
