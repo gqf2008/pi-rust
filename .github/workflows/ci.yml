@@ -148,6 +148,12 @@ jobs:
           cargo test -p kiqi-ai -p kiqi-tools --lib --locked
           --all-features
 
+      # Guests build for `wasm32-wasip2`, but wit-bindgen also generates host
+      # stubs, so their pure-logic unit tests run natively here.
+      - name: Test wasm guests' native unit tests
+        run: cargo test --manifest-path plugins/wasm/Cargo.toml -p kiqi-plan-mode-guest --locked
+
+
   # Compile the workspace on Windows. Nothing else did: the release matrix is
   # the only place that built for Windows, so a Windows-only compile error
   # surfaced there and blocked the release (v0.4.0 failed with `cannot find

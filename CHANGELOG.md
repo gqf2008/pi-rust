@@ -36,6 +36,12 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   compiled/wasm sink, action mailboxes); its C-ABI bus types moved to
   `kiqi-extensions::abi` and the shared contract constants live in
   `kiqi-plugin`.
+- **`kiqi-plan-mode-core` is gone — its logic lives in the guest.** The crate
+  existed only to make plan-mode logic unit-testable, on the premise that wasm
+  guests cannot carry tests; that premise is false (wit-bindgen generates host
+  stubs, so `cargo test -p kiqi-plan-mode-guest` runs natively). The logic and
+  its six tests now live in `plugins/wasm/kiqi-plan-mode-guest/src/plan.rs`,
+  with the WIT adapter as `src/lib.rs`.
 - **`kiqi-acp` is a crate now.** The ACP server moved out of `kiqi-cli`
   (`crates/kiqi-cli/src/acp/`) into `crates/kiqi-acp`; the host keeps the
   assembly roots (`SessionFactory`, `session/load` pre-check) in

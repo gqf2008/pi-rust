@@ -1,23 +1,27 @@
+#![forbid(unsafe_code)]
 //! `kiqi-plan-mode` ported to the wasm ABI (0.7.0).
 //!
 //! Plan mode is a *session* plugin: it swaps the active tool set, persists its
 //! state as a custom entry, restores it from the session branch, and can submit a
-//! planning request. All of that already exists in `kiqi-plan-mode-core`, shared
-//! with the compile-time plugin; the only new code here is the [`PlanHost`]
-//! adapter over the WIT imports.
+//! planning request. The behaviour lives in [`plan`] (pure logic + native unit
+//! tests — `cargo test -p kiqi-plan-mode-guest` from `plugins/wasm`, which runs
+//! on the host); this module is only the [`plan::PlanHost`] adapter over the WIT
+//! imports.
 //!
 //! The port found a real ABI gap: the WIT had `inject.append-entry`, which is
 //! `append_message`, but nothing for `append_custom_entry` — which is exactly
 //! what plan mode persists through. `append-custom-entry` was added for it.
 
+use crate::plan::{complete_plan, on_session_event, run_command, start_plan, PlanHost};
 use kiqi_plugin_guest::bindings::exports::kiqi::plugin::plugin_api::Guest;
 use kiqi_plugin_guest::bindings::kiqi::plugin::{inject, session_control, session_read, types};
-use kiqi_plan_mode_core::{complete_plan, on_session_event, run_command, start_plan, PlanHost};
 use serde_json::Value;
 
+mod plan;
+
 const ID: &str = "kiqi-plan-mode";
-const COMPLETE_TOOL: &str = kiqi_plan_mode_core::PLAN_TOOL;
-const START_TOOL: &str = kiqi_plan_mode_core::START_TOOL;
+const COMPLETE_TOOL: &str = plan::PLAN_TOOL;
+const START_TOOL: &str = plan::START_TOOL;
 const COMMAND: &str = "plan";
 
 /// The session operations, over the wasm imports instead of `HostCaps`.
@@ -81,7 +85,7 @@ impl Guest for PlanMode {
                 description: "Submit a complete implementation-ready plan and leave plan mode. Only available while /plan mode is active.".to_string(),
                 parameters_schema: format!(
                     r#"{{"type":"object","required":["plan"],"properties":{{"plan":{{"type":"string","minLength":1,"maxLength":{},"description":"The complete decision-ready implementation plan in Markdown."}}}}}}"#,
-                    kiqi_plan_mode_core::MAX_PLAN_CHARS
+                    plan::MAX_PLAN_CHARS
                 ),
             },
             types::ToolSpec {
@@ -94,10 +98,7 @@ impl Guest for PlanMode {
         ]
     }
 
-    fn call_tool(
-        name: String,
-        arguments: String,
-    ) -> Result<types::ToolResult, types::PluginError> {
+    fn call_tool(name: String, arguments: String) -> Result<types::ToolResult, types::PluginError> {
         let params: Value = serde_json::from_str(&arguments)
             .map_err(|error| types::PluginError::InvalidArguments(error.to_string()))?;
         let outcome = match name.as_str() {
@@ -118,7 +119,7 @@ impl Guest for PlanMode {
             .unwrap_or_else(|| parsed.to_string());
         let details = parsed.get("details").cloned().unwrap_or(Value::Null);
         Ok(types::ToolResult {
-            blocks: vec!(types::ContentBlock::Text(text)),
+            blocks: vec![types::ContentBlock::Text(text)],
             is_error: false,
             details: details.to_string(),
         })
@@ -131,7 +132,10 @@ impl Guest for PlanMode {
         }]
     }
 
-    fn run_command(name: String, arguments: String) -> Result<types::CommandResult, types::PluginError> {
+    fn run_command(
+        name: String,
+        arguments: String,
+    ) -> Result<types::CommandResult, types::PluginError> {
         if name != COMMAND {
             return Err(types::PluginError::UnknownTool(name));
         }

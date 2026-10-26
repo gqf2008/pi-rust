@@ -23,11 +23,15 @@ persists a **custom-typed** entry, and the compile-time `InjectApi` has a
 separate `append_custom_entry` for it. There was no wasm equivalent, so the port
 added `inject.append-custom-entry` to the ABI (0.6.0).
 
-## Sharing one implementation
+## One implementation, inside this crate
 
 The logic (which tools survive, what `/plan` prints, how the outline is parsed)
-lives in `kiqi-plan-mode-core`, the same crate the compile-time plugin uses. Only
-the `PlanHost` adapter differs: `HostCaps` there, the WIT imports here.
+lives in `src/plan.rs`; `src/lib.rs` is only the `PlanHost` adapter over the WIT
+imports. There used to be a separate `kiqi-plan-mode-core` crate so the logic
+could carry native unit tests — that turned out to be unnecessary: wit-bindgen
+generates host-target stubs, so `cargo test -p kiqi-plan-mode-guest` (from
+`plugins/wasm`) runs the pure-logic tests on the host while the
+`wasm32-wasip2` build remains the shipped artifact.
 
 ABI 0.8.0: a rebuild must also implement `continue_command` and the `oauth-api` / `provider-api` / `render-api` contribution exports; this crate fills the latter three with `kiqi_plugin_guest::deny_contribution_exports!(…)`.
 

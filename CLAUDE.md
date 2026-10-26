@@ -31,6 +31,9 @@ cargo check --workspace --all-targets --all-features --locked
 cargo test  -p kiqi-ai -p kiqi-tools --lib --locked --all-features
 cargo test  --workspace --locked
 
+# wasm guest 的纯逻辑单测（宿主目标）：
+cargo test --manifest-path plugins/wasm/Cargo.toml -p kiqi-plan-mode-guest --locked
+
 # 脚本门禁（改到对应文件后必须重跑）：
 sh scripts/check-offline-lock.sh          # Cargo.lock 覆盖全部 feature
 sh scripts/check-ci-locked.sh             # CI 每条 cargo build/check/test 都带 --locked
@@ -80,8 +83,7 @@ kiqi-tui                  # 终端组件、编辑器、渲染（零内部依赖�
 kiqi-host                 # Extension 契约 + 事件派发脊柱（恒编译）+ wasm 后端（`wasm` feature，wasmtime）
 kiqi-mcp                  # MCP 客户端集成（依赖 ai+agent+harness；boundary.rs 是与 harness 的接缝）
 kiqi-acp                  # `ki acp serve` 协议服务器（依赖 acp 协议 crate + agent/harness/mcp/extensions；会话组装根留在 kiqi-cli 注入）
-kiqi-plan-mode-core       # 计划模式核心逻辑（零内部依赖；只被 plugins/wasm/kiqi-plan-mode-guest 链接）
-kiqi-cli                  # 组合以上（plan-mode-core、kiqi-acp 除外）：配置、认证、CLI/TUI；acp 的 factory/precheck 宿主侧在 src/acp.rs
+kiqi-cli                  # 组合以上（kiqi-acp 除外）：配置、认证、CLI/TUI；acp 的 factory/precheck 宿主侧在 src/acp.rs
 ```
 
 feature 门：`kiqi-ai` 的真实 HTTP provider 在 `cfg(feature = "providers")` 后，默认关
@@ -116,8 +118,11 @@ TUI Enter → `interactive_tui/run.rs::run_prompt_streaming` →
   + `wasm` 子模块；trait 由 `Plugin` 改名为 `Extension`）：registry/translate/
   compiled sink/mailboxes 恒编译，wasmtime 只在 `wasm` feature 后；
   `src/abi.rs` 是内部事件总线的线格式。
-- **wasm guest crate 里不写单测**：guest 只对 `wasm32-wasip2` 链接，行为一律由
-  `crates/kiqi-host/tests/e2e.rs` 从宿主侧验证（`--features wasm`）。
+- **wasm guest 的单测**：guest 的**纯逻辑**可以带原生 `#[cfg(test)]` 单测，在
+  `plugins/wasm` 工作区里 `cargo test -p kiqi-<x>-guest` 就能在宿主目标上跑
+  （实测可行：wit-bindgen 会为宿主目标生成桩）。**跨 WIT 边界的行为**（import
+  调用、宿主侧效果）一律由 `crates/kiqi-host/tests/e2e.rs` 从宿主侧验证
+  （`--features wasm`）。
 
 ### 设计文档
 

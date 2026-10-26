@@ -2249,13 +2249,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kiqi-plan-mode-core"
-version = "0.4.1"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
 name = "kiqi-telemetry"
 version = "0.4.1"
 dependencies = [

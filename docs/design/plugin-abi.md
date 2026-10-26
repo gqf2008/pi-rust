@@ -1354,3 +1354,16 @@ C ABI 线格式（`StbString`/`StablePluginEvent`/`EventView`/handler consts）�
 - crate 级消费路径：`kiqi_host::*`（契约/脊柱），`kiqi_host::wasm::*`（后端，
   仅 `wasm` feature）。wasm e2e（`tests/e2e.rs`，5,140 行）整体迁移并以
   `#![cfg(feature = "wasm")]` 门控。
+
+### 6.47 `kiqi-plan-mode-core` 折叠回 guest（2026-10-26）
+
+该 crate 的唯一存在理由是「guest 不能写单测」——实测**不成立**：wit-bindgen 为宿主
+目标生成桩，`plugins/wasm` 工作区里 `cargo test -p kiqi-plan-mode-guest` 能在宿主上
+跑纯逻辑单测（6 个测试原样通过）。于是：
+
+- `crates/kiqi-plan-mode-core/src/lib.rs` → `plugins/wasm/kiqi-plan-mode-guest/src/plan.rs`
+  （`PlanHost` trait + 逻辑 + 单测），guest `lib.rs` 只留 WIT 适配；
+- 删 crate、workspace member 与依赖边；`ki` 二进制本来就不链接它；
+- **规则修正**：guest 的纯逻辑可以带原生单测；跨 WIT 边界的行为仍由
+  `crates/kiqi-host/tests/e2e.rs` 从宿主侧验证（CLAUDE.md / AGENTS.md 同步）。
+- CI 增一步 `cargo test --manifest-path plugins/wasm/Cargo.toml -p kiqi-plan-mode-guest`。

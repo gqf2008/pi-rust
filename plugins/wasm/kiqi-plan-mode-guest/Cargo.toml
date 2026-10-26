@@ -17,5 +17,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 kiqi-plugin-guest = { path = "../kiqi-plugin-guest" }
-kiqi-plan-mode-core = { path = "../../../crates/kiqi-plan-mode-core" }
 serde_json = "1"

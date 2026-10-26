@@ -1,4 +1,3 @@
-#![forbid(unsafe_code)]
 //! Plan-mode logic for the `kiqi-plan-mode` wasm guest.
 //!
 //! The guest crate (`plugins/wasm/kiqi-plan-mode-guest`) is a thin shim: it

@@ -1,7 +1,6 @@
 # ki — a Rust agent runtime + CLI. See README.md and docs/architecture/overview.md.
 [workspace]
 members = [
-    "crates/kiqi-plan-mode-core",
     "crates/kiqi-telemetry",
     "crates/kiqi-ai",
     "crates/kiqi-agent",

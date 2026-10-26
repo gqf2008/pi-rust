@@ -116,7 +116,7 @@ import **与 export**（`oauth-api`/`provider-api`/`render-api` 折叠成 grant 
 | 宿主（wasmtime，把组件包成 `trait Extension`） | `crates/kiqi-host/src/wasm/` |
 | 插件 SDK（WIT → Rust trait） | `plugins/wasm/kiqi-plugin-guest` |
 | 已移植插件（12） | `plugins/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode,lens,websearch,subagents,goal,codegraph,orchestrator}-guest` |
-| 共享逻辑（编译期与 wasm 共用） | `crates/kiqi-plan-mode-core` |
+| 计划模式逻辑（纯逻辑 + 原生单测） | `plugins/wasm/kiqi-plan-mode-guest/src/plan.rs` |
 | CLI | `crates/kiqi-cli/src/plugin_cli.rs`（`ki plugin …`） |
 | 会话接线（发现/注册/事件 sink/各贡献面） | `crates/kiqi-cli/src/plugins.rs` |
 | 宿主归因 OAuth（端点、表单白名单、设备码轮询） | `crates/kiqi-host/src/wasm/oauth.rs` |
@@ -176,7 +176,7 @@ wasm-tools component wit plugins/kiqi-plugin.wit
 
 ```bash
 cargo test -p kiqi-host --features wasm --lib --test e2e   # e2e + 单测
-cargo test -p kiqi-plan-mode-core                      # 6
+cargo test -p kiqi-plan-mode-guest                     # 6（在 plugins/wasm 工作区）
 cargo test -p kiqi-lens                                # 3
 cargo test -p kiqi-plugin --lib                       # 7
 cargo test -p kiqi-cli --lib                           # 510
