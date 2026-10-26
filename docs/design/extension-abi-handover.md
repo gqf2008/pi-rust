@@ -112,7 +112,7 @@ import **与 export**（`oauth-api`/`provider-api`/`render-api` 折叠成 grant 
 | 角色 | 路径 |
 |---|---|
 | **契约** | `extensions/kiqi-extension.wit` |
-| 契约 Rust 侧（`trait Extension`、`Event`/`Verdict`、`grants`） | `crates/kiqi-extension` |
+| 契约 Rust 侧（`trait Extension`、`Event`/`Verdict`、`grants`） | `crates/kiqi-host` |
 | 宿主（wasmtime，把组件包成 `trait Extension`） | `crates/kiqi-host/src/wasm/` |
 | 插件 SDK（WIT → Rust trait） | `extensions/wasm/kiqi-wasm-bindings` |
 | 已移植插件（12） | `extensions/wasm/kiqi-{conformance,todo,langfuse,ask-user,webfetch,plan-mode,lens,websearch,subagents,goal,codegraph,orchestrator}`（bindings crate：`kiqi-wasm-bindings`） |

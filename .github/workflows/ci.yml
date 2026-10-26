@@ -117,6 +117,11 @@ jobs:
       - name: Test the README's install instructions against the manifests
         run: sh scripts/tests/docs-install-path.sh
 
+      - name: Check documentation source paths
+        run: |
+          sh scripts/tests/doc-paths.sh
+          sh scripts/check-doc-paths.sh
+
       - name: Verify the per-agent collab setup script
         run: sh scripts/tests/setup-collab-agents.sh
 
@@ -152,6 +157,11 @@ jobs:
       # stubs, so their pure-logic unit tests run natively here.
       - name: Test wasm guests' native unit tests
         run: cargo test --manifest-path extensions/wasm/Cargo.toml -p kiqi-plan-mode --locked
+
+      # Default features can hide broken no-wasm builds through feature
+      # unification, so check the smallest CLI configuration explicitly.
+      - name: Check the lean CLI build
+        run: cargo check -p kiqi-cli --no-default-features --locked
 
 
   # Compile the workspace on Windows. Nothing else did: the release matrix is

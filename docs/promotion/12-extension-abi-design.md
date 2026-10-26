@@ -1,3 +1,5 @@
+> 历史存档：本文描述已退役的 cdylib 通道，保留作设计背景；当前扩展通道见 docs/extensions/authoring.md。
+
 # 跨动态库的 Rust 插件 ABI：ki 如何控制边界风险
 
 > 插件系统最难的不是加载一个动态库，而是定义跨编译器、跨 crate 版本仍然可理解的内存边界。ki 将稳定的 C ABI 放在 `kiqi-extension-sdk`，把宿主加载和异步桥接放在 `kiqi-extensions`。

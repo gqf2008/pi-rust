@@ -251,7 +251,7 @@ sh scripts/sync-embedded-docs.sh
 注意：goal 断言已用子进程 + tempdir 隔离，`cargo test -p kiqi-cli` 不再改写源码树
 （`crates/kiqi-cli/.ki/` 已移出索引并被 `.gitignore` 的 `**/.ki/*` 忽略）。
 wasm guest 只在 `wasm32-wasip2` 链接，
-guest crate 内不写单测，行为由 `crates/kiqi-extension-host/tests/e2e.rs` 从宿主侧验证。
+guest crate 内不写单测，行为由 `crates/kiqi-host/tests/e2e.rs` 从宿主侧验证。
 
 ## 8. 什么样的条目算闭环证据
 

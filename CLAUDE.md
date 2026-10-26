@@ -27,6 +27,7 @@ Cargo.lock 覆盖全部 feature；`cargo fmt` 不接受 `--locked`）：
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --locked
 cargo check --workspace --all-targets --all-features --locked
+cargo check -p kiqi-cli --no-default-features --locked  # lean build（关 extension-wasm）
 # 被 feature 挡住的测试必须单跑 --all-features 才可见：
 cargo test  -p kiqi-ai -p kiqi-tools --lib --locked --all-features
 cargo test  --workspace --locked
@@ -37,6 +38,7 @@ cargo test --manifest-path extensions/wasm/Cargo.toml -p kiqi-plan-mode --locked
 # 脚本门禁（改到对应文件后必须重跑）：
 sh scripts/check-offline-lock.sh          # Cargo.lock 覆盖全部 feature
 sh scripts/check-ci-locked.sh             # CI 每条 cargo build/check/test 都带 --locked
+sh scripts/check-doc-paths.sh             # 现行文档中的 crate/extension 源码路径必须存在
 sh scripts/tests/install-sh.sh            # install.sh（离线可测）
 sh scripts/tests/release-sh.sh            # release.sh 与工作流一致
 sh scripts/check-release-targets.sh       # 发布矩阵三处消费清单一致

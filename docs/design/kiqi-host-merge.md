@@ -1,3 +1,5 @@
+> 历史存档：本文记录已完成的 crate 合并方案；当前宿主实现位于 crates/kiqi-host。
+
 # 方案：`kiqi-host` 合并与 `Extension → Extension` 改名
 
 状态：块 1、块 3 已完成（2026-10-26，`main @ 291ca0e`）；块 2 待执行。

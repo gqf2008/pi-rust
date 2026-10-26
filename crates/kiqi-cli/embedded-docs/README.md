@@ -27,7 +27,7 @@ Website: <https://ki.laofu.online/> · Docs: <https://ki.laofu.online/docs.html>
 | -------- | --------- | -------- |
 | A working terminal coding agent | nothing | `scripts/install.sh` (see below) |
 | Your own agent inside your process | `kiqi-agent` (+ `kiqi-ai`, `kiqi-tools`) | [`examples/minimal`](examples/minimal) |
-| A tool/provider that extends every session | `extensions/kiqi-extension.wit` | [`extensions/wasm/kiqi-todo`](extensions/wasm/kiqi-todo) |
+| A tool/provider that extends every session | `extensions/kiqi-extension.wit` | [`extensions/wasm/kiqi-todo`](../../extensions/wasm/kiqi-todo) |
 
 The three share one implementation. Build your tools once, debug them inside an
 embedded agent, and ship the same code as a wasm guest that the global `ki`
@@ -155,28 +155,23 @@ kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness
 A few crates sit outside that chain:
 
 - `kiqi-tui` depends on no other `kiqi-*` crate.
-- `kiqi-extension` is a leaf too (it has no `kiqi-*` deps), but it is not only
-  the host's extension contract: `kiqi-tools` also reads its env-var names, so the
-  host and its extensions cannot disagree about the strings they exchange across
-  the boundary. That edge is names-only — nothing is linked or called.
-- `kiqi-extensions` is `kiqi-extension` plus `kiqi-ai`/`kiqi-agent`, since it hosts
-  the dispatch spine every extension tier registers through.
-- `kiqi-extension-host` runs wasm guests on wasmtime; `kiqi-cli` depends on both,
-  which is how the `ki` binary gets the TUI, the harness and the extension runtime
-  at once.
+- `kiqi-host` is the extension-side crate: the `Extension` contract plus the event
+  dispatch spine (built always, so `kiqi-tools` can read the env-var names and
+  everyone agrees on the boundary strings), with the wasmtime-backed wasm
+  backend behind its `wasm` feature. Only `kiqi-cli` turns that feature on,
+  which is how the `ki` binary gets the extension runtime while the pure-Rust
+  crates stay wasmtime-free.
 
 | Crate | What it is |
 | ----- | ---------- |
-| [`kiqi-telemetry`](./crates/kiqi-telemetry) | Span/event contracts with a no-op default — instrumentation is opt-in, and pulls in no tracing or OpenTelemetry backend |
-| [`kiqi-ai`](./crates/kiqi-ai) | Provider-agnostic message, streaming and tool-schema types; Anthropic + OpenAI-compatible + `faux` providers |
-| [`kiqi-agent`](./crates/kiqi-agent) | The agent loop: `AgentTool`, events, hooks, queues, cancellation |
-| [`kiqi-tools`](./crates/kiqi-tools) | `read`/`write`/`edit`/`bash` (+ `grep`, `find`, `ls`, `powershell`) and the `ExecutionEnv` seam |
-| [`kiqi-harness`](./crates/kiqi-harness) | Session tree, JSONL persistence, compaction, crash recovery, the run loop |
-| [`kiqi-tui`](./crates/kiqi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
-| [`kiqi-cli`](./crates/kiqi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, extension loading |
-| [`kiqi-extension`](./crates/kiqi-extension) | The shared extension contract: `Extension` trait, event tags, grants, env-var names and dialog semantics |
-| [`kiqi-extension-host`](./crates/kiqi-extension-host) | The wasmtime host that runs wasm extensions against `extensions/kiqi-extension.wit` |
-| [`kiqi-extensions`](./crates/kiqi-extensions) | Host-side dispatch spine: registry, event funnels, compiled/wasm sink, action mailboxes |
+| [`kiqi-telemetry`](../../crates/kiqi-telemetry) | Span/event contracts with a no-op default — instrumentation is opt-in, and pulls in no tracing or OpenTelemetry backend |
+| [`kiqi-ai`](../../crates/kiqi-ai) | Provider-agnostic message, streaming and tool-schema types; Anthropic + OpenAI-compatible + `faux` providers |
+| [`kiqi-agent`](../../crates/kiqi-agent) | The agent loop: `AgentTool`, events, hooks, queues, cancellation |
+| [`kiqi-tools`](../../crates/kiqi-tools) | `read`/`write`/`edit`/`bash` (+ `grep`, `find`, `ls`, `powershell`) and the `ExecutionEnv` seam |
+| [`kiqi-harness`](../../crates/kiqi-harness) | Session tree, JSONL persistence, compaction, crash recovery, the run loop |
+| [`kiqi-tui`](../../crates/kiqi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
+| [`kiqi-cli`](../../crates/kiqi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, extension loading |
+| [`kiqi-host`](../../crates/kiqi-host) | Extension side of the host: the `Extension` contract (event tags, grants, env-var names, dialog semantics), the dispatch spine (registry, event funnels, compiled/wasm sink, action mailboxes) and — behind the `wasm` feature — the wasmtime host that runs wasm extensions against `extensions/kiqi-extension.wit` |
 
 Every crate has its own README. The crates are **not** published to crates.io
 (`publish = false` in each manifest), so links above point at the in-repo
@@ -278,7 +273,7 @@ capabilities are available this way, with the exact command for each.
 could be a Rust `cdylib` behind a `#[repr(C)]` ABI, installed with `ki install`
 and hot-reloaded with `ki dev`. Those commands, the `kiqi-extension-sdk` crate and
 the loader are gone; a cdylib no longer loads. Port the extension to a wasm
-guest against [`extensions/kiqi-extension.wit`](extensions/kiqi-extension.wit) (contract
+guest against [`extensions/kiqi-extension.wit`](../../extensions/kiqi-extension.wit) (contract
 notes in [`docs/design/extension-abi.md`](docs/design/extension-abi.md)) and install
 it with `ki insmod`.
 

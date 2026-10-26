@@ -347,7 +347,7 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 
 ki 的 OAuth 方向是“轻量核心 + 平台插件”：平台差异由扩展实现，宿主负责统一
 发现、生命周期和后续的凭证存储。cdylib 通道当前仍提供可选的
-`register_oauth_provider` 槽位（`crates/kiqi-extension-sdk/src/lib.rs:1265`）；旧插件不需要
+`register_oauth_provider` 槽位；旧插件不需要
 重新编译即可继续加载，但该槽位已无宿主侧消费者。
 
 插件注册一个 JSON manifest 和一个 action callback：
@@ -430,7 +430,7 @@ wasm 插件不注册槽位，改为**导出接口 + 授权 key**：能力是否�
 策略无法从 import 名推导，必须显式执行 `ki extension grant`（`AUTO_GRANT_EXEMPT`，
 `crates/kiqi-cli/src/extension_cli.rs:1272-1278`；无 tty 且无 `--yes` 时什么都不授）。
 接口 → grant key 的唯一映射是 `grant_key_for_interface`
-（`crates/kiqi-extension/src/grants.rs:1224-1243`）。
+（`crates/kiqi-host/src/grants.rs:1224-1243`）。
 
 | 能力 | 导出 / 导入面 | grant key | 授权命令 |
 |---|---|---|---|

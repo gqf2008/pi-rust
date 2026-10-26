@@ -1,3 +1,5 @@
+> 历史存档：本文保留 ACP 各批次的实施坐标；当前协议 crate 为 crates/kiqi-acp。
+
 # 方案：`ki acp serve` — 宿主级 ACP server
 
 > 状态：**已落地**（批次 1/2 于 2026-10-16，批次 3 于 2026-10-22）。目标：让 Zed（及任何 ACP 客户端）把 `ki` 当外部 coding
