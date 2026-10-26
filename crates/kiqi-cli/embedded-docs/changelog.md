@@ -20,9 +20,14 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   `ExtensionError`, `WasmExtension`, bindings crate `kiqi-wasm-bindings`), the
   CLI is `ki extension …`, the install directory is
   `$KI_AGENT_DIR/extensions/<id>/` and the component file is `extension.wasm`.
+  Host identity and the environment-variable constants moved to
+  `kiqi-agent::env` (the crate every consumer already depends on), so
+  `kiqi-tools` and `kiqi-mcp` no longer depend on `kiqi-host` at all.
   The guest directories and packages drop their `-guest` suffix too
   (`extensions/wasm/kiqi-todo/`, crate `kiqi-todo`); the shared bindings crate
-  is `kiqi-wasm-bindings`.
+  is `kiqi-wasm-bindings`. Machine-readable values that carried the old word
+  changed with it — notably `ki auth check --json` now reports
+  `"source": "extension-oauth"`.
   No compatibility shims: installed guests must be re-installed with
   `ki insmod`. Notes in `docs/design/extension-abi.md` §6.48.
 - **The host-side crates are merged.** The three former host crates (contract,

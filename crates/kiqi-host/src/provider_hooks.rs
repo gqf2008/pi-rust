@@ -332,7 +332,7 @@ fn before_agent_start_event(prompt: &str, image_count: usize, ctx: &Context) -> 
         // is watching). Read from the environment per turn rather than captured
         // at harness build, so an in-process session swap is reflected on the
         // very next turn.
-        "sessionId": std::env::var(crate::SESSION_ID_ENV).ok(),
+        "sessionId": std::env::var(kiqi_agent::SESSION_ID_ENV).ok(),
         // Who this extension is embedded in, so it can label its own output
         // (trace name, tags, `service.name`) without hardcoding a brand that a
         // rename would silently invalidate. Sent per turn, so it describes the
@@ -359,14 +359,14 @@ pub fn before_agent_start_input(ctx: &Context) -> Option<(i64, serde_json::Value
 
 /// The host's own identity, as handed to extensions.
 ///
-/// The name is the extension contract's constant ([`crate::HOST_NAME`])
+/// The name is the extension contract's constant ([`kiqi_agent::HOST_NAME`])
 /// and the version is this host crate's own `CARGO_PKG_VERSION` — every
 /// workspace crate shares one version, so this is the running host's version
 /// and not the SDK an extension was compiled against. Both are compile-time
 /// aliases, so there is exactly one place to change either.
 fn host_identity() -> serde_json::Value {
     serde_json::json!({
-        "name": crate::HOST_NAME,
+        "name": kiqi_agent::HOST_NAME,
         "version": env!("CARGO_PKG_VERSION"),
     })
 }
@@ -514,13 +514,13 @@ mod tests {
         // Absent when this process has no session id in its environment.
         assert_eq!(
             start_payload.get("sessionId").map(|v| v.is_null()),
-            Some(std::env::var(crate::SESSION_ID_ENV).is_err()),
+            Some(std::env::var(kiqi_agent::SESSION_ID_ENV).is_err()),
             "sessionId must mirror the host's session id env var: {}",
             agent_starts[0].1
         );
         // And the host identifies itself, so an extension can label its own output
         // (trace name, tags, service.name) without hardcoding a brand.
-        assert_eq!(start_payload["host"]["name"], crate::HOST_NAME);
+        assert_eq!(start_payload["host"]["name"], kiqi_agent::HOST_NAME);
         assert_eq!(
             start_payload["host"]["version"],
             env!("CARGO_PKG_VERSION"),

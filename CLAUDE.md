@@ -76,13 +76,13 @@ MSRV 1.96（由 wasmtime 49 拉高，见根 `Cargo.toml` 的注释）。全部 c
 ```text
 kiqi-telemetry            # 遥测接口与 span/event 合约（零内部依赖）
 └─ kiqi-ai                # 消息类型、Provider、流式 SSE、faux provider
-   └─ kiqi-agent          # Agent Loop、工具调用、事件、队列、取消
+   └─ kiqi-agent          # Agent Loop、工具调用、事件、队列、取消；`env` = 宿主身份/环境变量名
       └─ kiqi-tools       # 内置工具 + ExecutionEnv 抽象（真实/离线环境）
          └─ kiqi-harness  # 会话树、JSONL 持久化、压缩、崩溃恢复、skills
 kiqi-tui                  # 终端组件、编辑器、渲染（零内部依赖）
 kiqi-host                 # Extension 契约 + 事件派发脊柱（恒编译）+ wasm 后端（`wasm` feature，wasmtime）
 kiqi-mcp                  # MCP 客户端集成（依赖 ai+agent+harness；boundary.rs 是与 harness 的接缝）
-kiqi-acp                  # `ki acp serve` 协议服务器（依赖 acp 协议 crate + agent/harness/mcp/extensions；会话组装根留在 kiqi-cli 注入）
+kiqi-acp                  # `ki acp serve` 协议服务器（依赖 acp 协议 crate + agent/harness/mcp/host；会话组装根留在 kiqi-cli 注入）
 kiqi-cli                  # 组合以上（kiqi-acp 除外）：配置、认证、CLI/TUI；acp 的 factory/precheck 宿主侧在 src/acp.rs
 ```
 

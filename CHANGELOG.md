@@ -20,6 +20,9 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   `ExtensionError`, `WasmExtension`, bindings crate `kiqi-wasm-bindings`), the
   CLI is `ki extension …`, the install directory is
   `$KI_AGENT_DIR/extensions/<id>/` and the component file is `extension.wasm`.
+  Host identity and the environment-variable constants moved to
+  `kiqi-agent::env` (the crate every consumer already depends on), so
+  `kiqi-tools` and `kiqi-mcp` no longer depend on `kiqi-host` at all.
   The guest directories and packages drop their `-guest` suffix too
   (`extensions/wasm/kiqi-todo/`, crate `kiqi-todo`); the shared bindings crate
   is `kiqi-wasm-bindings`. Machine-readable values that carried the old word

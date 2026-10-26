@@ -2810,11 +2810,11 @@ fn publish_session_identity(tool_context: &kiqi_host::ToolCallContext, id: &str)
     // `env_lock` for why this is a shared, re-entrant lock rather than a
     // test-only mutex.
     crate::env_lock::with_env_lock(|| {
-        std::env::set_var(kiqi_host::SESSION_ID_ENV, id);
+        std::env::set_var(kiqi_agent::SESSION_ID_ENV, id);
         // Two audiences, two names: extensions read `KI_SESSION_ID`, while the shell
         // a `bash`/`powershell` tool spawns can name the session through
         // `KI_AGENT_ID`.
-        std::env::set_var(kiqi_host::AGENT_ID_ENV, id);
+        std::env::set_var(kiqi_agent::AGENT_ID_ENV, id);
     });
     tool_context.set_session_id(id);
 }
@@ -2835,7 +2835,7 @@ const EPHEMERAL_SESSION_ID: &str = "ephemeral";
 /// own echo".
 ///
 /// Called with the id of the session the caller is *attached to* — not with
-/// [`kiqi_host::AGENT_ID_ENV`], which `publish_session_identity` rewrites
+/// [`kiqi_agent::AGENT_ID_ENV`], which `publish_session_identity` rewrites
 /// on every activation and which is therefore a spawn-time value for any child
 /// process and a process-global cell in-process.
 pub(crate) fn session_id_from(published: Option<&str>) -> Option<String> {
@@ -2876,8 +2876,8 @@ pub(crate) async fn set_active_session(
         // not (0/20), because this path is what the failing test reaches through
         // `HostImpl::new_session`. Keep both: they write the same pair.
         crate::env_lock::with_env_lock(|| {
-            std::env::set_var(kiqi_host::SESSION_ID_ENV, &metadata.id);
-            std::env::set_var(kiqi_host::AGENT_ID_ENV, &metadata.id);
+            std::env::set_var(kiqi_agent::SESSION_ID_ENV, &metadata.id);
+            std::env::set_var(kiqi_agent::AGENT_ID_ENV, &metadata.id);
         });
         if let Some(context) = tool_context {
             context.set_session_id(metadata.id);
@@ -4709,10 +4709,10 @@ mod tests {
     #[test]
     fn host_private_env_matches_the_declared_contract() {
         // 1. The wire values. Pinned literally on purpose: see the doc comment.
-        assert_eq!(kiqi_host::SESSION_ID_ENV, "KI_SESSION_ID");
-        assert_eq!(kiqi_host::AGENT_ID_ENV, "KI_AGENT_ID");
+        assert_eq!(kiqi_agent::SESSION_ID_ENV, "KI_SESSION_ID");
+        assert_eq!(kiqi_agent::AGENT_ID_ENV, "KI_AGENT_ID");
         assert_eq!(
-            kiqi_host::SUBAGENT_PARENT_ENV,
+            kiqi_agent::SUBAGENT_PARENT_ENV,
             [
                 "LANGFUSE_PI_PARENT_TRACE_ID",
                 "LANGFUSE_PI_PARENT_SPAN_ID",
@@ -4725,9 +4725,9 @@ mod tests {
 
         // 2. Coverage — derived from the declarations, so a newly added family
         //    member is checked without anyone remembering to extend this test.
-        for name in kiqi_host::SUBAGENT_PARENT_ENV
+        for name in kiqi_agent::SUBAGENT_PARENT_ENV
             .iter()
-            .chain(std::iter::once(&kiqi_host::SESSION_ID_ENV))
+            .chain(std::iter::once(&kiqi_agent::SESSION_ID_ENV))
         {
             assert!(
                 kiqi_tools::is_host_private_env(name),
@@ -4741,7 +4741,7 @@ mod tests {
         for visible in [
             crate::args::KI_OFFLINE_ENV,
             crate::config::CONFIG_DIR_ENV,
-            kiqi_host::AGENT_ID_ENV,
+            kiqi_agent::AGENT_ID_ENV,
             "PATH",
         ] {
             assert!(
@@ -4762,8 +4762,8 @@ mod tests {
         impl Drop for Restore {
             fn drop(&mut self) {
                 for (name, saved) in [
-                    (kiqi_host::SESSION_ID_ENV, &self.session),
-                    (kiqi_host::AGENT_ID_ENV, &self.agent),
+                    (kiqi_agent::SESSION_ID_ENV, &self.session),
+                    (kiqi_agent::AGENT_ID_ENV, &self.agent),
                 ] {
                     match saved {
                         Some(value) => std::env::set_var(name, value),
@@ -4775,18 +4775,18 @@ mod tests {
 
         let _guard = crate::config::test_support::env_lock().lock();
         let _restore = Restore {
-            session: std::env::var_os(kiqi_host::SESSION_ID_ENV),
-            agent: std::env::var_os(kiqi_host::AGENT_ID_ENV),
+            session: std::env::var_os(kiqi_agent::SESSION_ID_ENV),
+            agent: std::env::var_os(kiqi_agent::AGENT_ID_ENV),
         };
 
         let context = kiqi_host::ToolCallContext::new("/tmp");
         publish_session_identity(&context, "01a0f60b-first");
         assert_eq!(
-            std::env::var(kiqi_host::SESSION_ID_ENV).ok().as_deref(),
+            std::env::var(kiqi_agent::SESSION_ID_ENV).ok().as_deref(),
             Some("01a0f60b-first")
         );
         assert_eq!(
-            std::env::var(kiqi_host::AGENT_ID_ENV).ok().as_deref(),
+            std::env::var(kiqi_agent::AGENT_ID_ENV).ok().as_deref(),
             Some("01a0f60b-first")
         );
         assert_eq!(context.session_id().as_deref(), Some("01a0f60b-first"));
@@ -4794,11 +4794,11 @@ mod tests {
         // A second activation must overwrite, not keep the first value.
         publish_session_identity(&context, "01a0f60b-second");
         assert_eq!(
-            std::env::var(kiqi_host::AGENT_ID_ENV).ok().as_deref(),
+            std::env::var(kiqi_agent::AGENT_ID_ENV).ok().as_deref(),
             Some("01a0f60b-second")
         );
         assert_eq!(
-            std::env::var(kiqi_host::SESSION_ID_ENV).ok().as_deref(),
+            std::env::var(kiqi_agent::SESSION_ID_ENV).ok().as_deref(),
             Some("01a0f60b-second")
         );
         assert_eq!(context.session_id().as_deref(), Some("01a0f60b-second"));

@@ -15,7 +15,6 @@ keywords = ["agent", "llm", "ai", "mcp"]
 categories = ["api-bindings", "development-tools"]
 
 [dependencies]
-kiqi-host = { workspace = true }
 kiqi-ai = { workspace = true, features = ["providers"] }
 kiqi-agent = { workspace = true }
 # Boundary glue only (`boundary.rs` drains notices into / refreshes tool

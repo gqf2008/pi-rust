@@ -79,14 +79,14 @@ struct ShellConfig {
 /// function that answers the full question. Use it rather than reading this
 /// slice, or an extension's channel will be missed — which is precisely the bug
 /// that let `LANGFUSE_PI_PARENT_*` through.
-pub const HOST_PRIVATE_ENV: &[&str] = &[kiqi_host::SESSION_ID_ENV];
+pub const HOST_PRIVATE_ENV: &[&str] = &[kiqi_agent::SESSION_ID_ENV];
 
 /// Whether `name` must not be inherited by a spawned shell.
 ///
 /// Two sources, because the variables come from two places:
 ///
 /// - [`HOST_PRIVATE_ENV`] — the host's own plumbing.
-/// - [`kiqi_host::SUBAGENT_PARENT_ENV`] — the family an *extension*
+/// - [`kiqi_agent::SUBAGENT_PARENT_ENV`] — the family an *extension*
 ///   declares for subagent nesting. An inherited copy makes a plain `ki` started
 ///   from inside `bash` adopt its ancestor's trace, hang its root off the
 ///   ancestor's root span, and call itself `Subagent Turn` instead of opening its
@@ -100,7 +100,7 @@ pub const HOST_PRIVATE_ENV: &[&str] = &[kiqi_host::SESSION_ID_ENV];
 /// matching a name nobody set. Going through the constant means a rename is a
 /// compile error, and a newly added family member is excluded automatically.
 pub fn is_host_private_env(name: &str) -> bool {
-    HOST_PRIVATE_ENV.contains(&name) || kiqi_host::SUBAGENT_PARENT_ENV.contains(&name)
+    HOST_PRIVATE_ENV.contains(&name) || kiqi_agent::SUBAGENT_PARENT_ENV.contains(&name)
 }
 
 /// Real-OS `ExecutionEnv`. Clone shares the tracked-pid set + registry.

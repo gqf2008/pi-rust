@@ -15,8 +15,15 @@ pub mod agent;
 pub mod agent_loop;
 pub mod agent_tool;
 pub(crate) mod clock;
+pub mod env;
 pub mod error;
 pub mod events;
+
+pub use env::{
+    AGENT_ID_ENV, HOST_NAME, HOST_VERSION, SESSION_ID_ENV, SUBAGENT_PARENT_DEPTH_ENV,
+    SUBAGENT_PARENT_ENV, SUBAGENT_PARENT_SESSION_ID_ENV, SUBAGENT_PARENT_SPAN_ID_ENV,
+    SUBAGENT_PARENT_TRACE_ID_ENV,
+};
 pub mod hooks;
 pub mod interrupt;
 pub mod interrupt_trace;

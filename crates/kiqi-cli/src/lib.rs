@@ -84,19 +84,19 @@ pub mod wasm_provider;
 /// Crate version, surfaced by `ki --version`. Mirrors the TS `VERSION` export
 /// (sourced from `package.json`; here from `env!("CARGO_PKG_VERSION")`).
 ///
-/// Aliases [`kiqi_host::HOST_VERSION`] so the version the CLI prints and
+/// Aliases [`kiqi_agent::HOST_VERSION`] so the version the CLI prints and
 /// the version handed to extensions (and, through it, the version extensions stamp
 /// on their own telemetry) can never disagree.
-pub const VERSION: &str = kiqi_host::HOST_VERSION;
+pub const VERSION: &str = kiqi_agent::HOST_VERSION;
 
 /// The application name used in help + version output. Mirrors TS `APP_NAME`
 /// (the TS bin is `"pi"`; the Rust crate publishes under the `kiqi-` namespace,
 /// so the binary + displayed name is `"ki"` to match).
 ///
-/// Aliases [`kiqi_host::HOST_NAME`] — the extension contract owns the
+/// Aliases [`kiqi_agent::HOST_NAME`] — the extension contract owns the
 /// identity, so an extension can label its output (a trace name, a tag) without
 /// hardcoding a brand that a rename would silently invalidate.
-pub const APP_NAME: &str = kiqi_host::HOST_NAME;
+pub const APP_NAME: &str = kiqi_agent::HOST_NAME;
 
 /// The executable name, as typed on the command line (`ki`). Distinct from
 /// [`APP_NAME`], the product/brand name (`kiqi`) used in the lockup and title.

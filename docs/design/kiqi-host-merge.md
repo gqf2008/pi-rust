@@ -94,8 +94,10 @@ wasm = ["dep:wasmtime", "dep:tokio", ...]
 
 ## 5. 遗留待定
 
-- 契约 crate 合并后不再是「零依赖」，`kiqi-tools`/`kiqi-mcp` 会多出
-  `kiqi-host → kiqi-ai/agent` 的传递依赖（两者本就依赖 agent，无环，但需在
-  文档里写明"契约面不可依赖 wasmtime"这条红线）。
+- ~~契约 crate 合并后 `kiqi-tools`/`kiqi-mcp` 传递依赖 `kiqi-host → ai/agent`~~
+  ✅ 2026-10-26 收口（方案 A）：环境/身份常量下沉到 **`kiqi-agent::env`**
+  （三个消费方本就依赖 agent，零新边），`kiqi-tools` 与 `kiqi-mcp` 直接删掉
+  `kiqi-host` 依赖；事件类型（`EventTag`/`Event`/`EventAction`）只被 `kiqi-cli`
+  与 `kiqi-host` 使用，留在 `kiqi-host`。于是**没有**新增 `kiqi-contract` crate。
 - `kiqi-extensions` 里的 C-ABI 注册机（`HostApi`/vtable）仍是不可达代码，
   折叠成 serde 总线是独立批次（`extension-abi.md` §6.45）。

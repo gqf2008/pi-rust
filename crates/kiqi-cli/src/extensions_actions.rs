@@ -690,8 +690,8 @@ mod tests {
         impl Drop for Restore {
             fn drop(&mut self) {
                 for (name, saved) in [
-                    (kiqi_host::SESSION_ID_ENV, &self.session),
-                    (kiqi_host::AGENT_ID_ENV, &self.agent),
+                    (kiqi_agent::SESSION_ID_ENV, &self.session),
+                    (kiqi_agent::AGENT_ID_ENV, &self.agent),
                 ] {
                     match saved {
                         Some(value) => std::env::set_var(name, value),
@@ -703,8 +703,8 @@ mod tests {
 
         let _guard = crate::config::test_support::env_lock().lock();
         let _restore = Restore {
-            session: std::env::var_os(kiqi_host::SESSION_ID_ENV),
-            agent: std::env::var_os(kiqi_host::AGENT_ID_ENV),
+            session: std::env::var_os(kiqi_agent::SESSION_ID_ENV),
+            agent: std::env::var_os(kiqi_agent::AGENT_ID_ENV),
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -733,7 +733,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            std::env::var(kiqi_host::AGENT_ID_ENV).ok().as_deref(),
+            std::env::var(kiqi_agent::AGENT_ID_ENV).ok().as_deref(),
             Some(target_id.as_str()),
             "a session swap must republish KI_AGENT_ID, not leave the startup value"
         );

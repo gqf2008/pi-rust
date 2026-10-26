@@ -154,7 +154,7 @@ fn passthrough_env(key: &str) -> bool {
 /// so an HTTP collab server must carry the id in its configured `headers`
 /// (`HttpTransport::headers`) instead.
 fn session_env() -> Option<(&'static str, std::ffi::OsString)> {
-    std::env::var_os(kiqi_host::AGENT_ID_ENV).map(|value| (kiqi_host::AGENT_ID_ENV, value))
+    std::env::var_os(kiqi_agent::AGENT_ID_ENV).map(|value| (kiqi_agent::AGENT_ID_ENV, value))
 }
 
 /// The native tool name separator. Part of the public surface (`{server}__{tool}`).

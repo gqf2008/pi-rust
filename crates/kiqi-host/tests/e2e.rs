@@ -3034,7 +3034,11 @@ fn exec_does_not_hang_when_the_command_leaves_a_background_child() {
 #[test]
 fn webfetch_guest_keeps_its_url_policy_and_needs_the_grant() {
     let wasm = build_guest("kiqi-webfetch", "kiqi_webfetch.wasm");
-    let extension = WasmExtension::load("kiqi-webfetch", &wasm).expect("load");
+    // Explicit empty grants, not `load`: `load` reads the *developer's* agent
+    // dir, so a machine with a real `kiqi-webfetch` net-http grant would make
+    // this test fetch live URLs and break the denial assertions.
+    let extension =
+        WasmExtension::load_with_grants("kiqi-webfetch", &wasm, Grants::default()).expect("load");
     assert_eq!(extension.id(), "kiqi-webfetch");
     assert!(
         extension.tools().iter().any(|tool| tool.name == "webfetch"),
