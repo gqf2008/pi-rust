@@ -159,7 +159,8 @@ fn event_payload(event: &StablePluginEvent) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiqi_plugin_sdk::{EventTag, StbString};
+    use kiqi_plugin::EventTag;
+    use kiqi_plugin_sdk::StbString;
     use std::sync::Mutex;
 
     /// Serializes the sink tests across the crate; the sink is process-global.

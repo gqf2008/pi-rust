@@ -398,15 +398,9 @@ fn project_resource_dirs(cwd: &Path, sub: &str, kind: ResourceKind) -> Vec<PathB
     for (_, settings) in loaded.iter() {
         dirs.extend(configured_paths(settings, cwd, kind));
     }
-    // Project packages are explicit, local resources. Keep configured project
-    // directories first, then package resources, then the conventional
+    // P6: project packages (`ki package link`) went with the cdylib channel.
+    // Keep configured project directories first, then the conventional
     // `.ki/<sub>` directory so existing precedence remains stable.
-    let package_kind = match kind {
-        ResourceKind::Skills => "skills",
-        ResourceKind::Prompts => "prompts",
-        ResourceKind::Extensions => "extensions",
-    };
-    dirs.extend(crate::packages::project_package_dirs(cwd, package_kind));
     dirs.push(project_dir(cwd, sub));
     // The cross-agent directory follows the ki-specific one, so a `.ki` copy wins
     // over a `.agents` copy of the same name (first-wins downstream).

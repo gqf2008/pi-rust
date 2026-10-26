@@ -308,7 +308,7 @@ impl UiDialogMailbox {
                     }));
                 }
                 let ui = args.get("ui").cloned().unwrap_or_else(|| args.clone());
-                kiqi_plugin_sdk::dialogs::validate(&ui, tool_call_id.as_deref())?;
+                kiqi_plugin::dialogs::validate(&ui, tool_call_id.as_deref())?;
                 state.active.insert(
                     id.clone(),
                     UiDialogEntry {

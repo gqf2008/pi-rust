@@ -315,38 +315,6 @@ unsafe impl Sync for StableToolSchema {}
 // Host context injected into plugin tool arguments
 // ---------------------------------------------------------------------------
 
-/// Reserved key the host adds to a **plugin** tool call's arguments.
-///
-/// The model never writes this field and never sees it: the host injects it
-/// after the model's arguments are parsed and before the plugin's
-/// [`ToolExecuteFn`] runs, so a plugin can tell *which* project and *which*
-/// session it is serving without the model having to supply either. (Built-in
-/// tools do not need it — they receive the host's `ExecutionToolContext`
-/// directly. A plugin tool has no such channel.)
-///
-/// The value is an object; today:
-///
-/// ```json
-/// { "cwd": "D:\\Projects\\pi-rust",
-///   "sessionId": "01adb026-7230-708b-855b-91eab6b056b8" }
-/// ```
-///
-/// Both fields are optional and either may be absent: `cwd` when the host
-/// cannot resolve one, `sessionId` for a session that has no id (ephemeral
-/// sessions) and on hosts that predate this field. The key itself may be absent
-/// entirely. Treat everything under it as best-effort, and prefer a
-/// project-scoped fallback when `sessionId` is missing rather than refusing to
-/// work.
-///
-/// **Consequence for plugin parameter types:** a plugin must tolerate unknown
-/// top-level keys in its arguments. Reading them out of a `serde_json::Value`
-/// does that naturally; a `#[serde(deny_unknown_fields)]` parameter struct
-/// would reject this key, so do not use one for tool parameters.
-///
-/// The host's value wins if the model happens to send the same key: this is
-/// host truth, not a hint to be merged.
-pub const HOST_CONTEXT_KEY: &str = "__ki";
-
 // ---------------------------------------------------------------------------
 // StepResult — the poll() return: Pending | Done | Err (explicit tag + union)
 // ---------------------------------------------------------------------------
@@ -518,186 +486,10 @@ pub type ToolDestroyFn = extern "C" fn(handle: StepHandle);
 // StablePluginEvent — 33 on() categories (explicit tag + union)
 // ---------------------------------------------------------------------------
 
-/// Discriminant for [`StablePluginEvent`], one variant per pi `on()` category
-/// (33 total) plus one kiqi-specific category (34 total). `#[repr(u32)]` pins
-/// the discriminant width.
-///
-/// The 33 Pi categories (verified against `extensions/types.ts:1203-1244`):
-/// project_trust, resources_discover, session_start, session_info_changed,
-/// session_before_switch, session_before_fork, session_before_compact,
-/// session_compact, session_shutdown, session_before_tree, session_tree,
-/// context, before_provider_request, before_provider_headers,
-/// after_provider_response, before_agent_start, agent_start, agent_end,
-/// agent_settled, turn_start, turn_end, message_start, message_update,
-/// message_end, tool_execution_start, tool_execution_update,
-/// tool_execution_end, model_select, thinking_level_select, tool_call,
-/// tool_result, user_bash, input.
-///
-/// `BeforeTuiStart` is **kiqi-specific** (not a Pi category): dispatched once
-/// before the interactive TUI is initialized, so extensions can prepare
-/// (connect a server, load a resource) before the UI starts. Appended last so
-/// existing discriminants keep their values (ABI-safe for already-compiled
-/// plugins).
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EventTag {
-    ProjectTrust = 0,
-    ResourcesDiscover = 1,
-    SessionStart = 2,
-    SessionInfoChanged = 3,
-    SessionBeforeSwitch = 4,
-    SessionBeforeFork = 5,
-    SessionBeforeCompact = 6,
-    SessionCompact = 7,
-    SessionShutdown = 8,
-    SessionBeforeTree = 9,
-    SessionTree = 10,
-    Context = 11,
-    BeforeProviderRequest = 12,
-    BeforeProviderHeaders = 13,
-    AfterProviderResponse = 14,
-    /// The start of a run, carrying the user prompt (`{"prompt", "imageCount",
-    /// "sessionId", "host"}`). Fire-and-forget like every other tag: subscribe to
-    /// *observe* the turn. To **change** the system prompt for the run, register a
-    /// handler with `register_before_agent_start` — that slot carries an `out`
-    /// pointer, which this fire-and-forget signature cannot.
-    BeforeAgentStart = 15,
-    AgentStart = 16,
-    AgentEnd = 17,
-    AgentSettled = 18,
-    TurnStart = 19,
-    TurnEnd = 20,
-    MessageStart = 21,
-    MessageUpdate = 22,
-    MessageEnd = 23,
-    ToolExecutionStart = 24,
-    ToolExecutionUpdate = 25,
-    ToolExecutionEnd = 26,
-    ModelSelect = 27,
-    ThinkingLevelSelect = 28,
-    ToolCall = 29,
-    ToolResult = 30,
-    UserBash = 31,
-    Input = 32,
-    /// kiqi-specific: dispatched before the interactive TUI initializes (not a
-    /// Pi `on()` category). Appended last so existing discriminants are stable.
-    BeforeTuiStart = 33,
-    /// Pi `on()` category: dispatched when the TUI shows an interactive prompt
-    /// (selector, dialog, etc.) that blocks agent work.
-    UiPromptStart = 34,
-    /// Pi `on()` category: dispatched when the TUI prompt is dismissed.
-    UiPromptEnd = 35,
-    /// kiqi-specific (not a Pi `on()` category): dispatched whenever the
-    /// interactive prompt editor's **text changes** — typing, pasting, deleting,
-    /// or a programmatic rewrite. Appended last so existing discriminants are
-    /// stable. The payload is `{"chars":N,"empty":bool}`; the draft text itself
-    /// is deliberately not shipped, because subscribers (a voice extension
-    /// barging in on playback) only need to know *that* the user is composing.
-    EditorChange = 36,
-}
-
-/// Number of event categories — `37` (33 Pi `on()` categories + 1 kiqi-specific
-/// [`EventTag::BeforeTuiStart`] + 2 UI prompt events + 1 kiqi-specific
-/// [`EventTag::EditorChange`]). A test asserts
-/// `EVENT_TAG_COUNT == 37` so a future edit that adds/removes a tag is caught.
-pub const EVENT_TAG_COUNT: usize = 37;
-
-/// The application name of the host that loads plugins: `"ki"`.
-///
-/// This is the **contract's** copy of the host identity, and the host's
-/// `APP_NAME` is defined in terms of it, so the two cannot drift. An extension
-/// that labels its own output (a trace name, a tag, a `service.name`) should
-/// derive from this rather than hardcode a brand — it has no other way to learn
-/// what it is embedded in.
-///
-/// [`HOST_VERSION`] is the matching version. Both are also handed to plugins at
-/// runtime in the `BeforeAgentStart` payload's `host` object, which is what an
-/// extension should prefer: that value always describes the process actually
-/// running, whereas these constants describe the host the plugin was *built*
-/// against.
-pub const HOST_NAME: &str = "kiqi";
-
-/// Version of the [`HOST_NAME`] host that this SDK ships with.
-///
-/// Because every workspace crate shares one version, this is the host's version
-/// as of this SDK release — good for a user agent or a fallback label, and
-/// superseded at runtime by the `host.version` field of the `BeforeAgentStart`
-/// payload.
-pub const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// Environment variable carrying the id of the session this process serves.
-///
-/// The host **rewrites** it whenever a session becomes active — at startup and
-/// on every in-process swap (`/import`, fork, switch) — so the value always
-/// names the session currently being served. It is not an embedder override:
-/// a value inherited from a parent process would otherwise make a child `ki`
-/// report its ancestor's session forever. Embedders that need to pin the id set
-/// it after the session is active rather than before.
-///
-/// The id is a plain UTF-8 string (no NUL), which is what makes writing it with
-/// `std::env::set_var` sound.
-pub const SESSION_ID_ENV: &str = "KI_SESSION_ID";
-
-/// Environment variable carrying the same session id to **commands a shell runs**.
-///
-/// Same value as [`SESSION_ID_ENV`], rewritten at the same moments (startup and
-/// every in-process swap), but a separate name addressed to a different
-/// audience: a command under `bash`/`powershell` can name its session, e.g.
-/// `walgit collab claim --id <card> --session "$KI_AGENT_ID"`. [`SESSION_ID_ENV`]
-/// must *not* reach a spawned shell (a nested `ki` would adopt it), while this
-/// one exists precisely so a child command can say which session it belongs to.
-///
-/// The host only ever writes it and nothing in `ki` reads it, so a pre-set value
-/// is harmless — the next activation overwrites it. It must **not** be added to
-/// `kiqi_tools::HOST_PRIVATE_ENV`: that list is stripped from spawned shells and
-/// would silently defeat the variable (a test pins this).
-///
-/// Under `--no-session` the value is the literal `ephemeral`, which is not
-/// unique across runs; treat it as "no session" when passing it to a claim.
-pub const AGENT_ID_ENV: &str = "KI_AGENT_ID";
-
-/// Environment variable a tracing extension publishes to name the trace a
-/// *nested* `ki` should attach to, and reads back to decide it is a subagent.
-///
-/// The name is `kiqi-langfuse`'s (it owns the `LANGFUSE_` prefix), but the
-/// variable is declared here because **three** parties have to agree on it and
-/// they live in different crates, two of them in different repositories:
-///
-/// - the extension writes it (so a launcher can attach a nested run),
-/// - the host's `bash`/`powershell` must *not* pass it on to a shell (or a plain
-///   `ki` started from one mistakes itself for a subagent), and
-/// - a launcher may set it deliberately, which is the supported nesting path.
-///
-/// Declaring it once here is what keeps those three in step. The host builds its
-/// exclusion list from these declarations, so dropping or renaming the family
-/// ([`SUBAGENT_PARENT_ENV`]) is a compile error there rather than a silently
-/// re-opened leak, and a newly added member is excluded without the host having
-/// to be told. What the compiler still cannot check is the string itself, since
-/// `kiqi-langfuse` lives in another repository and matches on the *value* — that
-/// is pinned by a test. See [`SUBAGENT_PARENT_ENV`] for the whole family.
-pub const SUBAGENT_PARENT_TRACE_ID_ENV: &str = "LANGFUSE_PI_PARENT_TRACE_ID";
-
-/// See [`SUBAGENT_PARENT_TRACE_ID_ENV`]. The parent turn's root observation id.
-pub const SUBAGENT_PARENT_SPAN_ID_ENV: &str = "LANGFUSE_PI_PARENT_SPAN_ID";
-
-/// See [`SUBAGENT_PARENT_TRACE_ID_ENV`]. The parent's session id.
-pub const SUBAGENT_PARENT_SESSION_ID_ENV: &str = "LANGFUSE_PI_PARENT_SESSION_ID";
-
-/// See [`SUBAGENT_PARENT_TRACE_ID_ENV`]. Nesting depth, so a grandchild knows
-/// how far down it is.
-pub const SUBAGENT_PARENT_DEPTH_ENV: &str = "LANGFUSE_PI_PARENT_DEPTH";
-
-/// Every [`SUBAGENT_PARENT_TRACE_ID_ENV`] sibling, as one slice.
-///
-/// A host that excludes this channel from a spawned shell should cover the whole
-/// slice rather than restating the names, and assert it does — a new entry here
-/// that is not excluded is the failure mode this array exists to make testable.
-pub const SUBAGENT_PARENT_ENV: &[&str] = &[
-    SUBAGENT_PARENT_TRACE_ID_ENV,
-    SUBAGENT_PARENT_SPAN_ID_ENV,
-    SUBAGENT_PARENT_SESSION_ID_ENV,
-    SUBAGENT_PARENT_DEPTH_ENV,
-];
+// The canonical tag enum lives in `kiqi-plugin` (the wasm contract crate);
+// the ABI layer borrows it so the two faces cannot drift. This crate is
+// scheduled for deletion (P6, cdylib channel retirement).
+pub use kiqi_plugin::EventTag;
 
 /// No-payload marker for events that carry none (e.g. `session_shutdown`).
 /// Carries a dummy byte so the empty-struct isn't flagged FFI-unsafe by
@@ -1565,8 +1357,8 @@ mod tests {
             EventTag::UiPromptEnd,
             EventTag::EditorChange,
         ];
-        assert_eq!(tags.len(), EVENT_TAG_COUNT);
-        assert_eq!(EVENT_TAG_COUNT, 37);
+        assert_eq!(tags.len(), kiqi_plugin::EVENT_TAG_COUNT);
+        assert_eq!(kiqi_plugin::EVENT_TAG_COUNT, 37);
         // Distinct discriminants 0..36.
         let mut discs: Vec<u32> = tags.iter().map(|t| *t as u32).collect();
         discs.sort();

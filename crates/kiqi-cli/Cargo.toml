@@ -20,7 +20,7 @@ categories = [
 ]
 
 [dependencies]
-kiqi-plugin = { path = "../kiqi-plugin" }
+kiqi-plugin = { workspace = true }
 kiqi-plugin-host = { path = "../kiqi-plugin-host", optional = true }
 kiqi-telemetry = { workspace = true }
 kiqi-ai = { workspace = true, features = ["providers"] }

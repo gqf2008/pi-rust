@@ -152,7 +152,7 @@ async fn build_session(
     }
     if let Some(reason) = crate::session::dispatch_session_event_async(
         &reload_context,
-        kiqi_plugin_sdk::EventTag::BeforeTuiStart,
+        kiqi_plugin::EventTag::BeforeTuiStart,
     )
     .await
     {
@@ -162,7 +162,7 @@ async fn build_session(
     }
     if let Some(reason) = crate::session::dispatch_session_event_async(
         &reload_context,
-        kiqi_plugin_sdk::EventTag::SessionStart,
+        kiqi_plugin::EventTag::SessionStart,
     )
     .await
     {

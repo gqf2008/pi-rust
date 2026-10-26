@@ -2516,7 +2516,7 @@ mod tests {
     #[test]
     fn event_tags_mirror_the_native_abi_exactly() {
         use kiqi_plugin::EventTag as K;
-        use kiqi_plugin_sdk::EventTag as N;
+        use kiqi_plugin::EventTag as N;
         let pairs: [(K, N); 37] = [
             (K::ProjectTrust, N::ProjectTrust),
             (K::ResourcesDiscover, N::ResourcesDiscover),
@@ -3128,7 +3128,7 @@ mod tests {
             let snapshot = kiqi_extensions::ExtensionRegistry::new().snapshot();
             let native_handled = kiqi_extensions::dispatch_empty_event(
                 &snapshot,
-                kiqi_plugin_sdk::EventTag::SessionStart,
+                kiqi_plugin::EventTag::SessionStart,
             );
             assert!(!native_handled, "no cdylib subscribed");
 
@@ -3186,7 +3186,7 @@ mod tests {
             let snapshot = kiqi_extensions::ExtensionRegistry::new().snapshot();
             let native_handled = kiqi_extensions::dispatch_empty_event(
                 &snapshot,
-                kiqi_plugin_sdk::EventTag::SessionTree,
+                kiqi_plugin::EventTag::SessionTree,
             );
             assert!(!native_handled, "no cdylib subscribed");
 

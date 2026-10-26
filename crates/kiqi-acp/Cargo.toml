@@ -9,6 +9,7 @@ repository = "https://github.com/gqf2008/pi-rust"
 description = "ki acp serve — a host-level Agent Client Protocol server"
 
 [dependencies]
+kiqi-plugin = { workspace = true }
 kiqi-ai = { workspace = true }
 kiqi-agent = { workspace = true }
 kiqi-harness = { workspace = true }

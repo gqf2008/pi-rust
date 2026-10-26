@@ -2085,6 +2085,7 @@ dependencies = [
  "kiqi-extensions",
  "kiqi-harness",
  "kiqi-mcp",
+ "kiqi-plugin",
  "kiqi-plugin-sdk",
  "kiqi-tools",
  "serde",
@@ -2189,6 +2190,7 @@ dependencies = [
  "futures",
  "kiqi-agent",
  "kiqi-ai",
+ "kiqi-plugin",
  "kiqi-plugin-sdk",
  "libloading",
  "serde",
@@ -2234,6 +2236,7 @@ dependencies = [
  "kiqi-agent",
  "kiqi-ai",
  "kiqi-harness",
+ "kiqi-plugin",
  "kiqi-plugin-sdk",
  "nix 0.31.3",
  "process-wrap",
@@ -2284,6 +2287,7 @@ dependencies = [
 name = "kiqi-plugin-sdk"
 version = "0.4.1"
 dependencies = [
+ "kiqi-plugin",
  "libc",
  "serde_json",
  "windows-sys 0.61.2",
@@ -2311,6 +2315,7 @@ dependencies = [
  "image",
  "kiqi-agent",
  "kiqi-ai",
+ "kiqi-plugin",
  "kiqi-plugin-sdk",
  "nix 0.29.0",
  "regex",

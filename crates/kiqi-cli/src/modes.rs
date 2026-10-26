@@ -1070,7 +1070,7 @@ pub async fn interactive(
     // extension subscribes.
     if let Some(reason) = crate::session::dispatch_session_event_async(
         reload_context,
-        kiqi_plugin_sdk::EventTag::BeforeTuiStart,
+        kiqi_plugin::EventTag::BeforeTuiStart,
     )
     .await
     {
@@ -1863,7 +1863,6 @@ mod tests {
             mailbox: kiqi_extensions::ReloadMailbox::default(),
             ui_dialog: kiqi_extensions::UiDialogMailbox::default(),
             signal_host: Arc::new(crate::signal_host::SignalHost::new()),
-            dev_extension: None,
             mcp: Arc::new(kiqi_mcp::McpManager::empty()),
         }
     }
@@ -1886,7 +1885,7 @@ mod tests {
         let mut registry = kiqi_extensions::ExtensionRegistry::new();
         registry.register_event_handler(
             "recorder".into(),
-            kiqi_plugin_sdk::EventTag::SessionShutdown,
+            kiqi_plugin::EventTag::SessionShutdown,
             record,
             &hits as *const _ as *mut std::ffi::c_void,
         );
@@ -1928,7 +1927,7 @@ mod tests {
         let mut registry = kiqi_extensions::ExtensionRegistry::new();
         registry.register_event_handler(
             "recorder".into(),
-            kiqi_plugin_sdk::EventTag::SessionShutdown,
+            kiqi_plugin::EventTag::SessionShutdown,
             record,
             &hits as *const _ as *mut std::ffi::c_void,
         );

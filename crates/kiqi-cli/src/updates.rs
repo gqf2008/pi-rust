@@ -78,8 +78,6 @@ struct UpdateCache {
     #[serde(default, alias = "rpiLatest")]
     kiqi_latest: Option<String>,
     #[serde(default)]
-    native_packages: BTreeMap<String, String>,
-    #[serde(default)]
     freshness: UpdateCacheFreshness,
 }
 
@@ -93,26 +91,11 @@ struct UpdateCacheFreshness {
     /// **Deliberate legacy trace**: the alias keeps pre-rename caches readable.
     #[serde(default, alias = "rpi")]
     ki: i64,
-    #[serde(default)]
-    native_packages: BTreeMap<String, i64>,
 }
-
-type RegistryCacheUpdate = (BTreeMap<String, String>, BTreeMap<String, i64>);
 
 #[derive(Debug, Deserialize)]
 struct ReleaseResponse {
     tag_name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CratesResponse {
-    #[serde(rename = "crate")]
-    crate_info: CrateInfo,
-}
-
-#[derive(Debug, Deserialize)]
-struct CrateInfo {
-    max_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,16 +120,14 @@ enum RegistryLookup {
     TransientFailure,
 }
 
-/// Best-effort startup check for the ki release and installed Rust extensions.
+/// Best-effort startup check for the ki release.
 pub async fn check_startup(cwd: &Path) -> UpdateReport {
     let _ = cwd;
     check_kiqi_startup().await
 }
 
-/// Check the ki release and every installed Rust cdylib extension.
-///
-/// Native-only: the npm/Git package halves of the old scope went away with the
-/// Pi compatibility layer, so this never shells out to a package manager.
+/// Check the ki release. (P6: the installed-cdylib-extension checks went with
+/// the `ki install` channel.)
 pub async fn check_kiqi_startup() -> UpdateReport {
     if update_checks_disabled() {
         return report_without_remote_checks();
@@ -187,28 +168,12 @@ async fn check_startup_with_client(client: Option<reqwest::Client>) -> UpdateRep
     let cache_path = agent_dir.join(CACHE_FILE);
     let previous_cache = read_cache(&cache_path);
 
-    // Installed Rust extensions come from `ki install`'s registry, so this
-    // path stays independent of any Pi package resource discovery.
-    let native_checks = crate::install::installed_native_packages()
-        .into_iter()
-        .filter(|package| package.source.is_none())
-        .map(|package| {
-            let client = client.clone();
-            async move {
-                let latest = match client.as_ref() {
-                    Some(client) => fetch_crates_latest(client, &package.name).await,
-                    None => RegistryLookup::TransientFailure,
-                };
-                (package.name, latest)
-            }
-        });
-    let kiqi_check = async {
-        Some(match client.as_ref() {
-            Some(client) => fetch_kiqi_latest(client).await,
-            None => RegistryLookup::TransientFailure,
-        })
+    // P6: `ki install` (crates.io cdylib extensions) is retired — the only
+    // update channels left are ki itself and the wasm guests (`ki insmod`).
+    let kiqi_result = match client.as_ref() {
+        Some(client) => Some(fetch_kiqi_latest(client).await),
+        None => Some(RegistryLookup::TransientFailure),
     };
-    let (kiqi_result, native_results) = tokio::join!(kiqi_check, collect_bounded(native_checks));
 
     let checked_at = now_ms();
     let mut kiqi_update = None;
@@ -230,35 +195,10 @@ async fn check_startup_with_client(client: Option<reqwest::Client>) -> UpdateRep
         kiqi_update = Some((latest, value_checked_at));
     }
 
-    let legacy_checked_at = previous_cache
-        .as_ref()
-        .map(|cache| cache.checked_at)
-        .unwrap_or_default();
-    let native_packages = results_with_individual_cache_fallback(
-        native_results,
-        previous_cache.as_ref().map(|cache| &cache.native_packages),
-        previous_cache
-            .as_ref()
-            .map(|cache| &cache.freshness.native_packages),
-        legacy_checked_at,
-        checked_at,
-    );
-
-    let cache = merge_and_write_cache(&cache_path, checked_at, kiqi_update, native_packages);
+    let cache = merge_and_write_cache(&cache_path, checked_at, kiqi_update);
     let mut report = report_from_cache(&cache);
     report.warnings = warnings;
     report
-}
-
-async fn collect_bounded<I, F, T>(checks: I) -> Vec<T>
-where
-    I: IntoIterator<Item = F>,
-    F: Future<Output = T>,
-{
-    stream::iter(checks)
-        .buffer_unordered(UPDATE_CHECK_CONCURRENCY)
-        .collect()
-        .await
 }
 
 fn kiqi_cache_checked_at(cache: &UpdateCache) -> i64 {
@@ -267,17 +207,6 @@ fn kiqi_cache_checked_at(cache: &UpdateCache) -> i64 {
     } else {
         cache.checked_at
     }
-}
-
-fn entry_cache_checked_at(
-    freshness: Option<&BTreeMap<String, i64>>,
-    key: &str,
-    legacy_checked_at: i64,
-) -> i64 {
-    freshness
-        .and_then(|values| values.get(key).copied())
-        .filter(|checked_at| *checked_at > 0)
-        .unwrap_or(legacy_checked_at)
 }
 
 fn timestamp_is_fresh(checked_at: i64, now: i64) -> bool {
@@ -300,39 +229,10 @@ fn resolved_checked_at(
     }
 }
 
-fn results_with_individual_cache_fallback(
-    results: Vec<(String, RegistryLookup)>,
-    cached: Option<&BTreeMap<String, String>>,
-    freshness: Option<&BTreeMap<String, i64>>,
-    legacy_checked_at: i64,
-    checked_at: i64,
-) -> RegistryCacheUpdate {
-    let mut values = BTreeMap::new();
-    let mut checked_at_values = BTreeMap::new();
-    for (name, result) in results {
-        let cached_value = cached.and_then(|cached| cached.get(&name).map(String::as_str));
-        let cached_at = entry_cache_checked_at(freshness, &name, legacy_checked_at);
-        let (latest, used_fallback) = lookup_with_cache_fallback(
-            result,
-            cached_value,
-            timestamp_is_fresh(cached_at, checked_at),
-        );
-        if let Some(latest) = latest {
-            checked_at_values.insert(
-                name.clone(),
-                resolved_checked_at(Some(&latest), used_fallback, cached_at, checked_at),
-            );
-            values.insert(name, latest);
-        }
-    }
-    (values, checked_at_values)
-}
-
 fn merge_and_write_cache(
     path: &Path,
     checked_at: i64,
     kiqi_update: Option<(Option<String>, i64)>,
-    native_packages: RegistryCacheUpdate,
 ) -> UpdateCache {
     let _guard = UPDATE_CACHE_WRITE_LOCK
         .lock()
@@ -345,8 +245,6 @@ fn merge_and_write_cache(
         cache.kiqi_latest = latest;
         cache.freshness.ki = latest_checked_at;
     }
-    cache.native_packages = native_packages.0;
-    cache.freshness.native_packages = native_packages.1;
     let _ = write_cache(path, &cache);
     cache
 }
@@ -374,22 +272,6 @@ fn report_from_cache(cache: &UpdateCache) -> UpdateReport {
                 current: crate::VERSION.into(),
                 latest: latest.into(),
                 command: "ki update".into(),
-            });
-        }
-    }
-    for package in crate::install::installed_native_packages() {
-        if package.source.is_some() {
-            continue;
-        }
-        let Some(latest) = cache.native_packages.get(&package.name) else {
-            continue;
-        };
-        if is_newer(&package.version, latest) {
-            notices.push(UpdateNotice {
-                name: package.name.clone(),
-                current: package.version,
-                latest: latest.clone(),
-                command: format!("ki install {} --force", package.name),
             });
         }
     }
@@ -648,30 +530,6 @@ fn run_release_tool_capture(program: &str, args: &[&str]) -> Result<String, Stri
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         ))
-    }
-}
-
-async fn fetch_crates_latest(client: &reqwest::Client, name: &str) -> RegistryLookup {
-    fetch_crates_url(client, &format!("https://crates.io/api/v1/crates/{name}")).await
-}
-
-async fn fetch_crates_url(client: &reqwest::Client, url: &str) -> RegistryLookup {
-    let response = match client.get(url).send().await {
-        Ok(response) => response,
-        Err(_) => return RegistryLookup::TransientFailure,
-    };
-    if matches!(
-        response.status(),
-        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
-    ) {
-        return RegistryLookup::Missing;
-    }
-    if !response.status().is_success() {
-        return RegistryLookup::TransientFailure;
-    }
-    match response.json::<CratesResponse>().await {
-        Ok(response) => RegistryLookup::Found(response.crate_info.max_version),
-        Err(_) => RegistryLookup::TransientFailure,
     }
 }
 
@@ -2615,11 +2473,9 @@ mod tests {
         windows_update_helper_command, write_windows_update_status, WINDOWS_UPDATE_HELPER,
     };
     use super::{
-        cargo_home_is_project_local, cargo_install_command, collect_bounded,
-        create_self_update_command_dir, fetch_crates_url, is_newer, parse_kiqi_version_output,
-        path_is_within, results_with_individual_cache_fallback,
-        validate_staged_kiqi_version_output, RegistryLookup, CACHE_FALLBACK_MAX_AGE_MS,
-        UPDATE_CHECK_CONCURRENCY,
+        cargo_home_is_project_local, cargo_install_command, create_self_update_command_dir,
+        is_newer, parse_kiqi_version_output, path_is_within, validate_staged_kiqi_version_output,
+        RegistryLookup, CACHE_FALLBACK_MAX_AGE_MS,
     };
 
     struct RestoreConfigDir(Option<OsString>);
@@ -3418,182 +3274,5 @@ mod tests {
         assert!(is_newer("1.2.3-beta.2", "1.2.3"));
         assert!(!is_newer("1.2.3", "1.2.3"));
         assert!(!is_newer("nightly", "1.0.0"));
-    }
-
-    #[test]
-    fn failed_item_checks_keep_only_corresponding_cached_values() {
-        let cached = BTreeMap::from([
-            ("fresh".to_string(), "1.0.0".to_string()),
-            ("failed".to_string(), "2.0.0".to_string()),
-            ("removed".to_string(), "3.0.0".to_string()),
-        ]);
-        let results = vec![
-            (
-                "fresh".to_string(),
-                RegistryLookup::Found("1.1.0".to_string()),
-            ),
-            ("failed".to_string(), RegistryLookup::TransientFailure),
-            ("uncached".to_string(), RegistryLookup::TransientFailure),
-            ("missing".to_string(), RegistryLookup::Missing),
-        ];
-
-        let (merged, checked_at_values) =
-            results_with_individual_cache_fallback(results, Some(&cached), None, 100, 100);
-        assert_eq!(merged.get("fresh").map(String::as_str), Some("1.1.0"));
-        assert_eq!(merged.get("failed").map(String::as_str), Some("2.0.0"));
-        assert!(!merged.contains_key("removed"));
-        assert!(!merged.contains_key("uncached"));
-        assert!(!merged.contains_key("missing"));
-        // A live lookup is stamped with the current check; a fallback keeps the
-        // timestamp it was cached at, so the fallback window cannot be extended
-        // indefinitely by repeated offline starts.
-        assert_eq!(checked_at_values.get("fresh").copied(), Some(100));
-        assert_eq!(checked_at_values.get("failed").copied(), Some(100));
-        assert!(!checked_at_values.contains_key("uncached"));
-        assert!(!checked_at_values.contains_key("missing"));
-    }
-
-    #[tokio::test]
-    async fn package_update_checks_have_a_shared_concurrency_limit() {
-        let in_flight = Arc::new(AtomicUsize::new(0));
-        let maximum = Arc::new(AtomicUsize::new(0));
-        let checks = (0..(UPDATE_CHECK_CONCURRENCY * 3)).map(|index| {
-            let in_flight = Arc::clone(&in_flight);
-            let maximum = Arc::clone(&maximum);
-            async move {
-                let active = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                maximum.fetch_max(active, Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                in_flight.fetch_sub(1, Ordering::SeqCst);
-                index
-            }
-        });
-
-        let mut results = collect_bounded(checks).await;
-        results.sort_unstable();
-
-        assert_eq!(
-            results,
-            (0..(UPDATE_CHECK_CONCURRENCY * 3)).collect::<Vec<_>>()
-        );
-        assert_eq!(maximum.load(Ordering::SeqCst), UPDATE_CHECK_CONCURRENCY);
-        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn bounded_checks_do_not_head_of_line_block_new_work() {
-        let release_first = Arc::new(tokio::sync::Notify::new());
-        let checks = (0..(UPDATE_CHECK_CONCURRENCY + 1)).map(|index| {
-            let release_first = Arc::clone(&release_first);
-            async move {
-                if index == 0 {
-                    release_first.notified().await;
-                } else if index == UPDATE_CHECK_CONCURRENCY {
-                    release_first.notify_one();
-                }
-                index
-            }
-        });
-
-        let mut results =
-            tokio::time::timeout(std::time::Duration::from_secs(1), collect_bounded(checks))
-                .await
-                .expect("a completed later check must free a concurrency slot");
-        results.sort_unstable();
-        assert_eq!(results, (0..=UPDATE_CHECK_CONCURRENCY).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn fresh_results_keep_individual_timestamps_when_a_peer_uses_fallback() {
-        let now = 10 * CACHE_FALLBACK_MAX_AGE_MS;
-        let nearly_stale = now - CACHE_FALLBACK_MAX_AGE_MS + 60_000;
-        let cached = BTreeMap::from([
-            ("fresh".to_string(), "1.0.0".to_string()),
-            ("failed".to_string(), "2.0.0".to_string()),
-        ]);
-        let freshness = BTreeMap::from([
-            ("fresh".to_string(), nearly_stale),
-            ("failed".to_string(), nearly_stale),
-        ]);
-        let (values, timestamps) = results_with_individual_cache_fallback(
-            vec![
-                (
-                    "fresh".to_string(),
-                    RegistryLookup::Found("1.1.0".to_string()),
-                ),
-                ("failed".to_string(), RegistryLookup::TransientFailure),
-            ],
-            Some(&cached),
-            Some(&freshness),
-            nearly_stale,
-            now,
-        );
-
-        assert_eq!(timestamps.get("fresh"), Some(&now));
-        assert_eq!(timestamps.get("failed"), Some(&nearly_stale));
-        let after_old_entry_expires = now + 120_000;
-        let (fallback, _) = results_with_individual_cache_fallback(
-            vec![
-                ("fresh".to_string(), RegistryLookup::TransientFailure),
-                ("failed".to_string(), RegistryLookup::TransientFailure),
-            ],
-            Some(&values),
-            Some(&timestamps),
-            nearly_stale,
-            after_old_entry_expires,
-        );
-        assert_eq!(fallback.get("fresh").map(String::as_str), Some("1.1.0"));
-        assert!(!fallback.contains_key("failed"));
-    }
-
-    #[tokio::test]
-    async fn crates_rate_limits_and_request_timeouts_are_transient() {
-        async fn lookup(status: &str, body: &str) -> RegistryLookup {
-            use std::io::{BufRead, BufReader, Write};
-
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = listener.local_addr().unwrap();
-            let status = status.to_string();
-            let body = body.to_string();
-            let server = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                {
-                    let mut reader = BufReader::new(&mut stream);
-                    let mut line = String::new();
-                    loop {
-                        line.clear();
-                        if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
-                            break;
-                        }
-                    }
-                }
-                write!(
-                    stream,
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .unwrap();
-            });
-            let client = reqwest::Client::builder().build().unwrap();
-            let result = fetch_crates_url(&client, &format!("http://{address}/crate")).await;
-            server.join().unwrap();
-            result
-        }
-
-        assert_eq!(
-            lookup("408 Request Timeout", "").await,
-            RegistryLookup::TransientFailure
-        );
-        assert_eq!(
-            lookup("429 Too Many Requests", "").await,
-            RegistryLookup::TransientFailure
-        );
-        let malformed = lookup("200 OK", "{malformed-json").await;
-        assert_eq!(malformed, RegistryLookup::TransientFailure);
-        assert_eq!(
-            super::lookup_with_cache_fallback(malformed, Some("9.9.9"), true),
-            (Some("9.9.9".to_string()), true)
-        );
-        assert_eq!(lookup("404 Not Found", "").await, RegistryLookup::Missing);
     }
 }

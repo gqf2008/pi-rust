@@ -61,8 +61,8 @@ pub(crate) fn permission_dialog(
         .tool_call_id
         .as_deref()
         .filter(|id| !id.trim().is_empty())?;
-    kiqi_plugin_sdk::dialogs::validate(&request.ui, Some(tool_call_id)).ok()?;
-    let sdk_options = kiqi_plugin_sdk::dialogs::permission_options(&request.ui).ok()?;
+    kiqi_plugin::dialogs::validate(&request.ui, Some(tool_call_id)).ok()?;
+    let sdk_options = kiqi_plugin::dialogs::permission_options(&request.ui).ok()?;
     let title = request
         .ui
         .get("question")

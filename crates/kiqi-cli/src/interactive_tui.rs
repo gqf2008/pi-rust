@@ -394,7 +394,7 @@ impl CommandRegistry {
 
 /// Dispatch a ui_prompt_start event to extensions.
 fn dispatch_ui_prompt_event(state: &TuiState) {
-    use kiqi_plugin_sdk::EventTag;
+    use kiqi_plugin::EventTag;
 
     if let Ok(session) = state.extension_session.lock() {
         if let Some(snapshot) = session.snapshot_arc() {
@@ -405,7 +405,7 @@ fn dispatch_ui_prompt_event(state: &TuiState) {
 
 /// Dispatch a ui_prompt_end event to extensions.
 fn dispatch_ui_prompt_event_end(state: &TuiState) {
-    use kiqi_plugin_sdk::EventTag;
+    use kiqi_plugin::EventTag;
 
     if let Ok(session) = state.extension_session.lock() {
         if let Some(snapshot) = session.snapshot_arc() {
@@ -458,7 +458,7 @@ fn char_shortcut_name(ch: char) -> Option<String> {
 /// what lets a push-to-talk extension measure how long a key was held — the
 /// normal editor path deliberately drops Release.
 fn dispatch_key_event(state: &TuiState, key: &KeyEvent, editor: &Editor) -> bool {
-    use kiqi_plugin_sdk::EventTag;
+    use kiqi_plugin::EventTag;
 
     let owned_release = key.kind == KeyEventKind::Release
         && state
@@ -2891,7 +2891,7 @@ pub async fn interactive_tui(
     // continue. No-op when no extension subscribes.
     if let Some(reason) = crate::session::dispatch_session_event_async(
         reload_context,
-        kiqi_plugin_sdk::EventTag::SessionStart,
+        kiqi_plugin::EventTag::SessionStart,
     )
     .await
     {

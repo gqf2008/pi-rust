@@ -151,7 +151,7 @@ impl SignalHost {
     /// The id of the session this host is attached to, when it identifies one.
     ///
     /// Taken from the attached [`Session`] rather than from
-    /// [`kiqi_plugin_sdk::AGENT_ID_ENV`]: that variable is a process-global cell
+    /// [`kiqi_plugin::AGENT_ID_ENV`]: that variable is a process-global cell
     /// rewritten by whichever code path activates a session, so reading it here
     /// would make a per-session decision depend on global mutation order (and
     /// made the attribution tests race each other). `set_active_session`

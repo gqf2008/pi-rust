@@ -88,10 +88,8 @@ async fn run_inner() -> i32 {
     // already sliced by the Node CLI entry).
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
 
-    if argv.first().map(String::as_str) == Some("__kiqi_dev_cleanup") {
-        return crate::dev_extension::run_cleanup_helper(&argv[1..]);
-    }
-
+    // P6: the cdylib dev channel (`ki dev`, `__kiqi_dev_cleanup`) is retired —
+    // wasm guests (`ki insmod`) are the only plugin channel.
     // ---- `ki --connect <addr>` — pure remote client ----
     // Intercepted before any provider / harness / session / extension work so
     // the client holds no local agent resources at all: it only connects to a
@@ -105,31 +103,14 @@ async fn run_inner() -> i32 {
     // the regular parsed path all observe the same process-wide gate.
     crate::args::normalize_offline_mode(&argv);
 
-    // `ki dev` wraps the normal CLI: consume only development-specific
-    // options, then pass every remaining argument through the regular parser.
-    let dev_command = argv.first().map(String::as_str);
-    let dev_options = if matches!(dev_command, Some("dev" | "dev-local")) {
-        match crate::dev_extension::parse_args(&argv[1..]) {
-            Ok(options) if options.help => {
-                crate::dev_extension::print_help();
-                return 0;
-            }
-            Ok(mut options) => {
-                if dev_command == Some("dev-local") {
-                    options.local_only = true;
-                }
-                argv = options.passthrough.clone();
-                Some(options)
-            }
-            Err(error) => {
-                eprintln!("error: {error}");
-                crate::dev_extension::print_help();
-                return EXIT_USAGE;
-            }
-        }
-    } else {
-        None
-    };
+    // P6: `ki dev` / `ki dev-local` are retired. Fail loudly (an upgrading
+    // user's muscle memory must not silently turn into a prompt run).
+    if matches!(argv.first().map(String::as_str), Some("dev" | "dev-local")) {
+        eprintln!(
+            "error: the cdylib dev channel (`ki dev`) was removed; wasm plugins install via `ki insmod --build plugins/wasm/<guest>`"
+        );
+        return EXIT_USAGE;
+    }
 
     // ---- Top-level subcommand dispatch (before flag parsing) ----
     // These are top-level subcommands (mirrors TS `runAuthCommand` / the
@@ -145,15 +126,6 @@ async fn run_inner() -> i32 {
         // parsing, provider resolution, session build, and stdin draining
         // entirely (same claim as `--connect`).
         Some("acp") => {
-            // The dev wrapper (`ki dev acp serve`) would be parsed above and
-            // then silently discarded here — the dev cdylib would never load.
-            // Say so instead of pretending the session exercises dev code.
-            if dev_options.is_some() {
-                eprintln!(
-                    "error: `ki dev` does not wrap `ki acp serve`; the dev extension session is not applied here — run `ki acp serve` directly"
-                );
-                return EXIT_USAGE;
-            }
             return crate::acp::run(&argv[1..]).await;
         }
         Some("auth") => {
@@ -168,9 +140,6 @@ async fn run_inner() -> i32 {
         Some("events") => return crate::events::run(&argv[1..]).await,
         Some("configure") => return crate::configure::run(&argv[1..]).await,
         Some("update") => return crate::updates::run_self_update(&argv[1..]),
-        Some("install") => return crate::install::run(&argv[1..]),
-        Some("uninstall") => return crate::install::uninstall(&argv[1..]),
-        Some("package") => return crate::packages::run(&argv[1..]),
         Some("plugin") => return crate::plugin_cli::run(&argv[1..]),
         // Kernel-flavoured spellings for the wasm tier (`ki install`/`uninstall`
         // are the cdylib/extension pair, a different artifact).
@@ -222,13 +191,6 @@ async fn run_inner() -> i32 {
     if let Some(search) = parsed.list_models.as_deref() {
         return list_models(search).await;
     }
-
-    // Build before provider resolution so compiler errors do not require
-    // valid model credentials. The staged directory joins normal discovery.
-    let dev_extension = match prepare_dev_extension(dev_options.as_ref(), &cwd, &mut parsed) {
-        Ok(extension) => extension,
-        Err(code) => return code,
-    };
 
     // `-r/--resume` is an interactive picker, unlike `-c/--continue` which
     // immediately opens the latest session. Resolve the picker result before
@@ -344,8 +306,6 @@ async fn run_inner() -> i32 {
                 return EXIT_RUNTIME;
             }
         };
-    reload_context.dev_extension = dev_extension;
-
     // ---- post-load stdin claim + initial message ----
     // Extensions are loaded by `build()` (above). A plugin may have declared
     // `{"ownsStdio":true}`: this process's stdio belongs to it (an ACP/MCP stdio
@@ -414,16 +374,6 @@ async fn run_inner() -> i32 {
     // plugin owns.
     let mode = if stdio_claimed { RunMode::Rpc } else { mode };
 
-    let dev_cleanup = reload_context.dev_extension.clone();
-    let dev_watcher = if matches!(mode, RunMode::Interactive) {
-        reload_context
-            .dev_extension
-            .as_ref()
-            .and_then(|extension| extension.start_watcher(reload_context.mailbox.clone()))
-    } else {
-        None
-    };
-
     let exit_code = match mode {
         RunMode::Print => {
             crate::modes::print(
@@ -475,7 +425,7 @@ async fn run_inner() -> i32 {
             // extension brings up the TCP server.
             let veto = crate::session::dispatch_session_event_async(
                 &reload_context,
-                kiqi_plugin_sdk::EventTag::BeforeTuiStart,
+                kiqi_plugin::EventTag::BeforeTuiStart,
             )
             .await;
             if let Some(reason) = veto {
@@ -488,7 +438,7 @@ async fn run_inner() -> i32 {
             } else {
                 if let Some(reason) = crate::session::dispatch_session_event_async(
                     &reload_context,
-                    kiqi_plugin_sdk::EventTag::SessionStart,
+                    kiqi_plugin::EventTag::SessionStart,
                 )
                 .await
                 {
@@ -540,17 +490,8 @@ async fn run_inner() -> i32 {
         }
     };
 
-    if let Some(dev) = &dev_cleanup {
-        dev.stop_watcher();
-    }
-    if let Some(watcher) = dev_watcher {
-        let _ = watcher.join();
-    }
     drop(reload_context);
     drop(harness);
-    if let Some(dev) = dev_cleanup {
-        dev.cleanup();
-    }
     exit_code
 }
 
@@ -608,42 +549,6 @@ fn export_if_requested(parsed: &Args) -> Option<i32> {
         Err(error) => {
             eprintln!("error: {error}");
             Some(EXIT_RUNTIME)
-        }
-    }
-}
-
-fn prepare_dev_extension(
-    options: Option<&crate::dev_extension::DevOptions>,
-    cwd: &Path,
-    parsed: &mut Args,
-) -> Result<Option<std::sync::Arc<crate::dev_extension::DevExtension>>, i32> {
-    let Some(options) = options else {
-        return Ok(None);
-    };
-
-    match crate::dev_extension::DevExtension::detect(cwd, options) {
-        Ok(extension) => {
-            if let Err(error) = extension.rebuild() {
-                eprintln!("error: initial extension build failed: {error}");
-                return Err(EXIT_RUNTIME);
-            }
-            if let Err(error) = extension.apply_to_args(parsed) {
-                eprintln!("error: {error}");
-                return Err(EXIT_RUNTIME);
-            }
-            Ok(Some(extension))
-        }
-        Err(error) => {
-            // No Cargo cdylib found: degrade to skills-only mode.
-            eprintln!("dev: {error}");
-            eprintln!("dev: no Cargo cdylib found; running in skills-only mode");
-            parsed.no_extensions = true;
-            parsed.extensions_dir.clear();
-            parsed.extension.clear();
-            if options.local_only {
-                parsed.dev_local_only = true;
-            }
-            Ok(None)
         }
     }
 }

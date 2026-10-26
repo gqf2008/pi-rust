@@ -177,7 +177,7 @@ fn stb_to_result(s: &StbString) -> AgentToolResult {
 // ---------------------------------------------------------------------------
 
 /// Per-session context the host injects into plugin tool arguments under
-/// [`kiqi_plugin_sdk::HOST_CONTEXT_KEY`].
+/// [`kiqi_plugin::HOST_CONTEXT_KEY`].
 ///
 /// A built-in tool gets an `ExecutionToolContext` from the harness and can
 /// resolve the working directory from it; a plugin tool has no such channel.
@@ -273,12 +273,12 @@ fn inject_tool_context(params: Value, context: &ToolCallContext) -> Value {
     };
     match params {
         Value::Object(mut object) => {
-            object.insert(kiqi_plugin_sdk::HOST_CONTEXT_KEY.to_string(), context_json);
+            object.insert(kiqi_plugin::HOST_CONTEXT_KEY.to_string(), context_json);
             Value::Object(object)
         }
         Value::Null => {
             let mut object = serde_json::Map::new();
-            object.insert(kiqi_plugin_sdk::HOST_CONTEXT_KEY.to_string(), context_json);
+            object.insert(kiqi_plugin::HOST_CONTEXT_KEY.to_string(), context_json);
             Value::Object(object)
         }
         other => other,
@@ -304,7 +304,7 @@ pub struct PluginToolAdapter {
     label: String,
     handle: PluginToolHandle,
     /// Injected into every call's arguments under
-    /// [`kiqi_plugin_sdk::HOST_CONTEXT_KEY`]. `Default` (nothing known) until the
+    /// [`kiqi_plugin::HOST_CONTEXT_KEY`]. `Default` (nothing known) until the
     /// CLI attaches the session's context, so an adapter built without one — as
     /// the tests and the SDK smoke test do — behaves exactly as before.
     context: ToolCallContext,

@@ -195,7 +195,7 @@ fn monitor_function_key_works_with_a_draft_without_changing_text() {
     use kiqi_extensions::{
         dispatch_empty_event, load_session_mixed, NullDiagnostics, RegistrySnapshot,
     };
-    use kiqi_plugin_sdk::EventTag;
+    use kiqi_plugin::EventTag;
     struct Shutdown(Arc<RegistrySnapshot>);
     impl Drop for Shutdown {
         fn drop(&mut self) {
@@ -237,7 +237,8 @@ fn monitor_function_key_works_with_a_draft_without_changing_text() {
 #[test]
 fn modal_inputs_keep_registered_plugin_shortcuts_until_closed() {
     use kiqi_extensions::{ExtensionRegistry, ExtensionSession, PluginKeepalive};
-    use kiqi_plugin_sdk::{EventTag, StablePluginEvent, EVENT_HANDLER_CLAIMED};
+    use kiqi_plugin::EventTag;
+    use kiqi_plugin_sdk::{StablePluginEvent, EVENT_HANDLER_CLAIMED};
     use std::sync::atomic::{AtomicUsize, Ordering};
     extern "C" fn claim(_: StablePluginEvent, user_data: *mut std::ffi::c_void) -> i32 {
         // The counter outlives the session and all synchronous dispatch calls.
@@ -548,7 +549,7 @@ fn programmatic_mark_is_consumed_even_with_no_subscriber() {
             .snapshot_arc()
             .expect("a dylib-free session carries an empty registry");
         snapshot
-            .handlers_for(kiqi_plugin_sdk::EventTag::SessionStart)
+            .handlers_for(kiqi_plugin::EventTag::SessionStart)
             .is_empty()
             && snapshot.before_agent_start().is_empty()
             && snapshot.resources_discover().is_empty()

@@ -14,9 +14,10 @@ use std::sync::Arc;
 
 use kiqi_agent::error::AgentError;
 use kiqi_ai::types::Tool;
+use kiqi_plugin::{EventTag, EVENT_TAG_COUNT};
 use kiqi_plugin_sdk::{
-    BeforeAgentStartFn, CommandHandlerFn, EventHandlerFn, EventTag, FreeStringFn, OAuthRequestFn,
-    ProviderRequestFn, RenderFn, ResourcesDiscoverFn, EVENT_TAG_COUNT,
+    BeforeAgentStartFn, CommandHandlerFn, EventHandlerFn, FreeStringFn, OAuthRequestFn,
+    ProviderRequestFn, RenderFn, ResourcesDiscoverFn,
 };
 
 use crate::tool::PluginToolHandle;

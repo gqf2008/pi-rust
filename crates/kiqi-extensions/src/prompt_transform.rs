@@ -28,7 +28,7 @@
 //!   each run; nothing here is persisted, matching pi's `without recording it`
 //!   (`agent-session.ts:1424`).
 //!
-//! [`EventTag::BeforeAgentStart`]: kiqi_plugin_sdk::EventTag::BeforeAgentStart
+//! [`EventTag::BeforeAgentStart`]: kiqi_plugin::EventTag::BeforeAgentStart
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -49,7 +49,7 @@ use crate::registry::{assert_active, BeforeAgentStartHandler, RegistrySnapshot};
 /// signal to leave the prompt untouched. A stale registry (swapped-out session)
 /// also returns `None`.
 ///
-/// [`EventTag::BeforeAgentStart`]: kiqi_plugin_sdk::EventTag::BeforeAgentStart
+/// [`EventTag::BeforeAgentStart`]: kiqi_plugin::EventTag::BeforeAgentStart
 pub fn emit_before_agent_start(
     current_prompt: &str,
     event_json: &str,

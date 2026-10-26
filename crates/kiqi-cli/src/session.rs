@@ -1078,7 +1078,6 @@ pub async fn build_with_selection(
         editor_text: editor_text_mailbox,
         mcp: Arc::clone(&mcp_manager),
         signal_host: Arc::clone(&signal_host),
-        dev_extension: None,
     };
 
     Ok((harness, event_rx, reload_context))
@@ -1318,10 +1317,6 @@ pub struct ReloadContext {
     /// A detached mailbox makes `ask_user` fail with "requires an interactive
     /// UI" (headless contract).
     pub ui_dialog: kiqi_extensions::UiDialogMailbox,
-    /// Active `ki dev` extension builder. `/reload` rebuilds it before
-    /// swapping plugin sessions; its watcher signals `mailbox` after a
-    /// successful background build.
-    pub dev_extension: Option<Arc<crate::dev_extension::DevExtension>>,
     /// The session's host-level MCP servers. Held here so every teardown path
     /// (via [`dispatch_session_shutdown_advisory`]) reaps their process trees,
     /// and so the `Drop` of the last builder is a backstop. The tool adapters
@@ -1349,7 +1344,7 @@ pub struct ReloadContext {
 /// (the session is already up or already closing).
 pub async fn dispatch_session_event_async(
     reload_context: &ReloadContext,
-    tag: kiqi_plugin_sdk::EventTag,
+    tag: kiqi_plugin::EventTag,
 ) -> Option<String> {
     // Take the snapshot Arc + keepalive, drop the session lock, then dispatch —
     // we must not hold the session cell's mutex across the await (a handler
@@ -1384,7 +1379,7 @@ pub async fn dispatch_session_event_async(
 /// [`kiqi_plugin::SessionRead::session_branch`] observes the NEW branch.
 pub(crate) async fn notify_session_tree(reload_context: &ReloadContext) {
     if let Some(reason) =
-        dispatch_session_event_async(reload_context, kiqi_plugin_sdk::EventTag::SessionTree).await
+        dispatch_session_event_async(reload_context, kiqi_plugin::EventTag::SessionTree).await
     {
         tracing::warn!("[ki] extension vetoed SessionTree (advisory): {reason}");
     }
@@ -1408,8 +1403,7 @@ pub async fn dispatch_session_shutdown_advisory(reload_context: &ReloadContext) 
     // below. Idempotent; the `Drop` chain is the backstop.
     reload_context.mcp.shutdown().await;
     if let Some(reason) =
-        dispatch_session_event_async(reload_context, kiqi_plugin_sdk::EventTag::SessionShutdown)
-            .await
+        dispatch_session_event_async(reload_context, kiqi_plugin::EventTag::SessionShutdown).await
     {
         tracing::warn!("[ki] extension vetoed SessionShutdown (ignored, closing): {reason}");
     }
@@ -1426,7 +1420,7 @@ async fn shutdown_extensions_for_reload(
             let _keepalive = keepalive;
             kiqi_extensions::dispatch_empty_event(
                 &snapshot,
-                kiqi_plugin_sdk::EventTag::SessionShutdown,
+                kiqi_plugin::EventTag::SessionShutdown,
             );
         })
         .await
@@ -1504,27 +1498,10 @@ async fn reload_extension_resources_inner<F>(
 where
     F: FnOnce() + Send,
 {
-    // Resolve the arguments once for this reload. `ki dev` may append its
-    // freshly staged extension directory; every subsequent loader and policy
-    // decision must observe that same effective set rather than falling back
-    // to the pre-dev snapshot held in `ctx.args`.
+    // Resolve the arguments once for this reload: every subsequent loader and
+    // policy decision must observe the same effective set rather than the
+    // pre-reload snapshot held in `ctx.args`.
     let mut effective_args = ctx.args.clone();
-    if let Some(dev) = &ctx.dev_extension {
-        if let Err(error) = dev
-            .rebuild()
-            .and_then(|_| dev.apply_to_args(&mut effective_args))
-        {
-            return ReloadOutcome {
-                summary: format!(
-                    "Extension build failed for {}: {error}. Keeping the currently loaded version.",
-                    dev.package_name()
-                ),
-                had_warnings: true,
-                details: Vec::new(),
-                had_errors: true,
-            };
-        }
-    }
     let cwd_str = ctx.cwd.to_string_lossy().to_string();
     let project_trusted = resolve_project_trust(&effective_args, &ctx.cwd);
     let prepared = match prepare_reload_inputs(&effective_args, &ctx.cwd, project_trusted) {
@@ -3014,11 +2991,11 @@ fn publish_session_identity(tool_context: &kiqi_extensions::ToolCallContext, id:
     // `env_lock` for why this is a shared, re-entrant lock rather than a
     // test-only mutex.
     crate::env_lock::with_env_lock(|| {
-        std::env::set_var(kiqi_plugin_sdk::SESSION_ID_ENV, id);
+        std::env::set_var(kiqi_plugin::SESSION_ID_ENV, id);
         // Two audiences, two names: plugins read `KI_SESSION_ID`, while the shell
         // a `bash`/`powershell` tool spawns can name the session through
         // `KI_AGENT_ID`.
-        std::env::set_var(kiqi_plugin_sdk::AGENT_ID_ENV, id);
+        std::env::set_var(kiqi_plugin::AGENT_ID_ENV, id);
     });
     tool_context.set_session_id(id);
 }
@@ -3039,7 +3016,7 @@ const EPHEMERAL_SESSION_ID: &str = "ephemeral";
 /// own echo".
 ///
 /// Called with the id of the session the caller is *attached to* — not with
-/// [`kiqi_plugin_sdk::AGENT_ID_ENV`], which `publish_session_identity` rewrites
+/// [`kiqi_plugin::AGENT_ID_ENV`], which `publish_session_identity` rewrites
 /// on every activation and which is therefore a spawn-time value for any child
 /// process and a process-global cell in-process.
 pub(crate) fn session_id_from(published: Option<&str>) -> Option<String> {
@@ -3080,8 +3057,8 @@ pub(crate) async fn set_active_session(
         // not (0/20), because this path is what the failing test reaches through
         // `HostImpl::new_session`. Keep both: they write the same pair.
         crate::env_lock::with_env_lock(|| {
-            std::env::set_var(kiqi_plugin_sdk::SESSION_ID_ENV, &metadata.id);
-            std::env::set_var(kiqi_plugin_sdk::AGENT_ID_ENV, &metadata.id);
+            std::env::set_var(kiqi_plugin::SESSION_ID_ENV, &metadata.id);
+            std::env::set_var(kiqi_plugin::AGENT_ID_ENV, &metadata.id);
         });
         if let Some(context) = tool_context {
             context.set_session_id(metadata.id);
@@ -4027,7 +4004,7 @@ mod tests {
             let mut registry = kiqi_extensions::ExtensionRegistry::new();
             registry.register_event_handler(
                 name.into(),
-                kiqi_plugin_sdk::EventTag::ToolCall,
+                kiqi_plugin::EventTag::ToolCall,
                 deny_test_tool_call,
                 std::ptr::null_mut(),
             );
@@ -4921,10 +4898,10 @@ mod tests {
     #[test]
     fn host_private_env_matches_the_declared_contract() {
         // 1. The wire values. Pinned literally on purpose: see the doc comment.
-        assert_eq!(kiqi_plugin_sdk::SESSION_ID_ENV, "KI_SESSION_ID");
-        assert_eq!(kiqi_plugin_sdk::AGENT_ID_ENV, "KI_AGENT_ID");
+        assert_eq!(kiqi_plugin::SESSION_ID_ENV, "KI_SESSION_ID");
+        assert_eq!(kiqi_plugin::AGENT_ID_ENV, "KI_AGENT_ID");
         assert_eq!(
-            kiqi_plugin_sdk::SUBAGENT_PARENT_ENV,
+            kiqi_plugin::SUBAGENT_PARENT_ENV,
             [
                 "LANGFUSE_PI_PARENT_TRACE_ID",
                 "LANGFUSE_PI_PARENT_SPAN_ID",
@@ -4937,9 +4914,9 @@ mod tests {
 
         // 2. Coverage — derived from the declarations, so a newly added family
         //    member is checked without anyone remembering to extend this test.
-        for name in kiqi_plugin_sdk::SUBAGENT_PARENT_ENV
+        for name in kiqi_plugin::SUBAGENT_PARENT_ENV
             .iter()
-            .chain(std::iter::once(&kiqi_plugin_sdk::SESSION_ID_ENV))
+            .chain(std::iter::once(&kiqi_plugin::SESSION_ID_ENV))
         {
             assert!(
                 kiqi_tools::is_host_private_env(name),
@@ -4953,7 +4930,7 @@ mod tests {
         for visible in [
             crate::args::KI_OFFLINE_ENV,
             crate::config::CONFIG_DIR_ENV,
-            kiqi_plugin_sdk::AGENT_ID_ENV,
+            kiqi_plugin::AGENT_ID_ENV,
             "PATH",
         ] {
             assert!(
@@ -4974,8 +4951,8 @@ mod tests {
         impl Drop for Restore {
             fn drop(&mut self) {
                 for (name, saved) in [
-                    (kiqi_plugin_sdk::SESSION_ID_ENV, &self.session),
-                    (kiqi_plugin_sdk::AGENT_ID_ENV, &self.agent),
+                    (kiqi_plugin::SESSION_ID_ENV, &self.session),
+                    (kiqi_plugin::AGENT_ID_ENV, &self.agent),
                 ] {
                     match saved {
                         Some(value) => std::env::set_var(name, value),
@@ -4987,20 +4964,18 @@ mod tests {
 
         let _guard = crate::config::test_support::env_lock().lock();
         let _restore = Restore {
-            session: std::env::var_os(kiqi_plugin_sdk::SESSION_ID_ENV),
-            agent: std::env::var_os(kiqi_plugin_sdk::AGENT_ID_ENV),
+            session: std::env::var_os(kiqi_plugin::SESSION_ID_ENV),
+            agent: std::env::var_os(kiqi_plugin::AGENT_ID_ENV),
         };
 
         let context = kiqi_extensions::ToolCallContext::new("/tmp");
         publish_session_identity(&context, "01a0f60b-first");
         assert_eq!(
-            std::env::var(kiqi_plugin_sdk::SESSION_ID_ENV)
-                .ok()
-                .as_deref(),
+            std::env::var(kiqi_plugin::SESSION_ID_ENV).ok().as_deref(),
             Some("01a0f60b-first")
         );
         assert_eq!(
-            std::env::var(kiqi_plugin_sdk::AGENT_ID_ENV).ok().as_deref(),
+            std::env::var(kiqi_plugin::AGENT_ID_ENV).ok().as_deref(),
             Some("01a0f60b-first")
         );
         assert_eq!(context.session_id().as_deref(), Some("01a0f60b-first"));
@@ -5008,13 +4983,11 @@ mod tests {
         // A second activation must overwrite, not keep the first value.
         publish_session_identity(&context, "01a0f60b-second");
         assert_eq!(
-            std::env::var(kiqi_plugin_sdk::AGENT_ID_ENV).ok().as_deref(),
+            std::env::var(kiqi_plugin::AGENT_ID_ENV).ok().as_deref(),
             Some("01a0f60b-second")
         );
         assert_eq!(
-            std::env::var(kiqi_plugin_sdk::SESSION_ID_ENV)
-                .ok()
-                .as_deref(),
+            std::env::var(kiqi_plugin::SESSION_ID_ENV).ok().as_deref(),
             Some("01a0f60b-second")
         );
         assert_eq!(context.session_id().as_deref(), Some("01a0f60b-second"));
@@ -5022,7 +4995,8 @@ mod tests {
 
     #[tokio::test]
     async fn reload_shutdown_joins_all_handlers_even_after_veto() {
-        use kiqi_plugin_sdk::{EventTag, StablePluginEvent};
+        use kiqi_plugin::EventTag;
+        use kiqi_plugin_sdk::StablePluginEvent;
         use std::sync::atomic::AtomicUsize;
         extern "C" fn stop(_: StablePluginEvent, data: *mut std::ffi::c_void) -> i32 {
             let calls = unsafe { &*(data as *const AtomicUsize) };
@@ -5073,7 +5047,7 @@ mod tests {
         let mut registry = kiqi_extensions::ExtensionRegistry::new();
         registry.register_event_handler(
             "vetoer".into(),
-            kiqi_plugin_sdk::EventTag::SessionTree,
+            kiqi_plugin::EventTag::SessionTree,
             veto,
             &calls as *const _ as *mut std::ffi::c_void,
         );
@@ -5105,7 +5079,6 @@ mod tests {
             mailbox: kiqi_extensions::ReloadMailbox::default(),
             ui_dialog: kiqi_extensions::UiDialogMailbox::default(),
             signal_host: Arc::new(crate::signal_host::SignalHost::new()),
-            dev_extension: None,
             mcp: Arc::new(kiqi_mcp::McpManager::empty()),
         };
 

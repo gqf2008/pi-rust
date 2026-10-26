@@ -60,9 +60,10 @@
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
+use kiqi_plugin::EventTag;
 use kiqi_plugin_sdk::{
-    BeforeAgentStartFn, EventHandlerFn, EventTag, FreeStringFn, OAuthRequestFn, ProviderRequestFn,
-    RenderFn, ResourcesDiscoverFn, RuntimeActionFn, StablePluginEvent, StableToolSchema, StbString,
+    BeforeAgentStartFn, EventHandlerFn, FreeStringFn, OAuthRequestFn, ProviderRequestFn, RenderFn,
+    ResourcesDiscoverFn, RuntimeActionFn, StablePluginEvent, StableToolSchema, StbString,
     StbStringRef, ToolCancelFn, ToolDestroyFn, ToolExecuteFn, ToolPollFn,
 };
 use thiserror::Error;

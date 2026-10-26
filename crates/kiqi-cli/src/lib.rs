@@ -38,7 +38,6 @@ pub mod changelog;
 pub mod config;
 pub mod configure;
 pub mod cron;
-pub mod dev_extension;
 pub mod docs_tool;
 pub(crate) mod env_lock;
 pub mod events;
@@ -49,13 +48,11 @@ pub mod extensions_actions;
 pub mod extras;
 pub mod fs_watch;
 pub mod goal_drive;
-pub mod install;
 pub mod interactive_tui;
 pub mod key_trace;
 pub mod llama_command;
 pub mod model_registry;
 pub mod modes;
-pub mod packages;
 pub mod permissions;
 pub mod plugin_cli;
 pub mod plugins;
@@ -86,19 +83,19 @@ pub mod wasm_provider;
 /// Crate version, surfaced by `ki --version`. Mirrors the TS `VERSION` export
 /// (sourced from `package.json`; here from `env!("CARGO_PKG_VERSION")`).
 ///
-/// Aliases [`kiqi_plugin_sdk::HOST_VERSION`] so the version the CLI prints and
+/// Aliases [`kiqi_plugin::HOST_VERSION`] so the version the CLI prints and
 /// the version handed to plugins (and, through it, the version extensions stamp
 /// on their own telemetry) can never disagree.
-pub const VERSION: &str = kiqi_plugin_sdk::HOST_VERSION;
+pub const VERSION: &str = kiqi_plugin::HOST_VERSION;
 
 /// The application name used in help + version output. Mirrors TS `APP_NAME`
 /// (the TS bin is `"pi"`; the Rust crate publishes under the `kiqi-` namespace,
 /// so the binary + displayed name is `"ki"` to match).
 ///
-/// Aliases [`kiqi_plugin_sdk::HOST_NAME`] — the plugin contract owns the
+/// Aliases [`kiqi_plugin::HOST_NAME`] — the plugin contract owns the
 /// identity, so an extension can label its output (a trace name, a tag) without
 /// hardcoding a brand that a rename would silently invalidate.
-pub const APP_NAME: &str = kiqi_plugin_sdk::HOST_NAME;
+pub const APP_NAME: &str = kiqi_plugin::HOST_NAME;
 
 /// The executable name, as typed on the command line (`ki`). Distinct from
 /// [`APP_NAME`], the product/brand name (`kiqi`) used in the lockup and title.

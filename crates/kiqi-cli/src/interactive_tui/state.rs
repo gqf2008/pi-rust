@@ -1236,7 +1236,7 @@ impl TuiState {
     /// runs while the editor's callback lock is held, where re-entering
     /// extension code is needlessly risky.
     pub(super) fn sync_editor_change(&self) {
-        use kiqi_plugin_sdk::EventTag;
+        use kiqi_plugin::EventTag;
 
         let Some(payload) = self.take_editor_change() else {
             return;

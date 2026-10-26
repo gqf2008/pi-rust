@@ -15,6 +15,7 @@ keywords = ["agent", "llm", "ai", "plugin", "ffi"]
 categories = ["api-bindings", "development-tools::ffi"]
 
 [dependencies]
+kiqi-plugin = { workspace = true }
 kiqi-plugin-sdk = { workspace = true }
 kiqi-ai = { workspace = true }
 kiqi-agent = { workspace = true }
