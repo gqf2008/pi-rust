@@ -17,7 +17,7 @@ ki --version
 ki --help
 ```
 
-`cargo install` 安装的是可执行文件。曾经的 `ki install`（安装 `kiqi-plugin-sdk` 构建的 Rust 动态库扩展）已随 cdylib 通道于 2026-10-26 退役；现在插件只有 wasm 一条通道，用 `ki insmod` 安装。
+`cargo install` 安装的是可执行文件。曾经的 `ki install`（安装 `kiqi-extension-sdk` 构建的 Rust 动态库扩展）已随 cdylib 通道于 2026-10-26 退役；现在插件只有 wasm 一条通道，用 `ki insmod` 安装。
 
 ### 从源码启动与构建
 
@@ -330,19 +330,19 @@ KI_AGENTS_DIR=/work/shared-agents ki
 
 ## 6. 插件（wasm）
 
-**cdylib 通道已于 2026-10-26 退役**：`ki install` / `ki uninstall` / `ki dev` / `ki dev-local` 与 `kiqi-plugin-sdk` 均已删除，`--extension` / `--extensions-dir` 仅为兼容而接受、不再加载任何东西。现在唯一的插件通道是 wasm 组件（契约 `plugins/kiqi-plugin.wit`），跑在 wasmtime 沙箱里，按授权文件 `$KI_AGENT_DIR/plugins/<id>/grants.json` 拿能力：
+**cdylib 通道已于 2026-10-26 退役**：`ki install` / `ki uninstall` / `ki dev` / `ki dev-local` 与 `kiqi-extension-sdk` 均已删除，`--extension` / `--extensions-dir` 仅为兼容而接受、不再加载任何东西。现在唯一的插件通道是 wasm 组件（契约 `extensions/kiqi-extension.wit`），跑在 wasmtime 沙箱里，按授权文件 `$KI_AGENT_DIR/extensions/<id>/grants.json` 拿能力：
 
 ```bash
 # 从仓库内 guest 源码构建并安装
-ki insmod --build plugins/wasm/kiqi-todo-guest
+ki insmod --build extensions/wasm/kiqi-todo
 # 安装已构建的组件
 ki insmod path/to/component.wasm --yes
 # 查看/卸载
-ki plugin list
+ki extension list
 ki rmmod <id>
 ```
 
-一方能力清单见 `website/data/packages.json`；契约与能力模型见 `docs/design/plugin-abi.md`。改写旧 cdylib 扩展请以 `plugins/wasm/kiqi-todo-guest` 为模板。
+一方能力清单见 `website/data/packages.json`；契约与能力模型见 `docs/design/extension-abi.md`。改写旧 cdylib 扩展请以 `extensions/wasm/kiqi-todo` 为模板。
 
 ## 7. SDK 集成
 
@@ -376,7 +376,7 @@ while let Some(event) = events.recv().await {
 
 ### 扩展加载失败
 
-确认插件目录下有 `plugin.wasm` 与 `grants.json`（`ki insmod` 会写好两者），并用 `ki plugin list` 查看宿主报错。加载失败时保留宿主输出的完整错误信息，检查授权是否覆盖插件声明的能力（缺失 = 什么都不授予）。
+确认插件目录下有 `extension.wasm` 与 `grants.json`（`ki insmod` 会写好两者），并用 `ki extension list` 查看宿主报错。加载失败时保留宿主输出的完整错误信息，检查授权是否覆盖插件声明的能力（缺失 = 什么都不授予）。
 
 ### 扩展事件处理器没触发或启动被中止
 
@@ -413,7 +413,7 @@ cargo test --workspace
 发布 crate 时按依赖顺序：
 
 ```text
-kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-plugin → kiqi-extensions →
+kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-extension → kiqi-extensions →
 kiqi-tools → kiqi-harness → kiqi-tui → kiqi-cli
 ```
 

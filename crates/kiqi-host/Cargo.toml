@@ -9,9 +9,9 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/kiqi-host"
-description = "ki's host-side plugin crate: Extension contract, event dispatch spine, and the wasm (component model) plugin backend"
+description = "ki's host-side extension crate: Extension contract, event dispatch spine, and the wasm (component model) extension backend"
 readme = "README.md"
-keywords = ["ki", "kiqi", "plugin", "wasm", "component-model"]
+keywords = ["ki", "kiqi", "extension", "wasm", "component-model"]
 categories = ["api-bindings", "development-tools"]
 
 [lib]

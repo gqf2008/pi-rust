@@ -2,7 +2,7 @@
 
 Host-level MCP (Model Context Protocol) client for `ki`, the Rust coding agent.
 
-MCP is a **host capability here, not a plugin**: external servers are declared in
+MCP is a **host capability here, not an extension**: external servers are declared in
 ki's own `settings.json` under `mcpServers`, the connection lives with the
 session, and each discovered tool is expanded into a native ki tool named
 `{server}__{tool}` so the model sees it directly.

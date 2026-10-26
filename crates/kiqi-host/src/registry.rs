@@ -1,8 +1,8 @@
-//! The extension registry — accumulates registrations during a plugin's
-//! `kiqi_plugin_register` call, then snapshots for the host session.
+//! The extension registry — accumulates registrations during an extension's
+//! `kiqi_extension_register` call, then snapshots for the host session.
 //!
 //! `HostApi` (in [`crate`]) holds an `ExtensionRegistry` behind a `Mutex` while
-//! the plugin's register trampolines run; after register completes the host
+//! the extension's register trampolines run; after register completes the host
 //! [`take`]s it and builds a [`RegistrySnapshot`] the session keeps for its
 //! lifetime. Staleness across a session swap / `/reload` is guarded by a shared
 //! `Arc<AtomicBool>` "active" flag ([`assert_active`]).
@@ -20,41 +20,41 @@ use crate::{EventTag, EVENT_TAG_COUNT};
 use kiqi_agent::error::AgentError;
 use kiqi_ai::types::Tool;
 
-use crate::tool::PluginToolHandle;
+use crate::tool::ExtensionToolHandle;
 
 // ---------------------------------------------------------------------------
 // Registered-item records
 // ---------------------------------------------------------------------------
 
 /// A tool an extension registered: the provider-facing [`Tool`] schema + the
-/// plugin's 4-function handle ([`PluginToolHandle`]) the host drives via
-/// [`PluginToolAdapter`](crate::PluginToolAdapter).
+/// extension's 4-function handle ([`ExtensionToolHandle`]) the host drives via
+/// [`ExtensionToolAdapter`](crate::ExtensionToolAdapter).
 ///
 /// `tool` is public so the host can merge schemas; `handle` is crate-private
-/// (only [`PluginToolAdapter`](crate::PluginToolAdapter) drives it). `Clone`
-/// derives because [`Tool`] is `Clone` and [`PluginToolHandle`] is `Copy`.
+/// (only [`ExtensionToolAdapter`](crate::ExtensionToolAdapter) drives it). `Clone`
+/// derives because [`Tool`] is `Clone` and [`ExtensionToolHandle`] is `Copy`.
 #[derive(Clone)]
 pub struct ExtensionTool {
     /// The provider-facing tool definition (name/description/parameters).
     pub tool: Tool,
-    pub(crate) handle: PluginToolHandle,
+    pub(crate) handle: ExtensionToolHandle,
 }
 
 impl ExtensionTool {
-    pub fn new(tool: Tool, handle: PluginToolHandle) -> Self {
+    pub fn new(tool: Tool, handle: ExtensionToolHandle) -> Self {
         Self { tool, handle }
     }
 
-    /// The plugin-side function handles backing this tool. `Copy` (fn pointers
+    /// The extension-side function handles backing this tool. `Copy` (fn pointers
     /// + a `FreeStringFn`), so handing it out is free. Public so the host
     /// (e.g. kiqi-cli's session builder) can wrap a registered tool in a
-    /// [`PluginToolAdapter`](crate::PluginToolAdapter) outside this crate.
-    pub fn handle(&self) -> PluginToolHandle {
+    /// [`ExtensionToolAdapter`](crate::ExtensionToolAdapter) outside this crate.
+    pub fn handle(&self) -> ExtensionToolHandle {
         self.handle
     }
 }
 
-/// A registered slash command and its plugin callback.
+/// A registered slash command and its extension callback.
 #[derive(Clone)]
 pub struct RegisteredCommand {
     pub name: String,
@@ -65,7 +65,7 @@ pub struct RegisteredCommand {
 
 /// A keyboard shortcut declared by a native extension (e.g. `"space"` for
 /// push-to-talk). The host records it so the TUI can route keys to it; the
-/// owning plugin receives the key via its `Input` event handler.
+/// owning extension receives the key via its `Input` event handler.
 ///
 /// `key` is a normalized key name (`"space"`, `"enter"`, `"c"`, `"f1"`)
 /// matching the editor's keybinding vocabulary.
@@ -74,16 +74,16 @@ pub struct RegisteredShortcut {
     pub key: String,
     pub description: String,
     /// The owning extension's display name (host-side only, for diagnostics).
-    pub plugin: String,
+    pub extension: String,
 }
 
-// SAFETY: the plugin owns the callback/context and promises they remain valid
+// SAFETY: the extension owns the callback/context and promises they remain valid
 // for the loaded library lifetime, matching the other registered callbacks.
 unsafe impl Send for RegisteredCommand {}
 unsafe impl Sync for RegisteredCommand {}
 
 /// A CLI flag declared by a native extension. Values are supplied by the
-/// host's parsed `Args::unknown_flags` map and read by the plugin through the
+/// host's parsed `Args::unknown_flags` map and read by the extension through the
 /// `RuntimeActionId::GetCliFlag` action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegisteredFlag {
@@ -91,73 +91,73 @@ pub struct RegisteredFlag {
     pub description: String,
 }
 
-/// A registered `on(tag)` event handler. `user_data` is the plugin's opaque
-/// context, passed back unchanged on every dispatch. `plugin` is the display
+/// A registered `on(tag)` event handler. `user_data` is the extension's opaque
+/// context, passed back unchanged on every dispatch. `extension` is the display
 /// name of the owning extension (host-side only — stamped from the cdylib path
 /// at registration; not part of the ABI), used for lifecycle veto diagnostics
 /// ("extension `foo` aborted `before_tui_start`").
 ///
-/// `priority`/`platforms` are the owning plugin's **declaration** (P2): the
+/// `priority`/`platforms` are the owning extension's **declaration** (P2): the
 /// snapshot sorts handlers by `priority` (smaller first, stable), and dispatch
 /// skips a handler whose non-empty `platforms` excludes the host platform.
-/// Both default to `100` / empty (all platforms); a plugin sets them via the
+/// Both default to `100` / empty (all platforms); an extension sets them via the
 /// unified C ABI `declare` callback.
 ///
-/// SAFETY contract: the plugin guarantees `handler` is safe to call from any
+/// SAFETY contract: the extension guarantees `handler` is safe to call from any
 /// thread (the host dispatches from the async emitter thread) and `user_data`
 /// is valid for the registry's lifetime. The host never frees `user_data`
-/// (plugin-owned).
+/// (extension-owned).
 #[derive(Clone)]
 pub struct RegisteredHandler {
     /// Display name of the owning extension (from the cdylib file stem).
-    pub plugin: String,
+    pub extension: String,
     /// Dispatch order (smaller runs first). Default `100`.
     pub priority: i32,
-    /// Platforms this handler's plugin supports (empty = all). Matched against
+    /// Platforms this handler's extension supports (empty = all). Matched against
     /// [`current_platform`].
     pub platforms: Vec<String>,
     pub handler: EventHandlerFn,
     pub user_data: *mut std::ffi::c_void,
 }
-// SAFETY: fn pointers are Send+Sync; `user_data` is an opaque plugin pointer the
-// plugin warrants is thread-safe to pass to `handler` from any thread. The host
+// SAFETY: fn pointers are Send+Sync; `user_data` is an opaque extension pointer the
+// extension warrants is thread-safe to pass to `handler` from any thread. The host
 // only reads it through `handler`.
 unsafe impl Send for RegisteredHandler {}
 unsafe impl Sync for RegisteredHandler {}
 
 /// A registered `resources_discover` handler (B5b). The `out` [`StbString`] the
-/// handler produces is **plugin-owned**, so the host reclaims it via the
-/// plugin's own `plugin_free_string` traveled alongside. `user_data` is the
-/// plugin's opaque context. SAFETY: same as [`RegisteredHandler`] — the plugin
+/// handler produces is **extension-owned**, so the host reclaims it via the
+/// extension's own `extension_free_string` traveled alongside. `user_data` is the
+/// extension's opaque context. SAFETY: same as [`RegisteredHandler`] — the extension
 /// warrants `handler` is callable from any thread and `user_data` is valid for
 /// the registry's lifetime; the host never frees `user_data`.
 #[derive(Clone, Copy)]
 pub struct ResourcesDiscoverHandler {
     pub handler: ResourcesDiscoverFn,
-    pub plugin_free_string: FreeStringFn,
+    pub extension_free_string: FreeStringFn,
     pub user_data: *mut std::ffi::c_void,
 }
-// SAFETY: fn pointers + an opaque plugin pointer the plugin warrants is
+// SAFETY: fn pointers + an opaque extension pointer the extension warrants is
 // thread-safe; the host only reads `user_data` through `handler`.
 unsafe impl Send for ResourcesDiscoverHandler {}
 unsafe impl Sync for ResourcesDiscoverHandler {}
 
 /// A registered `before_agent_start` handler (system-prompt transform). Same
 /// ownership shape as [`ResourcesDiscoverHandler`]: the handler produces a
-/// **plugin-owned** `out` [`StbString`] the host reclaims via the plugin's own
-/// `plugin_free_string`, which therefore travels alongside. `user_data` is the
-/// plugin's opaque context.
+/// **extension-owned** `out` [`StbString`] the host reclaims via the extension's own
+/// `extension_free_string`, which therefore travels alongside. `user_data` is the
+/// extension's opaque context.
 ///
-/// SAFETY: same as [`RegisteredHandler`] — the plugin warrants `handler` is
+/// SAFETY: same as [`RegisteredHandler`] — the extension warrants `handler` is
 /// callable from any thread and `user_data` is valid for the registry's
 /// lifetime; the host never frees `user_data`.
 #[derive(Clone, Copy)]
 pub struct BeforeAgentStartHandler {
     pub handler: BeforeAgentStartFn,
-    pub plugin_free_string: FreeStringFn,
+    pub extension_free_string: FreeStringFn,
     pub user_data: *mut std::ffi::c_void,
 }
-// SAFETY: fn pointers + an opaque plugin pointer the plugin warrants is
+// SAFETY: fn pointers + an opaque extension pointer the extension warrants is
 // thread-safe; the host only reads `user_data` through `handler`.
 unsafe impl Send for BeforeAgentStartHandler {}
 unsafe impl Sync for BeforeAgentStartHandler {}
@@ -165,54 +165,54 @@ unsafe impl Sync for BeforeAgentStartHandler {}
 /// A registered custom provider (B5c). The host wraps `request_fn` in a
 /// [`PluggableProvider`](crate::PluggableProvider) impl of `kiqi_ai::Provider`;
 /// its `stream_simple` drives `request_fn` on `spawn_blocking` (the sync fn
-/// can't own a chunked stream), reads the **plugin-owned** `out` JSON (a full
-/// assistant message), reclaims it via `plugin_free_string`, parses it to an
+/// can't own a chunked stream), reads the **extension-owned** `out` JSON (a full
+/// assistant message), reclaims it via `extension_free_string`, parses it to an
 /// [`AssistantMessage`](kiqi_ai::types::AssistantMessage), and emits it as one
 /// terminal `Done` chunk (v1 one-shot, documented divergence from pi's async
 /// streaming). `provider_id`/`base_url`/`api_style` carry the provider's
 /// identity (copied from the borrowed `StbStringRef`s at registration); the fn
-/// pointers + `user_data` live as long as the plugin (keepalive-mapped).
-/// `user_data` is the plugin's opaque context, passed back on every
+/// pointers + `user_data` live as long as the extension (keepalive-mapped).
+/// `user_data` is the extension's opaque context, passed back on every
 /// `request_fn` call.
 ///
-/// SAFETY: the plugin warrants `request_fn` is callable from any thread (the
+/// SAFETY: the extension warrants `request_fn` is callable from any thread (the
 /// host calls it from a `spawn_blocking` pool thread) and `user_data` is valid
-/// for the plugin's lifetime; the host never frees `user_data`.
+/// for the extension's lifetime; the host never frees `user_data`.
 #[derive(Clone)]
 pub struct RegisteredProvider {
     pub provider_id: String,
     pub base_url: String,
     pub api_style: String,
     pub request_fn: ProviderRequestFn,
-    pub plugin_free_string: FreeStringFn,
+    pub extension_free_string: FreeStringFn,
     pub user_data: *mut std::ffi::c_void,
 }
 
 /// A provider-owned OAuth implementation. `manifest_json` is validated JSON
-/// copied from the plugin; the callback receives action envelopes such as
-/// `{\"action\":\"begin\"}` and returns plugin-owned JSON.
+/// copied from the extension; the callback receives action envelopes such as
+/// `{\"action\":\"begin\"}` and returns extension-owned JSON.
 #[derive(Clone)]
 pub struct RegisteredOAuthProvider {
     /// The owning extension display name, used to scope credentials and
     /// diagnostics. This is host-owned metadata and is not supplied by the
-    /// plugin.
-    pub plugin: String,
+    /// extension.
+    pub extension: String,
     pub manifest_json: String,
     pub request_fn: OAuthRequestFn,
-    pub plugin_free_string: FreeStringFn,
+    pub extension_free_string: FreeStringFn,
     pub user_data: *mut std::ffi::c_void,
 }
 unsafe impl Send for RegisteredOAuthProvider {}
 unsafe impl Sync for RegisteredOAuthProvider {}
-// SAFETY: fn pointers + owned `String`s + an opaque plugin pointer the plugin
+// SAFETY: fn pointers + owned `String`s + an opaque extension pointer the extension
 // warrants is thread-safe; the host never frees `user_data`.
 unsafe impl Send for RegisteredProvider {}
 unsafe impl Sync for RegisteredProvider {}
 
 /// A registered message/markdown/entry renderer (B5c). The interactive TUI
 /// consumes all three kinds through the JSON component adapter. `render_fn` produces a
-/// **plugin-owned** `out` [`StbString`] the host reclaims via
-/// `plugin_free_string`; `user_data` is passed back on every render call. `name`
+/// **extension-owned** `out` [`StbString`] the host reclaims via
+/// `extension_free_string`; `user_data` is passed back on every render call. `name`
 /// is copied from the borrowed `StbStringRef` at registration.
 ///
 /// SAFETY: same as [`RegisteredProvider`].
@@ -221,7 +221,7 @@ pub struct RegisteredRenderer {
     pub name: String,
     pub kind: RegisteredRendererKind,
     pub render_fn: RenderFn,
-    pub plugin_free_string: FreeStringFn,
+    pub extension_free_string: FreeStringFn,
     pub user_data: *mut std::ffi::c_void,
 }
 
@@ -235,7 +235,7 @@ pub enum RegisteredRendererKind {
     Entry,
 }
 // SAFETY: same as [`RegisteredProvider`] — fn pointers + owned `String` + an
-// opaque plugin pointer the plugin warrants is thread-safe.
+// opaque extension pointer the extension warrants is thread-safe.
 unsafe impl Send for RegisteredRenderer {}
 unsafe impl Sync for RegisteredRenderer {}
 
@@ -249,14 +249,14 @@ pub enum RegistryEntry {
 }
 
 // ---------------------------------------------------------------------------
-// P2 — plugin declarations (priority + platforms)
+// P2 — extension declarations (priority + platforms)
 // ---------------------------------------------------------------------------
 
-/// Default dispatch priority for a plugin that declares none. Handlers run
+/// Default dispatch priority for an extension that declares none. Handlers run
 /// smallest-priority-first; ties break by registration order.
 pub const DEFAULT_PRIORITY: i32 = 100;
 
-/// The host platform, as matched against a plugin's declared `platforms`.
+/// The host platform, as matched against an extension's declared `platforms`.
 /// Platform set used by extension capability declarations.
 pub fn current_platform() -> &'static str {
     if cfg!(target_os = "android") {
@@ -290,7 +290,7 @@ pub fn platform_allows(platforms: &[String]) -> bool {
 // ExtensionRegistry — accumulated during register, then snapshotted
 // ---------------------------------------------------------------------------
 
-/// Accumulates registrations from one or more plugins' `kiqi_plugin_register`
+/// Accumulates registrations from one or more extensions' `kiqi_extension_register`
 /// calls. Held by [`HostApi`](crate::HostApi) during register; the host then
 /// [`take_registry`](crate::HostApi::take_registry) and builds a snapshot.
 ///
@@ -301,8 +301,8 @@ pub struct ExtensionRegistry {
     tools: Vec<ExtensionTool>,
     commands: Vec<RegisteredCommand>,
     flags: Vec<RegisteredFlag>,
-    /// Keyboard shortcuts declared by plugins (first-wins by `key`). Recorded
-    /// so the TUI can route a key press/release to the owning plugin's `Input`
+    /// Keyboard shortcuts declared by extensions (first-wins by `key`). Recorded
+    /// so the TUI can route a key press/release to the owning extension's `Input`
     /// event handler instead of consuming it as editor text.
     shortcuts: Vec<RegisteredShortcut>,
     /// `handlers[tag as usize]` — all handlers subscribed to that tag.
@@ -313,7 +313,7 @@ pub struct ExtensionRegistry {
     /// signature and is never dispatched through the fire-and-forget event path.
     resources_discover: Vec<ResourcesDiscoverHandler>,
     /// `before_agent_start` system-prompt transformers. A flat list for the same
-    /// reason as `resources_discover`: this is an out-param handler (the plugin
+    /// reason as `resources_discover`: this is an out-param handler (the extension
     /// returns the prompt to install), not a fire-and-forget event subscription,
     /// so it is not indexed by a tag. Chained in registration order.
     before_agent_start: Vec<BeforeAgentStartHandler>,
@@ -327,16 +327,16 @@ pub struct ExtensionRegistry {
     /// Registered renderers (B5c), split by kind at registration. First-wins on
     /// `(kind, name)`. The host records these now; TUI consumption is B5e.
     renderers: Vec<RegisteredRenderer>,
-    /// P2: the registering plugin's declared dispatch priority. Stamped onto
+    /// P2: the registering extension's declared dispatch priority. Stamped onto
     /// every handler it registers; a later `declare` also retro-updates them.
     priority: i32,
-    /// P2: the registering plugin's declared platforms (empty = all).
+    /// P2: the registering extension's declared platforms (empty = all).
     platforms: Vec<String>,
-    /// A plugin's `{"ownsStdio":true}` claim: this host process's stdin/stdout
-    /// belong to the plugin (an ACP/MCP-style stdio server), so the host must
+    /// An extension's `{"ownsStdio":true}` claim: this host process's stdin/stdout
+    /// belong to the extension (an ACP/MCP-style stdio server), so the host must
     /// defer `read_piped_stdin` until after extension load and run the headless
     /// `Rpc` lifecycle instead of Print/TUI. Monotonic across `absorb` (any
-    /// claiming plugin projects `true`). The scoped ActionBridge arbitrates
+    /// claiming extension projects `true`). The scoped ActionBridge arbitrates
     /// exclusivity before registries are merged. Default `false`.
     owns_stdio: bool,
     /// Shared staleness flag. `true` while the session owning this registry is
@@ -375,12 +375,12 @@ impl ExtensionRegistry {
 
     /// Register a tool. Returns `true` if a **prior** tool of the same name was
     /// kept (first-wins: the new one is dropped). Returns `false` on insert.
-    pub fn register_tool(&mut self, tool: Tool, handle: PluginToolHandle) -> bool {
+    pub fn register_tool(&mut self, tool: Tool, handle: ExtensionToolHandle) -> bool {
         if self.tools.iter().any(|t| t.tool.name == tool.name) {
             // First-wins: keep the prior, drop the new handle. We must destroy
             // the dropped handle's allocation? No — `handle` is just fn pointers
             // + a FreeStringFn (all Copy, no allocation). Dropping it is a no-op.
-            // A real per-tool plugin allocation only exists after `execute`
+            // A real per-tool extension allocation only exists after `execute`
             // produces a StepHandle; we never call execute for a dropped
             // registration, so nothing to free.
             return true;
@@ -423,38 +423,43 @@ impl ExtensionRegistry {
     /// earlier extension already claimed the same key.
     ///
     /// Recording a shortcut does **not** bind the key to a callback: the owning
-    /// plugin receives presses/releases through its `Input` event handler and
+    /// extension receives presses/releases through its `Input` event handler and
     /// decides what to do. The host uses this list only to know which keys are
     /// claimed, so it can route them to extensions instead of the editor.
-    pub fn register_shortcut(&mut self, plugin: String, key: String, description: String) -> bool {
+    pub fn register_shortcut(
+        &mut self,
+        extension: String,
+        key: String,
+        description: String,
+    ) -> bool {
         if self.shortcuts.iter().any(|s| s.key == key) {
             return true;
         }
         self.shortcuts.push(RegisteredShortcut {
             key,
             description,
-            plugin,
+            extension,
         });
         false
     }
 
     /// Subscribe a handler to `tag`. Multiple handlers per tag are kept
-    /// (fan-out on dispatch). Always inserts; returns `false`. `plugin` is the
+    /// (fan-out on dispatch). Always inserts; returns `false`. `extension` is the
     /// owning extension's display name (host-side only, for diagnostics).
     pub fn register_event_handler(
         &mut self,
-        plugin: String,
+        extension: String,
         tag: EventTag,
         handler: EventHandlerFn,
         user_data: *mut std::ffi::c_void,
     ) -> bool {
         let idx = tag as usize;
         if idx < EVENT_TAG_COUNT {
-            // Stamp the registering plugin's current declaration (P2). A plugin
+            // Stamp the registering extension's current declaration (P2). An extension
             // typically declares BEFORE registering handlers; `apply_declaration`
             // also retro-updates any handler registered before the declare call.
             self.handlers[idx].push(RegisteredHandler {
-                plugin,
+                extension,
                 priority: self.priority,
                 platforms: self.platforms.clone(),
                 handler,
@@ -464,7 +469,7 @@ impl ExtensionRegistry {
         false
     }
 
-    /// Apply a plugin's declaration parsed from the unified C ABI `declare` JSON
+    /// Apply an extension's declaration parsed from the unified C ABI `declare` JSON
     /// (`{"priority":60,"platforms":["linux","macos"]}`). Unknown keys are
     /// ignored; malformed values leave the corresponding field unchanged.
     /// Retro-updates any handlers already registered (so declare order doesn't
@@ -518,8 +523,8 @@ impl ExtensionRegistry {
                     .collect::<Vec<String>>()
             });
         if let Some(owns) = value.get("ownsStdio").and_then(|v| v.as_bool()) {
-            // A claim, not a toggle: once a plugin owns stdio it stays claimed
-            // (and `absorb` ORs it across plugins).
+            // A claim, not a toggle: once an extension owns stdio it stays claimed
+            // (and `absorb` ORs it across extensions).
             self.owns_stdio = self.owns_stdio || owns;
         }
         self.apply_declaration(priority, platforms);
@@ -531,12 +536,12 @@ impl ExtensionRegistry {
     pub fn register_resources_discover(
         &mut self,
         handler: ResourcesDiscoverFn,
-        plugin_free_string: FreeStringFn,
+        extension_free_string: FreeStringFn,
         user_data: *mut std::ffi::c_void,
     ) -> bool {
         self.resources_discover.push(ResourcesDiscoverHandler {
             handler,
-            plugin_free_string,
+            extension_free_string,
             user_data,
         });
         false
@@ -549,12 +554,12 @@ impl ExtensionRegistry {
     pub fn register_before_agent_start(
         &mut self,
         handler: BeforeAgentStartFn,
-        plugin_free_string: FreeStringFn,
+        extension_free_string: FreeStringFn,
         user_data: *mut std::ffi::c_void,
     ) -> bool {
         self.before_agent_start.push(BeforeAgentStartHandler {
             handler,
-            plugin_free_string,
+            extension_free_string,
             user_data,
         });
         false
@@ -579,10 +584,10 @@ impl ExtensionRegistry {
     /// JSON object with a non-empty string `id`; malformed manifests are
     /// rejected. Returns `true` when an existing provider won.
     ///
-    /// An id starting with `plugin:` is rejected too: that prefix is the
-    /// plugin credential namespace in the host's `auth.json`
-    /// (`plugin:<install-id>:<provider>`), and a generic OAuth provider under
-    /// it would put user-owned login credentials inside a plugin's namespace.
+    /// An id starting with `extension:` is rejected too: that prefix is the
+    /// extension credential namespace in the host's `auth.json`
+    /// (`extension:<install-id>:<provider>`), and a generic OAuth provider under
+    /// it would put user-owned login credentials inside an extension's namespace.
     pub fn register_oauth_provider(&mut self, provider: RegisteredOAuthProvider) -> bool {
         let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&provider.manifest_json)
         else {
@@ -592,7 +597,7 @@ impl ExtensionRegistry {
             return true;
         };
         if id.trim().is_empty()
-            || id.starts_with("plugin:")
+            || id.starts_with("extension:")
             || self.oauth_providers.iter().any(|p| {
                 serde_json::from_str::<serde_json::Value>(&p.manifest_json)
                     .ok()
@@ -671,17 +676,17 @@ impl ExtensionRegistry {
         self.active.load(Ordering::SeqCst)
     }
 
-    /// P2: the plugin's declared dispatch priority (default [`DEFAULT_PRIORITY`]).
+    /// P2: the extension's declared dispatch priority (default [`DEFAULT_PRIORITY`]).
     pub fn declared_priority(&self) -> i32 {
         self.priority
     }
 
-    /// P2: the plugin's declared platforms (empty = all).
+    /// P2: the extension's declared platforms (empty = all).
     pub fn declared_platforms(&self) -> &[String] {
         &self.platforms
     }
 
-    /// Whether this plugin claimed ownership of the host process's stdio
+    /// Whether this extension claimed ownership of the host process's stdio
     /// (`declare {"ownsStdio":true}`). Default `false`.
     pub fn declared_owns_stdio(&self) -> bool {
         self.owns_stdio
@@ -690,7 +695,7 @@ impl ExtensionRegistry {
     /// Absorb another registry's registrations into this one, first-wins on
     /// name (tools/commands) and appending (event handlers). Used by
     /// [`load_dir`](crate::loader::load_dir)/`merge_registries` to fold
-    /// per-plugin registries into one session registry in load order. Consumes
+    /// per-extension registries into one session registry in load order. Consumes
     /// `other` (its `active` flag is discarded — the session registry's flag
     /// wins, since it owns session lifetime).
     pub(crate) fn absorb(&mut self, mut other: ExtensionRegistry) {
@@ -777,7 +782,7 @@ impl ExtensionRegistry {
             }
             self.renderers.push(r);
         }
-        // stdio ownership is a claim: any claiming plugin makes the merged
+        // stdio ownership is a claim: any claiming extension makes the merged
         // session own stdio. The live bridge has already checked the exclusive
         // owner; this flag projects that claim into the immutable snapshot.
         self.owns_stdio |= other.owns_stdio;
@@ -790,7 +795,7 @@ impl ExtensionRegistry {
 
 /// An immutable snapshot of an [`ExtensionRegistry`] the host session keeps for
 /// its lifetime. Tools are wrapped in [`ExtensionTool`] so the host can build
-/// [`PluginToolAdapter`](crate::PluginToolAdapter)s; event handlers are grouped
+/// [`ExtensionToolAdapter`](crate::ExtensionToolAdapter)s; event handlers are grouped
 /// by tag for the [`ExtensionEmitter`](crate::ExtensionEmitter) to fan out.
 ///
 /// The `active` flag is shared with the source registry, so invalidating the
@@ -806,7 +811,7 @@ pub struct RegistrySnapshot {
     providers: Vec<RegisteredProvider>,
     oauth_providers: Vec<RegisteredOAuthProvider>,
     renderers: Vec<RegisteredRenderer>,
-    /// A plugin's `{"ownsStdio":true}` claim (merged OR across plugins). The
+    /// An extension's `{"ownsStdio":true}` claim (merged OR across extensions). The
     /// host read this after loading a session to defer `read_piped_stdin` and
     /// run the headless `Rpc` lifecycle. See
     /// [`ExtensionRegistry::declared_owns_stdio`]. Nothing can set it now that
@@ -850,7 +855,7 @@ impl RegistrySnapshot {
             && self.renderers.is_empty()
     }
 
-    /// Whether any loaded plugin claimed ownership of the host process's stdio
+    /// Whether any loaded extension claimed ownership of the host process's stdio
     /// (`declare {"ownsStdio":true}`). The host uses this to defer
     /// `read_piped_stdin` and run the headless `Rpc` lifecycle.
     ///
@@ -883,13 +888,13 @@ impl RegistrySnapshot {
     }
 
     /// The `resources_discover` handlers, registration order (B5b). Empty when
-    /// no plugin registered a discovery handler.
+    /// no extension registered a discovery handler.
     pub fn resources_discover(&self) -> &[ResourcesDiscoverHandler] {
         &self.resources_discover
     }
 
     /// The `before_agent_start` system-prompt transformers, registration order.
-    /// Empty when no plugin asked to transform the prompt — the common case, and
+    /// Empty when no extension asked to transform the prompt — the common case, and
     /// the one callers treat as "leave the prompt alone".
     pub fn before_agent_start(&self) -> &[BeforeAgentStartHandler] {
         &self.before_agent_start
@@ -897,7 +902,7 @@ impl RegistrySnapshot {
 
     /// The registered custom providers (B5c), registration order. The host wraps
     /// each in a [`PluggableProvider`](crate::PluggableProvider). Empty when no
-    /// plugin registered a provider.
+    /// extension registered a provider.
     pub fn providers(&self) -> &[RegisteredProvider] {
         &self.providers
     }
@@ -1008,7 +1013,7 @@ mod tests {
         let snap = first.snapshot();
         assert_eq!(snap.shortcuts().len(), 3);
         assert_eq!(snap.shortcuts()[0].key, "space");
-        assert_eq!(snap.shortcuts()[0].plugin, "voice");
+        assert_eq!(snap.shortcuts()[0].extension, "voice");
         assert_eq!(snap.shortcuts()[1].key, "enter");
         assert_eq!(snap.shortcuts()[2].key, "f1");
         // The claimed-key query the TUI routes on.
@@ -1035,7 +1040,10 @@ mod tests {
         assert_eq!(flags[1].name, "port");
     }
 
-    extern "C" fn noop_handler(_ev: crate::StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
+    extern "C" fn noop_handler(
+        _ev: crate::StableExtensionEvent,
+        _ud: *mut std::ffi::c_void,
+    ) -> i32 {
         0
     }
 
@@ -1047,8 +1055,8 @@ mod tests {
         &snap.handlers_for(tag)[i]
     }
 
-    /// Two plugins declaring different priorities: the merged snapshot orders
-    /// the lower-priority plugin's handler first (smaller runs first).
+    /// Two extensions declaring different priorities: the merged snapshot orders
+    /// the lower-priority extension's handler first (smaller runs first).
     #[test]
     fn priority_orders_handlers_after_merge() {
         let tag = EventTag::SessionStart;
@@ -1066,8 +1074,8 @@ mod tests {
         session.absorb(late);
         session.absorb(early);
         let snap = session.snapshot();
-        assert_eq!(handler_of(&snap, tag, 0).plugin, "early");
-        assert_eq!(handler_of(&snap, tag, 1).plugin, "late");
+        assert_eq!(handler_of(&snap, tag, 0).extension, "early");
+        assert_eq!(handler_of(&snap, tag, 1).extension, "late");
     }
 
     /// Equal priorities keep registration order (stable sort).
@@ -1078,8 +1086,8 @@ mod tests {
         reg.register_event_handler("a".into(), tag, noop_handler, std::ptr::null_mut());
         reg.register_event_handler("b".into(), tag, noop_handler, std::ptr::null_mut());
         let snap = reg.snapshot();
-        assert_eq!(handler_of(&snap, tag, 0).plugin, "a");
-        assert_eq!(handler_of(&snap, tag, 1).plugin, "b");
+        assert_eq!(handler_of(&snap, tag, 0).extension, "a");
+        assert_eq!(handler_of(&snap, tag, 1).extension, "b");
     }
 
     /// A declaration applied AFTER handlers exist retro-updates them (declare
@@ -1130,7 +1138,7 @@ mod tests {
         assert!(reg.apply_declaration_json(r#"{"ownsStdio":false}"#));
         assert!(reg.declared_owns_stdio());
 
-        // `absorb` ORs ownership across plugins (any claiming plugin wins).
+        // `absorb` ORs ownership across extensions (any claiming extension wins).
         let mut plain = ExtensionRegistry::new();
         let mut claiming = ExtensionRegistry::new();
         assert!(claiming.apply_declaration_json(r#"{"ownsStdio":true}"#));
@@ -1164,10 +1172,10 @@ mod tests {
     fn oauth_manifest_registers_and_deduplicates() {
         let mut reg = ExtensionRegistry::new();
         let make = |manifest: &str| RegisteredOAuthProvider {
-            plugin: "test-plugin".to_string(),
+            extension: "test-extension".to_string(),
             manifest_json: manifest.to_string(),
             request_fn: noop_oauth,
-            plugin_free_string: noop_free,
+            extension_free_string: noop_free,
             user_data: std::ptr::null_mut(),
         };
         assert!(!reg.register_oauth_provider(make(r#"{"id":"acme","displayName":"Acme"}"#)));
@@ -1176,25 +1184,25 @@ mod tests {
         assert_eq!(reg.snapshot().oauth_providers().len(), 1);
     }
 
-    /// The `plugin:` prefix is the host's namespaced credential key; a generic
+    /// The `extension:` prefix is the host's namespaced credential key; a generic
     /// (cdylib) OAuth provider may never register under it, or `ki auth login`
-    /// would file user-owned tokens inside a plugin's namespace.
+    /// would file user-owned tokens inside an extension's namespace.
     #[test]
-    fn oauth_manifest_refuses_the_reserved_plugin_prefix() {
+    fn oauth_manifest_refuses_the_reserved_extension_prefix() {
         let mut reg = ExtensionRegistry::new();
         let make = |manifest: &str| RegisteredOAuthProvider {
-            plugin: "test-plugin".to_string(),
+            extension: "test-extension".to_string(),
             manifest_json: manifest.to_string(),
             request_fn: noop_oauth,
-            plugin_free_string: noop_free,
+            extension_free_string: noop_free,
             user_data: std::ptr::null_mut(),
         };
-        assert!(reg.register_oauth_provider(make(r#"{"id":"plugin:evil:acme"}"#)));
-        assert!(reg.register_oauth_provider(make(r#"{"id":"plugin:x"}"#)));
+        assert!(reg.register_oauth_provider(make(r#"{"id":"extension:evil:acme"}"#)));
+        assert!(reg.register_oauth_provider(make(r#"{"id":"extension:x"}"#)));
         assert!(reg.snapshot().oauth_providers().is_empty());
         // An id that merely contains the prefix is fine; only a leading one
         // is reserved.
-        assert!(!reg.register_oauth_provider(make(r#"{"id":"acme:plugin:x"}"#)));
+        assert!(!reg.register_oauth_provider(make(r#"{"id":"acme:extension:x"}"#)));
         assert_eq!(reg.snapshot().oauth_providers().len(), 1);
     }
 }

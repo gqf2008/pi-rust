@@ -50,7 +50,7 @@
           <p data-i18n="packages.heroBody">核心 crate 从源码用 Cargo 接入项目；一方能力以 wasm 组件的形式由 ki CLI 安装。这里列出的每个 package 都给出它真正的安装命令，没有一条需要先有发布版本。</p>
           <div class="packages-install-grid">
             <div><div class="command-label" data-i18n="packages.coreCrate">核心 crate</div><div class="packages-install"><span class="command-prompt">$</span><code>cargo install --path crates/kiqi-cli</code><button type="button" data-copy-command data-i18n-attr="aria-label|action.copy">⧉</button></div></div>
-            <div><div class="command-label" data-i18n="packages.extension">扩展包</div><div class="packages-install"><span class="command-prompt">$</span><code>ki insmod --build plugins/wasm/kiqi-ask-user-guest</code><button type="button" data-copy-command data-i18n-attr="aria-label|action.copy">⧉</button></div></div>
+            <div><div class="command-label" data-i18n="packages.extension">扩展包</div><div class="packages-install"><span class="command-prompt">$</span><code>ki insmod --build extensions/wasm/kiqi-ask-user</code><button type="button" data-copy-command data-i18n-attr="aria-label|action.copy">⧉</button></div></div>
           </div>
           <p class="packages-install-note" data-i18n="packages.installNote">这些 crate 全部 `publish = false`，crates.io 上没有同名包：核心 crate 与第三方 cdylib 从源码路径安装，一方能力用 `ki insmod --build` 编译 wasm guest。</p>
         </section>

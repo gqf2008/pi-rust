@@ -11,7 +11,7 @@
 //!   `agent_dir()<sub>` discovery with project-wins dedupe via
 //!   [`crate::resource_dirs`]; SYSTEM.md/APPEND_SYSTEM.md project-wins
 //!   precedence). **Extension `resources_discover` (B5b) feeds the SAME loaders:
-//!   a plugin's discovered skill/prompt paths merge with the static dirs and
+//!   an extension's discovered skill/prompt paths merge with the static dirs and
 //!   re-run through `load_skills`/`load_prompt_templates` (individual `.md` files
 //!   load too — `load_skills` accepts both dirs and files). Package themes are
 //!   parsed by the TUI when selected via settings or `--theme`.**
@@ -167,9 +167,9 @@ pub fn default_system_prompt_for_tools(
     // "Available tools:" heading reads as a formatting bug.
     //
     // The resulting block is bigger than the old hard-coded one — measured 2014 B
-    // versus ~330 B on a session with the plugin and MCP tools installed — and that is
+    // versus ~330 B on a session with the extension and MCP tools installed — and that is
     // the point: the fixed text named five built-ins and silently omitted the other
-    // ~39 tools the model could actually call (plugins, codegraph, walgit MCP…).
+    // ~39 tools the model could actually call (extensions, codegraph, walgit MCP…).
     // Naming them costs tokens; a model that does not know they exist costs turns.
     // If this ever needs trimming, drop *names* per tool family (or reuse the
     // `<available_skills>` precedent of listing only what routing needs) rather than
@@ -302,7 +302,7 @@ pub fn default_session_dir(cwd: &Path) -> PathBuf {
 /// responses; the non-interactive modes simply drop it.
 /// Returns the harness, the live `AgentEvent` broadcast receiver, and a
 /// [`ReloadContext`] the interactive TUI holds to drive `/reload` (and a
-/// plugin's `runtime_action(Reload)` via the mailbox). Non-interactive modes
+/// extension's `runtime_action(Reload)` via the mailbox). Non-interactive modes
 /// drop the context (no `/reload` surface in print/json mode).
 pub async fn build(
     resolved: &ResolvedModel,
@@ -343,7 +343,7 @@ pub async fn build_with_selection(
     BuildError,
 > {
     let cwd_str = cwd.to_string_lossy().to_string();
-    // Plugin tools get the session's identity injected into every call's
+    // Extension tools get the session's identity injected into every call's
     // arguments (see `kiqi_host::ToolCallContext`). It is created here,
     // before the tools are built, and completed with the session id below once
     // the session exists — the tool set has to exist before the harness does.
@@ -362,15 +362,15 @@ pub async fn build_with_selection(
 
     // ---- B5a: build the action bridge BEFORE extension load ----
     // Extensions load before `AgentHarness::create` (extensions provide tools the
-    // harness is built with), but a plugin stores the `ActionBridge`'s raw
+    // harness is built with), but an extension stores the `ActionBridge`'s raw
     // `user_data` pointer during `register` and it must remain valid + the host
     // must be ready for the whole session. So:
     //  1. Capture the current tokio `Handle` (the async main-thread runtime) —
     //     the bridge spawns dispatch from any thread via `Handle::spawn`.
     //  2. Build an *empty* `HarnessActionHost` (its harness cell is unset; no
-    //     plugin can call a runtime action before the harness runs).
+    //     extension can call a runtime action before the harness runs).
     //  3. Wrap it as `Arc<dyn RuntimeActionHost>` + `ActionBridge`, thread
-    //     `Some(bridge)` into `load_extensions` so every plugin's `user_data`
+    //     `Some(bridge)` into `load_extensions` so every extension's `user_data`
     //     points at this bridge.
     //  4. After `AgentHarness::create` succeeds, call `set_harness(&cell, …)` to
     //     fill the host cell the bridge recovers on the first action call.
@@ -387,15 +387,15 @@ pub async fn build_with_selection(
         Arc::clone(&signal_host),
     );
     let host_arc: Arc<dyn kiqi_host::RuntimeActionHost> = Arc::new(action_host);
-    // Kept for the compiled-plugin capability adapter: `host_arc` itself is
+    // Kept for the compiled-extension capability adapter: `host_arc` itself is
     // moved into the action bridge below.
-    let plugin_caps_host = Arc::clone(&host_arc);
+    let extension_caps_host = Arc::clone(&host_arc);
     // `runtime` is reused below (B5c: `PluggableProvider` needs a captured
     // `Handle` to `spawn_blocking` the sync `ProviderRequestFn`), so clone here.
     //
     // B5d: build the initial bridge WITH a reload callback backed by a session-
     // long `ReloadMailbox` (cloned into `ReloadContext` + handed to the TUI). A
-    // plugin's `runtime_action(Reload)` then signals the TUI's main loop instead
+    // extension's `runtime_action(Reload)` then signals the TUI's main loop instead
     // of hitting the "not configured" fallback. The same mailbox is reused on
     // `/reload` (the fresh bridge carries `ctx.mailbox`), so the bridge always
     // points at the one TUI-installed sender across reloads.
@@ -404,20 +404,20 @@ pub async fn build_with_selection(
     // initial bridge carries it and the TUI attaches itself once it starts
     // polling; a headless run leaves it detached so `ask_user` fails loudly
     // instead of fabricating a user answer. The SAME mailbox is reused across
-    // `/reload` so in-flight prompts + TUI attachment survive a plugin swap.
+    // `/reload` so in-flight prompts + TUI attachment survive an extension swap.
     let ui_dialog_mailbox = kiqi_host::UiDialogMailbox::new();
     // Session-scoped extension status registry (runtime action 18 / `SetStatus`).
-    // The bridge lets plugins write; the TUI polls the revision and repaints its
-    // footer. Reused across `/reload` so a plugin's status survives the swap.
+    // The bridge lets extensions write; the TUI polls the revision and repaints its
+    // footer. Reused across `/reload` so an extension's status survives the swap.
     let ext_status_mailbox = kiqi_host::ExtensionStatusMailbox::new();
     // Session-scoped editor-text queue (runtime action 19 / `SetEditorText`).
-    // The bridge lets a plugin drop a draft into the prompt editor; the TUI
+    // The bridge lets an extension drop a draft into the prompt editor; the TUI
     // drains it each tick. Reused across `/reload` so a pending transcription
-    // survives a plugin swap.
+    // survives an extension swap.
     let editor_text_mailbox = kiqi_host::EditorTextMailbox::new();
-    // Kept for compiled plugins: their UI capabilities are served by these
+    // Kept for compiled extensions: their UI capabilities are served by these
     // mailboxes, which the bridge also clones.
-    let plugin_ui = std::sync::Arc::new(crate::plugins::UiCaps::new(
+    let extension_ui = std::sync::Arc::new(crate::extensions::UiCaps::new(
         ui_dialog_mailbox.clone(),
         ext_status_mailbox.clone(),
         editor_text_mailbox.clone(),
@@ -443,12 +443,12 @@ pub async fn build_with_selection(
     let mut tools = build_tools(&ctx, args, cwd, &signal_host);
 
     // ---- Extensions (Part B2) ----
-    // Load cdylib plugins from the resolved extension dirs, merge their tools
+    // Load cdylib extensions from the resolved extension dirs, merge their tools
     // into the built-in set (extension overrides same-named built-in; first-
-    // extension-wins across plugins; explicit `--tools`/`--exclude-tools` still
+    // extension-wins across extensions; explicit `--tools`/`--exclude-tools` still
     // apply to the merged set), and keep the loaded `Library` handles alive for
     // the harness lifetime via the returned session guard. `--no-extensions`
-    // skips discovery entirely (no dirs scanned, no plugins loaded).
+    // skips discovery entirely (no dirs scanned, no extensions loaded).
     //
     // P6: the cdylib loader is gone — the extension session is always the
     // empty registry, which keeps the dispatch funnels (compiled/wasm sink)
@@ -456,16 +456,16 @@ pub async fn build_with_selection(
     let extension_session = ExtensionSession::none();
     // The same capabilities serve tools and events; install the event sink
     // before anything can dispatch (the first `SessionStart` is still ahead).
-    let plugin_caps = crate::plugins::owned_caps(
-        std::sync::Arc::clone(&plugin_caps_host),
+    let extension_caps = crate::extensions::owned_caps(
+        std::sync::Arc::clone(&extension_caps_host),
         Some(runtime.clone()),
-        Some(std::sync::Arc::clone(&plugin_ui)),
+        Some(std::sync::Arc::clone(&extension_ui)),
     );
-    crate::plugins::install_compiled_event_sink(plugin_caps.clone());
-    crate::plugins::merge_compiled_plugin_tools(
+    crate::extensions::install_compiled_event_sink(extension_caps.clone());
+    crate::extensions::merge_compiled_extension_tools(
         &mut tools,
-        &crate::plugins::compiled_plugin_hosts(),
-        &plugin_caps,
+        &crate::extensions::compiled_extension_hosts(),
+        &extension_caps,
         &|name| tool_name_allowed(name, args),
     );
 
@@ -474,16 +474,16 @@ pub async fn build_with_selection(
     // spawned: `walgit mcp` inherits KI_AGENT_ID and reports it as
     // `self_session`, which the collab echo suppression compares against.
     let session = build_session(&selection, &cwd_str).await?;
-    // Plugin tools now know which session they serve: `todo` and friends key
+    // Extension tools now know which session they serve: `todo` and friends key
     // their per-session state off it. A session without an id (ephemeral) leaves
-    // the field unset and a plugin is expected to fall back to project scope.
+    // the field unset and an extension is expected to fall back to project scope.
     if let Ok(metadata) = session.get_metadata().await {
         publish_session_identity(&tool_context, &metadata.id);
     }
 
     // ---- MCP tools (host-level capability) ----
     // Injected LAST, so an MCP tool can never silently shadow a built-in,
-    // extension or plugin tool: a name collision is skipped with a warning.
+    // extension or extension tool: a name collision is skipped with a warning.
     // `--tools`/`--exclude-tools`/`--no-tools` gate these exactly as they gate
     // every other tool. A server that fails to start is skipped inside the
     // manager (loudly) and simply contributes no tools — one bad server must not
@@ -595,7 +595,7 @@ pub async fn build_with_selection(
     // ---- Resource discovery (skills + prompt-templates + context-files) ----
     // The env is OS-backed, rooted at cwd. Each `--no-*` flag suppresses its
     // channel independently (pi parity). Skills/prompts load project→global,
-    // explicit/plugin paths, then static packages; dedupe first-wins-by-name
+    // explicit/extension paths, then static packages; dedupe first-wins-by-name
     // keeps project and user resources ahead of packages. Context files walk
     // global→ancestor(cwd→root), deepest-last (pi parity).
     //
@@ -607,33 +607,33 @@ pub async fn build_with_selection(
 
     // ---- Package resources (wasm `resources.json` + `resources/`) ----
     // The host verifies each package (kinds, caps, digests, no symlinks) and
-    // yields dirs only for granted plugins. They are appended AFTER every
+    // yields dirs only for granted extensions. They are appended AFTER every
     // static/explicit/discovered path below: the loaders dedupe
     // first-wins-by-name, so a built-in or project resource always wins and a
-    // plugin cannot shadow it. A collision still surfaces as a
+    // extension cannot shadow it. A collision still surfaces as a
     // `ResourceDiagnostic`. `--no-skills`/`--no-prompt-templates` gate the two
     // channels independently, exactly as they gate the static dirs.
-    let plugin_resources = agent_dir
+    let extension_resources = agent_dir
         .as_deref()
-        .map(crate::plugins::granted_package_resource_dirs)
+        .map(crate::extensions::granted_package_resource_dirs)
         .unwrap_or_default();
-    for diagnostic in &plugin_resources.diagnostics {
-        eprintln!("warning: plugin resources: {diagnostic}");
+    for diagnostic in &extension_resources.diagnostics {
+        eprintln!("warning: extension resources: {diagnostic}");
     }
 
     // ---- B5b: extension resources_discover ----
-    // If any plugin registered a `resources_discover` handler, fan the event out
-    // (reason "startup") and collect skill/prompt/theme paths. These plugin-
+    // If any extension registered a `resources_discover` handler, fan the event out
+    // (reason "startup") and collect skill/prompt/theme paths. These extension-
     // contributed paths merge WITH the static Part-A dirs (project `.ki/skills`
     // and `.agents/skills`, `agent_dir/skills` and `~/.agents/skills`, plus any
     // configured dirs — see `resource_dirs::skill_dirs`) and the loaders re-run
     // over the union — the
-    // coherence point: a plugin's discovered skills land through the SAME loaders
+    // coherence point: an extension's discovered skills land through the SAME loaders
     // as static skills. Static dirs load FIRST so project skills keep winning name
-    // collisions (a plugin must not shadow a project skill of the same name —
+    // collisions (an extension must not shadow a project skill of the same name —
     // mirrors pi `extendResources` running AFTER the default load's first-wins
     // map). `load_skills` now accepts both dirs and individual `.md` files, so a
-    // plugin returning bare `SKILL.md` paths loads them (the gap this closes).
+    // extension returning bare `SKILL.md` paths loads them (the gap this closes).
     // Theme paths are available to the TUI through the package resource list;
     // skill/prompt loaders are the only resources needed by the harness here.
     // A `--no-*` flag suppresses its channel for BOTH static and discovered paths.
@@ -656,7 +656,7 @@ pub async fn build_with_selection(
         dirs.extend(args.skill.iter().cloned());
         dirs.extend(discovered.skill_paths.iter().map(PathBuf::from));
         // LAST: first-wins-by-name means a built-in/project skill wins.
-        dirs.extend(plugin_resources.skills.iter().cloned());
+        dirs.extend(extension_resources.skills.iter().cloned());
         let result = load_skills_with_precedence(&env_dyn, &dirs).await;
         skills = result.skills;
         skill_diags = result.diagnostics;
@@ -677,7 +677,7 @@ pub async fn build_with_selection(
         dirs.extend(args.prompt_template.iter().cloned());
         dirs.extend(discovered.prompt_paths.iter().map(PathBuf::from));
         // LAST: first-wins-by-name means a built-in/project prompt wins.
-        dirs.extend(plugin_resources.prompts.iter().cloned());
+        dirs.extend(extension_resources.prompts.iter().cloned());
         let result = load_prompt_templates_with_precedence(&env_dyn, &dirs).await;
         prompt_templates = result.prompt_templates;
         prompt_diags = result.diagnostics;
@@ -711,11 +711,11 @@ pub async fn build_with_selection(
         format_project_context(&files)
     };
 
-    // A plugin cannot shadow a built-in, but the attempt is worth saying out
+    // An extension cannot shadow a built-in, but the attempt is worth saying out
     // loud: these collisions are not behind `--verbose` like the rest.
     for diagnostic in &resource_diags {
         if let kiqi_harness::diagnostics::ResourceDiagnostic::Collision(collision) = diagnostic {
-            if plugin_resources.contains_path(&collision.loser_path) {
+            if extension_resources.contains_path(&collision.loser_path) {
                 eprintln!(
                     "warning: {} name \"{}\" collision: keeping {} (shadowed {})",
                     collision.resource_type.as_str(),
@@ -745,11 +745,11 @@ pub async fn build_with_selection(
                 d.message
             );
         }
-        // Structured collisions: make the winner/loser explicit. Plugin
+        // Structured collisions: make the winner/loser explicit. Extension
         // collisions were already printed above (visible without `--verbose`).
         for d in &resource_diags {
             if let kiqi_harness::diagnostics::ResourceDiagnostic::Collision(c) = d {
-                if plugin_resources.contains_path(&c.loser_path) {
+                if extension_resources.contains_path(&c.loser_path) {
                     continue;
                 }
                 eprintln!(
@@ -833,7 +833,7 @@ pub async fn build_with_selection(
         for t in &prompt_templates {
             eprintln!("    /{}", t.name);
         }
-        // B5b: surface plugin-contributed discovery paths so a smoke can confirm
+        // B5b: surface extension-contributed discovery paths so a smoke can confirm
         // the resources_discover round-trip fed the loaders; package themes are
         // selected by the TUI rather than injected into the harness prompt.
         eprintln!(
@@ -868,9 +868,9 @@ pub async fn build_with_selection(
     // ---- Extensions emitter (Part B3a) ----
     // If extensions loaded + registered any `on()` handlers, wrap the
     // broadcast emitter in a `TeeEmitter` so every `AgentEvent` flows to BOTH
-    // the TUI (via the broadcast receiver above) AND the plugin handlers (via
+    // the TUI (via the broadcast receiver above) AND the extension handlers (via
     // the `ExtensionEmitter`, which translates each `AgentEvent` →
-    // `StablePluginEvent` and fans out to the handlers registered for its tag).
+    // `StableExtensionEvent` and fans out to the handlers registered for its tag).
     // With no extensions the tee degrades to the bare broadcast emitter (a
     // one-child passthrough), so the TUI path is unchanged.
     let emitter: Arc<dyn kiqi_agent::AgentEmitter> = match extension_session.snapshot_arc() {
@@ -899,7 +899,7 @@ pub async fn build_with_selection(
     }
 
     // Share the live session cell with both /reload and the approval hook.
-    // Install the hook even when no plugins loaded yet: a later reload can
+    // Install the hook even when no extensions loaded yet: a later reload can
     // discover the first permission gate.
     let extension_session_cell = Arc::new(Mutex::new(extension_session.clone()));
     let policy_guard = crate::permissions::PolicyGuard::new(cwd.to_path_buf());
@@ -954,7 +954,7 @@ pub async fn build_with_selection(
         drive: DrivingMode::default(),
         session,
         // B5c: inject the resolved gateway provider PLUS one `Arc<dyn Provider>`
-        // per registered extension provider (`PluggableProvider` wraps a plugin's
+        // per registered extension provider (`PluggableProvider` wraps an extension's
         // sync `ProviderRequestFn`). The harness's `build_stream_fn` resolves a
         // provider lazily per call by `models.iter().find(|p| p.id() == model.provider)`,
         // so a catalog model whose `provider` matches an extension provider's id
@@ -974,13 +974,13 @@ pub async fn build_with_selection(
         after_tool_call: Some(policy_guard.after_hook()),
         transform_context: None,
         entry_transforms: Vec::new(),
-        // Extension provider hooks (B4): plugins subscribing to the
+        // Extension provider hooks (B4): extensions subscribing to the
         // BeforeProviderRequest / BeforeProviderHeaders / AfterProviderResponse
         // events observe every provider call (observer semantics — the handler
-        // ABI has no patch channel in v1). The compiled plugins' prompt
+        // ABI has no patch channel in v1). The compiled extensions' prompt
         // transforms are chained onto the same slot; both are skipped cleanly
         // when nothing subscribes.
-        provider_hooks: Some(crate::plugins::compiled_prompt_hooks(
+        provider_hooks: Some(crate::extensions::compiled_prompt_hooks(
             kiqi_host::ExtensionProviderHooks::from_session(&extension_session)
                 .map(|h| Arc::new(h) as Arc<dyn kiqi_ai::ProviderHooks>),
         )),
@@ -989,7 +989,7 @@ pub async fn build_with_selection(
     let harness = match AgentHarness::create(options).await {
         Ok(h) => {
             // Fill the extension action host now that the harness exists
-            // (plugin runtime_action calls can then reach it).
+            // (extension runtime_action calls can then reach it).
             crate::extensions_actions::HarnessActionHost::set_harness(
                 &harness_cell,
                 Arc::new(h.clone()),
@@ -1072,7 +1072,7 @@ pub async fn build_with_selection(
     Ok((harness, event_rx, reload_context))
 }
 
-/// Resolve the current plugin session for each call rather than keeping a
+/// Resolve the current extension session for each call rather than keeping a
 /// startup snapshot. A clone retains its libraries while approval is pending.
 fn extension_tool_call_hook(
     sessions: ExtensionSessionCell,
@@ -1091,7 +1091,7 @@ fn extension_tool_call_hook(
         let params = ctx.args.clone();
         let policy_cwd = cwd.clone();
         Box::pin(async move {
-            // Host policy runs before any plugin. A compiled or cdylib plugin
+            // Host policy runs before any extension. A compiled or cdylib extension
             // must not be able to widen the host's rules, and a local deny
             // needs no approval dialog. The file is re-read per call, so
             // `/reload` and an external edit take effect without a cache. A
@@ -1110,10 +1110,10 @@ fn extension_tool_call_hook(
                     args: None,
                 });
             }
-            // Compiled plugins' gate runs next: it is local and synchronous, so
+            // Compiled extensions' gate runs next: it is local and synchronous, so
             // a veto arrives without opening an approval dialog. A rewrite is
             // carried into the native dispatch so neither path sees stale args.
-            let compiled = crate::plugins::probe_tool_call(&tool_call_id, &tool_name, &params);
+            let compiled = crate::extensions::probe_tool_call(&tool_call_id, &tool_name, &params);
             let replacement = match compiled {
                 Some(kiqi_host::Verdict::Block { reason }) => {
                     return Some(kiqi_agent::BeforeToolCallResult {
@@ -1127,7 +1127,7 @@ fn extension_tool_call_hook(
                 _ => None,
             };
             let effective = replacement.clone().unwrap_or_else(|| params.clone());
-            // A plugin rewrite is applied after the host's first evaluation, so
+            // An extension rewrite is applied after the host's first evaluation, so
             // re-run the host policy on the arguments that will actually be
             // executed. Otherwise a `Replace` could turn a call the policy
             // denies into an allowed one (e.g. rewrite a `git push` command
@@ -1141,7 +1141,7 @@ fn extension_tool_call_hook(
                 ) {
                     return Some(kiqi_agent::BeforeToolCallResult {
                         block: true,
-                        reason: Some(format!("{reason} (after a plugin argument rewrite)")),
+                        reason: Some(format!("{reason} (after an extension argument rewrite)")),
                         terminate: false,
                         args: None,
                     });
@@ -1184,14 +1184,14 @@ fn extension_tool_call_hook(
 // B5d — `/reload`: re-run extension + resource discovery into a LIVE harness
 // ===========================================================================
 //
-// `/reload` (interactive TUI command, or a plugin's `runtime_action(Reload)`)
+// `/reload` (interactive TUI command, or an extension's `runtime_action(Reload)`)
 // re-runs everything `build` did around resources/extensions WITHOUT rebuilding
 // the `AgentHarness` itself (rebuilding would tear down the session/lane/event
 // wiring + the broadcast drain task the TUI owns). Instead it:
 //
 //  1. Builds a fresh `ExtensionSession` (re-load the cdylibs) over the same
 //     dir set, with a FRESH `ActionBridge` (the old one is `invalidate`d so
-//     in-flight plugin→host calls on the old bridge fail fast).
+//     in-flight extension→host calls on the old bridge fail fast).
 //  2. Fans `resources_discover(_, "reload")` over the fresh snapshot.
 //  3. Re-runs the Part-A loaders (skills/prompts/context/SYSTEM.md/
 //     APPEND_SYSTEM.md) with the discovered paths merged in — same precedence
@@ -1208,14 +1208,14 @@ fn extension_tool_call_hook(
 // The reload is a `kiqi-cli` concern (NOT a harness op): `kiqi-extensions`
 // carries only the `ActionBridge` staleness flag + a `ReloadMailbox` `()` signal
 // (no pi-cli `TuiMessage` type — leaf DAG preserved). The TUI owns the mailbox
-// receiver + the actual reload routine; a plugin's
+// receiver + the actual reload routine; an extension's
 // `runtime_action(Reload)` signals the mailbox and returns `Ok(null)`
-// immediately so the calling plugin's cdylib is NOT unmapped while its
+// immediately so the calling extension's cdylib is NOT unmapped while its
 // `runtime_action` frame is still on the stack (the self-unmapping race a
-// synchronous plugin-initiated reload would have).
+// synchronous extension-initiated reload would have).
 //
 // `reload_extension_resources` is the shared routine both `/reload` (TUI) and
-// a plugin's `runtime_action(Reload)` (via the mailbox) drive. It is `pub` so
+// an extension's `runtime_action(Reload)` (via the mailbox) drive. It is `pub` so
 // the TUI's main-loop handler + the mailbox-driven path call the same code.
 
 /// The cell that holds the live `ExtensionSession` across a `/reload`. Cloned
@@ -1226,10 +1226,10 @@ fn extension_tool_call_hook(
 /// placeholder during the swap.
 pub type ExtensionSessionCell = Arc<Mutex<ExtensionSession>>;
 
-/// The cell that holds the live `ActionBridge` across a `/reload`. A plugin
+/// The cell that holds the live `ActionBridge` across a `/reload`. An extension
 /// stores the bridge's raw `user_data` pointer during `register`; on reload the
 /// old bridge is `invalidate`d (in-flight calls fail fast) and the fresh one
-/// `store`d. The fresh session's plugins are handed the fresh bridge pointer.
+/// `store`d. The fresh session's extensions are handed the fresh bridge pointer.
 pub type ActionBridgeCell = Arc<Mutex<Option<Arc<kiqi_host::ActionBridge>>>>;
 
 /// Everything `/reload` needs to rebuild extension + resource state into a live
@@ -1243,9 +1243,9 @@ pub type ActionBridgeCell = Arc<Mutex<Option<Arc<kiqi_host::ActionBridge>>>>;
 pub struct ReloadContext {
     /// The live extension-session cell (swapped on reload).
     pub extension_session: ExtensionSessionCell,
-    /// The session's plugin-tool context (`cwd` + session id), reused — not
+    /// The session's extension-tool context (`cwd` + session id), reused — not
     /// rebuilt — on reload so the rebuilt adapters keep serving the SAME
-    /// session. A reload that made a fresh context would leave every plugin
+    /// session. A reload that made a fresh context would leave every extension
     /// tool without a session id until the next launch.
     pub tool_context: kiqi_host::ToolCallContext,
     /// The live action-bridge cell (swapped + old invalidated on reload).
@@ -1255,7 +1255,7 @@ pub struct ReloadContext {
     pub ext_status: kiqi_host::ExtensionStatusMailbox,
     /// The extension editor-text queue the TUI drains into the prompt editor
     /// (`SetEditorText`, runtime action 19). Lives in the context (not the cell)
-    /// so it survives a bridge swap — exactly like `ext_status`. A voice plugin
+    /// so it survives a bridge swap — exactly like `ext_status`. A voice extension
     /// writes a transcription here as a *draft*; the TUI applies it, starts the
     /// optional auto-send countdown, and submits through the normal path so the
     /// user bubble renders as usual.
@@ -1295,7 +1295,7 @@ pub struct ReloadContext {
     pub broadcast: Arc<dyn kiqi_agent::AgentEmitter>,
     /// The session-long reload mailbox (B5d). Build creates one, installs it on
     /// the initial `ActionBridge` via [`reload_callback_from_mailbox`], and hands
-    /// a clone to the TUI. The TUI installs its `TuiMessage` sender so a plugin's
+    /// a clone to the TUI. The TUI installs its `TuiMessage` sender so an extension's
     /// `runtime_action(Reload)` signals the main loop — the reload routine reuses
     /// THIS mailbox (not a fresh default) when building the fresh bridge, so the
     /// bridge always carries the mailbox the TUI installed across reloads.
@@ -1325,7 +1325,7 @@ pub struct ReloadContext {
 /// `/reload`-swapped session is honored. Each handler runs on a blocking thread
 /// with a per-event timeout ([`kiqi_host::lifecycle_timeout_for`]); a
 /// handler returning [`kiqi_host::EVENT_HANDLER_ABORT`] vetoes the phase
-/// and this returns `Some(reason)`. No-op (`None`) when no plugins loaded, no
+/// and this returns `Some(reason)`. No-op (`None`) when no extensions loaded, no
 /// handler subscribes, or the registry is stale.
 ///
 /// The caller decides what a veto means: a `BeforeTuiStart` veto aborts startup
@@ -1348,7 +1348,7 @@ pub async fn dispatch_session_event_async(
     }
 }
 
-/// Notify plugins the session moved to a different point of its tree — `/tree`
+/// Notify extensions the session moved to a different point of its tree — `/tree`
 /// navigation, `/session` switch, `/import`, `/fork`, `/clone`.
 ///
 /// **No payload**, and the veto is **advisory**: the move has already happened,
@@ -1356,7 +1356,7 @@ pub async fn dispatch_session_event_async(
 /// caller must not undo the navigation). Delivery is the same funnel as every
 /// lifecycle event — native cdylib handlers, the compiled trait face, and wasm
 /// guests in one call — so a wasm todo/plan-mode guest restores from the
-/// swapped-in branch exactly as the compiled plugins do.
+/// swapped-in branch exactly as the compiled extensions do.
 ///
 /// Callers fire this only AFTER the move completed (`navigate_tree` /
 /// `set_active_session` returned), so a handler reading
@@ -1383,7 +1383,7 @@ pub async fn dispatch_session_shutdown_advisory(reload_context: &ReloadContext) 
     // notice would otherwise sit forever).
     flush_mcp_notices_to_stderr(&reload_context.mcp);
     // MCP servers are ki's own child processes: reap them first so no teardown
-    // path can leave a process tree behind, independent of what a plugin does
+    // path can leave a process tree behind, independent of what an extension does
     // below. Idempotent; the `Drop` chain is the backstop.
     reload_context.mcp.shutdown().await;
     if let Some(reason) =
@@ -1393,7 +1393,7 @@ pub async fn dispatch_session_shutdown_advisory(reload_context: &ReloadContext) 
     }
 }
 
-/// Join plugin teardown before unloading modules. A detached timed-out handler
+/// Join extension teardown before unloading modules. A detached timed-out handler
 /// could still execute code in the old DLL, so it cannot safely permit a swap.
 async fn shutdown_extensions_for_reload(
     snapshot: Option<Arc<kiqi_host::RegistrySnapshot>>,
@@ -1453,12 +1453,12 @@ fn append_reload_resource_paths(
 /// Re-run extension + resource discovery and push the rebuilt state into the
 /// live `harness` via the B5d setters. The old `ExtensionSession` +
 /// `ActionBridge` are invalidated + swapped in [`ReloadContext`]'s cells. This
-/// is the single routine both `/reload` (TUI) and a plugin's
+/// is the single routine both `/reload` (TUI) and an extension's
 /// `runtime_action(Reload)` drive (the latter via the mailbox signal).
 ///
 /// Returns a [`ReloadOutcome`] for the transcript. Best-effort: a failure in
-/// one channel (e.g. a plugin that fails to reload) does not abort the others —
-/// the reload completes with whatever loaded, mirroring pi's per-plugin
+/// one channel (e.g. an extension that fails to reload) does not abort the others —
+/// the reload completes with whatever loaded, mirroring pi's per-extension
 /// skip-on-error. A hard failure (e.g. the harness is closed) surfaces as an
 /// error summary.
 pub async fn reload_extension_resources(
@@ -1529,7 +1529,7 @@ where
         Some(b) => b.clone_host(),
         None => {
             // No prior bridge (no extensions ever loaded). Build a fresh host so
-            // a reload that newly discovers plugins can still drive actions.
+            // a reload that newly discovers extensions can still drive actions.
             let (action_host, _cell) = crate::extensions_actions::HarnessActionHost::new_empty(
                 ctx.catalog.clone(),
                 ctx.cwd.clone(),
@@ -1545,7 +1545,7 @@ where
             Arc::new(action_host)
         }
     };
-    let host_for_plugins = Arc::clone(&host);
+    let host_for_extensions = Arc::clone(&host);
 
     let reload_cb = kiqi_host::reload_callback_from_mailbox(ctx.mailbox.clone());
     let fresh_bridge = kiqi_host::ActionBridge::with_reload_and_ui(
@@ -1558,7 +1558,7 @@ where
     );
 
     // P6: the cdylib loader is gone — the fresh session is always the empty
-    // registry (wasm guests reload through `plugins::reload_caps`, not here).
+    // registry (wasm guests reload through `extensions::reload_caps`, not here).
     let extension_session = kiqi_host::ExtensionSession::none();
 
     // ---- 2. Invalidate the old session + bridge BEFORE the swap ----
@@ -1602,11 +1602,11 @@ where
     let env_dyn: Arc<dyn kiqi_tools::ExecutionEnv> = env.clone();
 
     // Package resources are re-read here (grants + manifest + digests). That
-    // does not re-instantiate wasm hosts (`compiled_plugin_hosts` is a
-    // `OnceLock`), so a newly installed plugin's tools still need a restart;
+    // does not re-instantiate wasm hosts (`compiled_extension_hosts` is a
+    // `OnceLock`), so a newly installed extension's tools still need a restart;
     // its resource dirs are picked up. Appended LAST below, same as startup.
-    let plugin_resources = crate::config::agent_dir()
-        .map(|root| crate::plugins::granted_package_resource_dirs(&root))
+    let extension_resources = crate::config::agent_dir()
+        .map(|root| crate::extensions::granted_package_resource_dirs(&root))
         .unwrap_or_default();
 
     let mut skills: Vec<kiqi_harness::types::Skill> = Vec::new();
@@ -1617,7 +1617,7 @@ where
         // that host is swapped as part of a future full JS reload, preserve
         // the paths it contributed at startup across `/reload`.
         let js_paths: &[PathBuf] = &[];
-        let package_paths: &[PathBuf] = &plugin_resources.skills;
+        let package_paths: &[PathBuf] = &extension_resources.skills;
         let dirs = append_reload_resource_paths(
             skill_base_dirs,
             &effective_args.skill,
@@ -1636,7 +1636,7 @@ where
         Vec::new();
     if !effective_args.no_prompt_templates {
         let js_paths: &[PathBuf] = &[];
-        let package_paths: &[PathBuf] = &plugin_resources.prompts;
+        let package_paths: &[PathBuf] = &extension_resources.prompts;
         let dirs = append_reload_resource_paths(
             prompt_base_dirs,
             &effective_args.prompt_template,
@@ -1668,13 +1668,13 @@ where
     let context_block = format_project_context(&context_files);
 
     let mut details: Vec<String> = Vec::new();
-    for diagnostic in &plugin_resources.diagnostics {
-        details.push(format!("warning: plugin resources: {diagnostic}"));
+    for diagnostic in &extension_resources.diagnostics {
+        details.push(format!("warning: extension resources: {diagnostic}"));
     }
     if !skill_diags.is_empty()
         || !prompt_diags.is_empty()
         || !resource_diags.is_empty()
-        || !plugin_resources.diagnostics.is_empty()
+        || !extension_resources.diagnostics.is_empty()
     {
         warnings = true;
         // Collect formatted diagnostics for the caller to surface in its UI
@@ -1730,20 +1730,20 @@ where
     let _ = harness.set_agent_emitter(Some(emitter)).await;
     let _ = harness.set_models(ctx.providers.clone()).await;
     let _ = harness
-        .set_provider_hooks(Some(crate::plugins::compiled_prompt_hooks(
+        .set_provider_hooks(Some(crate::extensions::compiled_prompt_hooks(
             kiqi_host::ExtensionProviderHooks::from_session(&extension_session)
                 .map(|h| Arc::new(h) as Arc<dyn kiqi_ai::ProviderHooks>),
         )))
         .await;
 
     // The rebuilt tool adapters get the session's UI mailboxes too, so a
-    // `/reload` no longer costs a compiled plugin its `ui.dialog` /
+    // `/reload` no longer costs a compiled extension its `ui.dialog` /
     // `set_status` / `set_editor_text`. The mailboxes live in the reload
     // context (not the bridge) precisely so they survive the swap, and the
     // action bridge already exposes them — the "no accessor" note that used to
     // be here was stale.
-    let plugin_caps = crate::plugins::reload_caps(
-        std::sync::Arc::clone(&host_for_plugins),
+    let extension_caps = crate::extensions::reload_caps(
+        std::sync::Arc::clone(&host_for_extensions),
         ctx.ui_dialog.clone(),
         ctx.ext_status.clone(),
         ctx.editor_text.clone(),
@@ -1752,23 +1752,23 @@ where
     // events, commands, probes, prompt transforms and tools all run against one
     // consistent capability set after the swap (they were otherwise still on the
     // build-time set).
-    crate::plugins::install_compiled_event_sink(plugin_caps.clone());
-    crate::plugins::merge_compiled_plugin_tools(
+    crate::extensions::install_compiled_event_sink(extension_caps.clone());
+    crate::extensions::merge_compiled_extension_tools(
         &mut tools,
-        &crate::plugins::compiled_plugin_hosts(),
-        &plugin_caps,
+        &crate::extensions::compiled_extension_hosts(),
+        &extension_caps,
         &|name| tool_name_allowed(name, &effective_args),
     );
     // Re-inject the host-level MCP tools. This rebuild starts from an empty set
-    // (`build_tools` + extension + compiled-plugin tools) and `set_tools`
+    // (`build_tools` + extension + compiled-extension tools) and `set_tools`
     // REPLACES the harness registry, so without this a `/reload` would silently
     // drop every `{server}__{tool}` for the rest of the session.
     merge_mcp_tools(&mut tools, &ctx.mcp, &effective_args);
     // Compose the prompt only now: it lists the tools this session has, and the
-    // compiled-plugin and MCP adapters are merged above. Composing earlier (as this
+    // compiled-extension and MCP adapters are merged above. Composing earlier (as this
     // path used to) named only the built-ins and extension tools, so a `/reload`
     // advertised a set smaller than the one `set_tools` installed — and with the
-    // compiled plugins enabled, `todo` and friends were silently missing.
+    // compiled extensions enabled, `todo` and friends were silently missing.
     let reload_tool_names: Vec<String> =
         tools.iter().map(|t| t.tool.schema().name.clone()).collect();
     let mut context_paths = Vec::new();
@@ -2002,7 +2002,7 @@ pub enum BuildError {
 
 /// B5c: build the `AgentHarnessOptions.models` vec — the resolved gateway
 /// provider first, then one `Arc<dyn Provider>` per registered extension
-/// provider (each a [`kiqi_host::PluggableProvider`] wrapping a plugin's
+/// provider (each a [`kiqi_host::PluggableProvider`] wrapping an extension's
 /// sync `ProviderRequestFn`). The harness resolves a provider lazily per call by
 /// `models.iter().find(|p| p.id() == model.provider)`, so the gateway stays
 /// first-match for its own ids and an extension provider serves a catalog model
@@ -2156,7 +2156,7 @@ fn build_tools(
 /// Append the host-level MCP tool adapters to `tools`, honoring the same name
 /// policy (`--tools`/`--exclude-tools`/`--no-tools`) and collision gate as every
 /// other tool source. Called LAST in both `build` and `/reload` so an MCP tool
-/// can never silently shadow a built-in, extension or plugin tool — a collision
+/// can never silently shadow a built-in, extension or extension tool — a collision
 /// is skipped with a warning. `pub(crate)`: the ACP e2e tests mirror this exact
 /// merge in their harness-building factories.
 pub(crate) fn merge_mcp_tools(
@@ -2775,15 +2775,15 @@ async fn open_session_by_id_in_dir(id: &str, cwd: &str, dir: &Path) -> Result<Se
     })
 }
 
-/// Publish the active session's id to plugins, on both channels that carry it.
+/// Publish the active session's id to extensions, on both channels that carry it.
 ///
 /// Called on **every** activation of a session — the startup build AND every
-/// in-process swap (`switch_to_session`, `fork_session`, and the plugin
+/// in-process swap (`switch_to_session`, `fork_session`, and the extension
 /// `NewSession`/`Fork`/`SwitchSession` runtime actions all route through
 /// [`set_active_session`]). Three things must stay in step:
 ///
-/// - `ToolCallContext` — read per plugin **tool** call, which is why a stale
-///   value there made a plugin's `todo`-style state follow the wrong session.
+/// - `ToolCallContext` — read per extension **tool** call, which is why a stale
+///   value there made an extension's `todo`-style state follow the wrong session.
 /// - `KI_SESSION_ID` — read per **turn** by the provider hooks, which is the
 ///   only channel an observer gets for a pure-chat run. Process-global, which is
 ///   exactly the scope of "the session this process is serving".
@@ -2811,7 +2811,7 @@ fn publish_session_identity(tool_context: &kiqi_host::ToolCallContext, id: &str)
     // test-only mutex.
     crate::env_lock::with_env_lock(|| {
         std::env::set_var(kiqi_host::SESSION_ID_ENV, id);
-        // Two audiences, two names: plugins read `KI_SESSION_ID`, while the shell
+        // Two audiences, two names: extensions read `KI_SESSION_ID`, while the shell
         // a `bash`/`powershell` tool spawns can name the session through
         // `KI_AGENT_ID`.
         std::env::set_var(kiqi_host::AGENT_ID_ENV, id);
@@ -2821,7 +2821,7 @@ fn publish_session_identity(tool_context: &kiqi_host::ToolCallContext, id: &str)
 
 /// The session id a `--no-session` run carries (see [`ephemeral_session`]).
 ///
-/// Not unique across runs, so it never identifies a writer; `kiqi-plugin`'s
+/// Not unique across runs, so it never identifies a writer; `kiqi-extension`'s
 /// `AGENT_ID_ENV` docs name the same literal as "no session". Declared here so
 /// the two places that care (the session itself and [`session_id_from`]) cannot
 /// drift apart.
@@ -2846,11 +2846,11 @@ pub(crate) fn session_id_from(published: Option<&str>) -> Option<String> {
     Some(id.to_string())
 }
 
-/// Swap the session the harness serves, republishing the identity to plugins.
+/// Swap the session the harness serves, republishing the identity to extensions.
 ///
 /// The single funnel for an in-process session change. Prefer this over calling
 /// `AgentHarness::set_session` directly: the harness holds no reference to the
-/// plugin channels, so a bare `set_session` would leave every plugin reporting
+/// extension channels, so a bare `set_session` would leave every extension reporting
 /// the session it had before the swap. The same holds for `SignalHost`, which
 /// caches a `Session` handle — a swap that does not re-attach there keeps
 /// persisting `mcp.signals.*` into the previous session's JSONL. Both moves live
@@ -2906,7 +2906,7 @@ pub(crate) async fn set_active_session(
 /// Fork the harness's current session into a new JSONL session (new id, parent
 /// set to the source) and wrap it in a `Session`. Mirrors the TUI's
 /// `fork_session` flow (`interactive_tui.rs`) — hoisted here so both the TUI
-/// and the plugin `runtime_action(Fork)` host share one implementation.
+/// and the extension `runtime_action(Fork)` host share one implementation.
 /// Returns the new `Session` (NOT yet swapped onto the harness — the caller
 /// does `harness.set_session(...)`).
 pub(crate) async fn fork_session_storage(
@@ -3650,7 +3650,7 @@ mod tests {
     }
 
     extern "C" fn deny_test_tool_call(
-        _event: kiqi_host::StablePluginEvent,
+        _event: kiqi_host::StableExtensionEvent,
         _data: *mut std::ffi::c_void,
     ) -> i32 {
         kiqi_host::EVENT_HANDLER_ABORT
@@ -4116,7 +4116,7 @@ mod tests {
         // developer's environment.
         assert!(names.contains(&"docs".to_string()));
         assert!(names.contains(&"permissions".to_string()));
-        // The signal inbox tool is a host capability, not a plugin: it must be
+        // The signal inbox tool is a host capability, not an extension: it must be
         // present so an auto-wake can settle its disposition durably.
         assert!(names.contains(&"signals".to_string()));
         for legacy in ["grep", "find", "ls"] {
@@ -4675,7 +4675,7 @@ mod tests {
     #[test]
     fn an_ephemeral_session_id_is_not_an_identity() {
         assert_eq!(session_id_from(Some(EPHEMERAL_SESSION_ID)), None);
-        // Nothing published (a plugin-only run) or a blank value: also no id.
+        // Nothing published (an extension-only run) or a blank value: also no id.
         assert_eq!(session_id_from(None), None);
         assert_eq!(session_id_from(Some("   \n")), None);
         // A real id survives, trimmed — the value a child process receives.
@@ -4694,7 +4694,7 @@ mod tests {
 
     /// The exclusion policy, checked against the constants rather than copies.
     ///
-    /// `kiqi-tools` builds its exclusion from `kiqi-plugin`'s declarations, so
+    /// `kiqi-tools` builds its exclusion from `kiqi-extension`'s declarations, so
     /// within this repo a rename is a compile error — this test is not the link
     /// between those two crates any more. What it still guards is the part the
     /// compiler cannot see:
@@ -4807,9 +4807,9 @@ mod tests {
     #[tokio::test]
     async fn reload_shutdown_joins_all_handlers_even_after_veto() {
         use kiqi_host::EventTag;
-        use kiqi_host::StablePluginEvent;
+        use kiqi_host::StableExtensionEvent;
         use std::sync::atomic::AtomicUsize;
-        extern "C" fn stop(_: StablePluginEvent, data: *mut std::ffi::c_void) -> i32 {
+        extern "C" fn stop(_: StableExtensionEvent, data: *mut std::ffi::c_void) -> i32 {
             let calls = unsafe { &*(data as *const AtomicUsize) };
             std::thread::sleep(std::time::Duration::from_millis(20));
             if calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -4835,7 +4835,7 @@ mod tests {
     }
 
     /// `SessionTree` fires on `/tree` navigate, `/session` switch, `/import`,
-    /// `/fork` and `/clone` so plugins (compiled + wasm) re-restore from the
+    /// `/fork` and `/clone` so extensions (compiled + wasm) re-restore from the
     /// swapped-in branch. The dispatch must reach handlers through the same
     /// lifecycle funnel as `SessionStart`, and a handler's `ABORT` veto is
     /// **advisory** — the tree move already happened, so the notification
@@ -4843,7 +4843,7 @@ mod tests {
     #[tokio::test]
     async fn session_tree_notification_dispatches_and_veto_is_advisory() {
         use std::sync::atomic::AtomicUsize;
-        extern "C" fn veto(_: kiqi_host::StablePluginEvent, data: *mut std::ffi::c_void) -> i32 {
+        extern "C" fn veto(_: kiqi_host::StableExtensionEvent, data: *mut std::ffi::c_void) -> i32 {
             unsafe { &*(data as *const AtomicUsize) }
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             kiqi_host::EVENT_HANDLER_ABORT

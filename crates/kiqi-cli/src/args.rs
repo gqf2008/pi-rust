@@ -172,7 +172,7 @@ pub struct Args {
     pub no_context_files: bool,
     /// `--no-extensions`/`-ne`: accepted for compatibility. The cdylib loader
     /// this flag used to gate is gone (2026-10-26), so it no longer changes
-    /// plugin loading; wasm plugins are managed by `ki insmod`/`ki rmmod`.
+    /// extension loading; wasm extensions are managed by `ki insmod`/`ki rmmod`.
     pub no_extensions: bool,
     /// `--no-themes`: disable custom theme discovery and loading.
     /// Built-in presets remain available unless a custom `--theme` is given.
@@ -283,7 +283,7 @@ pub fn parse_args(args: &[String]) -> Args {
     result.offline = offline_env_enabled();
     // `KI_EXTENSIONS_DIR` env: retained for compatibility with scripts written
     // for the retired cdylib channel; the value is parsed but no longer loads
-    // anything (wasm plugins live in `$KI_AGENT_DIR/plugins/<id>/`).
+    // anything (wasm extensions live in `$KI_AGENT_DIR/extensions/<id>/`).
     if let Ok(raw) = std::env::var("KI_EXTENSIONS_DIR") {
         if !raw.is_empty() {
             let sep = if cfg!(windows) { ';' } else { ':' };
@@ -294,7 +294,7 @@ pub fn parse_args(args: &[String]) -> Args {
                 }
             }
             result.ignored.push(
-                "KI_EXTENSIONS_DIR is accepted for compatibility, but the cdylib channel was removed (wasm plugins install with `ki insmod`)"
+                "KI_EXTENSIONS_DIR is accepted for compatibility, but the cdylib channel was removed (wasm extensions install with `ki insmod`)"
                     .to_string(),
             );
         }
@@ -393,7 +393,7 @@ pub fn parse_args(args: &[String]) -> Args {
                 if let Some(v) = take_value(&mut result, &flag_key) {
                     result.extensions_dir.push(PathBuf::from(v));
                     result.ignored.push(
-                        "--extensions-dir is accepted for compatibility, but the cdylib channel was removed (wasm plugins install with `ki insmod`)"
+                        "--extensions-dir is accepted for compatibility, but the cdylib channel was removed (wasm extensions install with `ki insmod`)"
                             .to_string(),
                     );
                 }
@@ -435,7 +435,7 @@ pub fn parse_args(args: &[String]) -> Args {
                 if let Some(v) = take_value(&mut result, &flag_key) {
                     result.extension.push(PathBuf::from(v));
                     result.ignored.push(
-                        "--extension is accepted for compatibility, but the cdylib channel was removed (wasm plugins install with `ki insmod`)"
+                        "--extension is accepted for compatibility, but the cdylib channel was removed (wasm extensions install with `ki insmod`)"
                             .to_string(),
                     );
                 }
@@ -511,7 +511,7 @@ pub fn parse_args(args: &[String]) -> Args {
             // `--no-context-files`/`-nc`, `--no-extensions`/`-ne`, and
             // `--no-themes` is honored (parsed into a real field above). The
             // into real fields above), so they no longer reach this arm. The
-            // resource flags gate discovery in `session.rs`; plugin loading
+            // resource flags gate discovery in `session.rs`; extension loading
             // is separately opt-in.
             other if matches!(other, "--models") => {
                 // Consume a value if the next token isn't a flag (so
@@ -671,9 +671,9 @@ pub fn print_help() {
   --no-prompt-templates, -np     Skip prompt-template discovery (/expand templates)
   --no-context-files, -nc        Skip AGENTS.md/CLAUDE.md discovery (no <project_context>)
   --no-extensions, -ne           Accepted for compatibility (no-op: the cdylib
-                                 channel was removed; wasm plugins use `ki insmod`)
+                                 channel was removed; wasm extensions use `ki insmod`)
   --extensions-dir, -ed <dir>    Accepted for compatibility only; no longer loads
-                                 plugins (wasm guests live in $KI_AGENT_DIR/plugins)
+                                 extensions (wasm guests live in $KI_AGENT_DIR/extensions)
   --local-only                   Restrict skills/prompt templates to the project
                                  (no global discovery; explicit --skill/--prompt-template
                                  paths still load)
@@ -692,10 +692,10 @@ pub fn print_help() {
                                 ~/.ki/agent/models.json (see `ki configure --help`)
   events path|tail               Inspect the extension event journal (needs
                                 KI_EVENT_LOG=1; see `ki events --help`)
-  insmod <path.wasm>             Install a wasm plugin (capabilities and policy
+  insmod <path.wasm>             Install a wasm extension (capabilities and policy
                                 ride the grants; `--build <guest-crate-dir>`
-                                compiles one first; see `ki plugin --help`)
-  rmmod <id>                     Uninstall a wasm plugin (moves it aside)
+                                compiles one first; see `ki extension --help`)
+  rmmod <id>                     Uninstall a wasm extension (moves it aside)
 
 {u}Built-in Tools:{r}
   {builtin}  (enabled by default)
@@ -729,7 +729,7 @@ pub fn print_help() {
   OPENAI_API_KEY                 Bearer token for openai-completions/responses
   KI_OFFLINE                     Disable startup network operations when set to 1/true/yes
   KI_CODING_AGENT_DIR           Override the ~/.ki config directory (auth.json + models.json)
-  KI_SESSION_ID                 Session id served by a plugin (set by the host; also honored as an override)
+  KI_SESSION_ID                 Session id served by an extension (set by the host; also honored as an override)
   KI_AGENT_ID                   Session id handed to commands run by the bash tool (set by the host)
   KI_NO_EMOJI                   Render the brand lockup without the crab (1/true/yes)
 
@@ -1258,7 +1258,7 @@ mod tests {
         assert_eq!(a.fork.as_deref(), Some("xyz"));
         let a = parse_args(&s(&[
             "-e",
-            "plugin.dll",
+            "extension.dll",
             "--skill",
             "s",
             "--prompt-template",
@@ -1328,7 +1328,7 @@ mod tests {
             vec![PathBuf::from("/a/b"), PathBuf::from("/c/d")]
         );
         // The cdylib channel is gone: the flag must say so instead of pretending
-        // it still loads plugins.
+        // it still loads extensions.
         assert!(
             a.ignored
                 .iter()

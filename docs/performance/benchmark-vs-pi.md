@@ -39,7 +39,7 @@ Both tools get identical treatment:
 **ki does not read the `PI_*` variables.** It uses `KI_OFFLINE` and
 `KI_CODING_AGENT_DIR`. Setting only `PI_OFFLINE` / `PI_CODING_AGENT_DIR` leaves
 ki pointed at the real `~/.ki/agent`, which silently loads the machine's global
-plugin set and destroys the comparison. This was the single largest source of
+extension set and destroys the comparison. This was the single largest source of
 error in an earlier version of this document.
 
 ## Results
@@ -88,7 +88,7 @@ bytes), plus the Node binary itself (95,618,048 bytes).
   process creation.
 
 Two earlier runs were misleading: one reported cold start at 101 ms (the machine's
-global plugin set — trap 3), and the next reported 10.1 ms (a stopwatch started
+global extension set — trap 3), and the next reported 10.1 ms (a stopwatch started
 after `spawn()` — trap 4).
 
 ## Measurement traps (why these numbers are trustworthy)
@@ -108,7 +108,7 @@ which is why they are documented rather than deleted:
 3. **ki was not actually isolated.** The harness set `PI_OFFLINE` and
    `PI_CODING_AGENT_DIR`, which native pi honours but ki does not — ki reads
    `KI_OFFLINE` / `KI_CODING_AGENT_DIR`. So while pi ran against a fresh empty
-   config dir, ki read the real `~/.ki/agent` and loaded the **25 plugin DLLs**
+   config dir, ki read the real `~/.ki/agent` and loaded the **25 extension DLLs**
    installed on the test machine. Evidence: the `get_state` reply listed **31
    active tools**; correctly isolated it lists **6 built-ins**. Fixing the
    variables dropped cold start from 101 ms to 10 ms. `runEnvironment()` now sets

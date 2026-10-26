@@ -1,7 +1,7 @@
 //! Host-side bridge for provider-owned OAuth flows.
 //!
 //! The host owns discovery and callback invocation, while platform-specific
-//! authorization remains in the plugin. Token-bearing JSON is returned to the
+//! authorization remains in the extension. Token-bearing JSON is returned to the
 //! caller only; this module never logs it or emits it as an agent event.
 
 use std::sync::Arc;
@@ -21,9 +21,9 @@ pub enum OAuthExtensionError {
     InvalidResponseKind,
     #[error("OAuth action must be one of begin, exchange, refresh, revoke")]
     InvalidAction,
-    #[error("OAuth plugin returned status {0}: {1}")]
-    PluginStatus(i32, String),
-    #[error("OAuth plugin returned invalid JSON: {0}")]
+    #[error("OAuth extension returned status {0}: {1}")]
+    ExtensionStatus(i32, String),
+    #[error("OAuth extension returned invalid JSON: {0}")]
     InvalidResponse(String),
 }
 
@@ -104,7 +104,7 @@ pub struct OAuthCredential {
 /// A non-secret view of a registered OAuth provider.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OAuthProviderInfo {
-    pub plugin: String,
+    pub extension: String,
     pub id: String,
     #[serde(flatten)]
     pub manifest: serde_json::Map<String, Value>,
@@ -142,7 +142,7 @@ fn info(provider: &RegisteredOAuthProvider) -> Option<OAuthProviderInfo> {
     let id = manifest.get("id").and_then(Value::as_str)?.to_string();
     manifest.remove("id");
     Some(OAuthProviderInfo {
-        plugin: provider.plugin.clone(),
+        extension: provider.extension.clone(),
         id,
         manifest,
     })
@@ -167,10 +167,10 @@ fn invoke(
     );
     let response = out.to_string_lossy();
     if !out.is_empty() {
-        (provider.plugin_free_string)(out);
+        (provider.extension_free_string)(out);
     }
     if status != 0 {
-        return Err(OAuthExtensionError::PluginStatus(status, response));
+        return Err(OAuthExtensionError::ExtensionStatus(status, response));
     }
     serde_json::from_str(&response)
         .map_err(|error| OAuthExtensionError::InvalidResponse(error.to_string()))
@@ -228,10 +228,10 @@ mod tests {
     fn snapshot() -> Arc<RegistrySnapshot> {
         let mut registry = ExtensionRegistry::new();
         registry.register_oauth_provider(RegisteredOAuthProvider {
-            plugin: "oauth-test".to_string(),
+            extension: "oauth-test".to_string(),
             manifest_json: r#"{"id":"acme","displayName":"Acme"}"#.to_string(),
             request_fn: callback,
-            plugin_free_string: free_output,
+            extension_free_string: free_output,
             user_data: std::ptr::null_mut(),
         });
         Arc::new(registry.snapshot())
@@ -241,12 +241,12 @@ mod tests {
     fn lists_non_secret_manifest_info() {
         let providers = list(&snapshot());
         assert_eq!(providers[0].id, "acme");
-        assert_eq!(providers[0].plugin, "oauth-test");
+        assert_eq!(providers[0].extension, "oauth-test");
         assert!(!providers[0].manifest.contains_key("id"));
     }
 
     #[test]
-    fn invokes_action_and_reclaims_plugin_output() {
+    fn invokes_action_and_reclaims_extension_output() {
         FREED.store(0, Ordering::SeqCst);
         let result = request(&snapshot(), "acme", "refresh", serde_json::json!({"x": 1})).unwrap();
         assert_eq!(result["access"], "secret");

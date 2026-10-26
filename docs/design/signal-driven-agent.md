@@ -1,4 +1,4 @@
-> 注（2026-10-21）：编译期一方插件通道已退役；文中 `plugins/kiqi-*` 路径与 `plugin-kiqi-*` feature 是历史记录，现行实现在 `plugins/wasm/kiqi-*-guest`。
+> 注（2026-10-21）：编译期一方插件通道已退役；文中 `extensions/kiqi-*` 路径与 `extension-kiqi-*` feature 是历史记录，现行实现在 `extensions/wasm/kiqi-*`。
 
 # 方案：信号驱动的智能体 —— MCP 通知作为「另一个人的来信」
 
@@ -7,7 +7,7 @@
 > MCP `notifications/resources/updated` 作为第一个信号源。
 > 阶段 1 的实现落点见 §14；本文件此后仍作为该能力的唯一设计说明。
 > 关联：`ki-mcp-builtin.md` §11/§12（light notice 现状与 autoRead）、
-> `ki-acp-serve.md`（ACP 面）、`plugin-abi.md` §6.2（MCP 为宿主级能力的裁定）。
+> `ki-acp-serve.md`（ACP 面）、`extension-abi.md` §6.2（MCP 为宿主级能力的裁定）。
 
 ## 1. 要解决什么（实核证据）
 
@@ -142,10 +142,10 @@ chain_id        若由某次 run 的副作用产生，记录产生它的 run
 `list` 会标出 `[config]` / `[model]`；模型不能 `stop` 配置订阅。
 
 插件工具的具体面：
-`goal`（`plugins/kiqi-goal/src/lib.rs:1026`，start/update/pause/resume/complete/limit/show/list，
-目标跨轮注入）、`todo`（`plugins/kiqi-todo/src/lib.rs:340`，会话任务表）、
-`plan-mode`（`plugins/kiqi-plan-mode/src/lib.rs:262,283`）、
-`ask_user`（`plugins/kiqi-ask-user/src/lib.rs:1-14`）。
+`goal`（`extensions/kiqi-goal/src/lib.rs:1026`，start/update/pause/resume/complete/limit/show/list，
+目标跨轮注入）、`todo`（`extensions/kiqi-todo/src/lib.rs:340`，会话任务表）、
+`plan-mode`（`extensions/kiqi-plan-mode/src/lib.rs:262,283`）、
+`ask_user`（`extensions/kiqi-ask-user/src/lib.rs:1-14`）。
 
 ### 4.2 动作空间的边界
 

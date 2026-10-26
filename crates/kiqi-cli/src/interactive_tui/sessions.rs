@@ -117,7 +117,7 @@ pub(super) async fn switch_to_session(
     match crate::session::open_session_by_id(id, &cwd_str).await {
         Ok(new_session) => {
             // Route through the funnel so every session-scoped host follows the
-            // swap: the plugin channels (identity) and `SignalHost` (durable
+            // swap: the extension channels (identity) and `SignalHost` (durable
             // mute + attention inbox, which it caches a `Session` handle for).
             let _ = crate::session::set_active_session(
                 harness,
@@ -126,7 +126,7 @@ pub(super) async fn switch_to_session(
                 &reload_context.signal_host,
             )
             .await;
-            // `SessionTree`: the active session moved — plugins (compiled +
+            // `SessionTree`: the active session moved — extensions (compiled +
             // wasm) re-restore their state from the new branch. Fired after
             // the swap so handlers observe the NEW session; advisory.
             crate::session::notify_session_tree(reload_context).await;
@@ -272,7 +272,7 @@ pub(super) async fn fork_session(
         &reload_context.signal_host,
     )
     .await;
-    // `SessionTree`: the active session moved to the fresh fork — plugins
+    // `SessionTree`: the active session moved to the fresh fork — extensions
     // (compiled + wasm) re-restore from the new (empty) branch. Fired after
     // the swap so handlers observe the NEW session; advisory.
     crate::session::notify_session_tree(reload_context).await;
@@ -508,7 +508,7 @@ pub(super) fn invoke_extension_renderer(
             } else {
                 None
             };
-            out.free_with(Some(renderer.plugin_free_string));
+            out.free_with(Some(renderer.extension_free_string));
             text
         }))
         .ok()

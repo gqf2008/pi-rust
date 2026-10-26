@@ -92,7 +92,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki insmod --build plugins/wasm/kiqi-subagents-guest",
+    "install": "ki insmod --build extensions/wasm/kiqi-subagents",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-subagents"
   },
   {
@@ -116,7 +116,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki insmod --build plugins/wasm/kiqi-lens-guest",
+    "install": "ki insmod --build extensions/wasm/kiqi-lens",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-lens"
   },
   {
@@ -128,7 +128,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki insmod --build plugins/wasm/kiqi-todo-guest",
+    "install": "ki insmod --build extensions/wasm/kiqi-todo",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-todo"
   },
   {
@@ -140,7 +140,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki insmod --build plugins/wasm/kiqi-codegraph-guest",
+    "install": "ki insmod --build extensions/wasm/kiqi-codegraph",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-codegraph"
   },
   {
@@ -176,7 +176,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki insmod --build plugins/wasm/kiqi-ask-user-guest",
+    "install": "ki insmod --build extensions/wasm/kiqi-ask-user",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-ask-user",
     "featured": true
   },
@@ -215,7 +215,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki insmod --build plugins/wasm/kiqi-goal-guest",
+    "install": "ki insmod --build extensions/wasm/kiqi-goal",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-goal",
     "featured": true
   },
@@ -228,7 +228,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki insmod --build plugins/wasm/kiqi-websearch-guest",
+    "install": "ki insmod --build extensions/wasm/kiqi-websearch",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-websearch",
     "featured": true
   },
@@ -241,7 +241,7 @@
     "author": "kiqi-packages",
     "downloads": 0,
     "downloadsLabel": "0",
-    "install": "ki insmod --build plugins/wasm/kiqi-webfetch-guest",
+    "install": "ki insmod --build extensions/wasm/kiqi-webfetch",
     "repository": "https://github.com/pi-rust/rpi-package/tree/master/packages/kiqi-webfetch",
     "featured": true
   },

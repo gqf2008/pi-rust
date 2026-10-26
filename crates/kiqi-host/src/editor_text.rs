@@ -3,7 +3,7 @@
 //! Lets an extension place text into the interactive editor (the prompt input
 //! box) instead of sending it straight to the model. Mirrors
 //! [`ExtensionStatusMailbox`](crate::ExtensionStatusMailbox) and
-//! [`UiDialogMailbox`](crate::UiDialogMailbox): the plugin writes through the
+//! [`UiDialogMailbox`](crate::UiDialogMailbox): the extension writes through the
 //! `SetEditorText` runtime action, and the TUI — the only consumer — polls
 //! [`EditorTextMailbox::take_pending`] once per tick.
 //!
@@ -16,7 +16,7 @@
 //!
 //! Writes must not be lost when the TUI is busy rendering, and a headless run
 //! has no editor at all. An unbounded queue of pending edits (each an
-//! `append`/`replace` operation) keeps the plugin's call non-blocking and
+//! `append`/`replace` operation) keeps the extension's call non-blocking and
 //! lossless; a headless host simply never drains it.
 
 use std::collections::VecDeque;

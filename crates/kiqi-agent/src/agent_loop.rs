@@ -569,7 +569,7 @@ async fn stream_assistant_response(
         // `MessageEnd`), but it never joins `new_messages`, so an index-based
         // observer has to retract the count and skip the matching end — otherwise
         // every later message is committed one slot off. A Rust-side signal, not
-        // an `AgentEvent`: the plugin-visible event stream is unchanged.
+        // an `AgentEvent`: the extension-visible event stream is unchanged.
         emit.request_soft_interrupted(final_message.clone(), added_partial)
             .await;
         // A request with no `Start` has no live block: a provider cancelled

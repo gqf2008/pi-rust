@@ -1,7 +1,7 @@
 # ki Rust 扩展开发最佳实践
 
 本文是 ki 创建 Rust `cdylib` 扩展的模型可读规范。扩展是 Rust 原生动态库，
-通过稳定 C ABI（`kiqi-plugin-sdk`）注册工具、事件处理器、资源发现、Provider
+通过稳定 C ABI（`kiqi-extension-sdk`）注册工具、事件处理器、资源发现、Provider
 与渲染器，宿主（`ki` CLI）负责加载与生命周期。创建完整 Agent 项目的默认结构见
 `docs` 的 `agent` 主题；本指南聚焦扩展本身的 ABI 与生命周期。
 
@@ -10,13 +10,13 @@
 | 项目 | Rust 原生扩展 |
 | --- | --- |
 | 安装 | `ki install crate-name --path ../crate-name`（本仓库未发布，crates.io 上没有可解析的包） |
-| 入口 | `kiqi_plugin_register` C ABI 符号 |
+| 入口 | `kiqi_extension_register` C ABI 符号 |
 | 开发反馈 | `ki dev` watch + 热重载；`ki dev-local` 隔离调试 |
 | 静态资源 | `resources_discover` 或随项目放入 `.ki` |
 | 运行环境 | 本机动态库，当前用户权限 |
 | 适用场景 | 本地工具、系统集成、性能敏感或纯 Rust 项目 |
 
-扩展应遵循能力检测：只调用宿主明确提供的 capability，检查 `PluginApi`
+扩展应遵循能力检测：只调用宿主明确提供的 capability，检查 `ExtensionApi`
 对应注册槽位是否为 `Some`。缺少能力时返回清晰错误并优雅降级，不要 panic、
 空指针或依赖 `undefined` 语义。
 
@@ -48,24 +48,24 @@ repository = "https://github.com/example/my-kiqi-extension"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-kiqi-plugin-sdk = "0.1"
+kiqi-extension-sdk = "0.1"
 serde_json = "1"
 ```
 
 `cdylib` 是宿主加载的产物；同时保留 `rlib` 便于 Rust 集成测试。扩展边界只依赖
-`kiqi-plugin-sdk`，不要依赖 `kiqi-cli`、`kiqi-extensions` 或 harness 内部模块，
+`kiqi-extension-sdk`，不要依赖 `kiqi-cli`、`kiqi-extensions` 或 harness 内部模块，
 否则插件会和宿主实现耦合。
 
 ## 3. ABI 入口
 
-宿主只加载统一 C ABI 符号 `kiqi_plugin_register`。扩展使用 `export_plugin!`，
-通过同一个 `PluginApi` 注册能力并调用 `api.declare` 声明优先级/平台。
+宿主只加载统一 C ABI 符号 `kiqi_extension_register`。扩展使用 `export_extension!`，
+通过同一个 `ExtensionApi` 注册能力并调用 `api.declare` 声明优先级/平台。
 SDK 在注册前检查 `abi_version` 和 `struct_size`；不兼容时返回非零状态，宿主报告加载失败。
 
 ```rust
-kiqi_plugin_sdk::export_plugin!(|api| {
+kiqi_extension_sdk::export_extension!(|api| {
     if let Some(declare) = api.declare {
-        let status = declare(kiqi_plugin_sdk::StbStringRef::from_str(
+        let status = declare(kiqi_extension_sdk::StbStringRef::from_str(
             r#"{"priority":60,"platforms":["linux"]}"#,
         ));
         if status != 0 {
@@ -76,7 +76,7 @@ kiqi_plugin_sdk::export_plugin!(|api| {
         return -1;
     };
     // 构建 StableToolSchema 和 execute/poll/cancel/destroy 函数表，
-    // 然后调用 register_tool。完整实现参考 examples/plugin-stub。
+    // 然后调用 register_tool。完整实现参考 examples/extension-stub。
     let _ = register_tool;
     0
 });
@@ -108,10 +108,10 @@ kiqi_plugin_sdk::export_plugin!(|api| {
 - 宿主产生的 `StbString`（execute 的 params、事件 payload）由插件通过宿主的
   `free_string` 释放。
 - 插件产生的 `StbString`（done 结果、partial 进度、resources_discover 的 out）
-  由宿主通过插件注册时提供的 `plugin_free_string` 释放。
+  由宿主通过插件注册时提供的 `extension_free_string` 释放。
 - 每个 `extern "C"` 边界都不能 unwind；插件内部捕获 panic 并转换为错误结果。
 
-完整、可运行的 ABI 模板位于 `examples/plugin-stub/src/lib.rs`。创建新工具时先
+完整、可运行的 ABI 模板位于 `examples/extension-stub/src/lib.rs`。创建新工具时先
 复制生命周期骨架，再替换参数 schema 和领域逻辑，不要重新设计所有权协议。
 
 ## 5. 事件处理器、资源发现与 Provider
@@ -127,7 +127,7 @@ kiqi_plugin_sdk::export_plugin!(|api| {
   `ToolExecutionStart`/`Update`/`End`、`ToolCall`、`ToolResult`、`UserBash`、`Input`。
 - **ki 特有 / UI**：`BeforeTuiStart`（TUI 初始化前）、`UiPromptStart`/`UiPromptEnd`。
 
-处理器收到 `StablePluginEvent`，不得释放事件里的字符串（宿主 fan-out 后统一释放）。
+处理器收到 `StableExtensionEvent`，不得释放事件里的字符串（宿主 fan-out 后统一释放）。
 返回 `0` 成功；返回 `EVENT_HANDLER_ABORT` 表示 veto。
 
 ### 生命周期 veto
@@ -142,7 +142,7 @@ kiqi_plugin_sdk::export_plugin!(|api| {
 `api.register_resources_discover` 注册 handler，宿主在 `startup`/`reload` 时
 fan-out 到所有已注册 handler，合并返回的 `{skillPaths, promptPaths, themePaths}`。
 单个 handler 报错不中止 fan-out。`out` 是插件拥有的 `StbString`，宿主通过插件
-注册时给的 `plugin_free_string` 回收。
+注册时给的 `extension_free_string` 回收。
 
 ### Provider 与渲染器
 
@@ -254,9 +254,9 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 ## 9. 发布检查清单
 
 - `cargo fmt --check`、`cargo clippy --all-targets`、`cargo test` 通过。
-- `crate-type` 包含 `cdylib`，使用 `export_plugin!` 导出
-  `kiqi_plugin_register`。
-- 依赖已发布的 `kiqi-plugin-sdk` 兼容版本，不链接宿主私有 crate。
+- `crate-type` 包含 `cdylib`，使用 `export_extension!` 导出
+  `kiqi_extension_register`。
+- 依赖已发布的 `kiqi-extension-sdk` 兼容版本，不链接宿主私有 crate。
 - `ki dev --no-watch` 能编译、加载并注册预期工具。
 - `ki install <crate> --force` 的干净安装路径通过。
 - Linux/macOS/Windows 构建由 CI 验证，README 标明支持矩阵。
@@ -267,7 +267,7 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 
 1. 先调用 `docs` 查询 `authoring`（扩展开发）或 `debugging`（调试）。
 2. 阅读当前仓库现有 manifest、SDK 版本和相邻扩展约定，不猜 API。
-3. 优先复制 `examples/plugin-stub` 的最小骨架。
+3. 优先复制 `examples/extension-stub` 的最小骨架。
 4. 实现领域逻辑与边界测试，再连接 loader/ABI。
 5. 使用 `ki dev --no-watch` 与 `ki install <crate> --force` 做真实 smoke test。
 6. 不声称未验证的 Pi capability 已完全兼容；明确记录降级行为。

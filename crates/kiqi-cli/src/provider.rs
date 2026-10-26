@@ -88,7 +88,7 @@ use crate::wasm_provider::WasmProvider;
 pub const DEFAULT_MODEL_ID: &str = "claude-opus-4-8";
 
 /// Provider ids (and protocol aliases) that belong to the built-in tier. A
-/// plugin may never use one of these, so a grant cannot shadow them.
+/// extension may never use one of these, so a grant cannot shadow them.
 const BUILTIN_PROVIDER_IDS: &[&str] = &[
     "anthropic",
     "openai",
@@ -169,11 +169,11 @@ pub struct ResolvedModel {
     /// configuredProviders.has(m.provider))`) and surface only models that
     /// won't fail at request time with "No API key for provider".
     pub has_provider_key: bool,
-    /// Provider ids owned by an installed plugin whose `provider` grant the
+    /// Provider ids owned by an installed extension whose `provider` grant the
     /// user recorded. The grant is the only authority: a model under one of
     /// these ids is selectable and visible, and no built-in credential is ever
     /// needed (or consulted) for it.
-    pub granted_plugin_providers: BTreeSet<String>,
+    pub granted_extension_providers: BTreeSet<String>,
     /// Saved theme name from `~/.ki/agent/settings.json`, if any. Best-effort:
     /// the TUI applies it at startup when it matches a known preset
     /// (dark/light/monochrome); otherwise ignored.
@@ -191,7 +191,10 @@ impl std::fmt::Debug for ResolvedModel {
             .field("model", &self.model.id)
             .field("thinking_level", &self.thinking_level)
             .field("has_provider_key", &self.has_provider_key)
-            .field("granted_plugin_providers", &self.granted_plugin_providers)
+            .field(
+                "granted_extension_providers",
+                &self.granted_extension_providers,
+            )
             .field("theme", &self.theme)
             .finish()
     }
@@ -331,7 +334,7 @@ pub fn unconfigured_resolved(theme: Option<String>) -> ResolvedModel {
         model,
         thinking_level: ThinkingLevel::Off,
         has_provider_key: false,
-        granted_plugin_providers: BTreeSet::new(),
+        granted_extension_providers: BTreeSet::new(),
         theme,
         providers: vec![Arc::new(UnconfiguredProvider)],
     }
@@ -368,9 +371,9 @@ pub enum ResolveError {
     #[error("No API key. Set one of: {hint}")]
     NoApiKey { hint: &'static str },
     #[error(
-        "Provider id \"{id}\" from an installed plugin collides with {existing}. \
-         A plugin may not shadow a built-in provider, a models.json provider, or another \
-         plugin; rename or uninstall the plugin."
+        "Provider id \"{id}\" from an installed extension collides with {existing}. \
+         An extension may not shadow a built-in provider, a models.json provider, or another \
+         extension; rename or uninstall the extension."
     )]
     ProviderIdCollision { id: String, existing: String },
     #[error("Could not read config: {0}")]
@@ -457,22 +460,22 @@ fn resolve_with_settings(
     // provider id. A key belonging to `anthropic` must never make an unrelated
     // gateway available or become that gateway's provider default.
     let models_cfg = config::load_models_config()?;
-    // ---- Granted plugin providers: read before selection so their ids are
+    // ---- Granted extension providers: read before selection so their ids are
     // valid `--provider` / `provider/id` spellings and their models are authed.
     let granted_root: Option<PathBuf> = agent_root
         .map(Path::to_path_buf)
         .or_else(kiqi_host::grants::agent_dir);
-    let granted_plugins = match &granted_root {
-        Some(root) => granted_plugin_models(root),
+    let granted_extensions = match &granted_root {
+        Some(root) => granted_extension_models(root),
         None => Vec::new(),
     };
-    let granted_plugin_providers: BTreeSet<String> = granted_plugins
+    let granted_extension_providers: BTreeSet<String> = granted_extensions
         .iter()
-        .map(|plugin| plugin.id.clone())
+        .map(|extension| extension.id.clone())
         .collect();
     let canonical_cli_provider = cli_provider
         .map(|requested| {
-            canonicalize_cli_provider(requested, &models_cfg, &granted_plugin_providers)
+            canonicalize_cli_provider(requested, &models_cfg, &granted_extension_providers)
         })
         .transpose()?;
     let cli_provider = canonical_cli_provider.as_deref();
@@ -491,9 +494,9 @@ fn resolve_with_settings(
         .ok()
         .filter(|value| !value.is_empty());
 
-    // ---- Catalog: built-in, then ~/.ki/models.json, then granted plugin
+    // ---- Catalog: built-in, then ~/.ki/models.json, then granted extension
     // providers (fixed order; an id collision is a hard refusal) ----
-    let mut catalog = catalog_with_granted_plugins(&models_cfg, &granted_plugins)?;
+    let mut catalog = catalog_with_granted_extensions(&models_cfg, &granted_extensions)?;
 
     // Apply an explicit CLI endpoint override to the selected catalog lane.
     // The ambient Anthropic override belongs only to the built-in `anthropic`
@@ -546,10 +549,10 @@ fn resolve_with_settings(
                 cli_provider,
                 &catalog,
                 &models_cfg,
-                &granted_plugin_providers,
+                &granted_extension_providers,
             )?;
             if let Some(provider) = parsed_pattern.provider.as_deref() {
-                if !provider_is_known(provider, &models_cfg, &granted_plugin_providers) {
+                if !provider_is_known(provider, &models_cfg, &granted_extension_providers) {
                     return Err(ResolveError::UnknownProvider(provider.to_string()));
                 }
             }
@@ -561,7 +564,7 @@ fn resolve_with_settings(
                 &models_cfg,
                 &anthropic_credentials,
                 &openai_credentials,
-                &granted_plugin_providers,
+                &granted_extension_providers,
             )?;
 
             if parsed_pattern.inferred_provider {
@@ -571,7 +574,7 @@ fn resolve_with_settings(
                         &anthropic_credentials,
                         &openai_credentials,
                         false,
-                        &granted_plugin_providers,
+                        &granted_extension_providers,
                     ) {
                         let authenticated_raw_matches = |candidate: &str| {
                             catalog
@@ -585,7 +588,7 @@ fn resolve_with_settings(
                                             &anthropic_credentials,
                                             &openai_credentials,
                                             false,
-                                            &granted_plugin_providers,
+                                            &granted_extension_providers,
                                         )
                                 })
                                 .collect::<Vec<_>>()
@@ -616,7 +619,7 @@ fn resolve_with_settings(
                         &models_cfg,
                         &anthropic_credentials,
                         &openai_credentials,
-                        &granted_plugin_providers,
+                        &granted_extension_providers,
                     )?;
                     if selected.is_some() {
                         pattern_thinking = None;
@@ -631,7 +634,7 @@ fn resolve_with_settings(
                                 &models_cfg,
                                 &anthropic_credentials,
                                 &openai_credentials,
-                                &granted_plugin_providers,
+                                &granted_extension_providers,
                             )?;
                         }
                     }
@@ -675,7 +678,7 @@ fn resolve_with_settings(
             // to first-authed — which, once a second gateway is enabled, may
             // NOT be the user's saved choice (BTreeMap provider order).
             let saved_provider = settings.default_provider.as_deref().filter(|provider| {
-                provider_is_known(provider, &models_cfg, &granted_plugin_providers)
+                provider_is_known(provider, &models_cfg, &granted_extension_providers)
             });
             let saved = settings.default_model.as_deref().and_then(|id| {
                 if settings.default_provider.is_some() && saved_provider.is_none() {
@@ -687,7 +690,7 @@ fn resolve_with_settings(
                         &anthropic_credentials,
                         &openai_credentials,
                         cli_api_key.is_some(),
-                        &granted_plugin_providers,
+                        &granted_extension_providers,
                     )
                 })
             });
@@ -705,7 +708,7 @@ fn resolve_with_settings(
                     &anthropic_credentials,
                     &openai_credentials,
                     cli_api_key.is_some(),
-                    &granted_plugin_providers,
+                    &granted_extension_providers,
                 );
                 (model, thinking_level)
             }
@@ -715,11 +718,11 @@ fn resolve_with_settings(
     // ---- Provider build ----
     let selected_api = model.api.clone();
     let selected_provider = model.provider.clone();
-    // A granted plugin provider never gets a built-in credential folded into
+    // A granted extension provider never gets a built-in credential folded into
     // its catalog entry: the host-held credential is injected by `provider-http`
     // for a matching request, and nothing else may carry it.
-    let is_granted_plugin = granted_plugin_providers.contains(&selected_provider);
-    let selected_anthropic_credential = if is_granted_plugin {
+    let is_granted_extension = granted_extension_providers.contains(&selected_provider);
+    let selected_anthropic_credential = if is_granted_extension {
         None
     } else if matches!(selected_api, kiqi_ai::Api::AnthropicMessages) {
         let auth_header = models_cfg
@@ -736,7 +739,7 @@ fn resolve_with_settings(
     } else {
         None
     };
-    let selected_openai_key = if is_granted_plugin {
+    let selected_openai_key = if is_granted_extension {
         None
     } else if matches!(
         selected_api,
@@ -749,7 +752,7 @@ fn resolve_with_settings(
         None
     };
     let selected_is_authed = model_has_header_auth(&model)
-        || granted_plugin_providers.contains(&selected_provider)
+        || granted_extension_providers.contains(&selected_provider)
         || match selected_api {
             kiqi_ai::Api::AnthropicMessages => selected_anthropic_credential.is_some(),
             kiqi_ai::Api::OpenaiCompletions | kiqi_ai::Api::OpenaiResponses => {
@@ -772,14 +775,14 @@ fn resolve_with_settings(
             &BTreeMap::from([("authorization".into(), format!("Bearer {key}"))]),
         );
     }
-    // A granted plugin provider never goes through `build_runtime`: that would
+    // A granted extension provider never goes through `build_runtime`: that would
     // build a keyless direct HTTP client for a model whose requests belong on
     // the grant-owned `provider-http` channel. `WasmProvider` creates the
     // dedicated wasm host lazily, on the first request.
-    let (provider, has_provider_key) = if is_granted_plugin {
-        let granted = granted_plugins
+    let (provider, has_provider_key) = if is_granted_extension {
+        let granted = granted_extensions
             .iter()
-            .find(|plugin| plugin.id == selected_provider)
+            .find(|extension| extension.id == selected_provider)
             .expect("a selected granted provider comes from the grant scan");
         (
             Arc::new(WasmProvider::new(
@@ -813,9 +816,9 @@ fn resolve_with_settings(
         let mut seen: Vec<(String, kiqi_ai::Api)> =
             vec![(selected_provider.clone(), selected_api.clone())];
         for candidate in &full_catalog {
-            // Plugin providers are built below from their grant, never from a
+            // Extension providers are built below from their grant, never from a
             // built-in credential.
-            if granted_plugin_providers.contains(&candidate.provider) {
+            if granted_extension_providers.contains(&candidate.provider) {
                 continue;
             }
             let key = (candidate.provider.clone(), candidate.api.clone());
@@ -868,22 +871,22 @@ fn resolve_with_settings(
             providers.push(runtime);
         }
     }
-    // One runtime handle per granted plugin provider, so
+    // One runtime handle per granted extension provider, so
     // `authenticated_catalog` (and therefore `/model`) sees them. Each adapter
     // is independent and compiles nothing until its first request.
-    for plugin in &granted_plugins {
-        if providers.iter().any(|runtime| runtime.id() == plugin.id) {
+    for extension in &granted_extensions {
+        if providers.iter().any(|runtime| runtime.id() == extension.id) {
             continue;
         }
         let models: Vec<Model> = full_catalog
             .iter()
-            .filter(|candidate| candidate.provider == plugin.id)
+            .filter(|candidate| candidate.provider == extension.id)
             .cloned()
             .collect();
         providers.push(Arc::new(WasmProvider::new(
-            plugin.id.clone(),
+            extension.id.clone(),
             models,
-            plugin.wasm.clone(),
+            extension.wasm.clone(),
             granted_root.clone(),
         )));
     }
@@ -893,7 +896,7 @@ fn resolve_with_settings(
         model,
         thinking_level,
         has_provider_key,
-        granted_plugin_providers,
+        granted_extension_providers,
         theme: settings.theme.clone(),
         providers,
     })
@@ -1027,7 +1030,7 @@ pub fn available_catalog(resolved: &ResolvedModel) -> Vec<Model> {
             model_is_authed(
                 m,
                 resolved.has_provider_key,
-                &resolved.granted_plugin_providers,
+                &resolved.granted_extension_providers,
             )
         })
         .filter(|m| seen.insert((m.api.clone(), m.provider.clone(), m.id.to_ascii_lowercase())))
@@ -1091,28 +1094,28 @@ fn merge_user_catalog(catalog: &mut Vec<Model>, cfg: &config::ModelsConfig) {
     }
 }
 
-/// One granted plugin provider, as read off disk for catalog construction.
-struct GrantedPlugin {
+/// One granted extension provider, as read off disk for catalog construction.
+struct GrantedExtension {
     /// The install-dir id. A grant's provider profile must name this id; the
     /// host refuses to instantiate any profile that does not.
     id: String,
-    /// `plugins/<id>/plugin.wasm`, verified through the digest sidecar before
+    /// `extensions/<id>/extension.wasm`, verified through the digest sidecar before
     /// its catalog is surfaced. The provider adapter loads from here.
     wasm: PathBuf,
     grant: kiqi_host::grants::ProviderGrant,
 }
 
-/// Read `plugins/*/grants.json` and return the providers the user actually
+/// Read `extensions/*/grants.json` and return the providers the user actually
 /// granted under `root`.
 ///
-/// Deny-by-default: a plugin without a `provider` grant contributes nothing,
+/// Deny-by-default: an extension without a `provider` grant contributes nothing,
 /// and a profile whose id is not the install id is ignored (the host would
 /// never instantiate it). The digest sidecar is enforced here for the same
 /// reason it is enforced before loading: a catalog entry is a promise that the
 /// recorded bytes will run, so mismatched bytes must not appear.
-fn granted_plugin_models(root: &Path) -> Vec<GrantedPlugin> {
+fn granted_extension_models(root: &Path) -> Vec<GrantedExtension> {
     let mut granted = Vec::new();
-    for install_id in kiqi_host::grants::installed_plugins_at(root) {
+    for install_id in kiqi_host::grants::installed_extensions_at(root) {
         let grants = kiqi_host::grants::Grants::load_for_at(root, &install_id);
         let Some(grant) = grants.provider.clone() else {
             continue;
@@ -1126,14 +1129,14 @@ fn granted_plugin_models(root: &Path) -> Vec<GrantedPlugin> {
         {
             continue;
         }
-        let wasm = kiqi_host::grants::plugin_dir_at(root, &install_id).join("plugin.wasm");
+        let wasm = kiqi_host::grants::extension_dir_at(root, &install_id).join("extension.wasm");
         if !wasm.is_file() {
             continue;
         }
         if !wasm_digest_permits_catalog(&wasm) {
             continue;
         }
-        granted.push(GrantedPlugin {
+        granted.push(GrantedExtension {
             id: install_id,
             wasm,
             grant,
@@ -1146,9 +1149,9 @@ fn granted_plugin_models(root: &Path) -> Vec<GrantedPlugin> {
 /// time. `Ok(Some("missing"))` (an install that predates digests) is allowed,
 /// exactly as the session loader allows it; a mismatch or an unreadable
 /// sidecar is not.
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 fn wasm_digest_permits_catalog(wasm: &Path) -> bool {
-    match crate::plugins::digest_gate(wasm) {
+    match crate::extensions::digest_gate(wasm) {
         Ok(_) => true,
         Err(diagnostic) => {
             tracing::warn!("{diagnostic}; its provider catalog is not offered");
@@ -1157,7 +1160,7 @@ fn wasm_digest_permits_catalog(wasm: &Path) -> bool {
     }
 }
 
-#[cfg(not(feature = "plugin-wasm"))]
+#[cfg(not(feature = "extension-wasm"))]
 fn wasm_digest_permits_catalog(_wasm: &Path) -> bool {
     false
 }
@@ -1199,30 +1202,30 @@ fn granted_model_to_model(
 }
 
 /// Refuse an id collision instead of silently shadowing. Built-ins and
-/// models.json come first by construction; a plugin may add only a new id.
-fn refuse_plugin_provider_collisions(
-    granted: &[GrantedPlugin],
+/// models.json come first by construction; an extension may add only a new id.
+fn refuse_extension_provider_collisions(
+    granted: &[GrantedExtension],
     builtin: &BTreeSet<String>,
     configured: &BTreeSet<String>,
 ) -> Result<(), ResolveError> {
     let mut seen = BTreeSet::new();
-    for plugin in granted {
-        if builtin.contains(&plugin.id) {
+    for extension in granted {
+        if builtin.contains(&extension.id) {
             return Err(ResolveError::ProviderIdCollision {
-                id: plugin.id.clone(),
+                id: extension.id.clone(),
                 existing: "a built-in provider".to_string(),
             });
         }
-        if configured.contains(&plugin.id) {
+        if configured.contains(&extension.id) {
             return Err(ResolveError::ProviderIdCollision {
-                id: plugin.id.clone(),
+                id: extension.id.clone(),
                 existing: "a models.json provider".to_string(),
             });
         }
-        if !seen.insert(plugin.id.clone()) {
+        if !seen.insert(extension.id.clone()) {
             return Err(ResolveError::ProviderIdCollision {
-                id: plugin.id.clone(),
-                existing: "another plugin".to_string(),
+                id: extension.id.clone(),
+                existing: "another extension".to_string(),
             });
         }
     }
@@ -1230,10 +1233,10 @@ fn refuse_plugin_provider_collisions(
 }
 
 /// Build the effective catalog in its fixed order: built-ins, then
-/// `models.json`, then granted plugin providers.
-fn catalog_with_granted_plugins(
+/// `models.json`, then granted extension providers.
+fn catalog_with_granted_extensions(
     models_cfg: &config::ModelsConfig,
-    granted: &[GrantedPlugin],
+    granted: &[GrantedExtension],
 ) -> Result<Vec<Model>, ResolveError> {
     let mut catalog = anthropic_models();
     catalog.extend(openai_responses_models());
@@ -1243,15 +1246,15 @@ fn catalog_with_granted_plugins(
     merge_user_catalog(&mut catalog, models_cfg);
     let configured: BTreeSet<String> = models_cfg.providers.keys().cloned().collect();
 
-    refuse_plugin_provider_collisions(granted, &builtin, &configured)?;
+    refuse_extension_provider_collisions(granted, &builtin, &configured)?;
 
-    for plugin in granted {
-        for profile in &plugin.grant.providers {
-            if profile.id != plugin.id {
+    for extension in granted {
+        for profile in &extension.grant.providers {
+            if profile.id != extension.id {
                 continue;
             }
             for model in &profile.models {
-                if let Some(entry) = granted_model_to_model(&plugin.id, model) {
+                if let Some(entry) = granted_model_to_model(&extension.id, model) {
                     catalog.push(entry);
                 }
             }
@@ -1460,7 +1463,7 @@ fn split_model_pattern(
     cli_provider: Option<&str>,
     catalog: &[Model],
     cfg: &config::ModelsConfig,
-    granted_plugin_providers: &BTreeSet<String>,
+    granted_extension_providers: &BTreeSet<String>,
 ) -> Result<SplitModelPattern, ResolveError> {
     let mut provider = cli_provider.map(str::to_string);
     let mut model_id = value.to_string();
@@ -1470,7 +1473,7 @@ fn split_model_pattern(
         if !prefix.is_empty() && !remainder.is_empty() {
             let matches_explicit = cli_provider
                 .and_then(|requested| {
-                    canonicalize_cli_provider(prefix, cfg, granted_plugin_providers)
+                    canonicalize_cli_provider(prefix, cfg, granted_extension_providers)
                         .ok()
                         .map(|canonical| canonical == requested)
                 })
@@ -1478,7 +1481,7 @@ fn split_model_pattern(
             if matches_explicit {
                 model_id = remainder.to_string();
             } else if cli_provider.is_none() {
-                match canonicalize_cli_provider(prefix, cfg, granted_plugin_providers) {
+                match canonicalize_cli_provider(prefix, cfg, granted_extension_providers) {
                     Ok(canonical) => {
                         provider = Some(canonical);
                         model_id = remainder.to_string();
@@ -1548,7 +1551,7 @@ fn find_cli_model(
     cfg: &config::ModelsConfig,
     anthropic_credentials: &AnthropicCredentials,
     openai_credentials: &OpenAiCredentials,
-    granted_plugin_providers: &BTreeSet<String>,
+    granted_extension_providers: &BTreeSet<String>,
 ) -> Result<Option<Model>, ResolveError> {
     let exact_matches: Vec<&Model> = catalog
         .iter()
@@ -1571,7 +1574,7 @@ fn find_cli_model(
                         anthropic_credentials,
                         openai_credentials,
                         false,
-                        granted_plugin_providers,
+                        granted_extension_providers,
                     )
                 })
                 .collect();
@@ -1601,9 +1604,9 @@ fn find_cli_model(
 fn provider_is_known(
     requested: &str,
     cfg: &config::ModelsConfig,
-    granted_plugin_providers: &BTreeSet<String>,
+    granted_extension_providers: &BTreeSet<String>,
 ) -> bool {
-    granted_plugin_providers.contains(requested)
+    granted_extension_providers.contains(requested)
         || cfg.providers.contains_key(requested)
         || requested.eq_ignore_ascii_case("anthropic")
         || requested.eq_ignore_ascii_case("openai")
@@ -1618,9 +1621,9 @@ fn provider_is_known(
 fn canonicalize_cli_provider(
     requested: &str,
     cfg: &config::ModelsConfig,
-    granted_plugin_providers: &BTreeSet<String>,
+    granted_extension_providers: &BTreeSet<String>,
 ) -> Result<String, ResolveError> {
-    if granted_plugin_providers.contains(requested) {
+    if granted_extension_providers.contains(requested) {
         return Ok(requested.to_string());
     }
     if cfg.providers.contains_key(requested) {
@@ -1644,7 +1647,7 @@ fn canonicalize_cli_provider(
             .map(|provider| (*provider).to_string()),
     );
     matches.extend(
-        granted_plugin_providers
+        granted_extension_providers
             .iter()
             .filter(|provider| provider.eq_ignore_ascii_case(requested))
             .cloned(),
@@ -1710,13 +1713,15 @@ fn model_belongs_to_default_provider(
 ///
 /// The selected provider snapshot is identity-homogeneous. A model is runnable
 /// when its own headers carry auth, the selected provider has a default key,
-/// or the model's provider is granted to an installed plugin.
+/// or the model's provider is granted to an installed extension.
 fn model_is_authed(
     m: &Model,
     has_provider_key: bool,
-    granted_plugin_providers: &BTreeSet<String>,
+    granted_extension_providers: &BTreeSet<String>,
 ) -> bool {
-    model_has_header_auth(m) || has_provider_key || granted_plugin_providers.contains(&m.provider)
+    model_has_header_auth(m)
+        || has_provider_key
+        || granted_extension_providers.contains(&m.provider)
 }
 
 fn model_is_authed_for_resolution(
@@ -1724,11 +1729,11 @@ fn model_is_authed_for_resolution(
     anthropic_credentials: &AnthropicCredentials,
     openai_credentials: &OpenAiCredentials,
     has_cli_key: bool,
-    granted_plugin_providers: &BTreeSet<String>,
+    granted_extension_providers: &BTreeSet<String>,
 ) -> bool {
     model_has_header_auth(model)
         || has_cli_key
-        || granted_plugin_providers.contains(&model.provider)
+        || granted_extension_providers.contains(&model.provider)
         || match model.api {
             kiqi_ai::Api::AnthropicMessages => {
                 anthropic_credential_for(anthropic_credentials, &model.provider).is_some()
@@ -1765,7 +1770,7 @@ fn pick_default_model(
     anthropic_credentials: &AnthropicCredentials,
     openai_credentials: &OpenAiCredentials,
     has_cli_key: bool,
-    granted_plugin_providers: &BTreeSet<String>,
+    granted_extension_providers: &BTreeSet<String>,
 ) -> Model {
     // 1. upstream's known-provider defaults, in its declared priority order.
     for (provider, model_id) in DEFAULT_MODELS_PER_PROVIDER {
@@ -1777,7 +1782,7 @@ fn pick_default_model(
                     anthropic_credentials,
                     openai_credentials,
                     has_cli_key,
-                    granted_plugin_providers,
+                    granted_extension_providers,
                 )
         }) {
             return model.clone();
@@ -1793,7 +1798,7 @@ fn pick_default_model(
             anthropic_credentials,
             openai_credentials,
             has_cli_key,
-            granted_plugin_providers,
+            granted_extension_providers,
         )
     }) {
         return m.clone();
@@ -3790,22 +3795,22 @@ mod tests {
         assert!(message.contains("No provider is configured"), "{message}");
     }
 
-    // ---- Granted plugin provider catalog + auth predicate ----
+    // ---- Granted extension provider catalog + auth predicate ----
 
     /// Install a fake wasm component plus a `provider` grant under `root`, the
-    /// shape `ki plugin grant <id> provider` writes. The bytes are never
+    /// shape `ki extension grant <id> provider` writes. The bytes are never
     /// instantiated here (no host is built); only the catalog path is exercised.
-    #[cfg(feature = "plugin-wasm")]
-    fn install_plugin_provider(root: &Path, id: &str, models: &[(&str, &str)]) {
+    #[cfg(feature = "extension-wasm")]
+    fn install_extension_provider(root: &Path, id: &str, models: &[(&str, &str)]) {
         use kiqi_host::grants::{
             Grants, ProviderEndpoint, ProviderGrant, ProviderModel, ProviderProfile,
             PROVIDER_MAX_HANDLES_DEFAULT, PROVIDER_MAX_RESPONSE_BYTES_DEFAULT,
             PROVIDER_TIMEOUT_DEFAULT_SECONDS,
         };
 
-        let dir = root.join("plugins").join(id);
+        let dir = root.join("extensions").join(id);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("plugin.wasm"), b"not-a-real-component").unwrap();
+        std::fs::write(dir.join("extension.wasm"), b"not-a-real-component").unwrap();
         let grant = ProviderGrant {
             providers: vec![ProviderProfile {
                 id: id.to_string(),
@@ -3838,10 +3843,10 @@ mod tests {
         Grants::save_for_at(root, id, &grants).unwrap();
     }
 
-    /// Install the real conformance guest under `root/plugins/conformance` with
-    /// a provider grant covering `models`. Unlike [`install_plugin_provider`]
+    /// Install the real conformance guest under `root/extensions/conformance` with
+    /// a provider grant covering `models`. Unlike [`install_extension_provider`]
     /// these bytes are a loadable component, so a test may drive a request.
-    #[cfg(feature = "plugin-wasm")]
+    #[cfg(feature = "extension-wasm")]
     fn install_real_conformance_provider(root: &Path, models: &[&str]) -> PathBuf {
         use kiqi_host::grants::{
             Grants, ProviderEndpoint, ProviderGrant, ProviderModel, ProviderProfile,
@@ -3850,12 +3855,12 @@ mod tests {
 
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let built =
-            crate::plugin_cli::build_guest(&workspace.join("plugins/wasm/kiqi-conformance-guest"))
+            crate::extension_cli::build_guest(&workspace.join("extensions/wasm/kiqi-conformance"))
                 .expect("build the conformance guest");
-        let dir = root.join("plugins/conformance");
+        let dir = root.join("extensions/conformance");
         std::fs::create_dir_all(&dir).unwrap();
-        let wasm = dir.join("plugin.wasm");
-        std::fs::copy(&built, &wasm).expect("install plugin.wasm");
+        let wasm = dir.join("extension.wasm");
+        std::fs::copy(&built, &wasm).expect("install extension.wasm");
         let grant = ProviderGrant {
             providers: vec![ProviderProfile {
                 id: "conformance".to_string(),
@@ -3890,21 +3895,21 @@ mod tests {
     }
 
     /// Install a component directory with no capability grant at all.
-    #[cfg(feature = "plugin-wasm")]
-    fn install_plugin_without_grants(root: &Path, id: &str) {
+    #[cfg(feature = "extension-wasm")]
+    fn install_extension_without_grants(root: &Path, id: &str) {
         use kiqi_host::grants::Grants;
-        let dir = root.join("plugins").join(id);
+        let dir = root.join("extensions").join(id);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("plugin.wasm"), b"not-a-real-component").unwrap();
+        std::fs::write(dir.join("extension.wasm"), b"not-a-real-component").unwrap();
         Grants::save_for_at(root, id, &Grants::default()).unwrap();
     }
 
-    #[cfg(feature = "plugin-wasm")]
+    #[cfg(feature = "extension-wasm")]
     #[test]
-    fn granted_plugin_model_is_selectable_and_visible() {
+    fn granted_extension_model_is_selectable_and_visible() {
         let env = TestEnv::new();
         let root = env._tmp.path();
-        install_plugin_provider(root, "acme", &[("acme-1", "openai-completions")]);
+        install_extension_provider(root, "acme", &[("acme-1", "openai-completions")]);
 
         // No built-in key exists: the grant alone authorises the model.
         let resolved = resolve_with_settings(
@@ -3921,7 +3926,7 @@ mod tests {
         assert_eq!(resolved.model.provider, "acme");
         assert_eq!(resolved.provider.id(), "acme");
         assert!(!resolved.has_provider_key);
-        assert!(resolved.granted_plugin_providers.contains("acme"));
+        assert!(resolved.granted_extension_providers.contains("acme"));
         assert!(available_catalog(&resolved)
             .iter()
             .any(|model| model.id == "acme-1"));
@@ -3930,7 +3935,7 @@ mod tests {
             .any(|model| model.provider == "acme"));
 
         // A built-in credential (here `--api-key`) must never be folded onto a
-        // plugin model: the host-held credential is injected only by
+        // extension model: the host-held credential is injected only by
         // `provider-http` for a matching request.
         let keyed = resolve_with_settings(
             None,
@@ -3948,7 +3953,7 @@ mod tests {
                 .headers
                 .as_ref()
                 .map_or(true, |headers| headers.is_empty()),
-            "plugin model must not carry the CLI key: {:?}",
+            "extension model must not carry the CLI key: {:?}",
             keyed.model.headers
         );
 
@@ -3967,7 +3972,7 @@ mod tests {
         assert_eq!(default.model.provider, "acme");
         assert_eq!(default.model.id, "acme-1");
 
-        // `--provider` accepts the plugin id too.
+        // `--provider` accepts the extension id too.
         let by_provider = resolve_with_settings(
             Some("acme"),
             None,
@@ -3982,12 +3987,12 @@ mod tests {
     }
 
     /// `/model` is built from `resolved.providers`, so a reload must keep the
-    /// granted plugin adapter in that list. Adapters are per-resolve and lazy:
+    /// granted extension adapter in that list. Adapters are per-resolve and lazy:
     /// resolving compiles nothing, and a second resolve never reuses the first
     /// adapter's host.
-    #[cfg(feature = "plugin-wasm")]
+    #[cfg(feature = "extension-wasm")]
     #[tokio::test]
-    async fn granted_plugin_adapters_survive_reload_and_compile_lazily() {
+    async fn granted_extension_adapters_survive_reload_and_compile_lazily() {
         let _lock = crate::wasm_provider::HOST_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -4061,14 +4066,14 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "plugin-wasm")]
+    #[cfg(feature = "extension-wasm")]
     #[test]
-    fn ungranted_plugin_model_is_filtered_out_exactly_as_today() {
+    fn ungranted_extension_model_is_filtered_out_exactly_as_today() {
         let env = TestEnv::new();
         let root = env._tmp.path();
-        install_plugin_without_grants(root, "acme");
+        install_extension_without_grants(root, "acme");
 
-        assert!(granted_plugin_models(root).is_empty());
+        assert!(granted_extension_models(root).is_empty());
         let err = resolve_with_settings(
             None,
             Some("acme-1"),
@@ -4078,7 +4083,7 @@ mod tests {
             settings::Settings::default(),
             Some(root),
         )
-        .expect_err("an ungranted plugin model must not enter the catalog");
+        .expect_err("an ungranted extension model must not enter the catalog");
         assert!(matches!(err, ResolveError::NoMatch { .. }), "{err:?}");
 
         // Without any auth the gate is unchanged.
@@ -4095,12 +4100,12 @@ mod tests {
         assert!(matches!(err, ResolveError::NoApiKey { .. }), "{err:?}");
     }
 
-    #[cfg(feature = "plugin-wasm")]
+    #[cfg(feature = "extension-wasm")]
     #[test]
-    fn plugin_provider_id_collisions_are_refused() {
+    fn extension_provider_id_collisions_are_refused() {
         let env = TestEnv::new();
         let root = env._tmp.path();
-        install_plugin_provider(root, "anthropic", &[("shadow", "anthropic-messages")]);
+        install_extension_provider(root, "anthropic", &[("shadow", "anthropic-messages")]);
         let err = resolve_with_settings(
             None,
             None,
@@ -4110,7 +4115,7 @@ mod tests {
             settings::Settings::default(),
             Some(root),
         )
-        .expect_err("a plugin must not shadow a built-in provider id");
+        .expect_err("an extension must not shadow a built-in provider id");
         assert!(
             matches!(
                 err,
@@ -4120,7 +4125,7 @@ mod tests {
         );
 
         // Same rule for a models.json provider id.
-        std::fs::remove_dir_all(root.join("plugins").join("anthropic")).unwrap();
+        std::fs::remove_dir_all(root.join("extensions").join("anthropic")).unwrap();
         std::fs::write(
             config::models_path().unwrap(),
             r#"{
@@ -4135,7 +4140,7 @@ mod tests {
 }"#,
         )
         .unwrap();
-        install_plugin_provider(root, "gateway", &[("shadow", "anthropic-messages")]);
+        install_extension_provider(root, "gateway", &[("shadow", "anthropic-messages")]);
         let err = resolve_with_settings(
             None,
             None,
@@ -4145,7 +4150,7 @@ mod tests {
             settings::Settings::default(),
             Some(root),
         )
-        .expect_err("a plugin must not shadow a models.json provider id");
+        .expect_err("an extension must not shadow a models.json provider id");
         assert!(
             matches!(
                 err,
@@ -4155,9 +4160,9 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "plugin-wasm")]
+    #[cfg(feature = "extension-wasm")]
     #[test]
-    fn catalog_merge_order_is_builtin_then_models_json_then_plugins() {
+    fn catalog_merge_order_is_builtin_then_models_json_then_extensions() {
         let env = TestEnv::new();
         let root = env._tmp.path();
         std::fs::write(
@@ -4174,22 +4179,22 @@ mod tests {
 }"#,
         )
         .unwrap();
-        install_plugin_provider(root, "acme", &[("acme-1", "anthropic-messages")]);
+        install_extension_provider(root, "acme", &[("acme-1", "anthropic-messages")]);
 
         let cfg = config::load_models_config().unwrap();
-        let granted = granted_plugin_models(root);
-        let catalog = catalog_with_granted_plugins(&cfg, &granted).unwrap();
+        let granted = granted_extension_models(root);
+        let catalog = catalog_with_granted_extensions(&cfg, &granted).unwrap();
 
         assert_eq!(catalog[0].provider, "anthropic");
         let gateway = catalog
             .iter()
             .position(|model| model.provider == "gateway")
             .expect("models.json provider is present");
-        let plugin = catalog
+        let extension = catalog
             .iter()
             .position(|model| model.provider == "acme")
-            .expect("granted plugin provider is present");
-        assert!(gateway < plugin, "models.json must precede plugins");
-        assert_eq!(plugin, catalog.len() - 1, "plugins are appended last");
+            .expect("granted extension provider is present");
+        assert!(gateway < extension, "models.json must precede extensions");
+        assert_eq!(extension, catalog.len() - 1, "extensions are appended last");
     }
 }

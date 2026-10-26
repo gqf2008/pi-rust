@@ -356,7 +356,7 @@ harness-level hook of this name, and they are not interchangeable:
 | `agent-loop.ts` | `(messages) => messages` | `TransformContext` on `AgentLoopConfig` — **same** |
 | `harness` hook map | `{messages, systemPrompt} => {messages?, systemPrompt?}` | the prompt half lives on `ProviderHooks::transform_context` returning `ContextPatch`; the messages half is **not** implemented |
 
-A plugin reaches the prompt half through `register_before_agent_start`
+An extension reaches the prompt half through `register_before_agent_start`
 (`before_agent_start` returning `systemPrompt`, i.e. pi's `forceSystemPrompt`).
 So `TransformContext` above staying `messages -> messages` is correct, not an
 abbreviated port: it mirrors the loop, and the prompt lives one layer up where a

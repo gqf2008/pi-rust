@@ -34,7 +34,7 @@ pub async fn take_mcp_boundary(harness: &AgentHarness, mcp: &McpManager) -> crat
     batch
 }
 
-/// Record one drained batch as the single batched custom entry (the goal-guest
+/// Record one drained batch as the single batched custom entry (the goal extension
 /// injection precedent). It becomes a user message on the next context build.
 pub async fn append_notice_batch(harness: &AgentHarness, batch: &crate::McpNoticeBatch) {
     if batch.is_empty() {
@@ -49,7 +49,7 @@ pub async fn append_notice_batch(harness: &AgentHarness, batch: &crate::McpNotic
 /// Deliver MCP resource-update notices at a session boundary and refresh the
 /// MCP tool slice when a server sent `list_changed`.
 ///
-/// The notice is ONE batched custom entry (the goal-guest injection
+/// The notice is ONE batched custom entry (the goal extension injection
 /// precedent); it becomes a user message on the next context build. Reading
 /// the resource is on demand (`{server}__read_resource`) — the notice never
 /// carries content.

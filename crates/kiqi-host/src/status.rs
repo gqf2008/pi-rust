@@ -2,7 +2,7 @@
 //!
 //! A tiny host-side registry that lets an extension publish a short status
 //! string (e.g. `langfuse ✓ (trace sent)`) for the TUI to render in its footer.
-//! Mirrors [`UiDialogMailbox`](crate::UiDialogMailbox): the plugin writes
+//! Mirrors [`UiDialogMailbox`](crate::UiDialogMailbox): the extension writes
 //! through the `SetStatus` runtime action, and the TUI — the only consumer —
 //! polls [`ExtensionStatusMailbox::revision`] once per render tick and repaints
 //! only when something actually changed.
@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 /// Shared, cloneable handle to the extension status registry.
 ///
 /// Every clone refers to the same map: the host hands one clone to the action
-/// bridge (plugin writes) and one to the TUI (rendering).
+/// bridge (extension writes) and one to the TUI (rendering).
 #[derive(Clone, Default)]
 pub struct ExtensionStatusMailbox {
     entries: Arc<Mutex<BTreeMap<String, String>>>,

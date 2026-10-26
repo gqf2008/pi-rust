@@ -1,9 +1,9 @@
-> 注（2026-10-21）：编译期一方插件通道已退役；文中 `plugins/kiqi-*` 路径与 `plugin-kiqi-*` feature 是历史记录，现行实现在 `plugins/wasm/kiqi-*-guest`。
+> 注（2026-10-21）：编译期一方插件通道已退役；文中 `extensions/kiqi-*` 路径与 `extension-kiqi-*` feature 是历史记录，现行实现在 `extensions/wasm/kiqi-*`。
 
 # 「subagent 挂起后父 run 无法恢复」排查记录
 
 排查日期：2026-10-19 ~ 2026-10-20
-涉及仓库：`pi-rust`（`plugins/kiqi-orchestrator`、`crates/kiqi-cli`、`crates/kiqi-harness`）
+涉及仓库：`pi-rust`（`extensions/kiqi-orchestrator`、`crates/kiqi-cli`、`crates/kiqi-harness`）
 
 本文记录两次真实挂起的现象、已经**排除**的假设、已经**修掉**的无界等待，以及
 **尚未定位**的部分。目的与 `llm-repetition-forensics.md` 相同：给一份可复核的断点
@@ -37,13 +37,13 @@
 
 ### 2.1 「插件锁把父侧卡住了」
 
-**排除**。`PluginHost` 没有任何 `Mutex`：
+**排除**。`ExtensionHost` 没有任何 `Mutex`：
 
-- `crates/kiqi-cli/src/plugins.rs:836-856` 的 `struct PluginHost { id, plugin: Box<dyn Plugin>, untrusted }`
+- `crates/kiqi-cli/src/extensions.rs:836-856` 的 `struct ExtensionHost { id, extension: Box<dyn Extension>, untrusted }`
 - 所有方法都是 `&self`，`call_tool` 直接 `self.guard_result("call", ...)`
 
-而且工具调用本身跑在独立线程上（`crates/kiqi-cli/src/plugins.rs:574-592` 的
-`spawn_plugin_call` 用 `std::thread::Builder`），宿主持有的是 `oneshot::Receiver`。
+而且工具调用本身跑在独立线程上（`crates/kiqi-cli/src/extensions.rs:574-592` 的
+`spawn_extension_call` 用 `std::thread::Builder`），宿主持有的是 `oneshot::Receiver`。
 
 ### 2.2 「`inner` 锁跨 `.await` 持有」
 
@@ -59,7 +59,7 @@ let recovery_hook = self.inner.lock().unwrap().before_tool_call.clone();
 ### 2.3 「stdin 写入把父侧堵住」
 
 **排除**。`write_stdin` 是无取消检查点的同步写，但 task 上限是 20 KB
-（`plugins/kiqi-orchestrator/src/graph.rs:14` 的 `MAX_TASK_BYTES`），远小于管道容量，
+（`extensions/kiqi-orchestrator/src/graph.rs:14` 的 `MAX_TASK_BYTES`），远小于管道容量，
 不会背压。
 
 ---
@@ -68,7 +68,7 @@ let recovery_hook = self.inner.lock().unwrap().before_tool_call.clone();
 
 **这是唯一一条能直接解释「子进程已死、父侧不返回」的代码路径。**
 
-原实现（`plugins/kiqi-orchestrator/src/spawn.rs`）：
+原实现（`extensions/kiqi-orchestrator/src/spawn.rs`）：
 
 ```rust
 fn join_reader(handle: Option<JoinHandle<String>>) -> String {
@@ -79,7 +79,7 @@ fn join_reader(handle: Option<JoinHandle<String>>) -> String {
 reader 线程只在管道 EOF 时返回。若子进程已死但仍有进程持有写端，`join()` **永久阻塞**，
 且这个 join 发生在 `kill_and_reap` 之后、任何取消检查点之外。
 
-修复（`15273e3`，现 `plugins/kiqi-orchestrator/src/spawn.rs:572`）：reader 写入共享
+修复（`15273e3`，现 `extensions/kiqi-orchestrator/src/spawn.rs:572`）：reader 写入共享
 sink（`OutputSink`），调用方有界等待 `READER_JOIN_TIMEOUT = 5s`，超时后保留已读
 字节、丢弃 JoinHandle。
 
@@ -139,7 +139,7 @@ TUI 的按键循环跑在 `tokio::task::spawn_blocking`（`crates/kiqi-cli/src/i
 |---|---|---|
 | `setsid` 脱组测试 | macOS 无此命令，脚本失败但测试仍「通过」 | 以为复现了挂起，其实什么都没持有 |
 | 陈旧二进制 | worktree 与主 checkout 共用 `CARGO_TARGET_DIR`，源文件 mtime 早于缓存产物，cargo 判 fresh 复用 | `cargo build` 0.64s 未编译，`strings` 里找不到新代码 |
-| `grep -o 'plugin-kiqi-[a-z0-9-]*'` | 字符类含 `-`，grep 在连字符处切断，输出裸 token；`-f` 模式文件里一个空行就让整个查找失效 | 特性清单守卫永不失败 |
+| `grep -o 'extension-kiqi-[a-z0-9-]*'` | 字符类含 `-`，grep 在连字符处切断，输出裸 token；`-f` 模式文件里一个空行就让整个查找失效 | 特性清单守卫永不失败 |
 | CI 命令续行 | `cargo build --locked \` 换行，而 grep 在同一行找 `-p` | standalone 清单取到空，比对恒等 |
 
 **统一教训**：校验器与复现脚本自身必须被一个「应当失败」的用例验过。

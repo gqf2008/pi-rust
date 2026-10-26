@@ -3,7 +3,7 @@
 > 状态：**阶段 1、2、3、4 已全部落地（2026-10-19/20，`4902ab7` / `3fa2aa7` / `cf7e9c5`+`7e9377f` / §5.4）**。目标：把 Esc 从“终止整个 run”改为
 > “取消当前工具调用/模型流，保留 run 与 steering 队列”，由 LLM 在看到插入消息后
 > 决定停止、收尾还是继续。
-> 关联：`signal-driven-agent.md` §5（MUI 输入）、`plugin-abi.md` §6.38
+> 关联：`signal-driven-agent.md` §5（MUI 输入）、`extension-abi.md` §6.38
 > （wasm `proc.cancel-requested`）、`ki-mcp-builtin.md`。
 
 ## 1. 现状（实核）
@@ -164,7 +164,7 @@ UI：
    没生效。结束本 turn 仍然是 `Completed`（不是 `Aborted`），run signal 未取消（I1）、
    也不设静音（I5）。
 2. **不新增 `AgentEvent` 变体。** `AgentEvent` 是插件契约的一部分（`kiqi-extensions` 的
-   `EventTag` + `plugin-abi.md`），为一条丢弃消息新增变体得不偿失。改用
+   `EventTag` + `extension-abi.md`），为一条丢弃消息新增变体得不偿失。改用
    “emit `MessageEnd` + 从 `new_messages` 移除”。**已知副作用**：TUI 当场能看到被中断
    的那一段（靠 `MessageEnd` 收尾流式块），但重新加载会话后它不在了——因为会话文件
    里确实没有它。
@@ -222,7 +222,7 @@ trace 是纯诊断：无人回读、不参与任何返回值或时序、所有 I
 
 1. **用 trait 方法而不是新 `AgentEvent` 变体。** `AgentEvent` 是插件契约（§5.2 判断 2），
    而这条信号只有结算观察者关心，且带的是被丢弃的 `AssistantMessage`；加变体会改
-   `kiqi-extensions` 的 `EventTag` 与 `plugin-abi.md`，收益不成比例。代价是**树外
+   `kiqi-extensions` 的 `EventTag` 与 `extension-abi.md`，收益不成比例。代价是**树外
    emitter 默认收不到**：它只是默认 no-op，不破坏源码兼容；只有负责持久化的观察者
    （当前仅 `SettlingEmitter`）必须实现，装饰器要像 `try_emit` 一样转发。
 2. **`seen` 的撤回与 skip latch 必须成对。** 只减 `seen` 而不吃掉 `MessageEnd`，

@@ -656,15 +656,15 @@ impl SlashCommand for UsageCommand {
 }
 
 /// `/reload` — re-run extension + resource discovery into the LIVE harness
-/// (B5d): reload the cdylib plugins, invalidate the old `ActionBridge` +
+/// (B5d): reload the cdylib extensions, invalidate the old `ActionBridge` +
 /// registry snapshot, rebuild skills/prompts/context/SYSTEM.md/APPEND_SYSTEM.md
 /// + the `TeeEmitter`, and push the rebuilt state via the B5d harness setters.
 /// The command itself runs on the blocking submit thread, so it can't drive
 /// the async `reload_extension_resources` routine directly — it signals the main
 /// loop via `TuiMessage::ReloadExtensions`, which awaits it on the async runtime.
-/// (A plugin's `runtime_action(Reload)` signals the same loop via the
+/// (An extension's `runtime_action(Reload)` signals the same loop via the
 /// `ReloadMailbox` the TUI installs — the B5d async-reload design avoids the
-/// self-unmapping race a synchronous plugin-initiated reload would have.)
+/// self-unmapping race a synchronous extension-initiated reload would have.)
 pub(super) struct ReloadCommand;
 impl SlashCommand for ReloadCommand {
     fn name(&self) -> &'static str {
@@ -839,15 +839,15 @@ pub(super) fn register_extension_commands(
     register_compiled_commands(registry);
 }
 
-/// Register the `/commands` compiled-in and wasm plugins contribute.
+/// Register the `/commands` compiled-in and wasm extensions contribute.
 ///
-/// A compiled plugin's `run_command` is one synchronous call that returns the
+/// A compiled extension's `run_command` is one synchronous call that returns the
 /// text to show, so there is no selector/editor round-trip to resume — unlike
 /// [`ExtensionCommand`], which keeps the native session alive for a dialog.
-/// Built-ins already registered win, so a plugin cannot shadow `/help`.
+/// Built-ins already registered win, so an extension cannot shadow `/help`.
 pub(super) fn register_compiled_commands(registry: &mut CommandRegistry) {
-    for host in crate::plugins::compiled_plugin_hosts() {
-        for spec in host.plugin().commands() {
+    for host in crate::extensions::compiled_extension_hosts() {
+        for spec in host.extension().commands() {
             let name = if spec.name.starts_with('/') {
                 spec.name.clone()
             } else {
@@ -865,11 +865,11 @@ pub(super) fn register_compiled_commands(registry: &mut CommandRegistry) {
     }
 }
 
-/// A slash command contributed by a compiled-in or wasm plugin.
+/// A slash command contributed by a compiled-in or wasm extension.
 struct CompiledCommand {
     name: String,
     description: String,
-    host: std::sync::Arc<crate::plugins::PluginHost>,
+    host: std::sync::Arc<crate::extensions::ExtensionHost>,
 }
 
 impl SlashCommand for CompiledCommand {
@@ -887,7 +887,7 @@ impl SlashCommand for CompiledCommand {
         // Any previously pending flow is replaced (its reply will then fail the
         // stale-id check).
         let _ = ctx.state.cancel_command_flow();
-        spawn_plugin_command(
+        spawn_extension_command(
             ctx,
             self.host.clone(),
             self.name.trim_start_matches('/').to_string(),
@@ -900,13 +900,13 @@ impl SlashCommand for CompiledCommand {
 mod tests {
     use super::*;
 
-    /// A compiled-in plugin's `/command` lands in the same registry the TUI
+    /// A compiled-in extension's `/command` lands in the same registry the TUI
     /// dispatches from — kiqi-todo contributes `/todos`.
-    /// Needs a compiled plugin that contributes a command; the default build
+    /// Needs a compiled extension that contributes a command; the default build
     /// has none (they are opt-in features now, or wasm guests).
-    #[cfg(feature = "plugin-kiqi-todo")]
+    #[cfg(feature = "extension-kiqi-todo")]
     #[test]
-    fn compiled_plugin_commands_are_registered() {
+    fn compiled_extension_commands_are_registered() {
         let mut registry = CommandRegistry::new();
         register_compiled_commands(&mut registry);
         let command = registry.find("/todos").expect("/todos from kiqi-todo");
@@ -917,7 +917,7 @@ mod tests {
         );
     }
 
-    /// A plugin cannot shadow a built-in: built-ins register first and the
+    /// An extension cannot shadow a built-in: built-ins register first and the
     /// duplicate check keeps them, so `/help` stays the real one.
     #[test]
     fn compiled_commands_do_not_shadow_builtins() {

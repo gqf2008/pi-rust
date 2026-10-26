@@ -73,7 +73,7 @@ impl AgentMessage {
 /// [`crate::AgentEvent::MessageUpdate`] carries the streaming partial as an
 /// `Arc<AssistantMessage>` so neither the loop nor its consumers deep-clone the
 /// whole growing message per delta. Consumers that need the message as JSON (the
-/// remote protocol, the extension bridge) use this to keep the wire/plugin shape
+/// remote protocol, the extension bridge) use this to keep the wire/extension shape
 /// byte-identical to a real `AgentMessage` — a deep clone here would reintroduce
 /// exactly the per-delta copy the `Arc` exists to avoid. The equivalence is
 /// pinned by `assistant_json_matches_the_agent_message_shape`.

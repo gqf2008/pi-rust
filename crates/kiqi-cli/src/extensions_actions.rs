@@ -7,8 +7,8 @@
 //! `prompt_message`/`prompt_text`/`get_active_tools`/`set_active_tools`/
 //! `set_model`/`get_thinking_level`/`set_thinking_level`/`compact`/
 //! `navigate_tree`). Run-ops serialize via `acquire_run`'s `active_run` guard —
-//! a concurrent plugin invocation surfaces `lane_busy` as the harness error
-//! string, the right behavior (a plugin can't re-enter an active run).
+//! a concurrent extension invocation surfaces `lane_busy` as the harness error
+//! string, the right behavior (an extension can't re-enter an active run).
 //!
 //! 6 non-lane ops:
 //! - `append_entry`/`set_session_name` → `harness.session().append_message`/
@@ -22,13 +22,13 @@
 //! ## Construction ordering (the load-bearing wrinkle)
 //!
 //! Extensions load **before** the harness is created (extensions provide the
-//! tools the harness is built with), but the plugin stores the
+//! tools the harness is built with), but the extension stores the
 //! `ActionBridge`'s `user_data` pointer during `register` and that pointer
 //! must remain valid for the whole session. So the host cannot hold the
 //! `AgentHarness` directly — it holds an [`Arc<OnceLock<Arc<AgentHarness>>>`]
 //! that is **empty at register time** and **filled once** by
 //! [`HarnessActionHost::set_harness`] immediately after `AgentHarness::create`
-//! succeeds. No plugin can call a runtime action before the harness runs, so
+//! succeeds. No extension can call a runtime action before the harness runs, so
 //! the cell is always set before the first `get()`. The `Arc<dyn
 //! RuntimeActionHost>` (and thus the `ActionBridge` pointer) is stable from
 //! construction, satisfying the FFI lifetime requirement.
@@ -61,7 +61,7 @@ use crate::session::{default_session_dir, open_session_by_id};
 /// by the trampoline), so they may freely await.
 pub struct HarnessActionHost {
     /// Filled by `set_harness` after the harness exists. `get()` is infallible
-    /// once set; before that (only possible mid-build, before any plugin call)
+    /// once set; before that (only possible mid-build, before any extension call)
     /// methods return a "not ready" error.
     harness: Arc<OnceLock<Arc<AgentHarness>>>,
     /// The auth-filtered catalog (the same list the TUI `/model` selector
@@ -72,9 +72,9 @@ pub struct HarnessActionHost {
     cwd: PathBuf,
     /// Parsed unknown long flags retained for extension consumption.
     cli_flags: BTreeMap<String, serde_json::Value>,
-    /// The session's plugin-tool context (`cwd` + session id). The session
+    /// The session's extension-tool context (`cwd` + session id). The session
     /// runtime actions (`new_session`/`fork`/`switch_session`) swap the session
-    /// the harness serves, and must republish the id here too — a plugin whose
+    /// the harness serves, and must republish the id here too — an extension whose
     /// tool state keyed off the old id would otherwise keep serving the session
     /// it named before the swap.
     tool_context: kiqi_host::ToolCallContext,
@@ -127,7 +127,7 @@ impl HarnessActionHost {
     }
 
     /// Borrow the harness, or return a "not ready" error. Only reachable
-    /// mid-build before `set_harness`; once the harness runs, plugins can fire
+    /// mid-build before `set_harness`; once the harness runs, extensions can fire
     /// actions and the cell is set.
     fn harness(&self) -> Result<&AgentHarness, String> {
         self.harness
@@ -184,7 +184,7 @@ fn arg_str_array(args: &serde_json::Value, key: &str) -> Result<Vec<String>, Str
         .ok_or_else(|| format!("missing string-array field `{key}` in action args"))
 }
 
-/// Render a `HarnessRunOutcome` as JSON for the plugin. Only the terminal
+/// Render a `HarnessRunOutcome` as JSON for the extension. Only the terminal
 /// status + leaf id cross (the final message text is folded to a string; full
 /// assistant content is too rich for a v1 action result).
 fn run_outcome_json(outcome: HarnessRunOutcome) -> serde_json::Value {
@@ -587,12 +587,12 @@ mod tests {
         values.get_as::<bool>(crate::signal_host::SESSION_MUTE_KEY)
     }
 
-    /// The plugin runtime actions (`new_session`/`fork`/`switch_session`) must
+    /// The extension runtime actions (`new_session`/`fork`/`switch_session`) must
     /// move the signal host with the harness. It caches a `Session` handle
     /// whose clone snapshots the storage slot, so a swap that only calls
     /// `set_session` keeps persisting `mcp.signals.*` into the previous JSONL.
     #[tokio::test]
-    async fn plugin_session_actions_reattach_the_signal_host() {
+    async fn extension_session_actions_reattach_the_signal_host() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         let cwd_str = cwd.to_string_lossy().to_string();
@@ -680,7 +680,7 @@ mod tests {
     /// session — the exact staleness the shell-visible twin exists to avoid.
     ///
     /// `None` for the tool context is deliberate: the env channel is published
-    /// even when no plugin context is available.
+    /// even when no extension context is available.
     #[tokio::test]
     async fn switching_the_active_session_republishes_the_agent_identity() {
         struct Restore {

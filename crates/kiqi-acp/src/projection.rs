@@ -90,7 +90,7 @@ fn tool_result_text(result: &AgentToolResult) -> String {
 }
 
 /// ki tool names → ACP tool kinds (the spirit of rpi-package kiqi-acp's
-/// `kind_for_tool`, matched loosely so plugin tools land somewhere sensible).
+/// `kind_for_tool`, matched loosely so extension tools land somewhere sensible).
 pub(crate) fn kind_for_tool(name: &str) -> ToolKind {
     let lower = name.to_ascii_lowercase();
     if lower.contains("bash") || lower.contains("exec") {

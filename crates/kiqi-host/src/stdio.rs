@@ -81,7 +81,7 @@ impl StdioLifecycle {
         }
     }
 
-    /// Completion is retained, including when a plugin finishes before the host waits.
+    /// Completion is retained, including when an extension finishes before the host waits.
     pub async fn wait(&self) -> i32 {
         loop {
             let changed = self.changed.notified();

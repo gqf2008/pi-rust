@@ -31,8 +31,8 @@ Highlights:
 - Sessions are a tree with JSONL persistence and crash recovery driven by
   frame-level progress records. A process that dies mid-tool-call resumes instead
   of losing the turn or re-running the tool.
-- Plugins are Rust cdylibs behind a hand-written #[repr(C)] ABI with version
-  negotiation and panic containment, because host and plugin are compiled
+- Extensions are Rust cdylibs behind a hand-written #[repr(C)] ABI with version
+  negotiation and panic containment, because host and extension are compiled
   separately and may use different compiler versions.
 - Remote mode: a headless server plus a connect client that holds no local agent
   state.
@@ -48,7 +48,7 @@ JSONL command channel, isolated config, both offline:
 An earlier version of this post reported 103 ms and 1.7x; that was my bug. The
 harness set pi's `PI_OFFLINE` / `PI_CODING_AGENT_DIR`, which ki does not read —
 it uses `KI_OFFLINE` / `KI_CODING_AGENT_DIR` — so ki was silently loading the
-25 plugin DLLs in my real `~/.ki/agent` while pi ran clean. A second bug then
+25 extension DLLs in my real `~/.ki/agent` while pi ran clean. A second bug then
 under-reported ki: the cold-start stopwatch started *after* `spawn()`, hiding ~7 ms of
 process creation. With both fixed: ki's `--version` (17.5 ms) and its usable
 agent (17.7 ms) are equal, so its initialisation is negligible; Pi's two numbers
@@ -65,7 +65,7 @@ hiding them.
 
 https://github.com/gqf2008/pi-rust
 
-MIT licensed. Happy to answer questions about the crate split, the plugin ABI, or
+MIT licensed. Happy to answer questions about the crate split, the extension ABI, or
 the crash-recovery model.
 ```
 
@@ -93,7 +93,7 @@ Building a testable coding agent in Rust
 
 ```
 Most coding agents are CLIs. If you want one inside your own process — an editor
-plugin, a CI job, an internal tool — your only option is to shell out and parse
+extension, a CI job, an internal tool — your only option is to shell out and parse
 stdout. That works until it doesn't: the output format is meant for humans, error
 handling is string matching, and you cannot subscribe to intermediate events.
 
@@ -217,7 +217,7 @@ dependencies:
 
   kiqi-telemetry -> kiqi-ai -> kiqi-agent -> kiqi-tools -> kiqi-harness -> kiqi-cli
                     ^                                        ^
-              kiqi-tui                          kiqi-plugin-sdk -> kiqi-extensions
+              kiqi-tui                          kiqi-extension-sdk -> kiqi-extensions
 
 Design decisions that might be interesting here:
 
@@ -227,8 +227,8 @@ Design decisions that might be interesting here:
   loop has a single failure path.
 - `kiqi-ai`'s HTTP providers are behind a feature flag, so the default build
   contains no network stack and the test suite cannot accidentally depend on one.
-- The plugin SDK is a **zero-dependency leaf**. Plugins are cdylibs the host loads
-  with libloading, so if the SDK depended on the runtime the plugin would link the
+- The extension SDK is a **zero-dependency leaf**. Extensions are cdylibs the host loads
+  with libloading, so if the SDK depended on the runtime the extension would link the
   host — which breaks. The ABI is a hand-written `#[repr(C)]` contract: no `Drop`
   types cross, strings cross as ptr+len with an explicit `free_string` (each
   allocation freed exactly once, by the receiver), structured data crosses as JSON,
@@ -242,7 +242,7 @@ I also measured startup against the TypeScript original it ports, same machine,
 same JSONL command channel, isolated config, both offline: 9.7x faster to start, 10.7x
 faster to cold start, 7.6x smaller RSS. An earlier run reported 1.7x; that
 was an isolation bug — I set pi's `PI_*` variables but ki reads `KI_*`, so ki
-kept loading the 25 plugin DLLs in my real `~/.ki/agent` while pi ran clean. A
+kept loading the 25 extension DLLs in my real `~/.ki/agent` while pi ran clean. A
 second run reported 10 ms because the stopwatch started after `spawn()`; ki's
 real number is 17.7 ms, essentially its process-creation cost.
 
@@ -317,7 +317,7 @@ deterministic test double and recorded transcripts are interchangeable, and the
 default build contains no HTTP stack at all — providers are feature-gated so the
 test suite cannot depend on the network by accident.
 
-Plugins are cdylibs behind a hand-written `#[repr(C)]` ABI. Host and plugin are
+Extensions are cdylibs behind a hand-written `#[repr(C)]` ABI. Host and extension are
 compiled separately with potentially different compiler versions, so no `Drop`
 type may cross the boundary: strings cross as ptr+len with an explicit free
 function, structured data crosses as JSON, and both sides contain panics with

@@ -44,7 +44,7 @@ pub(crate) struct SignalWakeState {
     session_muted: bool,
     /// Consecutive host-started goal continuations for the current goal.
     /// Bounded only for an unbounded goal; a goal with its own turn/time budget
-    /// is bounded by the plugin.
+    /// is bounded by the extension.
     goal_chain: u32,
     /// The goal the chain belongs to; a new goal resets it.
     goal_key: Option<String>,
@@ -88,7 +88,7 @@ impl SignalWakeState {
 
     /// Count one host-started goal continuation. `unbounded` goals (no
     /// `maxTurns`/`maxMinutes`) are capped by [`MAX_GOAL_AUTO_RUNS`]; goals with
-    /// a budget are left to the plugin's own limit.
+    /// a budget are left to the extension's own limit.
     pub(crate) fn allow_goal_continuation(&mut self, key: &str, unbounded: bool) -> bool {
         if self.goal_key.as_deref() != Some(key) {
             self.goal_key = Some(key.to_string());

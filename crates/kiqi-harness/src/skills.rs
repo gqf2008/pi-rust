@@ -187,7 +187,7 @@ pub async fn load_skills(env: &Arc<dyn ExecutionEnv>, dirs: &[String]) -> LoadSk
         };
         // Mirror pi `skills.ts:462-481`: a skillPath may be a directory OR an
         // individual `.md` file. (Previously this branch was directory-only — a
-        // plugin's `resources_discover` returning bare `SKILL.md` file paths was
+        // extension's `resources_discover` returning bare `SKILL.md` file paths was
         // silently skipped. B5b widens this to files so discovered skills load.)
         let kind = resolve_kind(env, &root_info, &mut diagnostics, &cancel).await;
         match kind {

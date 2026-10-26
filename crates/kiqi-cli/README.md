@@ -6,7 +6,7 @@ The terminal coding-agent CLI — the `ki` binary — built on the `kiqi-*` libr
 crates. It is the ready-to-run surface of the
 [ki](https://github.com/gqf2008/pi-rust) project: an interactive TUI, a
 one-shot `-p` mode, a JSON event mode, durable sessions, and sandboxed wasm
-plugin loading.
+extension loading.
 
 ## Install
 
@@ -78,19 +78,19 @@ endpoint overrides also honour `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`.
 - Project resources are discovered from `.ki/` (skills, prompts, themes, and
   `SYSTEM.md`), with `~/.ki/agent/` as the global layer. When both define the
   same skill or prompt name, the project copy wins.
-- Plugins are wasm guests under `$KI_AGENT_DIR/plugins/<id>/`, installed and
+- Extensions are wasm guests under `$KI_AGENT_DIR/extensions/<id>/`, installed and
   removed with `ki insmod` / `ki rmmod` (the cdylib channel was retired on
   2026-10-26).
 
-## Plugins
+## Extensions
 
 ```bash
-ki insmod --build plugins/wasm/kiqi-todo-guest   # build a guest and install it
+ki insmod --build extensions/wasm/kiqi-todo   # build a guest and install it
 ki insmod path/to/component.wasm --yes           # install an already-built component
-ki plugin list                                   # what is installed
+ki extension list                                   # what is installed
 ```
 
-Every plugin is a wasm component (`plugins/kiqi-plugin.wit` is the contract),
+Every extension is a wasm component (`extensions/kiqi-extension.wit` is the contract),
 sandboxed by wasmtime and granted only what its `grants.json` approves. The
 capabilities that ship with this repository are all built this way;
 `ki insmod --build` compiles a guest for `wasm32-wasip2` and installs it.

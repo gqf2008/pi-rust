@@ -1,22 +1,22 @@
-//! Plugin event fan-out.
+//! Extension event fan-out.
 //!
-//! Plugins observe events through [`crate::Plugin::on_event`] rather than
+//! Extensions observe events through [`crate::Extension::on_event`] rather than
 //! the C ABI. This module is the seam: the native dispatch funnels call
 //! [`dispatch`], and the host installs a [`CompiledEventSink`] whose closure
-//! translates the stable event to the plugin contract and calls every loaded
+//! translates the stable event to the extension contract and calls every loaded
 //! host (wasm guests today). No sink installed (a bare `kiqi-extensions` build,
 //! or tests) makes every call a no-op.
 
 use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::EventView;
-use crate::StablePluginEvent;
+use crate::StableExtensionEvent;
 use serde_json::Value;
 
-/// What the compiled plugins decided about one event.
+/// What the compiled extensions decided about one event.
 ///
 /// The claim channel mirrors the native ABI's `EVENT_HANDLER_CLAIMED` / `0`:
-/// `crate::EventAction::Replace` maps to [`Self::Claimed`] (the plugin
+/// `crate::EventAction::Replace` maps to [`Self::Claimed`] (the extension
 /// took the event) because no rewrite can propagate down the native path.
 ///
 /// [`Self::Patch`] is the one mutation channel: it exists only for the
@@ -25,19 +25,19 @@ use serde_json::Value;
 /// claiming fan-out never consumes it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompiledVerdict {
-    /// No plugin objected; later handlers still run.
+    /// No extension objected; later handlers still run.
     Continue,
-    /// A plugin consumed the event: a routing dispatcher must stop and report it
+    /// An extension consumed the event: a routing dispatcher must stop and report it
     /// handled, exactly as a native handler's `CLAIMED` does.
     Claimed,
     /// A provider-gate patch (already validated by the host that produced it).
     Patch(Value),
 }
 
-/// Whether a dispatch may wait for a busy plugin.
+/// Whether a dispatch may wait for a busy extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchMode {
-    /// Advisory fan-out (`dispatch_to_handlers`, lifecycle): a plugin that is
+    /// Advisory fan-out (`dispatch_to_handlers`, lifecycle): an extension that is
     /// mid-call is skipped rather than waited for.
     Observe,
     /// Routing fan-out (claiming dispatchers): the verdict decides control
@@ -49,7 +49,7 @@ pub enum DispatchMode {
 }
 
 /// Receives one dispatched event as `(mode, wire tag, JSON payload)` and
-/// reports what the compiled plugins decided.
+/// reports what the compiled extensions decided.
 pub type CompiledEventSink = Arc<dyn Fn(DispatchMode, u32, Value) -> CompiledVerdict + Send + Sync>;
 
 static SINK: OnceLock<RwLock<Option<CompiledEventSink>>> = OnceLock::new();
@@ -58,7 +58,7 @@ fn sink_slot() -> &'static RwLock<Option<CompiledEventSink>> {
     SINK.get_or_init(|| RwLock::new(None))
 }
 
-/// Install (or replace) the sink the host uses to reach compiled plugins.
+/// Install (or replace) the sink the host uses to reach compiled extensions.
 ///
 /// Idempotent; last writer wins. The host installs it once per session build
 /// with the session's capabilities captured in the closure.
@@ -84,31 +84,31 @@ pub fn clear_compiled_event_sink() {
     *sink_slot().write().unwrap() = None;
 }
 
-/// Fan one stable event out to the compiled/wasm plugins, if a sink is
-/// installed. Observe fan-out: a busy plugin is skipped, never waited for.
+/// Fan one stable event out to the compiled/wasm extensions, if a sink is
+/// installed. Observe fan-out: a busy extension is skipped, never waited for.
 ///
 /// Called from the same dispatch funnels the cdylib handlers go through, so a
-/// plugin sees exactly the events a native one would.
-pub(crate) fn dispatch_observe(event: &StablePluginEvent) -> CompiledVerdict {
+/// extension sees exactly the events a native one would.
+pub(crate) fn dispatch_observe(event: &StableExtensionEvent) -> CompiledVerdict {
     dispatch_with(DispatchMode::Observe, event)
 }
 
-/// Routing variant: the caller acts on the verdict, so a busy plugin is waited
+/// Routing variant: the caller acts on the verdict, so a busy extension is waited
 /// for rather than skipped.
-pub(crate) fn dispatch_claiming(event: &StablePluginEvent) -> CompiledVerdict {
+pub(crate) fn dispatch_claiming(event: &StableExtensionEvent) -> CompiledVerdict {
     dispatch_with(DispatchMode::Claiming, event)
 }
 
 /// Provider-gate variant: asks only the patch-capable hosts and returns the
 /// merged patch, if any. The caller applies it; an observe fan-out never does.
-pub(crate) fn dispatch_provider_gate(event: &StablePluginEvent) -> Option<Value> {
+pub(crate) fn dispatch_provider_gate(event: &StableExtensionEvent) -> Option<Value> {
     match dispatch_with(DispatchMode::ProviderGate, event) {
         CompiledVerdict::Patch(value) => Some(value),
         _ => None,
     }
 }
 
-fn dispatch_with(mode: DispatchMode, event: &StablePluginEvent) -> CompiledVerdict {
+fn dispatch_with(mode: DispatchMode, event: &StableExtensionEvent) -> CompiledVerdict {
     let slot = sink_slot().read().unwrap();
     let Some(sink) = slot.as_ref() else {
         return CompiledVerdict::Continue;
@@ -122,7 +122,7 @@ fn dispatch_with(mode: DispatchMode, event: &StablePluginEvent) -> CompiledVerdi
 /// `serde_json::Value`: data/message payloads were JSON *strings* on the native
 /// side and are parsed here, tool payloads become the camelCase object the
 /// `crate::Event::tool_result` accessor already understands.
-fn event_payload(event: &StablePluginEvent) -> Value {
+fn event_payload(event: &StableExtensionEvent) -> Value {
     // SAFETY: `event` is the live event the host is dispatching; the view only
     // reads borrows of its payload and copies out before it returns.
     let view = unsafe { EventView::from_raw(event) };
@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn tool_payloads_become_camel_case_json() {
-        let call = StablePluginEvent::tool_call(
+        let call = StableExtensionEvent::tool_call(
             EventTag::ToolExecutionStart,
             StbString::from_string("c1".into()),
             StbString::from_string("bash".into()),
@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(payload["toolName"], "bash");
         assert_eq!(payload["params"]["command"], "ls");
 
-        let result = StablePluginEvent::tool_result(
+        let result = StableExtensionEvent::tool_result(
             EventTag::ToolExecutionEnd,
             StbString::from_string("c1".into()),
             StbString::from_string("bash".into()),
@@ -266,7 +266,7 @@ mod tests {
     fn without_a_sink_dispatch_is_a_noop() {
         let _guard = TEST_LOCK.lock().unwrap();
         clear_compiled_event_sink();
-        let event = StablePluginEvent::empty(EventTag::SessionStart);
+        let event = StableExtensionEvent::empty(EventTag::SessionStart);
         assert_eq!(dispatch_observe(&event), CompiledVerdict::Continue);
     }
 
@@ -276,12 +276,12 @@ mod tests {
     /// data arm of an empty event and crashed the host (SIGBUS).
     #[test]
     fn session_tree_payload_is_null_not_a_garbage_string() {
-        let event = StablePluginEvent::empty(EventTag::SessionTree);
+        let event = StableExtensionEvent::empty(EventTag::SessionTree);
         assert!(event_payload(&event).is_null());
     }
 
     /// A claim from the compiled side reaches the routing dispatcher, so a
-    /// compiled plugin can consume a key exactly like a cdylib handler.
+    /// compiled extension can consume a key exactly like a cdylib handler.
     #[test]
     fn a_claimed_verdict_reaches_the_routing_dispatcher() {
         let _guard = TEST_LOCK.lock().unwrap();

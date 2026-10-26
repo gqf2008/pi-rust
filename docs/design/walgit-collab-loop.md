@@ -2,7 +2,7 @@
 
 > 状态：**第 0 轮已闭环**（2026-10-19 前后，5 个线程全部 `closed`，见 §10）。第 1 轮起按本文执行。
 > 载体是**本机 walgit** 的 collab 层，**不是 GitHub**。
-> 相邻文档：`AGENTS.md`（仓库硬约束）、`docs/design/review-plugin-events-goal-hint.md`（第 0 轮样例）。
+> 相邻文档：`AGENTS.md`（仓库硬约束）、`docs/design/review-extension-events-goal-hint.md`（第 0 轮样例）。
 
 ## 1. 结论
 
@@ -251,7 +251,7 @@ sh scripts/sync-embedded-docs.sh
 注意：goal 断言已用子进程 + tempdir 隔离，`cargo test -p kiqi-cli` 不再改写源码树
 （`crates/kiqi-cli/.ki/` 已移出索引并被 `.gitignore` 的 `**/.ki/*` 忽略）。
 wasm guest 只在 `wasm32-wasip2` 链接，
-guest crate 内不写单测，行为由 `crates/kiqi-plugin-host/tests/e2e.rs` 从宿主侧验证。
+guest crate 内不写单测，行为由 `crates/kiqi-extension-host/tests/e2e.rs` 从宿主侧验证。
 
 ## 8. 什么样的条目算闭环证据
 
@@ -265,13 +265,13 @@ guest crate 内不写单测，行为由 `crates/kiqi-plugin-host/tests/e2e.rs` �
 
 ```
 提交 c42f95e；判据：
-cargo test -p kiqi-cli --lib --locked plugins::tests::plugin_calls_run_outside_the_tokio_context
+cargo test -p kiqi-cli --lib --locked extensions::tests::extension_calls_run_outside_the_tokio_context
 → 1 passed
 ```
 
 ```
 R1 已修 70fbfff；把 guest 的 present 改成 |_name| !tools.is_empty() 后
-cargo test -p kiqi-plugin-host --test e2e --locked goal_injection_carries
+cargo test -p kiqi-extension-host --test e2e --locked goal_injection_carries
 → FAILED（e2e.rs:3292）；还原后 1 passed
 ```
 
@@ -319,7 +319,7 @@ OSC-8 不闭合），修复后第二轮 `approve`。`r1-hung-post-flaky` 是第�
 
 第 0 轮的三条探针卡片在关闭时把 `status` 写成 `closed`，note 说明探针已验证、原始条目永久留在
 `refs/collab/inbox` 作为证据；两条实质工作项把提交 SHA 与复验命令写进 `status` 的 `note` 与
-同线程 `comment`（`docs/design/review-plugin-events-goal-hint.md` 是同一份结论的仓库内副本）。
+同线程 `comment`（`docs/design/review-extension-events-goal-hint.md` 是同一份结论的仓库内副本）。
 
 复验第 0 轮的现状：
 

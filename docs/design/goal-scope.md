@@ -4,7 +4,7 @@
 > §9 剩余第 1 条（「goal 范围」的精确边界）给出**可选项与建议**，因为该问题不定，
 > 阶段 1b（goal active 范围内自动授权）无法开工。
 > 关联：`decision-fallback.md` §8.3、`permissions`（`crates/kiqi-cli/src/permissions.rs`）、
-> `goal` 插件（`plugins/wasm/kiqi-goal-guest/src/lib.rs`）。
+> `goal` 插件（`extensions/wasm/kiqi-goal/src/lib.rs`）。
 
 ## 1. 为什么原问题问错了
 
@@ -18,7 +18,7 @@
 
 | 事实 | 判据 |
 |---|---|
-| goal 的持久化字段是 `title`/`status`/`notes`/`started_at`/`updated_at`/`turns_used`/`max_turns`/`deadline_ms`，其中 `notes` 是 `String` | `plugins/wasm/kiqi-goal-guest/src/lib.rs:104-118` |
+| goal 的持久化字段是 `title`/`status`/`notes`/`started_at`/`updated_at`/`turns_used`/`max_turns`/`deadline_ms`，其中 `notes` 是 `String` | `extensions/wasm/kiqi-goal/src/lib.rs:104-118` |
 | 宿主侧视图 `ActiveGoal` 只有 `title`/`started_at`/`turns_used`/`max_turns`/`deadline_ms` | `crates/kiqi-cli/src/goal_drive.rs:24-31` |
 | `active_goal()` 解析时**完全不读 `notes`** | `crates/kiqi-cli/src/goal_drive.rs:68-93`（无任何 `notes` 取值） |
 
@@ -106,7 +106,7 @@
 
 ## 4. 若采纳 A，落地形状（供后续开卡）
 
-1. `plugins/wasm/kiqi-goal-guest` + 编译期两侧：goal 增加可选 `scope: { allow, deny }`；
+1. `extensions/wasm/kiqi-goal` + 编译期两侧：goal 增加可选 `scope: { allow, deny }`；
    schema 与 lenient 解析同时改（老文件无该字段 = 不额外收紧）。
 2. `crates/kiqi-cli/src/goal_drive.rs`：`ActiveGoal` 增加 `scope`，解析它（这是 1.1 指出的
    必须补的通道）。

@@ -3,8 +3,8 @@
 //! 每个 [`LiveSession`] 独立持有 harness、事件接收器、turn/cancel 与对话框；
 //! ACP 层按 session id 路由，连接能力快照只在激活时复制到各会话。
 //!
-//! 已知的进程级限制：legacy compiled-plugin sink
-//! （`kiqi_host::set_compiled_event_sink`）与 `plugins::COMPILED_CAPS`
+//! 已知的进程级限制：legacy compiled-extension sink
+//! （`kiqi_host::set_compiled_event_sink`）与 `extensions::COMPILED_CAPS`
 //! 仍是 last-writer-wins，部分第三方插件也会在调用时读取进程 cwd。内置工具使用显式 cwd，ACP 的 run、
 //! cancel、标题和上下文不经过这些全局槽；不同 cwd 的 legacy 插件事件/项目状态
 //! 目前不能按会话隔离，后续需要单独的插件路由改造。
@@ -28,21 +28,21 @@ use super::dialogs::DialogPump;
 /// assembles these through `session::build` (resolve → veto → build →
 /// lifecycle); tests build them directly from a FauxProvider harness and never
 /// touch `session::build` (it writes session JSONL under cwd and installs
-/// global plugin state).
+/// global extension state).
 pub struct SessionDeps {
     pub harness: AgentHarness,
     pub event_rx: broadcast::Receiver<AgentEvent>,
-    /// The plugin UI-dialog mailbox (runtime action 17). Production wires
+    /// The extension UI-dialog mailbox (runtime action 17). Production wires
     /// the host-built reload context's mailbox; dialog tests inject a
     /// hand-constructed mailbox. `None` = the session cannot ask.
     pub ui_dialog: Option<UiDialogMailbox>,
     /// MCP manager wired at build time; the between-turn boundary drain reads
     /// it. `None` = the session runs without MCP.
     pub mcp: Option<Arc<kiqi_mcp::manager::McpManager>>,
-    /// Production only: the host's pre-built shutdown future (the plugin
+    /// Production only: the host's pre-built shutdown future (the extension
     /// `SessionShutdown` advisory flush + worker stop). The future owns the
     /// host reload context, so it is held until [`LiveSession::close`] runs
-    /// it — plugin runtimes outlive that dispatch.
+    /// it — extension runtimes outlive that dispatch.
     pub shutdown: Option<BoxFuture<'static, ()>>,
 }
 
@@ -129,7 +129,7 @@ pub(crate) struct LiveSession {
     /// The host's pre-built shutdown future, run exactly once by
     /// [`LiveSession::close`] before the context drops.
     shutdown: Option<BoxFuture<'static, ()>>,
-    /// The plugin UI-dialog mailbox the session was built with.
+    /// The extension UI-dialog mailbox the session was built with.
     ui_dialog: Option<UiDialogMailbox>,
     /// The dialog pump started once a connection exists to carry the outbound
     /// permission requests (`start_dialog_pump`).
@@ -165,7 +165,7 @@ impl LiveSession {
         }
     }
 
-    /// Spawns the dialog pump when the session carries a plugin UI mailbox.
+    /// Spawns the dialog pump when the session carries an extension UI mailbox.
     /// Runs at every session activation — `session/new` and `session/load`
     /// alike, a loaded session can ask permissions too.
     pub(crate) fn start_dialog_pump(&mut self, cx: ConnectionTo<Client>) {
@@ -181,8 +181,8 @@ impl LiveSession {
     }
 
     /// The dialog mailbox is detached BEFORE the host shutdown future (the
-    /// rpc-mode EOF order): cancelled mailbox entries release the plugin
-    /// polls while the plugin runtime is still alive to observe them; the
+    /// rpc-mode EOF order): cancelled mailbox entries release the extension
+    /// polls while the extension runtime is still alive to observe them; the
     /// shutdown future then flushes state, and only afterwards does the
     /// reload context it owns — and with it the cdylibs — drop.
     pub(crate) async fn close(self) {

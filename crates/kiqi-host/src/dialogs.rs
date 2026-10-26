@@ -7,7 +7,7 @@ pub struct PermissionOption {
     pub permission: String,
 }
 
-/// Validate the explicit permission semantics and retain the plugin's answer labels.
+/// Validate the explicit permission semantics and retain the extension's answer labels.
 pub fn permission_options(ui: &Value) -> Result<Vec<PermissionOption>, String> {
     if ui.get("purpose").and_then(Value::as_str) != Some("permission") {
         return Err("dialog is not a permission request".to_owned());

@@ -10,10 +10,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use kiqi_host::wasm::{Grants, NetHttpGrant, WasmPlugin};
+use kiqi_host::wasm::{Grants, NetHttpGrant, WasmExtension};
 use kiqi_host::{
-    Block, CancelProbe, Event, EventAction, EventTag, Extension, HostCaps, Log, LogLevel,
-    PluginError, Progress, ProgressSink, Verdict,
+    Block, CancelProbe, Event, EventAction, EventTag, Extension, ExtensionError, HostCaps, Log,
+    LogLevel, Progress, ProgressSink, Verdict,
 };
 
 struct RecordingSink {
@@ -42,7 +42,7 @@ impl Log for NullLog {
 /// the default `--test-threads`. They share one `--target-dir`, so while one `cargo
 /// build` is rewriting the component another test can be told "already fresh" and
 /// open it mid-write — observed as
-/// `load …/kiqi_conformance_guest.wasm: failed to read from …`.
+/// `load …/kiqi_conformance.wasm: failed to read from …`.
 ///
 /// The mutex serialises builds inside this binary, and the header check covers the
 /// cross-process window (a sibling `cargo test` sharing the same target dir). Both
@@ -56,8 +56,11 @@ fn build_guest(crate_dir: &str, artifact: &str) -> PathBuf {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let manifest = root.join("plugins/wasm").join(crate_dir).join("Cargo.toml");
-    let target_dir = root.join("plugins/wasm/target");
+    let manifest = root
+        .join("extensions/wasm")
+        .join(crate_dir)
+        .join("Cargo.toml");
+    let target_dir = root.join("extensions/wasm/target");
     let path = target_dir.join("wasm32-wasip2/release").join(artifact);
     let build = || {
         Command::new(env!("CARGO"))
@@ -95,11 +98,11 @@ fn has_wasm_header(path: &Path) -> bool {
 }
 
 fn fixture_wasm() -> PathBuf {
-    build_guest("kiqi-conformance-guest", "kiqi_conformance_guest.wasm")
+    build_guest("kiqi-conformance", "kiqi_conformance.wasm")
 }
 
 fn todo_wasm() -> PathBuf {
-    build_guest("kiqi-todo-guest", "kiqi_todo_guest.wasm")
+    build_guest("kiqi-todo", "kiqi_todo.wasm")
 }
 
 /// A conformance component with one no-argument core function turned into an
@@ -297,14 +300,14 @@ impl kiqi_host::SessionRead for FixedSession {
 #[test]
 fn loads_calls_streams_denies_and_unloads() {
     let wasm = fixture_wasm();
-    let plugin = WasmPlugin::load("conformance", &wasm).expect("load the component");
+    let extension = WasmExtension::load("conformance", &wasm).expect("load the component");
 
-    assert_eq!(plugin.id(), "conformance");
+    assert_eq!(extension.id(), "conformance");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
 
     // The guest's declared tools are visible to the host.
-    let tools = plugin.tools();
+    let tools = extension.tools();
     assert!(tools.iter().any(|tool| tool.name == "conformance"));
     assert!(tools.iter().any(|tool| tool.name == "fetch"));
 
@@ -312,7 +315,7 @@ fn loads_calls_streams_denies_and_unloads() {
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
-    let outcome = plugin
+    let outcome = extension
         .call("conformance", &serde_json::json!({"x": 1}), &caps, &sink)
         .expect("call the tool");
     assert!(
@@ -342,21 +345,24 @@ fn loads_calls_streams_denies_and_unloads() {
     assert!(matches!(&blocks[2], Progress::Text(t) if t == "last"));
 
     // An undeclared tool is a typed error, not a trap or a panic.
-    let error = plugin
+    let error = extension
         .call("nope", &serde_json::json!({}), &caps, &sink)
         .unwrap_err();
-    assert!(matches!(error, PluginError::UnknownTool(_)), "got {error}");
+    assert!(
+        matches!(error, ExtensionError::UnknownTool(_)),
+        "got {error}"
+    );
 
     // Events carry an action: the fixture claims `BeforeAgentStart`.
-    let claimed = plugin.on_event(
+    let claimed = extension.on_event(
         &Event::new(
             EventTag::BeforeAgentStart,
             serde_json::json!({"prompt": "hi"}),
         ),
         &caps,
     );
-    assert_eq!(claimed, EventAction::Claimed, "a wasm plugin can claim");
-    let observed = plugin.on_event(
+    assert_eq!(claimed, EventAction::Claimed, "a wasm extension can claim");
+    let observed = extension.on_event(
         &Event::new(EventTag::SessionStart, serde_json::Value::Null),
         &caps,
     );
@@ -364,20 +370,20 @@ fn loads_calls_streams_denies_and_unloads() {
 
     // Unload releases the instance; later calls fail cleanly instead of using a
     // released store.
-    plugin.unload();
-    let after = plugin
+    extension.unload();
+    let after = extension
         .call("conformance", &serde_json::json!({}), &caps, &sink)
         .unwrap_err();
     assert!(after.to_string().contains("unloaded"), "got {after}");
 }
 
-/// The first real wasm plugin: `kiqi-todo`. It proves the structured `details`
+/// The first real wasm extension: `kiqi-todo`. It proves the structured `details`
 /// state channel and `session-read` (restoring from the branch) end to end.
 #[test]
 fn todo_guest_restores_from_the_session_branch() {
     let wasm = todo_wasm();
-    let plugin = WasmPlugin::load("kiqi-todo", &wasm).expect("load the todo component");
-    assert_eq!(plugin.tools()[0].name, "todo");
+    let extension = WasmExtension::load("kiqi-todo", &wasm).expect("load the todo component");
+    assert_eq!(extension.tools()[0].name, "todo");
 
     let session = FixedSession {
         branch: serde_json::json!({
@@ -405,7 +411,7 @@ fn todo_guest_restores_from_the_session_branch() {
 
     // A session (re)start restores the list from the branch through
     // `session-read`.
-    let action = plugin.on_event(
+    let action = extension.on_event(
         &Event::new(EventTag::SessionStart, serde_json::Value::Null),
         &caps,
     );
@@ -414,7 +420,7 @@ fn todo_guest_restores_from_the_session_branch() {
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
-    let listed = plugin
+    let listed = extension
         .call("todo", &serde_json::json!({"action": "list"}), &caps, &sink)
         .expect("list");
     let text = match &listed.blocks[0] {
@@ -429,7 +435,7 @@ fn todo_guest_restores_from_the_session_branch() {
     );
 
     // Mutations update that state and report it back.
-    let added = plugin
+    let added = extension
         .call(
             "todo",
             &serde_json::json!({"action": "add", "text": "new one"}),
@@ -495,7 +501,7 @@ fn session_tree_restores_from_a_swapped_branch() {
     }
 
     let wasm = todo_wasm();
-    let plugin = WasmPlugin::load("kiqi-todo", &wasm).expect("load the todo component");
+    let extension = WasmExtension::load("kiqi-todo", &wasm).expect("load the todo component");
 
     let session = SwappingSession {
         branch: Mutex::new(branch_with("branch A todo")),
@@ -512,8 +518,8 @@ fn session_tree_restores_from_a_swapped_branch() {
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
-    let list_text = |plugin: &WasmPlugin| -> String {
-        let listed = plugin
+    let list_text = |extension: &WasmExtension| -> String {
+        let listed = extension
             .call("todo", &serde_json::json!({"action": "list"}), &caps, &sink)
             .expect("list");
         match &listed.blocks[0] {
@@ -523,28 +529,28 @@ fn session_tree_restores_from_a_swapped_branch() {
     };
 
     // SessionStart restores branch A.
-    let action = plugin.on_event(
+    let action = extension.on_event(
         &Event::new(EventTag::SessionStart, serde_json::Value::Null),
         &caps,
     );
     assert_eq!(action, EventAction::Continue);
     assert!(
-        list_text(&plugin).contains("branch A todo"),
+        list_text(&extension).contains("branch A todo"),
         "restore A: {}",
-        list_text(&plugin)
+        list_text(&extension)
     );
 
     // The branch swaps underneath the guest (the host moved to another
     // branch), then SessionTree arrives — the guest must re-restore from the
     // NEW branch, not keep A's state.
     *session.branch.lock().unwrap() = branch_with("branch B todo");
-    let action = plugin.on_event(
+    let action = extension.on_event(
         &Event::new(EventTag::SessionTree, serde_json::Value::Null),
         &caps,
     );
     assert_eq!(action, EventAction::Continue);
 
-    let text = list_text(&plugin);
+    let text = list_text(&extension);
     assert!(
         text.contains("branch B todo"),
         "SessionTree must restore the swapped-in branch: {text}"
@@ -568,9 +574,11 @@ fn net_http_is_gated_by_the_users_grant() {
     let request = serde_json::json!({"url": "http://127.0.0.1:9/"});
 
     // No grant: the fetch tool degrades and reports the deny.
-    let plugin =
-        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
-    let denied = plugin.call("fetch", &request, &caps, &sink).expect("call");
+    let extension =
+        WasmExtension::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    let denied = extension
+        .call("fetch", &request, &caps, &sink)
+        .expect("call");
     assert!(denied.is_error, "ungranted net-http is an error result");
     assert!(
         text_of(&denied).contains("not granted"),
@@ -585,8 +593,11 @@ fn net_http_is_gated_by_the_users_grant() {
         }),
         ..Default::default()
     };
-    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, wrong_host).expect("load");
-    let denied = plugin.call("fetch", &request, &caps, &sink).expect("call");
+    let extension =
+        WasmExtension::load_with_grants("conformance", &wasm, wrong_host).expect("load");
+    let denied = extension
+        .call("fetch", &request, &caps, &sink)
+        .expect("call");
     assert!(denied.is_error);
     assert!(
         text_of(&denied).contains("not granted"),
@@ -602,8 +613,8 @@ fn net_http_is_gated_by_the_users_grant() {
         }),
         ..Default::default()
     };
-    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, granted).expect("load");
-    let allowed = plugin
+    let extension = WasmExtension::load_with_grants("conformance", &wasm, granted).expect("load");
+    let allowed = extension
         .call("fetch", &serde_json::json!({"url": url}), &caps, &sink)
         .expect("call");
     assert!(!allowed.is_error, "granted fetch succeeds: {allowed:?}");
@@ -650,7 +661,7 @@ fn spawn_http_server() -> (String, std::thread::JoinHandle<()>) {
 }
 
 fn langfuse_wasm() -> PathBuf {
-    build_guest("kiqi-langfuse-guest", "kiqi_langfuse_guest.wasm")
+    build_guest("kiqi-langfuse", "kiqi_langfuse.wasm")
 }
 
 /// A server that reads one request and hands the caller its body.
@@ -721,8 +732,8 @@ fn langfuse_subset_builds_a_trace_and_flushes_it_over_net_http() {
         }),
         ..Default::default()
     };
-    let plugin = WasmPlugin::load_with_grants("kiqi-langfuse", &wasm, grants).expect("load");
-    assert!(plugin
+    let extension = WasmExtension::load_with_grants("kiqi-langfuse", &wasm, grants).expect("load");
+    assert!(extension
         .tools()
         .iter()
         .any(|tool| tool.name == "langfuse_config"));
@@ -733,7 +744,7 @@ fn langfuse_subset_builds_a_trace_and_flushes_it_over_net_http() {
         blocks: Mutex::new(Vec::new()),
     };
 
-    let configured = plugin
+    let configured = extension
         .call(
             "langfuse_config",
             &serde_json::json!({
@@ -749,7 +760,7 @@ fn langfuse_subset_builds_a_trace_and_flushes_it_over_net_http() {
 
     // One turn: root -> generation -> assistant message -> shutdown(flush).
     let dispatch = |tag, payload| {
-        plugin.on_event(&Event::new(tag, payload), &caps);
+        extension.on_event(&Event::new(tag, payload), &caps);
     };
     dispatch(EventTag::SessionStart, serde_json::Value::Null);
     dispatch(
@@ -800,11 +811,11 @@ fn provider_observation_is_not_delivered_without_a_grant() {
         }),
         ..Default::default()
     };
-    let plugin = WasmPlugin::load_with_grants("kiqi-langfuse", &wasm, grants).expect("load");
+    let extension = WasmExtension::load_with_grants("kiqi-langfuse", &wasm, grants).expect("load");
 
     let log = NullLog;
     let caps = HostCaps::observer(&log);
-    let configured = plugin
+    let configured = extension
         .call(
             "langfuse_config",
             &serde_json::json!({
@@ -821,7 +832,7 @@ fn provider_observation_is_not_delivered_without_a_grant() {
     assert!(!configured.is_error, "{configured:?}");
 
     let dispatch = |tag, payload| {
-        plugin.on_event(&Event::new(tag, payload), &caps);
+        extension.on_event(&Event::new(tag, payload), &caps);
     };
     dispatch(EventTag::SessionStart, serde_json::Value::Null);
     dispatch(
@@ -871,11 +882,11 @@ fn provider_hooks_require_a_grant_and_after_response_is_not_delivered() {
         (EventTag::AfterProviderResponse, "response-marker"),
     ];
 
-    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, Grants::default())
+    let extension = WasmExtension::load_with_grants("conformance", &wasm, Grants::default())
         .expect("load without grants");
     let caps = HostCaps::observer(&NullLog);
     for (tag, marker) in events {
-        let action = plugin.on_event(
+        let action = extension.on_event(
             &Event::new(tag, serde_json::json!({ "marker": marker })),
             &caps,
         );
@@ -892,10 +903,10 @@ fn provider_hooks_require_a_grant_and_after_response_is_not_delivered() {
         }),
         ..Default::default()
     };
-    let plugin = WasmPlugin::load_with_grants("conformance-granted", &wasm, grants)
+    let extension = WasmExtension::load_with_grants("conformance-granted", &wasm, grants)
         .expect("load with observation grant");
     let caps = HostCaps::observer(&NullLog);
-    let request = plugin.on_event(
+    let request = extension.on_event(
         &Event::new(
             EventTag::BeforeProviderRequest,
             serde_json::json!({ "marker": "request-marker" }),
@@ -906,7 +917,7 @@ fn provider_hooks_require_a_grant_and_after_response_is_not_delivered() {
         matches!(request, kiqi_host::EventAction::Claimed),
         "a granted guest must receive BeforeProviderRequest: {request:?}"
     );
-    let headers = plugin.on_event(
+    let headers = extension.on_event(
         &Event::new(
             EventTag::BeforeProviderHeaders,
             serde_json::json!({ "marker": "headers-marker" }),
@@ -917,7 +928,7 @@ fn provider_hooks_require_a_grant_and_after_response_is_not_delivered() {
         matches!(headers, kiqi_host::EventAction::Claimed),
         "a granted guest must receive BeforeProviderHeaders: {headers:?}"
     );
-    let after = plugin.on_event(
+    let after = extension.on_event(
         &Event::new(
             EventTag::AfterProviderResponse,
             serde_json::json!({ "marker": "response-marker" }),
@@ -957,8 +968,8 @@ fn gate_event(patch: serde_json::Value) -> Event {
 #[test]
 fn provider_gate_returns_a_validated_patch() {
     let wasm = fixture_wasm();
-    let plugin =
-        WasmPlugin::load_with_grants("conformance", &wasm, gate_grants(true, 500)).expect("load");
+    let extension = WasmExtension::load_with_grants("conformance", &wasm, gate_grants(true, 500))
+        .expect("load");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     let event = gate_event(serde_json::json!({
@@ -969,7 +980,7 @@ fn provider_gate_returns_a_validated_patch() {
         "temperature": 0.5,
     }));
 
-    let patch = plugin
+    let patch = extension
         .provider_gate(&event, &caps)
         .expect("a valid patch")
         .expect("the guest returned a patch");
@@ -985,8 +996,8 @@ fn provider_gate_returns_a_validated_patch() {
 #[test]
 fn provider_gate_rejects_the_whole_patch_on_one_bad_key() {
     let wasm = fixture_wasm();
-    let plugin =
-        WasmPlugin::load_with_grants("conformance", &wasm, gate_grants(true, 500)).expect("load");
+    let extension = WasmExtension::load_with_grants("conformance", &wasm, gate_grants(true, 500))
+        .expect("load");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     let event = gate_event(serde_json::json!({
@@ -994,7 +1005,7 @@ fn provider_gate_rejects_the_whole_patch_on_one_bad_key() {
         "headers": { "Authorization": "secret" },
     }));
 
-    let error = plugin
+    let error = extension
         .provider_gate(&event, &caps)
         .expect_err("the protected header rejects the patch");
     assert!(
@@ -1008,13 +1019,13 @@ fn provider_gate_rejects_the_whole_patch_on_one_bad_key() {
 #[test]
 fn provider_gate_is_denied_without_a_patch_grant() {
     let wasm = fixture_wasm();
-    let plugin =
-        WasmPlugin::load_with_grants("conformance", &wasm, gate_grants(false, 500)).expect("load");
+    let extension = WasmExtension::load_with_grants("conformance", &wasm, gate_grants(false, 500))
+        .expect("load");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     let event = gate_event(serde_json::json!({ "maxTokens": 128 }));
 
-    assert_eq!(plugin.provider_gate(&event, &caps), Ok(None));
+    assert_eq!(extension.provider_gate(&event, &caps), Ok(None));
 }
 
 /// A patch returned for any other tag is ignored: the gate refuses it on the
@@ -1022,8 +1033,8 @@ fn provider_gate_is_denied_without_a_patch_grant() {
 #[test]
 fn a_patch_for_a_non_provider_tag_is_ignored() {
     let wasm = fixture_wasm();
-    let plugin =
-        WasmPlugin::load_with_grants("conformance", &wasm, gate_grants(true, 500)).expect("load");
+    let extension = WasmExtension::load_with_grants("conformance", &wasm, gate_grants(true, 500))
+        .expect("load");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     let event = Event::new(
@@ -1031,9 +1042,9 @@ fn a_patch_for_a_non_provider_tag_is_ignored() {
         serde_json::json!({ "tagPatch": { "maxTokens": 7 } }),
     );
 
-    assert_eq!(plugin.provider_gate(&event, &caps), Ok(None));
+    assert_eq!(extension.provider_gate(&event, &caps), Ok(None));
     assert_eq!(
-        plugin.on_event(&event, &caps),
+        extension.on_event(&event, &caps),
         EventAction::Continue,
         "an observe dispatch must not surface a patch"
     );
@@ -1050,23 +1061,23 @@ impl kiqi_host::UiApi for RecordingUi {
     fn dialog(
         &self,
         request: &serde_json::Value,
-    ) -> Result<serde_json::Value, kiqi_host::PluginError> {
+    ) -> Result<serde_json::Value, kiqi_host::ExtensionError> {
         self.dialogs.lock().unwrap().push(request.clone());
         Ok(serde_json::json!({ "answer": "42" }))
     }
-    fn set_status(&self, update: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
+    fn set_status(&self, update: &serde_json::Value) -> Result<(), kiqi_host::ExtensionError> {
         self.statuses.lock().unwrap().push(update.clone());
         Ok(())
     }
-    fn set_editor_text(&self, _edit: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
+    fn set_editor_text(&self, _edit: &serde_json::Value) -> Result<(), kiqi_host::ExtensionError> {
         Ok(())
     }
     fn component(
         &self,
         _name: &str,
         _payload: &serde_json::Value,
-    ) -> Result<serde_json::Value, kiqi_host::PluginError> {
-        Err(kiqi_host::PluginError::Failed(
+    ) -> Result<serde_json::Value, kiqi_host::ExtensionError> {
+        Err(kiqi_host::ExtensionError::Failed(
             "no components here".to_string(),
         ))
     }
@@ -1077,8 +1088,8 @@ impl kiqi_host::UiApi for RecordingUi {
 #[test]
 fn conformance_surface_is_reachable() {
     let wasm = fixture_wasm();
-    let plugin =
-        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    let extension =
+        WasmExtension::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
     let ui = RecordingUi::default();
     let log = NullLog;
     let caps = HostCaps {
@@ -1094,7 +1105,11 @@ fn conformance_surface_is_reachable() {
     };
 
     // tools
-    let tools: Vec<String> = plugin.tools().into_iter().map(|tool| tool.name).collect();
+    let tools: Vec<String> = extension
+        .tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
     for expected in ["conformance", "fetch", "dialog"] {
         assert!(
             tools.iter().any(|tool| tool == expected),
@@ -1103,16 +1118,19 @@ fn conformance_surface_is_reachable() {
     }
 
     // commands, flags, shortcuts
-    assert_eq!(plugin.commands()[0].name, "conformance");
+    assert_eq!(extension.commands()[0].name, "conformance");
     assert_eq!(
-        plugin.run_command("conformance", "", &caps).unwrap().body,
+        extension
+            .run_command("conformance", "", &caps)
+            .unwrap()
+            .body,
         kiqi_host::CommandResultBody::Message("conformance command ran".to_string())
     );
-    assert_eq!(plugin.flags()[0].name, "conformance-flag");
-    assert_eq!(plugin.shortcuts()[0].key, "f8");
+    assert_eq!(extension.flags()[0].name, "conformance-flag");
+    assert_eq!(extension.shortcuts()[0].key, "f8");
 
     // system-prompt transform
-    let replaced = plugin
+    let replaced = extension
         .before_agent_start(&serde_json::json!("SYS"), &caps)
         .expect("the guest replaces the prompt");
     assert!(
@@ -1121,13 +1139,16 @@ fn conformance_surface_is_reachable() {
     );
 
     // probe gate
-    assert_eq!(plugin.probe_points(), vec!["before-tool-call".to_string()]);
     assert_eq!(
-        plugin.probe("before-tool-call", &serde_json::json!({}), &caps),
+        extension.probe_points(),
+        vec!["before-tool-call".to_string()]
+    );
+    assert_eq!(
+        extension.probe("before-tool-call", &serde_json::json!({}), &caps),
         Verdict::Continue
     );
     assert!(matches!(
-        plugin.probe(
+        extension.probe(
             "before-tool-call",
             &serde_json::json!({ "x": "block" }),
             &caps
@@ -1136,7 +1157,7 @@ fn conformance_surface_is_reachable() {
     ));
 
     // ui.dialog round trip: the host really answered the guest.
-    let answer = plugin
+    let answer = extension
         .call(
             "dialog",
             &serde_json::json!({ "request": "pick one" }),
@@ -1149,7 +1170,7 @@ fn conformance_surface_is_reachable() {
     assert_eq!(ui.dialogs.lock().unwrap().len(), 1);
 
     // With a granted UI, `ui.set-status` now succeeds instead of being denied.
-    let outcome = plugin
+    let outcome = extension
         .call("conformance", &serde_json::json!({}), &caps, &sink)
         .expect("call");
     assert!(
@@ -1160,7 +1181,7 @@ fn conformance_surface_is_reachable() {
     assert!(!ui.statuses.lock().unwrap().is_empty());
 }
 
-/// Gate §6.3.7: a plugin that hangs or panics must be contained, not take the
+/// Gate §6.3.7: an extension that hangs or panics must be contained, not take the
 /// host down.
 #[test]
 fn a_spinning_guest_is_metered_and_a_panicking_one_traps() {
@@ -1172,7 +1193,7 @@ fn a_spinning_guest_is_metered_and_a_panicking_one_traps() {
     };
 
     // A fuel budget turns an infinite loop into a trapped call, not a hang.
-    let bounded = WasmPlugin::load_with_options(
+    let bounded = WasmExtension::load_with_options(
         "conformance",
         &wasm,
         Grants::default(),
@@ -1189,15 +1210,15 @@ fn a_spinning_guest_is_metered_and_a_panicking_one_traps() {
 
     // A panicking guest traps too; the call is an error, not a process abort.
     let panicking =
-        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+        WasmExtension::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
     let panic = panicking
         .call("panic", &serde_json::json!({}), &caps, &sink)
         .unwrap_err();
     assert!(!panic.to_string().is_empty());
 
-    // The host is unaffected: another plugin still loads and lists its tools.
+    // The host is unaffected: another extension still loads and lists its tools.
     let survivor =
-        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+        WasmExtension::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
     assert!(survivor
         .tools()
         .iter()
@@ -1205,7 +1226,7 @@ fn a_spinning_guest_is_metered_and_a_panicking_one_traps() {
 }
 
 fn ask_user_wasm() -> PathBuf {
-    build_guest("kiqi-ask-user-guest", "kiqi_ask_user_guest.wasm")
+    build_guest("kiqi-ask-user", "kiqi_ask_user.wasm")
 }
 
 /// How the scripted host UI answers the next poll.
@@ -1240,7 +1261,7 @@ impl kiqi_host::UiApi for ScriptedUi {
     fn dialog(
         &self,
         request: &serde_json::Value,
-    ) -> Result<serde_json::Value, kiqi_host::PluginError> {
+    ) -> Result<serde_json::Value, kiqi_host::ExtensionError> {
         let op = request
             .get("op")
             .and_then(serde_json::Value::as_str)
@@ -1261,18 +1282,18 @@ impl kiqi_host::UiApi for ScriptedUi {
         })
     }
 
-    fn set_status(&self, _update: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
+    fn set_status(&self, _update: &serde_json::Value) -> Result<(), kiqi_host::ExtensionError> {
         Ok(())
     }
-    fn set_editor_text(&self, _edit: &serde_json::Value) -> Result<(), kiqi_host::PluginError> {
+    fn set_editor_text(&self, _edit: &serde_json::Value) -> Result<(), kiqi_host::ExtensionError> {
         Ok(())
     }
     fn component(
         &self,
         _name: &str,
         _payload: &serde_json::Value,
-    ) -> Result<serde_json::Value, kiqi_host::PluginError> {
-        Err(kiqi_host::PluginError::Failed("none".to_string()))
+    ) -> Result<serde_json::Value, kiqi_host::ExtensionError> {
+        Err(kiqi_host::ExtensionError::Failed("none".to_string()))
     }
 }
 
@@ -1281,9 +1302,9 @@ impl kiqi_host::UiApi for ScriptedUi {
 #[test]
 fn ask_user_round_trips_through_the_host_dialog() {
     let wasm = ask_user_wasm();
-    let plugin =
-        WasmPlugin::load_with_grants("kiqi-ask-user", &wasm, Grants::default()).expect("load");
-    assert!(plugin.tools().iter().any(|tool| tool.name == "ask_user"));
+    let extension =
+        WasmExtension::load_with_grants("kiqi-ask-user", &wasm, Grants::default()).expect("load");
+    assert!(extension.tools().iter().any(|tool| tool.name == "ask_user"));
 
     let ui = ScriptedUi::new(DialogMode::Answer(serde_json::json!({ "text": "7897" })));
     let log = NullLog;
@@ -1299,7 +1320,7 @@ fn ask_user_round_trips_through_the_host_dialog() {
         blocks: Mutex::new(Vec::new()),
     };
 
-    let outcome = plugin
+    let outcome = extension
         .call(
             "ask_user",
             &serde_json::json!({ "question": "Which port?" }),
@@ -1331,7 +1352,7 @@ fn ask_user_round_trips_through_the_host_dialog() {
         log: &log,
         cancel: None,
     };
-    let confirm = plugin
+    let confirm = extension
         .call(
             "ask_user",
             &serde_json::json!({ "type": "confirm", "summary": "Deploy?" }),
@@ -1347,13 +1368,13 @@ fn ask_user_round_trips_through_the_host_dialog() {
     );
 }
 
-/// Gate §6.3.4: cancellation reaches the plugin instead of being mistaken for
+/// Gate §6.3.4: cancellation reaches the extension instead of being mistaken for
 /// an answer.
 #[test]
 fn ask_user_reports_cancellation() {
     let wasm = ask_user_wasm();
-    let plugin =
-        WasmPlugin::load_with_grants("kiqi-ask-user", &wasm, Grants::default()).expect("load");
+    let extension =
+        WasmExtension::load_with_grants("kiqi-ask-user", &wasm, Grants::default()).expect("load");
     let ui = ScriptedUi::new(DialogMode::Cancel);
     let log = NullLog;
     let caps = HostCaps {
@@ -1368,7 +1389,7 @@ fn ask_user_reports_cancellation() {
         blocks: Mutex::new(Vec::new()),
     };
 
-    let outcome = plugin
+    let outcome = extension
         .call(
             "ask_user",
             &serde_json::json!({ "question": "Which port?" }),
@@ -1385,7 +1406,7 @@ fn ask_user_reports_cancellation() {
 }
 
 /// The TUI opens an `ask_user` dialog from the same key loop that runs the
-/// observe event fan-out. While the guest call holds the plugin's call lock
+/// observe event fan-out. While the guest call holds the extension's call lock
 /// waiting for the user, an observe dispatch must skip instead of waiting:
 /// the only person who can end the wait is the one the UI is trying to ask.
 /// Without the skip this deadlocks the TUI (observed 2026-10-18).
@@ -1395,13 +1416,13 @@ fn observe_events_skip_a_guest_that_is_waiting_on_the_ui() {
     use std::time::{Duration, Instant};
 
     let wasm = ask_user_wasm();
-    let plugin = Arc::new(
-        WasmPlugin::load_with_grants("kiqi-ask-user", &wasm, Grants::default()).expect("load"),
+    let extension = Arc::new(
+        WasmExtension::load_with_grants("kiqi-ask-user", &wasm, Grants::default()).expect("load"),
     );
     let ui = Arc::new(ScriptedUi::new(DialogMode::Pending));
 
     let ask = {
-        let plugin = plugin.clone();
+        let extension = extension.clone();
         let ui = ui.clone();
         std::thread::spawn(move || {
             let log = NullLog;
@@ -1416,7 +1437,7 @@ fn observe_events_skip_a_guest_that_is_waiting_on_the_ui() {
             let sink = RecordingSink {
                 blocks: Mutex::new(Vec::new()),
             };
-            plugin.call(
+            extension.call(
                 "ask_user",
                 &serde_json::json!({ "question": "Which port?" }),
                 &caps,
@@ -1439,7 +1460,7 @@ fn observe_events_skip_a_guest_that_is_waiting_on_the_ui() {
     // observe probe must come back on its own.
     let (tx, rx) = std::sync::mpsc::channel();
     let observe = {
-        let plugin = plugin.clone();
+        let extension = extension.clone();
         let ui = ui.clone();
         std::thread::spawn(move || {
             let log = NullLog;
@@ -1451,7 +1472,7 @@ fn observe_events_skip_a_guest_that_is_waiting_on_the_ui() {
                 log: &log,
                 cancel: None,
             };
-            let action = plugin.try_on_event(
+            let action = extension.try_on_event(
                 &Event::new(EventTag::SessionStart, serde_json::Value::Null),
                 &caps,
             );
@@ -1482,8 +1503,8 @@ fn observe_events_skip_a_guest_that_is_waiting_on_the_ui() {
 #[test]
 fn ask_user_honours_timeout() {
     let wasm = ask_user_wasm();
-    let plugin =
-        WasmPlugin::load_with_grants("kiqi-ask-user", &wasm, Grants::default()).expect("load");
+    let extension =
+        WasmExtension::load_with_grants("kiqi-ask-user", &wasm, Grants::default()).expect("load");
     let ui = ScriptedUi::new(DialogMode::Pending);
     let log = NullLog;
     let caps = HostCaps {
@@ -1498,7 +1519,7 @@ fn ask_user_honours_timeout() {
         blocks: Mutex::new(Vec::new()),
     };
 
-    let outcome = plugin
+    let outcome = extension
         .call(
             "ask_user",
             &serde_json::json!({ "question": "Which port?", "timeout": 1 }),
@@ -1533,12 +1554,12 @@ fn ask_user_honours_timeout() {
     );
 }
 
-/// `ki plugin install` shows the user what a component declares. Only the
+/// `ki extension install` shows the user what a component declares. Only the
 /// grantable interfaces count; `log`/`progress`/`ui` are not gated.
 ///
 /// From 0.8.0 the three contribution exports (`oauth-api`, `provider-api`,
 /// `render-api`) are mandatory world exports, so every component declares them
-/// even when the plugin only denies them. They are listed for disclosure and
+/// even when the extension only denies them. They are listed for disclosure and
 /// stay ungranted: none of them is auto-granted by `--yes`.
 #[test]
 fn declared_capabilities_reads_the_components_imports_and_exports() {
@@ -1562,38 +1583,38 @@ fn declared_capabilities_reads_the_components_imports_and_exports() {
 
 /// Load the fixture from a scratch directory, so `fs`/`exec` write into a temp
 /// data directory instead of the build output.
-fn load_fixture_in_temp(grants: Grants) -> (tempfile::TempDir, WasmPlugin) {
+fn load_fixture_in_temp(grants: Grants) -> (tempfile::TempDir, WasmExtension) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let wasm = dir.path().join("plugin.wasm");
+    let wasm = dir.path().join("extension.wasm");
     std::fs::copy(fixture_wasm(), &wasm).expect("copy the fixture next to a writable data dir");
-    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, grants).expect("load");
-    (dir, plugin)
+    let extension = WasmExtension::load_with_grants("conformance", &wasm, grants).expect("load");
+    (dir, extension)
 }
 
 fn call_main_tool(
-    plugin: &WasmPlugin,
+    extension: &WasmExtension,
     arguments: serde_json::Value,
-) -> Result<kiqi_host::ToolOutcome, PluginError> {
+) -> Result<kiqi_host::ToolOutcome, ExtensionError> {
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
-    plugin.call("conformance", &arguments, &caps, &sink)
+    extension.call("conformance", &arguments, &caps, &sink)
 }
 
 /// `fs` is a real capability, and the jail is its policy: granted, the guest
 /// round-trips a file inside its own data directory.
 #[test]
-fn fs_is_granted_and_jailed_to_the_plugins_data_directory() {
-    let (dir, plugin) = load_fixture_in_temp(Grants {
+fn fs_is_granted_and_jailed_to_the_extensions_data_directory() {
+    let (dir, extension) = load_fixture_in_temp(Grants {
         fs: Some(kiqi_host::grants::FsGrant {
-            cwd: kiqi_host::grants::ExecCwd::PluginData,
+            cwd: kiqi_host::grants::ExecCwd::ExtensionData,
         }),
         ..Grants::default()
     });
 
-    let outcome = call_main_tool(&plugin, serde_json::json!({})).expect("call");
+    let outcome = call_main_tool(&extension, serde_json::json!({})).expect("call");
     assert!(
         text_of(&outcome).contains("fs=conformance"),
         "the write/read round trip must succeed: {}",
@@ -1601,7 +1622,7 @@ fn fs_is_granted_and_jailed_to_the_plugins_data_directory() {
     );
     assert!(
         dir.path().join("data/conformance/probe.txt").is_file(),
-        "the file lands inside the plugin's own data directory"
+        "the file lands inside the extension's own data directory"
     );
 }
 
@@ -1611,29 +1632,29 @@ fn fs_is_granted_and_jailed_to_the_plugins_data_directory() {
 fn exec_runs_only_allow_listed_commands() {
     use kiqi_host::wasm::ExecGrant;
 
-    let (_dir, plugin) = load_fixture_in_temp(Grants {
+    let (_dir, extension) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
             commands: vec!["echo".to_string()],
             ..ExecGrant::default()
         }),
         ..Grants::default()
     });
-    let allowed = call_main_tool(&plugin, serde_json::json!({})).expect("call");
+    let allowed = call_main_tool(&extension, serde_json::json!({})).expect("call");
     assert!(
         text_of(&allowed).contains("exec=conformance"),
         "echo must run and its stdout come back: {}",
         text_of(&allowed)
     );
 
-    // Same plugin, a grant that does not include `echo`.
-    let (_dir, plugin) = load_fixture_in_temp(Grants {
+    // Same extension, a grant that does not include `echo`.
+    let (_dir, extension) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
             commands: vec!["ls".to_string()],
             ..ExecGrant::default()
         }),
         ..Grants::default()
     });
-    let denied = call_main_tool(&plugin, serde_json::json!({})).expect("call");
+    let denied = call_main_tool(&extension, serde_json::json!({})).expect("call");
     assert!(
         text_of(&denied).contains("exec=exec of `echo` is not granted"),
         "an unlisted command must report the deny reason: {}",
@@ -1643,12 +1664,14 @@ fn exec_runs_only_allow_listed_commands() {
 
 /// Load the fixture with an explicit project directory: the data dir sits in
 /// `dir`, the cwd scope `project` resolves against `project`.
-fn load_fixture_with_project(grants: Grants) -> (tempfile::TempDir, tempfile::TempDir, WasmPlugin) {
+fn load_fixture_with_project(
+    grants: Grants,
+) -> (tempfile::TempDir, tempfile::TempDir, WasmExtension) {
     let dir = tempfile::tempdir().expect("tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
-    let wasm = dir.path().join("plugin.wasm");
+    let wasm = dir.path().join("extension.wasm");
     std::fs::copy(fixture_wasm(), &wasm).expect("copy the fixture next to a writable data dir");
-    let plugin = WasmPlugin::load_with_options(
+    let extension = WasmExtension::load_with_options(
         "conformance",
         &wasm,
         grants,
@@ -1658,17 +1681,17 @@ fn load_fixture_with_project(grants: Grants) -> (tempfile::TempDir, tempfile::Te
         },
     )
     .expect("load");
-    (dir, project, plugin)
+    (dir, project, extension)
 }
 
 /// The grant's cwd scope decides where the child starts: the default is the
-/// plugin's own data directory, and a guest-supplied relative cwd resolves
+/// extension's own data directory, and a guest-supplied relative cwd resolves
 /// inside it.
 #[test]
-fn exec_cwd_defaults_to_the_plugin_data_directory() {
+fn exec_cwd_defaults_to_the_extension_data_directory() {
     use kiqi_host::wasm::ExecGrant;
 
-    let (dir, plugin) = load_fixture_in_temp(Grants {
+    let (dir, extension) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
             commands: vec!["sh".to_string()],
             ..ExecGrant::default()
@@ -1676,7 +1699,7 @@ fn exec_cwd_defaults_to_the_plugin_data_directory() {
         ..Grants::default()
     });
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch marker"] } }),
     )
     .expect("call");
@@ -1687,7 +1710,7 @@ fn exec_cwd_defaults_to_the_plugin_data_directory() {
     );
 
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch marker"], "cwd": "sub" } }),
     )
     .expect("call");
@@ -1700,7 +1723,7 @@ fn exec_cwd_defaults_to_the_plugin_data_directory() {
     // `.` is the root itself: no final component to check, and it must not be
     // refused by the symlink guard comparing the root's parent against it.
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch dot"], "cwd": "." } }),
     )
     .expect("call");
@@ -1717,7 +1740,7 @@ fn exec_cwd_defaults_to_the_plugin_data_directory() {
 fn exec_cwd_cannot_escape_its_scope_root() {
     use kiqi_host::wasm::ExecGrant;
 
-    let (dir, plugin) = load_fixture_in_temp(Grants {
+    let (dir, extension) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
             commands: vec!["sh".to_string()],
             ..ExecGrant::default()
@@ -1726,7 +1749,7 @@ fn exec_cwd_cannot_escape_its_scope_root() {
     });
     for cwd in ["../outside", "/tmp"] {
         let outcome = call_main_tool(
-            &plugin,
+            &extension,
             serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch escaped"], "cwd": cwd } }),
         )
         .expect("call");
@@ -1747,7 +1770,7 @@ fn exec_cwd_cannot_escape_its_scope_root() {
 fn exec_cwd_refuses_a_symlinked_parent() {
     use kiqi_host::wasm::ExecGrant;
 
-    let (dir, plugin) = load_fixture_in_temp(Grants {
+    let (dir, extension) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
             commands: vec!["sh".to_string()],
             ..ExecGrant::default()
@@ -1760,7 +1783,7 @@ fn exec_cwd_refuses_a_symlinked_parent() {
     std::os::unix::fs::symlink(outside.path(), data.join("link")).expect("plant the symlink");
 
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch escaped"], "cwd": "link" } }),
     )
     .expect("call");
@@ -1775,7 +1798,7 @@ fn exec_cwd_refuses_a_symlinked_parent() {
     // verifies the existing prefix before creating anything, so the refused
     // call must not leave `outside/sub` behind.
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "true"], "cwd": "link/sub" } }),
     )
     .expect("call");
@@ -1791,12 +1814,12 @@ fn exec_cwd_refuses_a_symlinked_parent() {
 }
 
 /// With the `project` cwd scope, the child starts in the project directory —
-/// what a diagnostic plugin needs to run `cargo`/`clippy` on the user's tree.
+/// what a diagnostic extension needs to run `cargo`/`clippy` on the user's tree.
 #[test]
 fn exec_cwd_project_scope_runs_in_the_project_directory() {
     use kiqi_host::wasm::{ExecCwd, ExecGrant};
 
-    let (dir, project, plugin) = load_fixture_with_project(Grants {
+    let (dir, project, extension) = load_fixture_with_project(Grants {
         exec: Some(ExecGrant {
             commands: vec!["sh".to_string()],
             cwd: ExecCwd::Project,
@@ -1805,7 +1828,7 @@ fn exec_cwd_project_scope_runs_in_the_project_directory() {
         ..Grants::default()
     });
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch marker"] } }),
     )
     .expect("call");
@@ -1816,13 +1839,13 @@ fn exec_cwd_project_scope_runs_in_the_project_directory() {
     );
     assert!(
         !dir.path().join("data/marker").exists(),
-        "and not in the plugin's data directory"
+        "and not in the extension's data directory"
     );
 
     // A relative cwd descends into an existing subdirectory.
     std::fs::create_dir_all(project.path().join("sub")).expect("project subdir");
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "touch marker"], "cwd": "sub" } }),
     )
     .expect("call");
@@ -1835,7 +1858,7 @@ fn exec_cwd_project_scope_runs_in_the_project_directory() {
     // But the project tree is the user's: a cwd that does not exist must fail,
     // not be `mkdir -p`'d into it.
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "true"], "cwd": "typo-dir" } }),
     )
     .expect("call");
@@ -1851,7 +1874,7 @@ fn exec_cwd_project_scope_runs_in_the_project_directory() {
 
     // The project root is still a root: `..` out of it is refused.
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "true"], "cwd": ".." } }),
     )
     .expect("call");
@@ -1868,7 +1891,7 @@ fn exec_cwd_project_scope_runs_in_the_project_directory() {
 fn exec_times_out_at_the_grants_budget() {
     use kiqi_host::wasm::ExecGrant;
 
-    let (_dir, plugin) = load_fixture_in_temp(Grants {
+    let (_dir, extension) = load_fixture_in_temp(Grants {
         exec: Some(ExecGrant {
             commands: vec!["sh".to_string()],
             timeout_seconds: 1,
@@ -1878,7 +1901,7 @@ fn exec_times_out_at_the_grants_budget() {
     });
     let start = std::time::Instant::now();
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "sleep 10"] } }),
     )
     .expect("call");
@@ -1899,12 +1922,16 @@ fn exec_times_out_at_the_grants_budget() {
 /// host's `exec`/`proc` grants instead of spawning processes itself.
 #[test]
 fn codegraph_guest_declares_the_eight_tools() {
-    let wasm = build_guest("kiqi-codegraph-guest", "kiqi_codegraph_guest.wasm");
-    let plugin =
-        WasmPlugin::load_with_grants("kiqi-codegraph", &wasm, Grants::default()).expect("load");
-    assert_eq!(plugin.id(), "kiqi-codegraph");
+    let wasm = build_guest("kiqi-codegraph", "kiqi_codegraph.wasm");
+    let extension =
+        WasmExtension::load_with_grants("kiqi-codegraph", &wasm, Grants::default()).expect("load");
+    assert_eq!(extension.id(), "kiqi-codegraph");
 
-    let mut names: Vec<String> = plugin.tools().into_iter().map(|tool| tool.name).collect();
+    let mut names: Vec<String> = extension
+        .tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
     names.sort();
     assert_eq!(
         names,
@@ -1919,9 +1946,9 @@ fn codegraph_guest_declares_the_eight_tools() {
             "codegraph_status",
         ]
     );
-    // Every ported schema keeps the shape the compiled plugin emitted: an
+    // Every ported schema keeps the shape the compiled extension emitted: an
     // object schema whose properties always include `projectPath`.
-    for spec in plugin.tools() {
+    for spec in extension.tools() {
         assert_eq!(spec.parameters["type"], "object", "{}", spec.name);
         assert!(
             spec.parameters["properties"]["projectPath"].is_object(),
@@ -1936,7 +1963,7 @@ fn codegraph_guest_declares_the_eight_tools() {
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
-    let unknown = plugin
+    let unknown = extension
         .call("codegraph_nope", &serde_json::json!({}), &caps, &sink)
         .unwrap_err();
     assert!(unknown.to_string().contains("codegraph_nope"), "{unknown}");
@@ -1984,10 +2011,10 @@ fn codegraph_guest_probes_the_index_then_needs_the_codegraph_grant() {
         (with_index.path(), "codegraph sync"),
         (without_index.path(), "codegraph init"),
     ] {
-        let wasm = build_guest("kiqi-codegraph-guest", "kiqi_codegraph_guest.wasm");
-        let plugin =
-            WasmPlugin::load_with_grants("kiqi-codegraph", &wasm, grants.clone()).expect("load");
-        let error = plugin
+        let wasm = build_guest("kiqi-codegraph", "kiqi_codegraph.wasm");
+        let extension =
+            WasmExtension::load_with_grants("kiqi-codegraph", &wasm, grants.clone()).expect("load");
+        let error = extension
             .call(
                 "codegraph_status",
                 &serde_json::json!({ "projectPath": project.display().to_string() }),
@@ -2037,8 +2064,8 @@ fn codegraph_guest_live_session_when_asked() {
         .prefix(".kq-codegraph-live-")
         .tempdir_in(".")
         .expect("temp project");
-    let wasm = build_guest("kiqi-codegraph-guest", "kiqi_codegraph_guest.wasm");
-    let plugin = WasmPlugin::load_with_grants(
+    let wasm = build_guest("kiqi-codegraph", "kiqi_codegraph.wasm");
+    let extension = WasmExtension::load_with_grants(
         "kiqi-codegraph",
         &wasm,
         Grants {
@@ -2062,7 +2089,7 @@ fn codegraph_guest_live_session_when_asked() {
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
-    let outcome = plugin
+    let outcome = extension
         .call(
             "codegraph_status",
             &serde_json::json!({ "projectPath": project.path().display().to_string() }),
@@ -2084,8 +2111,8 @@ fn codegraph_guest_live_session_when_asked() {
 fn orchestrator_guest_runs_a_wave_via_cat() {
     use kiqi_host::wasm::ProcGrant;
 
-    let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
-    let plugin = WasmPlugin::load_with_grants(
+    let wasm = build_guest("kiqi-orchestrator", "kiqi_orchestrator.wasm");
+    let extension = WasmExtension::load_with_grants(
         "kiqi-orchestrator",
         &wasm,
         Grants {
@@ -2098,14 +2125,14 @@ fn orchestrator_guest_runs_a_wave_via_cat() {
         },
     )
     .expect("load");
-    assert_eq!(plugin.id(), "kiqi-orchestrator");
+    assert_eq!(extension.id(), "kiqi-orchestrator");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
 
-    let set = plugin
+    let set = extension
         .call(
             "plan",
             &serde_json::json!({"action": "set", "nodes": [
@@ -2119,7 +2146,7 @@ fn orchestrator_guest_runs_a_wave_via_cat() {
     assert!(text_of(&set).contains("0/2 done"), "{}", text_of(&set));
 
     // First wave: only `a` is ready (`b` depends on it).
-    let wave = plugin
+    let wave = extension
         .call(
             "dispatch",
             &serde_json::json!({ "program": "cat" }),
@@ -2134,7 +2161,7 @@ fn orchestrator_guest_runs_a_wave_via_cat() {
     );
 
     // Second wave: `b` is ready now; the wave completes the plan.
-    let wave = plugin
+    let wave = extension
         .call(
             "dispatch",
             &serde_json::json!({ "program": "cat" }),
@@ -2149,7 +2176,7 @@ fn orchestrator_guest_runs_a_wave_via_cat() {
     );
 
     // waitSeconds:0 is refused with the wasm-tier explanation.
-    let refused = plugin
+    let refused = extension
         .call(
             "dispatch",
             &serde_json::json!({ "waitSeconds": 0, "program": "cat" }),
@@ -2168,8 +2195,8 @@ fn orchestrator_guest_runs_a_wave_via_cat() {
 fn orchestrator_guest_subagent_round_trips_via_cat() {
     use kiqi_host::wasm::ProcGrant;
 
-    let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
-    let plugin = WasmPlugin::load_with_grants(
+    let wasm = build_guest("kiqi-orchestrator", "kiqi_orchestrator.wasm");
+    let extension = WasmExtension::load_with_grants(
         "kiqi-orchestrator",
         &wasm,
         Grants {
@@ -2187,7 +2214,7 @@ fn orchestrator_guest_subagent_round_trips_via_cat() {
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
-    let outcome = plugin
+    let outcome = extension
         .call(
             "subagent",
             &serde_json::json!({ "task": "hello orchestrator", "program": "cat" }),
@@ -2202,8 +2229,8 @@ fn orchestrator_guest_subagent_round_trips_via_cat() {
     );
 
     // Without the grant the same call is denied with the remediation.
-    let bare =
-        WasmPlugin::load_with_grants("kiqi-orchestrator", &wasm, Grants::default()).expect("load");
+    let bare = WasmExtension::load_with_grants("kiqi-orchestrator", &wasm, Grants::default())
+        .expect("load");
     let denied = bare
         .call(
             "subagent",
@@ -2232,13 +2259,13 @@ impl CancelProbe for PollThenCancel {
 }
 
 /// A cancelled `subagent` must kill its child and return promptly instead of
-/// waiting out `timeoutSeconds` while holding the plugin's call mutex.
+/// waiting out `timeoutSeconds` while holding the extension's call mutex.
 #[test]
 fn orchestrator_guest_subagent_stops_when_the_host_cancels() {
     use kiqi_host::wasm::ProcGrant;
 
-    let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
-    let plugin = WasmPlugin::load_with_grants(
+    let wasm = build_guest("kiqi-orchestrator", "kiqi_orchestrator.wasm");
+    let extension = WasmExtension::load_with_grants(
         "kiqi-orchestrator",
         &wasm,
         Grants {
@@ -2262,7 +2289,7 @@ fn orchestrator_guest_subagent_stops_when_the_host_cancels() {
     };
 
     let started = std::time::Instant::now();
-    let error = plugin
+    let error = extension
         .call(
             "subagent",
             &serde_json::json!({
@@ -2286,23 +2313,23 @@ fn orchestrator_guest_subagent_stops_when_the_host_cancels() {
     );
 }
 
-/// A session switch clears the plan, matching the compiled plugin.
+/// A session switch clears the plan, matching the compiled extension.
 #[test]
 fn orchestrator_guest_session_switch_clears_the_plan() {
-    let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
-    let plugin =
-        WasmPlugin::load_with_grants("kiqi-orchestrator", &wasm, Grants::default()).expect("load");
+    let wasm = build_guest("kiqi-orchestrator", "kiqi_orchestrator.wasm");
+    let extension = WasmExtension::load_with_grants("kiqi-orchestrator", &wasm, Grants::default())
+        .expect("load");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
 
-    let _ = plugin.before_agent_start(
+    let _ = extension.before_agent_start(
         &serde_json::json!({"sessionId": "s1", "systemPrompt": "base"}),
         &caps,
     );
-    plugin
+    extension
         .call(
             "plan",
             &serde_json::json!({"action": "set", "nodes": [
@@ -2313,11 +2340,11 @@ fn orchestrator_guest_session_switch_clears_the_plan() {
         )
         .expect("plan set");
 
-    let _ = plugin.before_agent_start(
+    let _ = extension.before_agent_start(
         &serde_json::json!({"sessionId": "s2", "systemPrompt": "base"}),
         &caps,
     );
-    let shown = plugin
+    let shown = extension
         .call("plan", &serde_json::json!({"action": "show"}), &caps, &sink)
         .expect("plan show");
     assert!(
@@ -2334,9 +2361,9 @@ fn orchestrator_guest_session_switch_clears_the_plan() {
 fn orchestrator_guest_gates_guidance_on_the_active_goal() {
     use kiqi_host::wasm::{ExecCwd, FsGrant};
 
-    let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
+    let wasm = build_guest("kiqi-orchestrator", "kiqi_orchestrator.wasm");
     let project = tempfile::tempdir().expect("project tempdir");
-    let plugin = WasmPlugin::load_with_options(
+    let extension = WasmExtension::load_with_options(
         "kiqi-orchestrator",
         &wasm,
         Grants {
@@ -2359,13 +2386,15 @@ fn orchestrator_guest_gates_guidance_on_the_active_goal() {
 
     // No goal file → no guidance (fail-closed).
     assert!(
-        plugin.before_agent_start(&prompt("base"), &caps).is_none(),
+        extension
+            .before_agent_start(&prompt("base"), &caps)
+            .is_none(),
         "no goal file means no guidance"
     );
 
     // An active goal turns it on, over the base prompt.
     std::fs::write(&goals, r#"{"active":{"status":"active"},"archived":[]}"#).expect("write");
-    let injected = plugin
+    let injected = extension
         .before_agent_start(&prompt("base"), &caps)
         .expect("the section is appended");
     assert!(
@@ -2374,7 +2403,7 @@ fn orchestrator_guest_gates_guidance_on_the_active_goal() {
     );
 
     // The heading is never appended twice (idempotent).
-    let twice = plugin.before_agent_start(
+    let twice = extension.before_agent_start(
         &prompt("base\n\n## Subagent orchestration\nalready here"),
         &caps,
     );
@@ -2390,17 +2419,19 @@ fn orchestrator_guest_gates_guidance_on_the_active_goal() {
     ] {
         std::fs::write(&goals, state).expect("write");
         assert!(
-            plugin.before_agent_start(&prompt("base"), &caps).is_none(),
+            extension
+                .before_agent_start(&prompt("base"), &caps)
+                .is_none(),
             "`{state}` means no guidance"
         );
     }
 }
 
 /// Without the `fs` grant the guest cannot read the goal file, so the guidance
-/// stays off — the compiled plugin had no capability gate, a guest fails closed.
+/// stays off — the compiled extension had no capability gate, a guest fails closed.
 #[test]
 fn orchestrator_guest_guidance_needs_the_fs_grant() {
-    let wasm = build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
+    let wasm = build_guest("kiqi-orchestrator", "kiqi_orchestrator.wasm");
     let project = tempfile::tempdir().expect("project tempdir");
     std::fs::create_dir_all(project.path().join(".ki")).expect("state dir");
     std::fs::write(
@@ -2408,7 +2439,7 @@ fn orchestrator_guest_guidance_needs_the_fs_grant() {
         r#"{"active":{"status":"active"},"archived":[]}"#,
     )
     .expect("write");
-    let plugin = WasmPlugin::load_with_options(
+    let extension = WasmExtension::load_with_options(
         "kiqi-orchestrator",
         &wasm,
         Grants::default(),
@@ -2421,7 +2452,7 @@ fn orchestrator_guest_guidance_needs_the_fs_grant() {
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     assert!(
-        plugin
+        extension
             .before_agent_start(
                 &serde_json::json!({"sessionId": "s", "systemPrompt": "base"}),
                 &caps
@@ -2445,11 +2476,11 @@ fn goal_guest_output_turns_the_orchestrator_guidance_on() {
     let project = tempfile::tempdir().expect("project tempdir");
 
     // The goal guest starts a goal through its own `goal` tool.
-    let goal_artifact = build_guest("kiqi-goal-guest", "kiqi_goal_guest.wasm");
+    let goal_artifact = build_guest("kiqi-goal", "kiqi_goal.wasm");
     let goal_component = tempfile::tempdir().expect("goal component tempdir");
-    let goal_wasm = goal_component.path().join("plugin.wasm");
+    let goal_wasm = goal_component.path().join("extension.wasm");
     std::fs::copy(&goal_artifact, &goal_wasm).expect("copy the goal guest");
-    let goal_plugin = WasmPlugin::load_with_options(
+    let goal_extension = WasmExtension::load_with_options(
         "kiqi-goal",
         &goal_wasm,
         goal_fs_grant(),
@@ -2464,7 +2495,7 @@ fn goal_guest_output_turns_the_orchestrator_guidance_on() {
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
-    goal_plugin
+    goal_extension
         .call(
             "goal",
             &serde_json::json!({"action": "start", "title": "Couple the tiers"}),
@@ -2479,9 +2510,8 @@ fn goal_guest_output_turns_the_orchestrator_guidance_on() {
     );
 
     // The orchestrator guest reads that same file and turns the guidance on.
-    let orchestrator_artifact =
-        build_guest("kiqi-orchestrator-guest", "kiqi_orchestrator_guest.wasm");
-    let orchestrator = WasmPlugin::load_with_options(
+    let orchestrator_artifact = build_guest("kiqi-orchestrator", "kiqi_orchestrator.wasm");
+    let orchestrator = WasmExtension::load_with_options(
         "kiqi-orchestrator",
         &orchestrator_artifact,
         Grants {
@@ -2509,7 +2539,7 @@ fn goal_guest_output_turns_the_orchestrator_guidance_on() {
     );
 }
 
-/// The fs grant's scope: the default is the plugin's own data directory
+/// The fs grant's scope: the default is the extension's own data directory
 /// (unchanged), and `--cwd project` (via the CLI options) opts the guest into
 /// reading and writing the project tree.
 #[test]
@@ -2519,7 +2549,7 @@ fn fs_project_scope_reads_and_writes_the_project_tree() {
     let project = tempfile::tempdir().expect("project tempdir");
     std::fs::write(project.path().join("notes.txt"), b"project file").expect("seed file");
     let wasm = fixture_wasm();
-    let plugin = WasmPlugin::load_with_options(
+    let extension = WasmExtension::load_with_options(
         "conformance",
         &wasm,
         Grants {
@@ -2542,7 +2572,7 @@ fn fs_project_scope_reads_and_writes_the_project_tree() {
     };
     // The conformance tool's fs probe writes `conformance/probe.txt` then reads
     // it back — inside the project directory when the scope is `project`.
-    let outcome = call_main_tool(&plugin, serde_json::json!({})).expect("call");
+    let outcome = call_main_tool(&extension, serde_json::json!({})).expect("call");
     assert!(
         text_of(&outcome).contains("fs=conformance"),
         "the guest round-tripped a file through the scoped fs: {}",
@@ -2561,7 +2591,7 @@ fn fs_project_scope_reads_and_writes_the_project_tree() {
 fn proc_round_trips_a_line_through_the_host() {
     use kiqi_host::wasm::ProcGrant;
 
-    let (dir, plugin) = load_fixture_in_temp(Grants {
+    let (dir, extension) = load_fixture_in_temp(Grants {
         proc: Some(ProcGrant {
             commands: vec!["sh".to_string()],
             ..ProcGrant::default()
@@ -2569,7 +2599,7 @@ fn proc_round_trips_a_line_through_the_host() {
         ..Grants::default()
     });
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({"proc": {
             "cmd": "sh",
             "args": ["-c", "read line; echo \"reply:$line\""],
@@ -2582,7 +2612,7 @@ fn proc_round_trips_a_line_through_the_host() {
         text.contains("proc=spawned=1 reply=reply:hello wait=0 stderr=0"),
         "the whole conversation happened: {text}"
     );
-    // The child is a real process in the plugin's own data directory.
+    // The child is a real process in the extension's own data directory.
     assert!(dir.path().join("data").is_dir());
 }
 
@@ -2592,9 +2622,9 @@ fn proc_round_trips_a_line_through_the_host() {
 fn proc_is_gated_like_exec() {
     use kiqi_host::wasm::ProcGrant;
 
-    let (_dir, plugin) = load_fixture_in_temp(Grants::default());
+    let (_dir, extension) = load_fixture_in_temp(Grants::default());
     let denied = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({"proc": {"cmd": "sh", "args": ["-c", "true"]}}),
     )
     .expect("call");
@@ -2604,7 +2634,7 @@ fn proc_is_gated_like_exec() {
         text_of(&denied)
     );
 
-    let (_dir, plugin) = load_fixture_in_temp(Grants {
+    let (_dir, extension) = load_fixture_in_temp(Grants {
         proc: Some(ProcGrant {
             commands: vec!["ls".to_string()],
             ..ProcGrant::default()
@@ -2612,7 +2642,7 @@ fn proc_is_gated_like_exec() {
         ..Grants::default()
     });
     let denied = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({"proc": {"cmd": "sh", "args": ["-c", "true"]}}),
     )
     .expect("call");
@@ -2623,7 +2653,7 @@ fn proc_is_gated_like_exec() {
     );
 
     // The cwd scope is the same jail `exec` uses.
-    let (_dir, plugin) = load_fixture_in_temp(Grants {
+    let (_dir, extension) = load_fixture_in_temp(Grants {
         proc: Some(ProcGrant {
             commands: vec!["sh".to_string()],
             ..ProcGrant::default()
@@ -2631,7 +2661,7 @@ fn proc_is_gated_like_exec() {
         ..Grants::default()
     });
     let escaped = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({"proc": {"cmd": "sh", "args": ["-c", "true"], "cwd": "../outside"}}),
     )
     .expect("call");
@@ -2647,7 +2677,7 @@ fn proc_is_gated_like_exec() {
 fn proc_max_open_is_enforced() {
     use kiqi_host::wasm::ProcGrant;
 
-    let (_dir, plugin) = load_fixture_in_temp(Grants {
+    let (_dir, extension) = load_fixture_in_temp(Grants {
         proc: Some(ProcGrant {
             commands: vec!["sh".to_string()],
             max_open: 1,
@@ -2656,7 +2686,7 @@ fn proc_max_open_is_enforced() {
         ..Grants::default()
     });
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({"proc": {
             "cmd": "sh", "args": ["-c", "true"], "count": 2, "keep": true
         }}),
@@ -2679,7 +2709,7 @@ fn proc_max_open_is_enforced() {
 fn proc_reaps_children_when_the_call_ends() {
     use kiqi_host::wasm::ProcGrant;
 
-    let (_dir, plugin) = load_fixture_in_temp(Grants {
+    let (_dir, extension) = load_fixture_in_temp(Grants {
         proc: Some(ProcGrant {
             commands: vec!["sh".to_string()],
             ..ProcGrant::default()
@@ -2689,7 +2719,7 @@ fn proc_reaps_children_when_the_call_ends() {
     // The fixture reads the child's first stdout line = its pid, writes nothing
     // useful and leaves the child sleeping (`keep`): the guest never kills it.
     let outcome = call_main_tool(
-        &plugin,
+        &extension,
         serde_json::json!({"proc": {
             "cmd": "sh",
             "args": ["-c", "echo $$; sleep 30"],
@@ -2736,13 +2766,14 @@ fn net_sockets_connect_through_a_host_allow_list() {
         stream.write_all(&buffer[..read]).expect("echo it back");
     });
 
-    let (_dir, plugin) = load_fixture_in_temp(Grants {
+    let (_dir, extension) = load_fixture_in_temp(Grants {
         net_sockets: Some(NetSocketsGrant {
             hosts: vec!["127.0.0.1".to_string()],
         }),
         ..Grants::default()
     });
-    let outcome = call_main_tool(&plugin, serde_json::json!({ "address": address })).expect("call");
+    let outcome =
+        call_main_tool(&extension, serde_json::json!({ "address": address })).expect("call");
     server.join().expect("server thread");
     assert!(
         text_of(&outcome).contains("socket=sent=4 recv=ping"),
@@ -2751,14 +2782,14 @@ fn net_sockets_connect_through_a_host_allow_list() {
     );
 
     // A host outside the grant is denied before any connection is attempted.
-    let (_dir, plugin) = load_fixture_in_temp(Grants {
+    let (_dir, extension) = load_fixture_in_temp(Grants {
         net_sockets: Some(NetSocketsGrant {
             hosts: vec!["example.com".to_string()],
         }),
         ..Grants::default()
     });
     let denied =
-        call_main_tool(&plugin, serde_json::json!({ "address": "127.0.0.1:9" })).expect("call");
+        call_main_tool(&extension, serde_json::json!({ "address": "127.0.0.1:9" })).expect("call");
     assert!(
         text_of(&denied).contains("socket=net-sockets to `127.0.0.1` is not granted"),
         "the allow-list must be consulted: {}",
@@ -2771,9 +2802,10 @@ fn net_sockets_connect_through_a_host_allow_list() {
 /// read from that directory).
 #[test]
 fn a_declared_id_does_not_override_the_install_directory() {
-    let plugin = WasmPlugin::load("installed-as", &fixture_wasm()).expect("load the component");
+    let extension =
+        WasmExtension::load("installed-as", &fixture_wasm()).expect("load the component");
     assert_eq!(
-        plugin.id(),
+        extension.id(),
         "installed-as",
         "the conformance guest declares `conformance`, but the load id must win"
     );
@@ -2818,7 +2850,7 @@ fn net_http_does_not_follow_a_redirect_to_an_ungranted_host() {
         let _ = stream.write_all(response.as_bytes());
     });
 
-    let (_dir, plugin) = load_fixture_in_temp(Grants {
+    let (_dir, extension) = load_fixture_in_temp(Grants {
         net_http: Some(NetHttpGrant {
             hosts: vec!["127.0.0.1".to_string()],
         }),
@@ -2829,7 +2861,7 @@ fn net_http_does_not_follow_a_redirect_to_an_ungranted_host() {
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
-    let outcome = plugin
+    let outcome = extension
         .call(
             "fetch",
             &serde_json::json!({ "url": format!("http://127.0.0.1:{port}/") }),
@@ -2860,7 +2892,7 @@ fn guest_memory_is_capped() {
         blocks: Mutex::new(Vec::new()),
     };
 
-    let bounded = WasmPlugin::load_with_options(
+    let bounded = WasmExtension::load_with_options(
         "conformance",
         &wasm,
         Grants::default(),
@@ -2925,7 +2957,7 @@ fn net_http_refuses_an_oversized_response_body() {
         }
     });
 
-    let (_dir, plugin) = load_fixture_in_temp(Grants {
+    let (_dir, extension) = load_fixture_in_temp(Grants {
         net_http: Some(NetHttpGrant {
             hosts: vec!["127.0.0.1".to_string()],
         }),
@@ -2936,7 +2968,7 @@ fn net_http_refuses_an_oversized_response_body() {
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
-    let outcome = plugin
+    let outcome = extension
         .call(
             "fetch",
             &serde_json::json!({ "url": format!("http://127.0.0.1:{port}/") }),
@@ -2972,7 +3004,7 @@ fn exec_does_not_hang_when_the_command_leaves_a_background_child() {
 
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let (_dir, plugin) = load_fixture_in_temp(Grants {
+        let (_dir, extension) = load_fixture_in_temp(Grants {
             exec: Some(ExecGrant {
                 commands: vec!["sh".to_string()],
                 ..ExecGrant::default()
@@ -2980,7 +3012,7 @@ fn exec_does_not_hang_when_the_command_leaves_a_background_child() {
             ..Grants::default()
         });
         let outcome = call_main_tool(
-            &plugin,
+            &extension,
             serde_json::json!({ "exec": { "cmd": "sh", "args": ["-c", "sleep 60 & exit 0"] } }),
         )
         .expect("call");
@@ -3001,13 +3033,13 @@ fn exec_does_not_hang_when_the_command_leaves_a_background_child() {
 /// access, so this stays hermetic.
 #[test]
 fn webfetch_guest_keeps_its_url_policy_and_needs_the_grant() {
-    let wasm = build_guest("kiqi-webfetch-guest", "kiqi_webfetch_guest.wasm");
-    let plugin = WasmPlugin::load("kiqi-webfetch", &wasm).expect("load");
-    assert_eq!(plugin.id(), "kiqi-webfetch");
+    let wasm = build_guest("kiqi-webfetch", "kiqi_webfetch.wasm");
+    let extension = WasmExtension::load("kiqi-webfetch", &wasm).expect("load");
+    assert_eq!(extension.id(), "kiqi-webfetch");
     assert!(
-        plugin.tools().iter().any(|tool| tool.name == "webfetch"),
+        extension.tools().iter().any(|tool| tool.name == "webfetch"),
         "the tool is declared: {:?}",
-        plugin.tools()
+        extension.tools()
     );
 
     let log = NullLog;
@@ -3016,9 +3048,9 @@ fn webfetch_guest_keeps_its_url_policy_and_needs_the_grant() {
         blocks: Mutex::new(Vec::new()),
     };
 
-    // The plugin's own policy, not the host's: localhost and literal private IPs
+    // The extension's own policy, not the host's: localhost and literal private IPs
     // are refused inside the guest.
-    let local = plugin
+    let local = extension
         .call(
             "webfetch",
             &serde_json::json!({ "url": "http://localhost/" }),
@@ -3027,7 +3059,7 @@ fn webfetch_guest_keeps_its_url_policy_and_needs_the_grant() {
         )
         .unwrap_err();
     assert!(local.to_string().contains("local hosts"), "got {local}");
-    let private = plugin
+    let private = extension
         .call(
             "webfetch",
             &serde_json::json!({ "url": "http://127.0.0.1:1/" }),
@@ -3041,7 +3073,7 @@ fn webfetch_guest_keeps_its_url_policy_and_needs_the_grant() {
     );
 
     // A public URL passes the policy and is then the grant's to refuse.
-    let denied = plugin
+    let denied = extension
         .call(
             "webfetch",
             &serde_json::json!({ "url": "http://example.com/" }),
@@ -3057,7 +3089,7 @@ fn webfetch_guest_keeps_its_url_policy_and_needs_the_grant() {
 /// the project directory — and without the grant the tool degrades to a clear
 /// deny instead of running.
 #[test]
-fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
+fn kiqi_lens_runs_checks_in_the_project_directory() {
     use kiqi_host::wasm::{ExecCwd, ExecGrant};
 
     // The test needs `git` for real (the fixture init below and the guest's
@@ -3071,11 +3103,11 @@ fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
         .map(|status| !status.success())
         .unwrap_or(true)
     {
-        eprintln!("skipping kiqi_lens_guest_runs_checks_in_the_project_directory: no git on PATH");
+        eprintln!("skipping kiqi_lens_runs_checks_in_the_project_directory: no git on PATH");
         return;
     }
 
-    let wasm = build_guest("kiqi-lens-guest", "kiqi_lens_guest.wasm");
+    let wasm = build_guest("kiqi-lens", "kiqi_lens.wasm");
     let project = tempfile::tempdir().expect("project tempdir");
     let init = Command::new("git")
         .args(["init", "--quiet"])
@@ -3091,7 +3123,7 @@ fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
     };
 
     // Granted with the project scope: the diff check runs in the project dir.
-    let plugin = WasmPlugin::load_with_options(
+    let extension = WasmExtension::load_with_options(
         "kiqi-lens",
         &wasm,
         Grants {
@@ -3108,13 +3140,16 @@ fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
         },
     )
     .expect("load");
-    assert_eq!(plugin.id(), "kiqi-lens");
+    assert_eq!(extension.id(), "kiqi-lens");
     assert!(
-        plugin.tools().iter().any(|tool| tool.name == "code_lens"),
+        extension
+            .tools()
+            .iter()
+            .any(|tool| tool.name == "code_lens"),
         "the tool is declared: {:?}",
-        plugin.tools()
+        extension.tools()
     );
-    let outcome = plugin
+    let outcome = extension
         .call(
             "code_lens",
             &serde_json::json!({ "check": "diff" }),
@@ -3132,7 +3167,7 @@ fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
     // subdir descends, and an absolute path outside the project is refused by
     // the guest before the host is even asked.
     std::fs::create_dir_all(project.path().join("sub")).expect("project subdir");
-    let outcome = plugin
+    let outcome = extension
         .call(
             "code_lens",
             &serde_json::json!({ "check": "diff", "cwd": "." }),
@@ -3145,7 +3180,7 @@ fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
         "cwd `.` is the project root: {}",
         text_of(&outcome)
     );
-    let outcome = plugin
+    let outcome = extension
         .call(
             "code_lens",
             &serde_json::json!({ "check": "diff", "cwd": "sub" }),
@@ -3158,7 +3193,7 @@ fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
         "a relative subdir of the project works: {}",
         text_of(&outcome)
     );
-    let refused = plugin
+    let refused = extension
         .call(
             "code_lens",
             &serde_json::json!({ "check": "diff", "cwd": "/" }),
@@ -3178,7 +3213,7 @@ fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
     // strip anchor — so an absolute path spelled the way shell completion
     // emits it (with a trailing slash) is accepted, and `git diff --check`
     // runs read-only in the repo the test process sits in.
-    let plugin = WasmPlugin::load_with_grants(
+    let extension = WasmExtension::load_with_grants(
         "kiqi-lens",
         &wasm,
         Grants {
@@ -3192,7 +3227,7 @@ fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
     )
     .expect("load");
     let cwd_with_slash = format!("{}/", std::env::current_dir().unwrap().display());
-    let outcome = plugin
+    let outcome = extension
         .call(
             "code_lens",
             &serde_json::json!({ "check": "diff", "cwd": cwd_with_slash }),
@@ -3206,12 +3241,12 @@ fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
         text_of(&outcome)
     );
 
-    // Same plugin without the project scope: the child starts in the data
+    // Same extension without the project scope: the child starts in the data
     // directory, which is not a git repository.
     let dir = tempfile::tempdir().expect("install tempdir");
-    let scoped_wasm = dir.path().join("plugin.wasm");
+    let scoped_wasm = dir.path().join("extension.wasm");
     std::fs::copy(&wasm, &scoped_wasm).expect("copy the guest next to a data dir");
-    let plugin = WasmPlugin::load_with_grants(
+    let extension = WasmExtension::load_with_grants(
         "kiqi-lens",
         &scoped_wasm,
         Grants {
@@ -3223,7 +3258,7 @@ fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
         },
     )
     .expect("load");
-    let outcome = plugin
+    let outcome = extension
         .call(
             "code_lens",
             &serde_json::json!({ "check": "diff" }),
@@ -3239,11 +3274,12 @@ fn kiqi_lens_guest_runs_checks_in_the_project_directory() {
     );
 
     // Without the grant at all, the tool reports the deny and how to fix it.
-    // The advice must name BOTH commands the tool can run — `ki plugin grant`
+    // The advice must name BOTH commands the tool can run — `ki extension grant`
     // replaces the whole exec policy, so advice naming only the denied command
     // would steer the user into revoking the other one.
-    let plugin = WasmPlugin::load_with_grants("kiqi-lens", &wasm, Grants::default()).expect("load");
-    let denied = plugin
+    let extension =
+        WasmExtension::load_with_grants("kiqi-lens", &wasm, Grants::default()).expect("load");
+    let denied = extension
         .call(
             "code_lens",
             &serde_json::json!({ "check": "diff" }),
@@ -3289,55 +3325,55 @@ impl kiqi_host::SessionRead for PlanSessionHost {
 }
 
 impl kiqi_host::SessionControl for PlanSessionHost {
-    fn set_session_name(&self, _name: &str) -> Result<(), PluginError> {
+    fn set_session_name(&self, _name: &str) -> Result<(), ExtensionError> {
         Ok(())
     }
-    fn set_active_tools(&self, tools: &[String]) -> Result<(), PluginError> {
+    fn set_active_tools(&self, tools: &[String]) -> Result<(), ExtensionError> {
         *self.active.lock().unwrap() = tools.to_vec();
         Ok(())
     }
-    fn set_model(&self, _model: &str) -> Result<(), PluginError> {
+    fn set_model(&self, _model: &str) -> Result<(), ExtensionError> {
         Ok(())
     }
-    fn set_thinking_level(&self, _level: &str) -> Result<(), PluginError> {
+    fn set_thinking_level(&self, _level: &str) -> Result<(), ExtensionError> {
         Ok(())
     }
-    fn compact(&self) -> Result<(), PluginError> {
+    fn compact(&self) -> Result<(), ExtensionError> {
         Ok(())
     }
-    fn new_session(&self) -> Result<(), PluginError> {
+    fn new_session(&self) -> Result<(), ExtensionError> {
         Ok(())
     }
-    fn fork(&self) -> Result<(), PluginError> {
+    fn fork(&self) -> Result<(), ExtensionError> {
         Ok(())
     }
-    fn navigate_tree(&self, _target: &str) -> Result<(), PluginError> {
+    fn navigate_tree(&self, _target: &str) -> Result<(), ExtensionError> {
         Ok(())
     }
-    fn switch_session(&self, _id: &str) -> Result<(), PluginError> {
+    fn switch_session(&self, _id: &str) -> Result<(), ExtensionError> {
         Ok(())
     }
-    fn reload(&self) -> Result<(), PluginError> {
+    fn reload(&self) -> Result<(), ExtensionError> {
         Ok(())
     }
 }
 
 impl kiqi_host::InjectApi for PlanSessionHost {
-    fn send_message(&self, _message: &serde_json::Value) -> Result<(), PluginError> {
+    fn send_message(&self, _message: &serde_json::Value) -> Result<(), ExtensionError> {
         Ok(())
     }
-    fn send_user_message(&self, text: &str) -> Result<(), PluginError> {
+    fn send_user_message(&self, text: &str) -> Result<(), ExtensionError> {
         self.messages.lock().unwrap().push(text.to_string());
         Ok(())
     }
-    fn append_message(&self, _message: &serde_json::Value) -> Result<(), PluginError> {
+    fn append_message(&self, _message: &serde_json::Value) -> Result<(), ExtensionError> {
         Ok(())
     }
     fn append_custom_entry(
         &self,
         custom_type: &str,
         data: &serde_json::Value,
-    ) -> Result<(), PluginError> {
+    ) -> Result<(), ExtensionError> {
         self.entries
             .lock()
             .unwrap()
@@ -3351,10 +3387,10 @@ impl kiqi_host::InjectApi for PlanSessionHost {
 /// `inject.append-custom-entry`, and `/plan show` reads it back.
 #[test]
 fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
-    let wasm = build_guest("kiqi-plan-mode-guest", "kiqi_plan_mode_guest.wasm");
-    let plugin = WasmPlugin::load("kiqi-plan-mode", &wasm).expect("load");
-    assert_eq!(plugin.id(), "kiqi-plan-mode");
-    assert!(plugin
+    let wasm = build_guest("kiqi-plan-mode", "kiqi_plan_mode.wasm");
+    let extension = WasmExtension::load("kiqi-plan-mode", &wasm).expect("load");
+    assert_eq!(extension.id(), "kiqi-plan-mode");
+    assert!(extension
         .tools()
         .iter()
         .any(|tool| tool.name == "plan_mode_complete"));
@@ -3375,7 +3411,7 @@ fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
     };
 
     // Enter: the active set becomes the planning set.
-    plugin
+    extension
         .call("plan_mode_start", &serde_json::json!({}), &caps, &sink)
         .expect("start plan mode");
     assert_eq!(
@@ -3385,7 +3421,7 @@ fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
     );
 
     // Complete: the previous set comes back and the plan is persisted.
-    plugin
+    extension
         .call(
             "plan_mode_complete",
             &serde_json::json!({ "plan": "1. Do the thing" }),
@@ -3403,7 +3439,7 @@ fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
     );
 
     // `/plan show` reports what was stored.
-    let status = plugin
+    let status = extension
         .run_command("plan", "show", &caps)
         .expect("plan show");
     let kiqi_host::CommandResultBody::Message(status) = status.body else {
@@ -3423,14 +3459,17 @@ fn plan_mode_guest_swaps_tools_and_persists_through_the_host() {
 /// host before a request leaves the process.
 #[test]
 fn websearch_guest_validates_in_the_guest_and_needs_the_grant() {
-    let wasm = build_guest("kiqi-websearch-guest", "kiqi_websearch_guest.wasm");
-    let plugin =
-        WasmPlugin::load_with_grants("kiqi-websearch", &wasm, Grants::default()).expect("load");
-    assert_eq!(plugin.id(), "kiqi-websearch");
+    let wasm = build_guest("kiqi-websearch", "kiqi_websearch.wasm");
+    let extension =
+        WasmExtension::load_with_grants("kiqi-websearch", &wasm, Grants::default()).expect("load");
+    assert_eq!(extension.id(), "kiqi-websearch");
     assert!(
-        plugin.tools().iter().any(|tool| tool.name == "websearch"),
+        extension
+            .tools()
+            .iter()
+            .any(|tool| tool.name == "websearch"),
         "the tool is declared: {:?}",
-        plugin.tools()
+        extension.tools()
     );
 
     let log = NullLog;
@@ -3441,14 +3480,14 @@ fn websearch_guest_validates_in_the_guest_and_needs_the_grant() {
 
     // The guest's own argument policy, before any capability call: a missing or
     // empty query never reaches the network.
-    let missing = plugin
+    let missing = extension
         .call("websearch", &serde_json::json!({}), &caps, &sink)
         .unwrap_err();
     assert!(
         missing.to_string().contains("query is required"),
         "got {missing}"
     );
-    let empty = plugin
+    let empty = extension
         .call(
             "websearch",
             &serde_json::json!({ "query": "   " }),
@@ -3462,7 +3501,7 @@ fn websearch_guest_validates_in_the_guest_and_needs_the_grant() {
     );
 
     // A valid query passes the guest's policy and is then the grant's to refuse.
-    let denied = plugin
+    let denied = extension
         .call(
             "websearch",
             &serde_json::json!({ "query": "rust" }),
@@ -3473,7 +3512,7 @@ fn websearch_guest_validates_in_the_guest_and_needs_the_grant() {
     assert!(denied.to_string().contains("denied"), "got {denied}");
 
     // A grant for some unrelated host still does not cover api.duckduckgo.com.
-    let other = WasmPlugin::load_with_grants(
+    let other = WasmExtension::load_with_grants(
         "kiqi-websearch",
         &wasm,
         Grants {
@@ -3511,20 +3550,20 @@ fn websearch_guest_live_search_when_asked() {
         );
         return;
     }
-    let wasm = build_guest("kiqi-websearch-guest", "kiqi_websearch_guest.wasm");
+    let wasm = build_guest("kiqi-websearch", "kiqi_websearch.wasm");
     let grants = Grants {
         net_http: Some(NetHttpGrant {
             hosts: vec!["api.duckduckgo.com".into(), "en.wikipedia.org".into()],
         }),
         ..Grants::default()
     };
-    let plugin = WasmPlugin::load_with_grants("kiqi-websearch", &wasm, grants).expect("load");
+    let extension = WasmExtension::load_with_grants("kiqi-websearch", &wasm, grants).expect("load");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
-    let outcome = plugin
+    let outcome = extension
         .call(
             "websearch",
             &serde_json::json!({ "query": "rust programming language", "limit": 3 }),
@@ -3548,15 +3587,15 @@ fn websearch_guest_live_search_when_asked() {
 // ---------------------------------------------------------------------------
 
 /// `kiqi-subagents` ported to wasm: pure logic, no capabilities. The guest must
-/// emit the *same* delegation envelope bytes the compile-time plugin emits, so
+/// emit the *same* delegation envelope bytes the compile-time extension emits, so
 /// the envelope is compared field-order-and-value, byte for byte.
 #[test]
 fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
-    let wasm = build_guest("kiqi-subagents-guest", "kiqi_subagents_guest.wasm");
-    let plugin = WasmPlugin::load("kiqi-subagents", &wasm).expect("load");
-    assert_eq!(plugin.id(), "kiqi-subagents");
+    let wasm = build_guest("kiqi-subagents", "kiqi_subagents.wasm");
+    let extension = WasmExtension::load("kiqi-subagents", &wasm).expect("load");
+    assert_eq!(extension.id(), "kiqi-subagents");
 
-    let tool = plugin
+    let tool = extension
         .tools()
         .into_iter()
         .find(|tool| tool.name == "delegate_task")
@@ -3572,8 +3611,8 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
         blocks: Mutex::new(Vec::new()),
     };
 
-    // Clamping and field order match the compile-time plugin exactly.
-    let outcome = plugin
+    // Clamping and field order match the compile-time extension exactly.
+    let outcome = extension
         .call(
             "delegate_task",
             &serde_json::json!({"task": "review", "maxTurns": 999, "timeoutSeconds": 99999}),
@@ -3589,7 +3628,7 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
     assert_eq!(outcome.details, serde_json::Value::Null);
 
     // Defaults apply when the optional fields are absent.
-    let defaults = plugin
+    let defaults = extension
         .call(
             "delegate_task",
             &serde_json::json!({"task": "x"}),
@@ -3603,7 +3642,7 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
     );
 
     // A role is carried through verbatim.
-    let roled = plugin
+    let roled = extension
         .call(
             "delegate_task",
             &serde_json::json!({"task": "x", "role": "planner"}),
@@ -3620,7 +3659,7 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
     // Both validation errors survive the port, message and all — including the
     // lenient-parse path, where a non-object argument reads as a missing task
     // exactly as the compile-time `kit` does (`unwrap_or(Value::Null)`).
-    let empty = plugin
+    let empty = extension
         .call(
             "delegate_task",
             &serde_json::json!({"task": "   "}),
@@ -3634,7 +3673,7 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
             .contains("task must contain 1-20000 characters"),
         "got {empty}"
     );
-    let missing = plugin
+    let missing = extension
         .call("delegate_task", &serde_json::json!({}), &caps, &sink)
         .unwrap_err();
     assert!(
@@ -3643,7 +3682,7 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
             .contains("missing string parameter `task`"),
         "got {missing}"
     );
-    let non_object = plugin
+    let non_object = extension
         .call("delegate_task", &serde_json::Value::Null, &caps, &sink)
         .unwrap_err();
     assert!(
@@ -3654,11 +3693,11 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
     );
 
     // An undeclared tool is a typed error, not a trap.
-    let unknown = plugin
+    let unknown = extension
         .call("no_such_tool", &serde_json::json!({}), &caps, &sink)
         .unwrap_err();
     assert!(
-        matches!(unknown, PluginError::UnknownTool(_)),
+        matches!(unknown, ExtensionError::UnknownTool(_)),
         "got {unknown}"
     );
 }
@@ -3675,13 +3714,13 @@ struct GoalInjectHost {
 }
 
 impl kiqi_host::InjectApi for GoalInjectHost {
-    fn send_message(&self, _message: &serde_json::Value) -> Result<(), PluginError> {
+    fn send_message(&self, _message: &serde_json::Value) -> Result<(), ExtensionError> {
         Ok(())
     }
-    fn send_user_message(&self, _text: &str) -> Result<(), PluginError> {
+    fn send_user_message(&self, _text: &str) -> Result<(), ExtensionError> {
         Ok(())
     }
-    fn append_message(&self, message: &serde_json::Value) -> Result<(), PluginError> {
+    fn append_message(&self, message: &serde_json::Value) -> Result<(), ExtensionError> {
         self.messages.lock().unwrap().push(message.clone());
         Ok(())
     }
@@ -3689,7 +3728,7 @@ impl kiqi_host::InjectApi for GoalInjectHost {
         &self,
         _custom_type: &str,
         _data: &serde_json::Value,
-    ) -> Result<(), PluginError> {
+    ) -> Result<(), ExtensionError> {
         Ok(())
     }
 }
@@ -3714,13 +3753,13 @@ fn read_json(path: &std::path::Path) -> serde_json::Value {
 /// Load the goal guest from a scratch component directory, with the project
 /// scope pointed at a temp project: writes land there, not in the repo. Returns
 /// the component dir (whose `data/` was the old jail) and the project dir.
-fn load_goal_guest(grants: Grants) -> (tempfile::TempDir, tempfile::TempDir, WasmPlugin) {
-    let artifact = build_guest("kiqi-goal-guest", "kiqi_goal_guest.wasm");
+fn load_goal_guest(grants: Grants) -> (tempfile::TempDir, tempfile::TempDir, WasmExtension) {
+    let artifact = build_guest("kiqi-goal", "kiqi_goal.wasm");
     let component = tempfile::tempdir().expect("component tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
-    let wasm = component.path().join("plugin.wasm");
+    let wasm = component.path().join("extension.wasm");
     std::fs::copy(&artifact, &wasm).expect("copy the guest next to its component dir");
-    let plugin = WasmPlugin::load_with_options(
+    let extension = WasmExtension::load_with_options(
         "kiqi-goal",
         &wasm,
         grants,
@@ -3730,7 +3769,7 @@ fn load_goal_guest(grants: Grants) -> (tempfile::TempDir, tempfile::TempDir, Was
         },
     )
     .expect("load");
-    (component, project, plugin)
+    (component, project, extension)
 }
 
 fn goal_caps<'a>(host: &'a GoalInjectHost, log: &'a NullLog) -> HostCaps<'a> {
@@ -3777,7 +3816,7 @@ fn goal_injection_carries_the_orchestration_hint_only_when_its_tools_exist() {
 
     let null_log = NullLog;
     let host = GoalInjectHost::default();
-    let (_component, _project, plugin) = load_goal_guest(goal_fs_grant());
+    let (_component, _project, extension) = load_goal_guest(goal_fs_grant());
     let with_orchestrator = ToolFaceSession {
         tools: vec!["plan".into(), "dispatch".into(), "subagent".into()],
     };
@@ -3789,7 +3828,7 @@ fn goal_injection_carries_the_orchestration_hint_only_when_its_tools_exist() {
         log: &null_log,
         cancel: None,
     };
-    plugin
+    extension
         .call(
             "goal",
             &serde_json::json!({"action": "start", "title": "hinted"}),
@@ -3807,7 +3846,7 @@ fn goal_injection_carries_the_orchestration_hint_only_when_its_tools_exist() {
 
     // A status that is no longer `active` must drop the nudge even though the
     // orchestrator tools are still on the tool face.
-    plugin
+    extension
         .call(
             "goal",
             &serde_json::json!({"action": "pause"}),
@@ -3827,7 +3866,7 @@ fn goal_injection_carries_the_orchestration_hint_only_when_its_tools_exist() {
     // The live site is an install *without* the orchestrator but with other
     // tools: the tool face is not empty, it just lacks plan/dispatch/subagent.
     let host_bare = GoalInjectHost::default();
-    let (_component2, _project2, plugin2) = load_goal_guest(goal_fs_grant());
+    let (_component2, _project2, extension2) = load_goal_guest(goal_fs_grant());
     let without_orchestrator = ToolFaceSession {
         tools: vec!["bash".into(), "read".into(), "edit".into()],
     };
@@ -3839,7 +3878,7 @@ fn goal_injection_carries_the_orchestration_hint_only_when_its_tools_exist() {
         log: &null_log,
         cancel: None,
     };
-    plugin2
+    extension2
         .call(
             "goal",
             &serde_json::json!({"action": "start", "title": "bare"}),
@@ -3858,14 +3897,14 @@ fn goal_injection_carries_the_orchestration_hint_only_when_its_tools_exist() {
 
 /// The core port: `goal` records state in `<project>/.ki/goals.json` in the
 /// compiled shape (`{active, archived}`), and the lifecycle moves the goal
-/// between the active slot and the archive. The plugin data directory is not a
+/// between the active slot and the archive. The extension data directory is not a
 /// second source of truth.
 #[test]
 fn goal_guest_writes_the_project_file_in_the_compiled_shape() {
-    let (component, project, plugin) = load_goal_guest(goal_fs_grant());
-    assert_eq!(plugin.id(), "kiqi-goal");
-    assert!(plugin.tools().iter().any(|tool| tool.name == "goal"));
-    assert!(plugin
+    let (component, project, extension) = load_goal_guest(goal_fs_grant());
+    assert_eq!(extension.id(), "kiqi-goal");
+    assert!(extension.tools().iter().any(|tool| tool.name == "goal"));
+    assert!(extension
         .commands()
         .iter()
         .any(|command| command.name == "goal"));
@@ -3879,7 +3918,7 @@ fn goal_guest_writes_the_project_file_in_the_compiled_shape() {
     let file = project.path().join(".ki/goals.json");
 
     // start writes the project file in the compiled shape.
-    plugin
+    extension
         .call(
             "goal",
             &serde_json::json!({"action": "start", "title": "Ship the goal port"}),
@@ -3914,7 +3953,7 @@ fn goal_guest_writes_the_project_file_in_the_compiled_shape() {
     }
 
     // pause / resume flip the status in the file.
-    plugin
+    extension
         .call(
             "goal",
             &serde_json::json!({"action": "pause"}),
@@ -3923,7 +3962,7 @@ fn goal_guest_writes_the_project_file_in_the_compiled_shape() {
         )
         .expect("pause");
     assert_eq!(read_json(&file)["active"]["status"], "paused");
-    plugin
+    extension
         .call(
             "goal",
             &serde_json::json!({"action": "resume"}),
@@ -3934,7 +3973,7 @@ fn goal_guest_writes_the_project_file_in_the_compiled_shape() {
     assert_eq!(read_json(&file)["active"]["status"], "active");
 
     // complete moves the goal to the archive and clears the active slot.
-    plugin
+    extension
         .call(
             "goal",
             &serde_json::json!({"action": "complete"}),
@@ -3956,7 +3995,7 @@ fn goal_guest_writes_the_project_file_in_the_compiled_shape() {
 /// turn, re-injects only on a state change, and auto-pauses an exhausted goal.
 #[test]
 fn goal_guest_charges_the_turn_budget_from_the_project_file() {
-    let (_component, project, plugin) = load_goal_guest(goal_fs_grant());
+    let (_component, project, extension) = load_goal_guest(goal_fs_grant());
     let host = GoalInjectHost::default();
     let log = NullLog;
     let caps = goal_caps(&host, &log);
@@ -3965,7 +4004,7 @@ fn goal_guest_charges_the_turn_budget_from_the_project_file() {
     };
     let file = project.path().join(".ki/goals.json");
 
-    plugin
+    extension
         .call(
             "goal",
             &serde_json::json!({"action": "start", "title": "Ship the goal port", "maxTurns": 2}),
@@ -3976,13 +4015,13 @@ fn goal_guest_charges_the_turn_budget_from_the_project_file() {
     assert_eq!(read_json(&file)["active"]["title"], "Ship the goal port");
 
     // One TurnEnd charges a turn and does not re-inject (fingerprint unchanged).
-    plugin.on_event(&Event::new(EventTag::TurnEnd, serde_json::json!({})), &caps);
+    extension.on_event(&Event::new(EventTag::TurnEnd, serde_json::json!({})), &caps);
     assert_eq!(
         host.messages.lock().unwrap().len(),
         1,
         "no re-injection for an unchanged goal"
     );
-    let after_one = plugin
+    let after_one = extension
         .call("goal", &serde_json::json!({"action": "show"}), &caps, &sink)
         .expect("show after one turn");
     assert!(
@@ -3993,7 +4032,7 @@ fn goal_guest_charges_the_turn_budget_from_the_project_file() {
 
     // The second TurnEnd exhausts the budget: the goal auto-pauses and a notice
     // is injected.
-    plugin.on_event(&Event::new(EventTag::TurnEnd, serde_json::json!({})), &caps);
+    extension.on_event(&Event::new(EventTag::TurnEnd, serde_json::json!({})), &caps);
     {
         let messages = host.messages.lock().unwrap();
         assert_eq!(
@@ -4007,7 +4046,7 @@ fn goal_guest_charges_the_turn_budget_from_the_project_file() {
         assert!(notice.contains("paused"), "got {notice}");
     }
     assert_eq!(read_json(&file)["active"]["status"], "paused");
-    let paused = plugin
+    let paused = extension
         .call("goal", &serde_json::json!({"action": "show"}), &caps, &sink)
         .expect("show after the budget is spent");
     assert!(
@@ -4017,7 +4056,7 @@ fn goal_guest_charges_the_turn_budget_from_the_project_file() {
     );
 
     // The `/goal` command renders the same state.
-    let status = plugin
+    let status = extension
         .run_command("goal", "status", &caps)
         .expect("goal status");
     let kiqi_host::CommandResultBody::Message(status) = status.body else {
@@ -4035,9 +4074,9 @@ fn goal_guest_charges_the_turn_budget_from_the_project_file() {
 /// real upgrade's migration is a no-op and the guest starts fresh.
 #[test]
 fn goal_guest_migrates_the_pre_scope_store() {
-    let artifact = build_guest("kiqi-goal-guest", "kiqi_goal_guest.wasm");
+    let artifact = build_guest("kiqi-goal", "kiqi_goal.wasm");
     let component = tempfile::tempdir().expect("component tempdir");
-    let wasm = component.path().join("plugin.wasm");
+    let wasm = component.path().join("extension.wasm");
     std::fs::copy(&artifact, &wasm).expect("copy the guest");
     let data = component.path().join("data");
     std::fs::create_dir_all(&data).expect("data dir");
@@ -4050,7 +4089,7 @@ fn goal_guest_migrates_the_pre_scope_store() {
     });
     std::fs::write(data.join("goals.json"), legacy.to_string()).expect("seed the pre-scope store");
 
-    let plugin = WasmPlugin::load_with_options(
+    let extension = WasmExtension::load_with_options(
         "kiqi-goal",
         &wasm,
         goal_fs_grant(),
@@ -4068,7 +4107,7 @@ fn goal_guest_migrates_the_pre_scope_store() {
     };
 
     // A read surfaces the migrated goal and writes it out.
-    let shown = plugin
+    let shown = extension
         .call("goal", &serde_json::json!({"action": "show"}), &caps, &sink)
         .expect("show");
     assert!(
@@ -4087,20 +4126,20 @@ fn goal_guest_migrates_the_pre_scope_store() {
     assert!(value["archived"].is_array());
 }
 
-/// The port degrades like the compiled plugin: no `fs` grant makes the write a
+/// The port degrades like the compiled extension: no `fs` grant makes the write a
 /// typed error (not a trap) while a read falls back to "no goal", and a missing
 /// injection surface is non-fatal — the goal is still recorded.
 #[test]
 fn goal_guest_denies_without_fs_and_injection_is_optional() {
     // No fs: starting a goal cannot persist, so the action is a typed error.
-    let (_component, _project, plugin) = load_goal_guest(Grants::default());
+    let (_component, _project, extension) = load_goal_guest(Grants::default());
     let host = GoalInjectHost::default();
     let log = NullLog;
     let caps = goal_caps(&host, &log);
     let sink = RecordingSink {
         blocks: Mutex::new(Vec::new()),
     };
-    let denied = plugin
+    let denied = extension
         .call(
             "goal",
             &serde_json::json!({"action": "start", "title": "nope"}),
@@ -4109,11 +4148,11 @@ fn goal_guest_denies_without_fs_and_injection_is_optional() {
         )
         .unwrap_err();
     assert!(
-        matches!(&denied, PluginError::InvalidArguments(reason) if reason.contains("fs is not granted")),
+        matches!(&denied, ExtensionError::InvalidArguments(reason) if reason.contains("fs is not granted")),
         "got {denied}"
     );
     // A read without fs degrades to "no goal" rather than failing.
-    let shown = plugin
+    let shown = extension
         .call("goal", &serde_json::json!({"action": "show"}), &caps, &sink)
         .expect("show without fs");
     assert!(
@@ -4123,7 +4162,7 @@ fn goal_guest_denies_without_fs_and_injection_is_optional() {
     );
 
     // With fs but no injection surface, the goal is still recorded.
-    let (_component, _project, plugin) = load_goal_guest(goal_fs_grant());
+    let (_component, _project, extension) = load_goal_guest(goal_fs_grant());
     let log = NullLog;
     let caps = HostCaps {
         session: None,
@@ -4133,7 +4172,7 @@ fn goal_guest_denies_without_fs_and_injection_is_optional() {
         log: &log,
         cancel: None,
     };
-    let started = plugin
+    let started = extension
         .call(
             "goal",
             &serde_json::json!({"action": "start", "title": "recorded anyway"}),
@@ -4287,7 +4326,7 @@ fn render_instantiation_bounds_a_spinning_start_function() {
 // ---------------------------------------------------------------------------
 
 /// A `SessionRead` that answers two different flags, so one can prove the
-/// host scopes each read to the *calling* plugin's declarations.
+/// host scopes each read to the *calling* extension's declarations.
 struct FlagSession {
     conformance: Option<kiqi_host::FlagValue>,
     todo: Option<kiqi_host::FlagValue>,
@@ -4325,13 +4364,15 @@ fn text_of_message(result: &kiqi_host::CommandResult) -> &str {
 #[test]
 fn command_flows_round_trip_and_carry_flow_ids() {
     let wasm = fixture_wasm();
-    let plugin =
-        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    let extension =
+        WasmExtension::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
 
     // run-command returns a typed selector carrying a flow id.
-    let selector = plugin.run_command("conformance", "flow:", &caps).unwrap();
+    let selector = extension
+        .run_command("conformance", "flow:", &caps)
+        .unwrap();
     assert_eq!(selector.flow_id, "flow-1");
     match selector.body {
         kiqi_host::CommandResultBody::Selector(spec) => {
@@ -4342,7 +4383,7 @@ fn command_flows_round_trip_and_carry_flow_ids() {
     }
 
     // continue-command delivers the reply to the same flow.
-    let picked = plugin
+    let picked = extension
         .continue_command(
             "conformance",
             "flow-1",
@@ -4353,7 +4394,7 @@ fn command_flows_round_trip_and_carry_flow_ids() {
     assert_eq!(text_of_message(&picked), "selected:alpha");
 
     // Cancellation is a first-class reply.
-    let cancelled = plugin
+    let cancelled = extension
         .continue_command(
             "conformance",
             "flow-ed",
@@ -4364,13 +4405,17 @@ fn command_flows_round_trip_and_carry_flow_ids() {
     assert_eq!(text_of_message(&cancelled), "cancelled:flow-ed");
 
     // Editor and prompt bodies are typed the same way.
-    let editor = plugin.run_command("conformance", "editor:", &caps).unwrap();
+    let editor = extension
+        .run_command("conformance", "editor:", &caps)
+        .unwrap();
     assert_eq!(editor.flow_id, "flow-ed");
     assert!(matches!(
         editor.body,
         kiqi_host::CommandResultBody::Editor(_)
     ));
-    let prompt = plugin.run_command("conformance", "prompt:", &caps).unwrap();
+    let prompt = extension
+        .run_command("conformance", "prompt:", &caps)
+        .unwrap();
     assert_eq!(prompt.flow_id, "flow-pr");
     assert!(matches!(
         prompt.body,
@@ -4378,7 +4423,7 @@ fn command_flows_round_trip_and_carry_flow_ids() {
     ));
 
     // An unknown flow id is refused by the guest.
-    let stale = plugin.continue_command(
+    let stale = extension.continue_command(
         "conformance",
         "gone",
         kiqi_host::CommandReply::Selected("x".to_string()),
@@ -4390,13 +4435,15 @@ fn command_flows_round_trip_and_carry_flow_ids() {
 #[test]
 fn command_results_are_sanitized_before_render() {
     let wasm = fixture_wasm();
-    let plugin =
-        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    let extension =
+        WasmExtension::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
 
     // ANSI escapes are stripped from selector strings.
-    let ansi = plugin.run_command("conformance", "ansi:", &caps).unwrap();
+    let ansi = extension
+        .run_command("conformance", "ansi:", &caps)
+        .unwrap();
     match ansi.body {
         kiqi_host::CommandResultBody::Selector(spec) => {
             assert_eq!(spec.title, "Red");
@@ -4406,7 +4453,7 @@ fn command_results_are_sanitized_before_render() {
     }
 
     // A surviving C0 control character rejects the whole result.
-    let control = plugin.run_command("conformance", "ctl:", &caps);
+    let control = extension.run_command("conformance", "ctl:", &caps);
     assert!(
         control.is_err(),
         "a control character must be rejected: {control:?}"
@@ -4414,14 +4461,14 @@ fn command_results_are_sanitized_before_render() {
 }
 
 #[test]
-fn cli_flag_is_scoped_to_the_calling_plugins_declarations() {
+fn cli_flag_is_scoped_to_the_calling_extensions_declarations() {
     let conformance_wasm = fixture_wasm();
     let todo_wasm = todo_wasm();
     let conformance =
-        WasmPlugin::load_with_grants("conformance", &conformance_wasm, Grants::default())
+        WasmExtension::load_with_grants("conformance", &conformance_wasm, Grants::default())
             .expect("load conformance");
     let todo =
-        WasmPlugin::load_with_grants("todo", &todo_wasm, Grants::default()).expect("load todo");
+        WasmExtension::load_with_grants("todo", &todo_wasm, Grants::default()).expect("load todo");
 
     let session = FlagSession {
         conformance: Some(kiqi_host::FlagValue::Bare),
@@ -4437,7 +4484,7 @@ fn cli_flag_is_scoped_to_the_calling_plugins_declarations() {
         cancel: None,
     };
 
-    // Each plugin reads its OWN flag, including the bare form that used to be
+    // Each extension reads its OWN flag, including the bare form that used to be
     // dropped by the JSON reader.
     let own_bare = conformance
         .run_command("conformance", "flag:conformance-flag", &caps)
@@ -4460,14 +4507,14 @@ fn cli_flag_is_scoped_to_the_calling_plugins_declarations() {
 #[test]
 fn typed_input_events_reach_the_guest_and_can_be_claimed() {
     let wasm = fixture_wasm();
-    let plugin =
-        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    let extension =
+        WasmExtension::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
     let log = NullLog;
     let caps = HostCaps::observer(&log);
 
     // The declared `f8` shortcut arrives typed (`Input(event)`), not as an
     // opaque `other` record with a Debug-formatted kind.
-    let claimed = plugin.on_event(
+    let claimed = extension.on_event(
         &Event::new(
             EventTag::Input,
             serde_json::json!({
@@ -4483,8 +4530,8 @@ fn typed_input_events_reach_the_guest_and_can_be_claimed() {
     assert_eq!(claimed, EventAction::Claimed);
 
     // An un-declared key still reaches the guest (the host only fans out to
-    // plugins that declared a shortcut) and the guest declines it.
-    let declined = plugin.on_event(
+    // extensions that declared a shortcut) and the guest declines it.
+    let declined = extension.on_event(
         &Event::new(EventTag::Input, serde_json::json!({ "key": "f9" })),
         &caps,
     );
@@ -4530,12 +4577,15 @@ fn oauth_grant(
 #[test]
 fn oauth_action_without_a_grant_never_calls_the_guest() {
     let wasm = fixture_wasm();
-    let plugin =
-        WasmPlugin::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
+    let extension =
+        WasmExtension::load_with_grants("conformance", &wasm, Grants::default()).expect("load");
 
-    assert!(plugin.oauth_providers().is_empty(), "no grant, no catalog");
+    assert!(
+        extension.oauth_providers().is_empty(),
+        "no grant, no catalog"
+    );
 
-    let error = plugin
+    let error = extension
         .oauth_action(
             "conformance-oauth",
             kiqi_host::OAuthAction::Begin(String::new()),
@@ -4558,13 +4608,13 @@ fn oauth_action_reaches_a_granted_guest_and_narrows_by_declaration() {
     grants
         .grant_oauth(oauth_grant(vec![oauth_profile("conformance-oauth")]))
         .expect("valid grant");
-    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, grants).expect("load");
+    let extension = WasmExtension::load_with_grants("conformance", &wasm, grants).expect("load");
 
-    let declared = plugin.oauth_providers();
+    let declared = extension.oauth_providers();
     assert_eq!(declared.len(), 1);
     assert_eq!(declared[0].id, "conformance-oauth");
 
-    match plugin
+    match extension
         .oauth_action(
             "conformance-oauth",
             kiqi_host::OAuthAction::Begin("challenge".to_string()),
@@ -4596,9 +4646,9 @@ fn oauth_providers_are_narrowed_by_the_guest_list() {
             oauth_profile("ghost"),
         ]))
         .expect("valid grant");
-    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, grants).expect("load");
+    let extension = WasmExtension::load_with_grants("conformance", &wasm, grants).expect("load");
 
-    let ids: Vec<String> = plugin
+    let ids: Vec<String> = extension
         .oauth_providers()
         .into_iter()
         .map(|provider| provider.id)
@@ -4606,7 +4656,7 @@ fn oauth_providers_are_narrowed_by_the_guest_list() {
     assert_eq!(ids, vec!["conformance-oauth"]);
 
     // The guest never declared `ghost`, so the wrapper refuses without a call.
-    let error = plugin
+    let error = extension
         .oauth_action("ghost", kiqi_host::OAuthAction::Poll)
         .expect_err("not declared");
     assert!(error.to_string().contains("not declared"), "{error}");
@@ -4628,10 +4678,10 @@ fn oauth_action_times_out_on_a_spinning_guest() {
             max_requests: 2,
         })
         .expect("valid grant");
-    let plugin = WasmPlugin::load_with_grants("conformance", &wasm, grants).expect("load");
+    let extension = WasmExtension::load_with_grants("conformance", &wasm, grants).expect("load");
 
     let started = std::time::Instant::now();
-    let error = plugin
+    let error = extension
         .oauth_action(
             "conformance-spin",
             kiqi_host::OAuthAction::Begin(String::new()),
@@ -4648,9 +4698,9 @@ fn oauth_action_times_out_on_a_spinning_guest() {
         "the deadline must bound the call: {elapsed:?}"
     );
 
-    // A timeout must not leave the plugin permanently "unloaded": the host
+    // A timeout must not leave the extension permanently "unloaded": the host
     // rebuilds the instance from the retained engine and component.
-    let next = plugin
+    let next = extension
         .oauth_action("conformance-oauth", kiqi_host::OAuthAction::Poll)
         .expect("a second action after a timeout must still work");
     assert!(
@@ -4734,14 +4784,14 @@ struct ProviderFixture {
     pub root: PathBuf,
 }
 
-/// A component in `plugins/conformance/`, plus the host-held credential
+/// A component in `extensions/conformance/`, plus the host-held credential
 /// sidecar and `auth.json` the grant's handle resolves through.
 fn provider_fixture() -> ProviderFixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("agent");
-    let plugin_dir = root.join("plugins").join("conformance");
-    std::fs::create_dir_all(&plugin_dir).expect("plugin dir");
-    let wasm = plugin_dir.join("plugin.wasm");
+    let extension_dir = root.join("extensions").join("conformance");
+    std::fs::create_dir_all(&extension_dir).expect("extension dir");
+    let wasm = extension_dir.join("extension.wasm");
     std::fs::copy(fixture_wasm(), &wasm).expect("copy the fixture");
     std::fs::write(
         root.join("auth.json"),
@@ -4757,7 +4807,7 @@ fn provider_fixture() -> ProviderFixture {
         }
     });
     std::fs::write(
-        plugin_dir.join("credentials.json"),
+        extension_dir.join("credentials.json"),
         serde_json::to_string(&sidecar).unwrap(),
     )
     .expect("credentials.json");

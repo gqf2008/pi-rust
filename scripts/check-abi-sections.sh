@@ -1,10 +1,10 @@
 #!/bin/sh
-# Check the round-by-round section numbers of `docs/design/plugin-abi.md`.
+# Check the round-by-round section numbers of `docs/design/extension-abi.md`.
 #
 # That file is the single source of truth for the wasm contract, and AGENTS.md tells
 # contributors to add a §6.x per change. Two failures had gone unnoticed:
 #
-#   1. §6.34 was cited by four files (AGENTS.md, plugin-abi-handover.md twice,
+#   1. §6.34 was cited by four files (AGENTS.md, extension-abi-handover.md twice,
 #      ki-mcp-builtin.md) but had never been written — `git log -S "6.34" -- that
 #      file` returns nothing. A reader following the pointer found nothing and could
 #      not tell whether the rule had changed or the citation was wrong.
@@ -19,7 +19,7 @@
 # POSIX sh only. Both checks print what is wrong and exit 1.
 set -eu
 
-ABI_FILE="docs/design/plugin-abi.md"
+ABI_FILE="docs/design/extension-abi.md"
 [ -f "$ABI_FILE" ] || { echo "missing $ABI_FILE" >&2; exit 1; }
 
 tmp=$(mktemp -d)
@@ -54,7 +54,7 @@ done < "$tmp/seq"
 # --- B. citations resolve --------------------------------------------------
 # Every §6.N mentioned outside the ABI file itself.
 grep -rhoE '§6\.[0-9]+' --include='*.md' --include='*.rs' \
-    docs crates plugins AGENTS.md README.md 2>/dev/null \
+    docs crates extensions AGENTS.md README.md 2>/dev/null \
     | sed 's/^§6\.//' | sort -un > "$tmp/cited"
 
 if [ -s "$tmp/cited" ]; then
@@ -65,7 +65,7 @@ if [ -s "$tmp/cited" ]; then
         while IFS= read -r n; do
             echo "  §6.$n — cited by:" >&2
             grep -rlE "§6\.$n(\b|[^0-9])" --include='*.md' --include='*.rs' \
-                docs crates plugins AGENTS.md README.md 2>/dev/null \
+                docs crates extensions AGENTS.md README.md 2>/dev/null \
                 | sed 's/^/      /' >&2
         done < "$tmp/dangling"
         status=1
@@ -75,7 +75,7 @@ fi
 if [ "$status" -eq 0 ]; then
     sections=$(wc -l < "$tmp/seq" | tr -d ' ')
     cites=$(wc -l < "$tmp/cited" | tr -d ' ')
-    echo "plugin-abi sections 6.1-6.$sections are contiguous; $cites cited numbers all resolve"
+    echo "extension-abi sections 6.1-6.$sections are contiguous; $cites cited numbers all resolve"
 fi
 
 exit "$status"

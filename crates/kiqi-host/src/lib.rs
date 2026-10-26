@@ -1,10 +1,10 @@
-//! ki's host-side plugin crate: contract + wasm backend + dispatch spine.
+//! ki's host-side extension crate: contract + wasm backend + dispatch spine.
 //!
-//! Formerly three crates (`kiqi-plugin` / `kiqi-plugin-host` / `kiqi-extensions`);
+//! Formerly three crates (`kiqi-extension` / `kiqi-extension-host` / `kiqi-extensions`);
 //! merged on 2026-10-26 so the host has one dependency instead of three
 //! (`docs/design/kiqi-host-merge.md`). The layers inside:
 //!
-//! - **Contract (un-gated, no wasmtime)**: the [`Extension`] trait every plugin
+//! - **Contract (un-gated, no wasmtime)**: the [`Extension`] trait every extension
 //!   backend implements, the event vocabulary ([`EventTag`], [`Event`],
 //!   [`EventAction`], 37 tags), host identity and environment-variable
 //!   constants, `grants` (capability/authorization model) and `dialogs`.
@@ -13,9 +13,9 @@
 //!   bridge + UI mailboxes, the stdio lifecycle, and the C-ABI bus types in
 //!   [`abi`] (internal wire format; no `libloading` since the cdylib channel
 //!   was retired on 2026-10-26).
-//! - **Wasm backend (`wasm` feature)**: [`wasm`] binds `plugins/kiqi-plugin.wit`
+//! - **Wasm backend (`wasm` feature)**: [`wasm`] binds `extensions/kiqi-extension.wit`
 //!   with wasmtime and hosts a guest behind the same [`Extension`] seam. This
-//!   is the only plugin channel.
+//!   is the only extension channel.
 //!
 //! # Red line
 //!
@@ -23,29 +23,29 @@
 //! `kiqi-mcp` and `kiqi-acp` depend on this crate unconditionally, and only
 //! `kiqi-cli` (the composition root) turns the `wasm` feature on.
 //!
-//! # What a plugin can reach
+//! # What an extension can reach
 //!
 //! Nothing it is not handed. The host passes [`HostCaps`] per call, built from
-//! exactly the capabilities that plugin's grants allow. Guests reach far less:
+//! exactly the capabilities that extension's grants allow. Guests reach far less:
 //! the wasm sandbox links an import only when the corresponding grant exists.
 use serde_json::Value;
 
 pub mod dialogs;
 
-/// Wasm (component model) plugin backend — the only plugin channel.
+/// Wasm (component model) extension backend — the only extension channel.
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
 // ---------------------------------------------------------------------------
 
-/// Reserved key the host adds to a **plugin** tool call's arguments.
+/// Reserved key the host adds to a **extension** tool call's arguments.
 ///
 /// The model never writes this field and never sees it: the host injects it
-/// after the model's arguments are parsed and before the plugin's
-/// host's tool-execution hook runs, so a plugin can tell *which* project and *which*
+/// after the model's arguments are parsed and before the extension's
+/// host's tool-execution hook runs, so an extension can tell *which* project and *which*
 /// session it is serving without the model having to supply either. (Built-in
 /// tools do not need it — they receive the host's `ExecutionToolContext`
-/// directly. A plugin tool has no such channel.)
+/// directly. An extension tool has no such channel.)
 ///
 /// The value is an object; today:
 ///
@@ -61,7 +61,7 @@ pub mod wasm;
 /// project-scoped fallback when `sessionId` is missing rather than refusing to
 /// work.
 ///
-/// **Consequence for plugin parameter types:** a plugin must tolerate unknown
+/// **Consequence for extension parameter types:** an extension must tolerate unknown
 /// top-level keys in its arguments. Reading them out of a `serde_json::Value`
 /// does that naturally; a `#[serde(deny_unknown_fields)]` parameter struct
 /// would reject this key, so do not use one for tool parameters.
@@ -76,7 +76,7 @@ pub const HOST_CONTEXT_KEY: &str = "__ki";
 /// `EVENT_TAG_COUNT == 37` so a future edit that adds/removes a tag is caught.
 pub const EVENT_TAG_COUNT: usize = 37;
 
-/// The application name of the host that loads plugins: `"ki"`.
+/// The application name of the host that loads extensions: `"ki"`.
 ///
 /// This is the **contract's** copy of the host identity, and the host's
 /// `APP_NAME` is defined in terms of it, so the two cannot drift. An extension
@@ -84,10 +84,10 @@ pub const EVENT_TAG_COUNT: usize = 37;
 /// derive from this rather than hardcode a brand — it has no other way to learn
 /// what it is embedded in.
 ///
-/// [`HOST_VERSION`] is the matching version. Both are also handed to plugins at
+/// [`HOST_VERSION`] is the matching version. Both are also handed to extensions at
 /// runtime in the `BeforeAgentStart` payload's `host` object, which is what an
 /// extension should prefer: that value always describes the process actually
-/// running, whereas these constants describe the host the plugin was *built*
+/// running, whereas these constants describe the host the extension was *built*
 /// against.
 pub const HOST_NAME: &str = "kiqi";
 
@@ -175,7 +175,7 @@ pub const SUBAGENT_PARENT_ENV: &[&str] = &[
 
 pub mod grants;
 
-/// A tool the plugin contributes to the model.
+/// A tool the extension contributes to the model.
 #[derive(Debug, Clone)]
 pub struct ToolSpec {
     pub name: String,
@@ -202,7 +202,7 @@ pub struct ToolOutcome {
     ///
     /// This is not decoration: `kiqi-todo` keeps its whole task list here, so
     /// the state rides the session branch and survives fork/switch. Without a
-    /// details channel a plugin has to invent its own side file and loses the
+    /// details channel an extension has to invent its own side file and loses the
     /// branch-scoped semantics.
     pub details: Value,
 }
@@ -231,7 +231,7 @@ impl ToolOutcome {
 /// Partial output pushed **while** a tool is still running.
 ///
 /// The native ABI expressed this with a host-provided callback function
-/// pointer; here it is a sink the plugin writes to, which is the same thing
+/// pointer; here it is a sink the extension writes to, which is the same thing
 /// without the FFI.
 pub enum Progress {
     /// Append a line the user should see now.
@@ -252,7 +252,7 @@ impl ProgressSink for NoProgress {
     fn progress(&self, _progress: Progress) {}
 }
 
-/// A slash command the plugin contributes (e.g. `/todos`).
+/// A slash command the extension contributes (e.g. `/todos`).
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     pub name: String,
@@ -353,7 +353,7 @@ pub enum OAuthFlow {
 /// A provider this guest declares it can drive.
 ///
 /// Endpoints, client id and secrets stay host-side; the guest only sees this
-/// metadata. [`Plugin::oauth_action`] advances the flow and the resulting
+/// metadata. [`Extension::oauth_action`] advances the flow and the resulting
 /// credential never crosses the boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthProvider {
@@ -481,7 +481,7 @@ pub struct ProviderDelta {
 /// Where a running provider request writes its streamed deltas.
 ///
 /// Mirrors the wasm `provider-stream` import, which is valid only while a
-/// [`Plugin::provider_request`] call is on the stack.
+/// [`Extension::provider_request`] call is on the stack.
 pub trait ProviderDeltaSink {
     fn delta(&self, delta: ProviderDelta);
 }
@@ -493,10 +493,10 @@ impl ProviderDeltaSink for NoProviderDeltas {
     fn delta(&self, _delta: ProviderDelta) {}
 }
 
-/// A CLI flag the plugin claims.
+/// A CLI flag the extension claims.
 ///
 /// Registration is a **declaration**, not a callable: the host records that the
-/// flag belongs to this plugin, and the plugin reads its value through
+/// flag belongs to this extension, and the extension reads its value through
 /// [`SessionRead::cli_flag`]. The same is true of [`ShortcutSpec`], whose key
 /// arrives as an `Input` event.
 #[derive(Debug, Clone)]
@@ -517,9 +517,9 @@ pub enum FlagValue {
     Text(String),
 }
 
-/// A keyboard shortcut the plugin claims (e.g. `f8`).
+/// A keyboard shortcut the extension claims (e.g. `f8`).
 ///
-/// Declaring it routes the key to this plugin as an [`EventTag::Input`] event;
+/// Declaring it routes the key to this extension as an [`EventTag::Input`] event;
 /// there is no separate callback.
 #[derive(Debug, Clone)]
 pub struct ShortcutSpec {
@@ -527,23 +527,23 @@ pub struct ShortcutSpec {
     pub description: String,
 }
 
-/// A plugin failure.
+/// An extension failure.
 ///
-/// Distinct from [`ToolOutcome::error`]: this is "the plugin could not do its
+/// Distinct from [`ToolOutcome::error`]: this is "the extension could not do its
 /// job", not "the tool ran and reported a failure the model should read".
 #[derive(Debug)]
-pub enum PluginError {
-    /// The model invoked a tool this plugin never declared.
+pub enum ExtensionError {
+    /// The model invoked a tool this extension never declared.
     UnknownTool(String),
     /// The arguments did not match the tool's schema.
     InvalidArguments(String),
-    /// The plugin reached for a capability it was not granted.
+    /// The extension reached for a capability it was not granted.
     Denied(String),
     /// Anything else.
     Failed(String),
 }
 
-impl std::fmt::Display for PluginError {
+impl std::fmt::Display for ExtensionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownTool(name) => write!(f, "unknown tool `{name}`"),
@@ -554,12 +554,12 @@ impl std::fmt::Display for PluginError {
     }
 }
 
-impl std::error::Error for PluginError {}
+impl std::error::Error for ExtensionError {}
 
 /// The event categories the host dispatches.
 ///
 /// Mirrors the native ABI's `EventTag` **exactly**, discriminants included:
-/// the plugin and the host are one binary here, so there is no version skew to
+/// the extension and the host are one binary here, so there is no version skew to
 /// absorb - which is also why there is no `Other` escape hatch. An unknown tag
 /// cannot exist, and pretending otherwise would just mean matching on strings
 /// again.
@@ -665,7 +665,7 @@ impl EventTag {
     }
 }
 
-/// One runtime event delivered to plugins.
+/// One runtime event delivered to extensions.
 ///
 /// A tag plus a JSON payload. The payload travels as JSON because the native
 /// ABI already ships it that way - this is parity, not a shortcut - and typed
@@ -686,7 +686,7 @@ impl Event {
     /// `is_error`), where `result` is a JSON *string* that is parsed here.
     pub fn tool_result(&self) -> Option<ToolResult> {
         // Both tags carry a tool result, exactly as the native
-        // `kiqi_plugin_sdk::EventView::tool_result` does: the host fans a
+        // `kiqi_extension_sdk::EventView::tool_result` does: the host fans a
         // finished tool call out as `ToolExecutionEnd` (the compile-time
         // dispatcher routes that tag to the same handler), so accepting only
         // `ToolResult` silently turned those handlers into no-ops.
@@ -727,14 +727,14 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
-    /// The `details` the tool returned - how a plugin carries state that must
+    /// The `details` the tool returned - how an extension carries state that must
     /// survive fork/switch (kiqi-todo keeps its whole task list here).
     pub fn details(&self) -> &Value {
         self.result.get("details").unwrap_or(&Value::Null)
     }
 }
 
-/// What a plugin decided to do about an event.
+/// What an extension decided to do about an event.
 ///
 /// The native ABI returned an `i32` with `CONTINUE` / `CLAIMED`; this is the
 /// same two outcomes with the magic numbers replaced by a type, plus the 0.8.0
@@ -743,9 +743,9 @@ impl ToolResult {
 /// [`Patch`]: EventAction::Patch
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventAction {
-    /// Observed; pass the event on to the next plugin and to normal handling.
+    /// Observed; pass the event on to the next extension and to normal handling.
     Continue,
-    /// Consumed: no later plugin sees it and normal handling is skipped.
+    /// Consumed: no later extension sees it and normal handling is skipped.
     ///
     /// Mirrors the native ABI's `EVENT_HANDLER_CLAIMED` / `0`.
     Claimed,
@@ -770,7 +770,7 @@ pub enum Verdict {
 }
 
 // ---------------------------------------------------------------------------
-// Host capabilities — the plugin's whole reachable surface
+// Host capabilities — the extension's whole reachable surface
 // ---------------------------------------------------------------------------
 
 /// Read-only session state.
@@ -785,7 +785,7 @@ pub trait SessionRead: Send + Sync {
     fn session_branch(&self) -> Value;
 
     /// The session id, when the host knows it. Defaults to `None`, so an
-    /// implementation that cannot answer keeps compiling and a plugin reads an
+    /// implementation that cannot answer keeps compiling and an extension reads an
     /// empty id rather than a fabricated one.
     fn session_id(&self) -> Option<String> {
         None
@@ -798,16 +798,16 @@ pub trait SessionRead: Send + Sync {
 /// SetThinkingLevel, Compact, NewSession, Fork, NavigateTree, SwitchSession,
 /// Reload}`.
 pub trait SessionControl: Send + Sync {
-    fn set_session_name(&self, name: &str) -> Result<(), PluginError>;
-    fn set_active_tools(&self, tools: &[String]) -> Result<(), PluginError>;
-    fn set_model(&self, model: &str) -> Result<(), PluginError>;
-    fn set_thinking_level(&self, level: &str) -> Result<(), PluginError>;
-    fn compact(&self) -> Result<(), PluginError>;
-    fn new_session(&self) -> Result<(), PluginError>;
-    fn fork(&self) -> Result<(), PluginError>;
-    fn navigate_tree(&self, target: &str) -> Result<(), PluginError>;
-    fn switch_session(&self, id: &str) -> Result<(), PluginError>;
-    fn reload(&self) -> Result<(), PluginError>;
+    fn set_session_name(&self, name: &str) -> Result<(), ExtensionError>;
+    fn set_active_tools(&self, tools: &[String]) -> Result<(), ExtensionError>;
+    fn set_model(&self, model: &str) -> Result<(), ExtensionError>;
+    fn set_thinking_level(&self, level: &str) -> Result<(), ExtensionError>;
+    fn compact(&self) -> Result<(), ExtensionError>;
+    fn new_session(&self) -> Result<(), ExtensionError>;
+    fn fork(&self) -> Result<(), ExtensionError>;
+    fn navigate_tree(&self, target: &str) -> Result<(), ExtensionError>;
+    fn switch_session(&self, id: &str) -> Result<(), ExtensionError>;
+    fn reload(&self) -> Result<(), ExtensionError>;
 }
 
 /// Injecting content into the run.
@@ -816,15 +816,15 @@ pub trait SessionControl: Send + Sync {
 /// capability that changes what the model sees, so it is kept apart from the
 /// two read/control surfaces above.
 pub trait InjectApi: Send + Sync {
-    fn send_message(&self, message: &Value) -> Result<(), PluginError>;
-    fn send_user_message(&self, text: &str) -> Result<(), PluginError>;
+    fn send_message(&self, message: &Value) -> Result<(), ExtensionError>;
+    fn send_user_message(&self, text: &str) -> Result<(), ExtensionError>;
     /// Append a message entry to the transcript (no run). The host takes
     /// `{"message": <AgentMessage>}`.
-    fn append_message(&self, message: &Value) -> Result<(), PluginError>;
+    fn append_message(&self, message: &Value) -> Result<(), ExtensionError>;
 
     /// Append a custom entry. The host takes
     /// `{"customType": "...", "data": <json>}`.
-    fn append_custom_entry(&self, custom_type: &str, data: &Value) -> Result<(), PluginError>;
+    fn append_custom_entry(&self, custom_type: &str, data: &Value) -> Result<(), ExtensionError>;
 }
 
 /// The user-facing UI surface.
@@ -842,20 +842,20 @@ pub trait UiApi: Send + Sync {
     ///
     /// `op` drives the dialog lifecycle, `ui` carries the descriptor (the
     /// option list a permission prompt renders).
-    fn dialog(&self, request: &Value) -> Result<Value, PluginError>;
+    fn dialog(&self, request: &Value) -> Result<Value, ExtensionError>;
 
     /// `{key, value?, panel?}` - the footer status the TUI renders.
-    fn set_status(&self, update: &Value) -> Result<(), PluginError>;
+    fn set_status(&self, update: &Value) -> Result<(), ExtensionError>;
 
     /// `{text, mode?, autoSendMs?}` - a draft dropped into the prompt editor.
-    fn set_editor_text(&self, edit: &Value) -> Result<(), PluginError>;
+    fn set_editor_text(&self, edit: &Value) -> Result<(), ExtensionError>;
 
     /// Custom UI components. The bridge does not serve this today, so the
     /// host refuses rather than pretending.
-    fn component(&self, name: &str, payload: &Value) -> Result<Value, PluginError>;
+    fn component(&self, name: &str, payload: &Value) -> Result<Value, ExtensionError>;
 }
 
-/// Logging. Always available — this is the one capability no plugin is denied.
+/// Logging. Always available — this is the one capability no extension is denied.
 pub trait Log: Send + Sync {
     fn log(&self, level: LogLevel, message: &str);
 }
@@ -871,9 +871,9 @@ pub enum LogLevel {
 
 /// A cancellation probe, wired per call when the host can abort a running
 /// tool (the harness's `CancellationToken`, which the adapter otherwise dropped
-/// on the floor). Long-running plugins poll it and wind down their children.
+/// on the floor). Long-running extensions poll it and wind down their children.
 ///
-/// This is deliberately a probe, not a blocking wait: a plugin decides where
+/// This is deliberately a probe, not a blocking wait: an extension decides where
 /// its checkpoints are. It is also the one part of `HostCaps` that wasm guests
 /// do not get — the ABI has no cancel channel; a guest's call is bounded by
 /// the host's own limits instead.
@@ -881,10 +881,10 @@ pub trait CancelProbe: Send + Sync {
     fn is_cancelled(&self) -> bool;
 }
 
-/// Everything a plugin may reach, handed in **per call**.
+/// Everything an extension may reach, handed in **per call**.
 ///
-/// A capability left `None` is not merely empty — the plugin has no way to
-/// express a call to it. The host builds one of these per plugin from its
+/// A capability left `None` is not merely empty — the extension has no way to
+/// express a call to it. The host builds one of these per extension from its
 /// deployment policy, which is this design's equivalent of adjudicating the
 /// wasm import face before instantiation.
 pub struct HostCaps<'a> {
@@ -899,7 +899,7 @@ pub struct HostCaps<'a> {
 
 impl<'a> HostCaps<'a> {
     /// Only logging: the minimum viable capability set (e.g. for a probe-only
-    /// plugin that merely observes).
+    /// extension that merely observes).
     pub fn observer(log: &'a dyn Log) -> Self {
         Self {
             session: None,
@@ -913,26 +913,26 @@ impl<'a> HostCaps<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// The plugin
+// The extension
 // ---------------------------------------------------------------------------
 
-/// A plugin compiled into the binary.
+/// An extension compiled into the binary.
 ///
-/// Every method is optional: a plugin may contribute tools, gates, event
-/// hooks, or any subset. The host calls only what the plugin declares (by
-/// returning a non-empty list from [`Plugin::tools`] / [`Plugin::probe_points`]).
+/// Every method is optional: an extension may contribute tools, gates, event
+/// hooks, or any subset. The host calls only what the extension declares (by
+/// returning a non-empty list from [`Extension::tools`] / [`Extension::probe_points`]).
 pub trait Extension: Send + Sync + 'static {
     /// Stable identity: log prefix, config key, and the root of tool names.
     fn id(&self) -> &str;
 
-    /// Tools this plugin contributes. Called once at registration.
+    /// Tools this extension contributes. Called once at registration.
     fn tools(&self) -> Vec<ToolSpec> {
         Vec::new()
     }
 
-    /// Execute a tool. `name` is always one this plugin declared.
+    /// Execute a tool. `name` is always one this extension declared.
     ///
-    /// `caps` is what this plugin may reach; `sink` is where partial output
+    /// `caps` is what this extension may reach; `sink` is where partial output
     /// goes while the call is still running.
     fn call(
         &self,
@@ -940,16 +940,18 @@ pub trait Extension: Send + Sync + 'static {
         _arguments: &Value,
         _caps: &HostCaps<'_>,
         _sink: &dyn ProgressSink,
-    ) -> Result<ToolOutcome, PluginError> {
-        Err(PluginError::Failed("this plugin declares no tools".into()))
+    ) -> Result<ToolOutcome, ExtensionError> {
+        Err(ExtensionError::Failed(
+            "this extension declares no tools".into(),
+        ))
     }
 
-    /// Slash commands this plugin contributes.
+    /// Slash commands this extension contributes.
     fn commands(&self) -> Vec<CommandSpec> {
         Vec::new()
     }
 
-    /// Run one of [`Plugin::commands`].
+    /// Run one of [`Extension::commands`].
     ///
     /// The result says what the host should show or do next; today that is
     /// [`CommandResultBody::Message`].
@@ -958,17 +960,17 @@ pub trait Extension: Send + Sync + 'static {
         _name: &str,
         _arguments: &str,
         _caps: &HostCaps<'_>,
-    ) -> Result<CommandResult, PluginError> {
-        Err(PluginError::Failed(
-            "this plugin declares no commands".into(),
+    ) -> Result<CommandResult, ExtensionError> {
+        Err(ExtensionError::Failed(
+            "this extension declares no commands".into(),
         ))
     }
 
-    /// Continue a selector/editor/prompt flow started by [`Plugin::run_command`].
+    /// Continue a selector/editor/prompt flow started by [`Extension::run_command`].
     ///
     /// `flow_id` is the id the earlier [`CommandResult`] carried; the host
     /// rejects a stale or unknown id before this is called. The default
-    /// refuses, so a plugin that only returns [`CommandResultBody::Message`]
+    /// refuses, so an extension that only returns [`CommandResultBody::Message`]
     /// keeps compiling.
     fn continue_command(
         &self,
@@ -976,24 +978,24 @@ pub trait Extension: Send + Sync + 'static {
         _flow_id: &str,
         _reply: CommandReply,
         _caps: &HostCaps<'_>,
-    ) -> Result<CommandResult, PluginError> {
-        Err(PluginError::Failed(
-            "this plugin declares no continuable commands".into(),
+    ) -> Result<CommandResult, ExtensionError> {
+        Err(ExtensionError::Failed(
+            "this extension declares no continuable commands".into(),
         ))
     }
 
-    /// CLI flags this plugin claims.
+    /// CLI flags this extension claims.
     fn flags(&self) -> Vec<FlagSpec> {
         Vec::new()
     }
 
-    /// Keyboard shortcuts this plugin claims; the key then arrives as an
+    /// Keyboard shortcuts this extension claims; the key then arrives as an
     /// [`EventTag::Input`] event.
     fn shortcuts(&self) -> Vec<ShortcutSpec> {
         Vec::new()
     }
 
-    /// OAuth providers this plugin can drive (0.8.0).
+    /// OAuth providers this extension can drive (0.8.0).
     ///
     /// This is install-time discovery and a load-time cross-check only: the
     /// `oauth` grant is the sole catalog authority and may only narrow the
@@ -1006,19 +1008,19 @@ pub trait Extension: Send + Sync + 'static {
     ///
     /// The host owns endpoints, HTTP and credential storage; the guest only
     /// generates PKCE material and reports what the user must do, so no token
-    /// crosses this boundary. The default refuses because a plugin without the
+    /// crosses this boundary. The default refuses because an extension without the
     /// `oauth` grant is never called.
     fn oauth_action(
         &self,
         provider_id: &str,
         action: OAuthAction,
-    ) -> Result<OAuthResponse, PluginError> {
-        Err(PluginError::Denied(format!(
+    ) -> Result<OAuthResponse, ExtensionError> {
+        Err(ExtensionError::Denied(format!(
             "oauth is not granted for provider `{provider_id}`: {action:?}"
         )))
     }
 
-    /// Model providers this plugin offers (0.8.0).
+    /// Model providers this extension offers (0.8.0).
     ///
     /// Metadata only; the `provider` grant is the sole catalog authority and
     /// may only narrow the list.
@@ -1028,14 +1030,14 @@ pub trait Extension: Send + Sync + 'static {
 
     /// Serve one synchronous model request, streaming deltas to `sink`.
     ///
-    /// Deny-by-default: without a `provider` grant the plugin is never asked
+    /// Deny-by-default: without a `provider` grant the extension is never asked
     /// and the default below refuses.
     fn provider_request(
         &self,
         _request: &str,
         _sink: &dyn ProviderDeltaSink,
-    ) -> Result<String, PluginError> {
-        Err(PluginError::Denied(
+    ) -> Result<String, ExtensionError> {
+        Err(ExtensionError::Denied(
             "provider requests are not granted".into(),
         ))
     }
@@ -1044,8 +1046,8 @@ pub trait Extension: Send + Sync + 'static {
     ///
     /// Deny-by-default: the `render` grant decides, and the host owns theming,
     /// sanitization, scheduling and caching.
-    fn transform_markdown(&self, _markdown: &str) -> Result<String, PluginError> {
-        Err(PluginError::Denied("render is not granted".into()))
+    fn transform_markdown(&self, _markdown: &str) -> Result<String, ExtensionError> {
+        Err(ExtensionError::Denied("render is not granted".into()))
     }
 
     /// Rewrite the system prompt for the coming run, or `None` to leave it.
@@ -1057,7 +1059,7 @@ pub trait Extension: Send + Sync + 'static {
         None
     }
 
-    /// Gate points this plugin wants to intervene at (e.g. `before-tool-call`).
+    /// Gate points this extension wants to intervene at (e.g. `before-tool-call`).
     fn probe_points(&self) -> Vec<String> {
         Vec::new()
     }
@@ -1073,14 +1075,14 @@ pub trait Extension: Send + Sync + 'static {
         EventAction::Continue
     }
 
-    /// Observe-only variant that must never wait for a busy plugin.
+    /// Observe-only variant that must never wait for a busy extension.
     ///
-    /// The observe fan-out runs on the UI's key loop, and a plugin call can be
+    /// The observe fan-out runs on the UI's key loop, and an extension call can be
     /// waiting on the same user the UI is about to prompt (`ask_user` holds the
     /// wasm call lock for as long as the dialog is open). A blocking observe
     /// would therefore deadlock the dialog that would end the wait. Hosts that
     /// serialize calls (wasm) override this to skip instead of waiting;
-    /// in-process plugins keep the blocking default.
+    /// in-process extensions keep the blocking default.
     fn try_on_event(&self, event: &Event, caps: &HostCaps<'_>) -> EventAction {
         self.on_event(event, caps)
     }
@@ -1088,7 +1090,7 @@ pub trait Extension: Send + Sync + 'static {
     /// The `provider-request` policy this host enforces, if it is a sandboxed
     /// host with grants.
     ///
-    /// `None` means the host has no grant model (an in-process compiled plugin):
+    /// `None` means the host has no grant model (an in-process compiled extension):
     /// it keeps the unconditional observe fan-out it has always had. A
     /// `Some` policy partitions the hosts: `patch: true` hosts are excluded
     /// from the observe fan-out and invoked only by the provider gate;
@@ -1112,7 +1114,7 @@ pub trait Extension: Send + Sync + 'static {
     fn shutdown(&self) {}
 }
 
-/// Constructs a plugin. Each plugin crate exports exactly one of these.
+/// Constructs an extension. Each extension crate exports exactly one of these.
 pub type Factory = fn() -> Box<dyn Extension>;
 
 #[cfg(test)]
@@ -1174,7 +1176,7 @@ pub(crate) static SINK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 
 mod panel;
 pub use panel::{ExtensionPanel, PanelAnchor, PanelLayout};
-pub use tool::{PluginToolAdapter, PluginToolHandle, ToolCallContext};
+pub use tool::{ExtensionToolAdapter, ExtensionToolHandle, ToolCallContext};
 pub use translate::{
     dispatch_data_event, dispatch_data_event_claiming, dispatch_empty_event,
     dispatch_lifecycle_event, dispatch_tool_call_event, ExtensionEmitter, TeeEmitter,
@@ -1200,12 +1202,12 @@ mod tool;
 mod translate;
 
 /// A diagnostics/event sink the host wires so the loader + adapter can report
-/// plugin-load skips, ABI mismatches, panics caught at the FFI boundary, etc.
+/// extension-load skips, ABI mismatches, panics caught at the FFI boundary, etc.
 /// Mirrors the `diagnostic` channel pi surfaces for extensions.
-pub trait PluginDiagnostics: Send + Sync {
-    /// A non-fatal warning (e.g. "skipped plugin foo: ABI version mismatch").
+pub trait ExtensionDiagnostics: Send + Sync {
+    /// A non-fatal warning (e.g. "skipped extension foo: ABI version mismatch").
     fn warn(&self, message: &str);
-    /// A plugin that registered something but a registration slot is not yet
+    /// An extension that registered something but a registration slot is not yet
     /// wired on the host (e.g. an event tag the host does not emit yet).
     fn unsupported(&self, message: &str);
 }
@@ -1214,27 +1216,27 @@ pub trait PluginDiagnostics: Send + Sync {
 #[derive(Default)]
 pub struct NullDiagnostics;
 
-impl PluginDiagnostics for NullDiagnostics {
+impl ExtensionDiagnostics for NullDiagnostics {
     fn warn(&self, _message: &str) {}
     fn unsupported(&self, _message: &str) {}
 }
 
-/// Error returned by [`PluginToolAdapter::execute`] when the plugin side failed
+/// Error returned by [`ExtensionToolAdapter::execute`] when the extension side failed
 /// (terminal `Err` from `poll`, or the drive handle was never produced).
 #[derive(Debug, Error)]
-pub enum PluginToolError {
-    #[error("plugin execute returned a null handle (allocation failure)")]
+pub enum ExtensionToolError {
+    #[error("extension execute returned a null handle (allocation failure)")]
     NullHandle,
-    #[error("plugin error: {0}")]
-    Plugin(String),
+    #[error("extension error: {0}")]
+    Extension(String),
     #[error("runtime unavailable: {0}")]
     NoRuntime(String),
 }
 
 /// The host's `free_string` for [`StbString`]s the host *produces* and hands to
-/// the plugin (event payloads, action outputs, execute params when the host
-/// owns them). The plugin frees what it *receives* via this; the host frees
-/// what it *receives* via the plugin's `free_string` (stored per-tool).
+/// the extension (event payloads, action outputs, execute params when the host
+/// owns them). The extension frees what it *receives* via this; the host frees
+/// what it *receives* via the extension's `free_string` (stored per-tool).
 ///
 /// Reconstructs the `Box<[u8]>` from ptr+len and drops it. Idempotent on
 /// empty/null.
@@ -1251,10 +1253,10 @@ pub extern "C" fn host_free_string(s: StbString) {
 }
 
 // ===========================================================================
-// HostApi — the PluginApi the host builds and hands to each plugin's register
+// HostApi — the ExtensionApi the host builds and hands to each extension's register
 // ===========================================================================
 
-/// The host state a [`PluginApi`] closes over. Held behind `Arc` so the fn
+/// The host state a [`ExtensionApi`] closes over. Held behind `Arc` so the fn
 /// pointers (which are `extern "C"`,不好做闭包) can recover the host state via
 /// the `user_data` slot — but since `extern "C" fn` cannot capture, the host
 /// stores per-registration receiver state in the [`HostApi`] itself keyed by
@@ -1265,14 +1267,14 @@ pub extern "C" fn host_free_string(s: StbString) {
 /// This struct is `Send + Sync` (registry is `Mutex`-guarded).
 pub struct HostApi {
     registry: Mutex<Option<ExtensionRegistry>>,
-    /// Display name of the plugin currently registering (from the cdylib file
-    /// stem). Stamped onto every registration the plugin makes (e.g. event
+    /// Display name of the extension currently registering (from the cdylib file
+    /// stem). Stamped onto every registration the extension makes (e.g. event
     /// handlers) so host-side diagnostics can name the owning extension. Not
-    /// part of the ABI — the plugin never sees it.
+    /// part of the ABI — the extension never sees it.
     name: String,
-    /// B5a: the plugin→host action bridge, carried in
-    /// [`PluginApi::user_data`] so [`trampoline_runtime_action`] can recover
-    /// the harness state from ANY thread a plugin calls from (post-register, no
+    /// B5a: the extension→host action bridge, carried in
+    /// [`ExtensionApi::user_data`] so [`trampoline_runtime_action`] can recover
+    /// the harness state from ANY thread an extension calls from (post-register, no
     /// thread-local). `None` keeps the no-bridge stub `runtime_action` and the
     /// register `user_data` (the `HostApi` pointer) — so call sites that
     /// don't pass a bridge behave exactly as before.
@@ -1282,11 +1284,11 @@ pub struct HostApi {
 impl HostApi {
     /// Build a fresh host API bound to the given registry + diagnostics. With
     /// no action bridge, `runtime_action` stays the stub returning `-1`. `name`
-    /// is the registering plugin's display name (from the cdylib file stem).
+    /// is the registering extension's display name (from the cdylib file stem).
     pub fn new(
         name: impl Into<String>,
         registry: ExtensionRegistry,
-        _diagnostics: Arc<dyn PluginDiagnostics>,
+        _diagnostics: Arc<dyn ExtensionDiagnostics>,
     ) -> Arc<Self> {
         Arc::new(Self {
             registry: Mutex::new(Some(registry)),
@@ -1295,26 +1297,26 @@ impl HostApi {
         })
     }
 
-    /// The registering plugin's display name.
+    /// The registering extension's display name.
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// B5a: build a host API that wires the real [`trampoline_runtime_action`]
-    /// via the bridge. The bridge is cloned into every plugin's vtable
+    /// via the bridge. The bridge is cloned into every extension's vtable
     /// `user_data` so post-register `runtime_action` calls recover it on any
     /// thread. `kiqi-cli` keeps one master `Arc<ActionBridge>` per session; the
-    /// plugin gets a scoped context sharing the session's facilities. The
+    /// extension gets a scoped context sharing the session's facilities. The
     /// loader retains that context with the library, so its pointer stays valid
-    /// after registration. `name` is the registering plugin's display name.
+    /// after registration. `name` is the registering extension's display name.
     pub fn with_action_bridge(
         name: impl Into<String>,
         registry: ExtensionRegistry,
-        _diagnostics: Arc<dyn PluginDiagnostics>,
+        _diagnostics: Arc<dyn ExtensionDiagnostics>,
         action_bridge: Arc<ActionBridge>,
     ) -> Arc<Self> {
         let name = name.into();
-        let action_bridge = action_bridge.for_plugin(&name);
+        let action_bridge = action_bridge.for_extension(&name);
         Arc::new(Self {
             registry: Mutex::new(Some(registry)),
             name,
@@ -1333,10 +1335,10 @@ impl HostApi {
         self.registry.lock().expect("host api registry lock").take()
     }
 
-    /// Build the [`PluginApi`] struct passed to `kiqi_plugin_register`.
+    /// Build the [`ExtensionApi`] struct passed to `kiqi_extension_register`.
     ///
     /// Every optional registrar slot resolves to a real `extern "C"` trampoline
-    /// that forwards into `self`'s registry (so a plugin that calls
+    /// that forwards into `self`'s registry (so an extension that calls
     /// `register_tool` / `register_command` / renderer registration sees its
     /// registration land). `runtime_action` resolves to the real
     /// [`trampoline_runtime_action`] when a bridge is present (B5a), else the
@@ -1345,12 +1347,12 @@ impl HostApi {
     /// **`user_data`**: the register trampolines recover host state via the
     /// thread-local `CURRENT_HOST_API` (set for the duration of register in
     /// `load_one`) — they ignore `user_data`. Post-register `runtime_action`
-    /// cannot use the thread-local (plugin calls from foreign threads), so when
+    /// cannot use the thread-local (extension calls from foreign threads), so when
     /// a bridge is present `user_data` is repurposed to point at the
     /// `ActionBridge` (the SDK-designated "host's opaque context"). The bridge's
-    /// scoped `Arc` is retained by the loaded plugin and session keepalive, so
-    /// the pointer a plugin stores during register stays valid.
-    pub fn build_vtable(self: &Arc<Self>) -> crate::PluginApi {
+    /// scoped `Arc` is retained by the loaded extension and session keepalive, so
+    /// the pointer an extension stores during register stays valid.
+    pub fn build_vtable(self: &Arc<Self>) -> crate::ExtensionApi {
         // When a bridge is present, user_data carries it (post-register action
         // recovery). Otherwise keep the register-path HostApi pointer (harmless
         // — register trampolines use the thread-local and ignore user_data).
@@ -1368,9 +1370,9 @@ impl HostApi {
                 Arc::as_ptr(self) as *mut c_void,
             ),
         };
-        crate::PluginApi {
-            abi_version: crate::KI_PLUGIN_ABI_VERSION_UNIFIED,
-            struct_size: std::mem::size_of::<crate::PluginApi>() as u32,
+        crate::ExtensionApi {
+            abi_version: crate::KI_EXTENSION_ABI_VERSION_UNIFIED,
+            struct_size: std::mem::size_of::<crate::ExtensionApi>() as u32,
             free_string: host_free_string,
             register_tool: Some(trampoline_register_tool),
             register_command: Some(trampoline_register_command),
@@ -1383,7 +1385,7 @@ impl HostApi {
             register_event_handler: Some(trampoline_register_event_handler),
             register_resources_discover: Some(trampoline_register_resources_discover),
             // Appended last so `struct_size` grows without shifting any earlier
-            // offset (a plugin built against the previous layout keeps working).
+            // offset (an extension built against the previous layout keeps working).
             register_before_agent_start: Some(trampoline_register_before_agent_start),
             register_oauth_provider: Some(trampoline_register_oauth_provider),
             runtime_action: runtime_action_fn,
@@ -1394,13 +1396,13 @@ impl HostApi {
     }
 }
 
-// Thread-local "current host api" for the duration of a plugin register call.
+// Thread-local "current host api" for the duration of an extension register call.
 // Set by the retired `load_one` loader before calling register, cleared after.
 // The loader is gone, so nothing sets it today; kept with the rest of the
 // unreachable C-ABI spine. This is the
 // sound way to let `extern "C" fn` trampolines (which cannot capture) reach the
 // host's registry: the register call is synchronous and single-threaded per
-// plugin, so a thread-local is unambiguous.
+// extension, so a thread-local is unambiguous.
 thread_local! {
     static CURRENT_HOST_API: std::cell::Cell<*const HostApi> = std::cell::Cell::new(std::ptr::null());
 }
@@ -1444,7 +1446,7 @@ extern "C" fn trampoline_register_tool(
     poll_fn: ToolPollFn,
     cancel_fn: ToolCancelFn,
     destroy_fn: ToolDestroyFn,
-    plugin_free_string: FreeStringFn,
+    extension_free_string: FreeStringFn,
 ) -> i32 {
     if !current_api_present() {
         return -1;
@@ -1452,9 +1454,9 @@ extern "C" fn trampoline_register_tool(
     if schema.is_null() {
         return 1;
     }
-    // SAFETY: the plugin guarantees `schema` is valid for the call; we copy the
-    // strings out immediately (under the borrow) and free them via the plugin's
-    // `plugin_free_string` right after, so no retention past the call.
+    // SAFETY: the extension guarantees `schema` is valid for the call; we copy the
+    // strings out immediately (under the borrow) and free them via the extension's
+    // `extension_free_string` right after, so no retention past the call.
     let (name, description, parameters_value, schema_owned) = unsafe {
         let s = &*schema;
         (
@@ -1464,12 +1466,12 @@ extern "C" fn trampoline_register_tool(
             *s,
         )
     };
-    // Free the schema strings via the plugin's free fn (plugin produced them).
+    // Free the schema strings via the extension's free fn (extension produced them).
     // `FreeStringFn` is `extern "C" fn(StbString)` — calling a bare fn pointer
-    // is safe (no `unsafe` needed); the idempotent free contract is on the plugin.
-    plugin_free_string(schema_owned.name);
-    plugin_free_string(schema_owned.description);
-    plugin_free_string(schema_owned.parameters);
+    // is safe (no `unsafe` needed); the idempotent free contract is on the extension.
+    extension_free_string(schema_owned.name);
+    extension_free_string(schema_owned.description);
+    extension_free_string(schema_owned.parameters);
     let Some(parameters_value) = parameters_value else {
         return 2;
     };
@@ -1482,15 +1484,15 @@ extern "C" fn trampoline_register_tool(
         parameters: kiqi_ai::types::Schema::new(parameters_value),
         constrained_sampling: None,
     };
-    let handle = PluginToolHandle {
+    let handle = ExtensionToolHandle {
         execute_fn,
         poll_fn,
         cancel_fn,
         destroy_fn,
-        plugin_free_string,
+        extension_free_string,
     };
     // `register_tool` returns `bool` (true on overwrite of a prior same-named
-    // tool). For the plugin a name collision is not a hard failure — always
+    // tool). For the extension a name collision is not a hard failure — always
     // return 0 (success) when the registry accepted it; -1 only if the registry
     // was already detached.
     let ok =
@@ -1515,12 +1517,12 @@ extern "C" fn trampoline_register_command(
     if !current_api_present() {
         return -1;
     }
-    // SAFETY: the plugin guarantees the refs are valid for this call.
+    // SAFETY: the extension guarantees the refs are valid for this call.
     let (name, description) =
         unsafe { (name.as_str().to_string(), description.as_str().to_string()) };
     let ok = with_current_api(|api| {
         // The v1 command ABI predates an explicit context parameter. Keep a
-        // null context for compatibility; plugins that need host state can use
+        // null context for compatibility; extensions that need host state can use
         // `runtime_action` from their command callback.
         match api.with_registry(|reg| {
             reg.register_command(name, description, handler, std::ptr::null_mut())
@@ -1540,12 +1542,12 @@ extern "C" fn trampoline_register_shortcut(key: StbStringRef, description: StbSt
     if !current_api_present() {
         return -1;
     }
-    // SAFETY: the plugin guarantees these borrowed refs are valid for the
+    // SAFETY: the extension guarantees these borrowed refs are valid for the
     // duration of the registration call; copy before returning.
     let (key, description) =
         unsafe { (key.as_str().to_string(), description.as_str().to_string()) };
     // Record the claim. The key is NOT bound to a callback here: the owning
-    // plugin receives presses/releases through its `Input` event handler
+    // extension receives presses/releases through its `Input` event handler
     // (dispatched by the TUI) and decides what to do. The host only needs to
     // know the key is claimed so it can route it away from the editor.
     let ok = with_current_api(|api| {
@@ -1567,7 +1569,7 @@ extern "C" fn trampoline_register_flag(name: StbStringRef, description: StbStrin
     if !current_api_present() {
         return -1;
     }
-    // SAFETY: the plugin guarantees these borrowed refs are valid for the
+    // SAFETY: the extension guarantees these borrowed refs are valid for the
     // duration of the registration call; copy them before returning.
     let (name, description) =
         unsafe { (name.as_str().to_string(), description.as_str().to_string()) };
@@ -1610,17 +1612,17 @@ extern "C" fn trampoline_register_event_handler(
     }
 }
 
-/// Plugin `declare` trampoline. Runs synchronously during a plugin's
-/// `register` (thread-local `CURRENT_HOST_API` is set). The plugin hands a
+/// Extension `declare` trampoline. Runs synchronously during an extension's
+/// `register` (thread-local `CURRENT_HOST_API` is set). The extension hands a
 /// borrowed JSON payload (`{"priority":60,"platforms":["linux"]}`); we parse
-/// and apply it to this plugin's registry (retro-updating any handlers already
+/// and apply it to this extension's registry (retro-updating any handlers already
 /// registered, so declare order doesn't matter). Returns `0` on a parsed
 /// payload, `1` on malformed JSON, `-1` outside register.
 extern "C" fn trampoline_declare(json: StbStringRef) -> i32 {
     if !current_api_present() {
         return -1;
     }
-    // SAFETY: the plugin guarantees `json` is valid UTF-8 for the call; we read
+    // SAFETY: the extension guarantees `json` is valid UTF-8 for the call; we read
     // it immediately (copy into the registry) and never retain the borrow.
     let text = unsafe { json.as_str() };
     match with_current_api(|api| {
@@ -1647,11 +1649,11 @@ extern "C" fn trampoline_declare(json: StbStringRef) -> i32 {
     }
 }
 
-/// B5c: `register_provider` trampoline. Runs synchronously inside a plugin's
-/// `register` call (thread-local `CURRENT_HOST_API` is set). The plugin hands its
+/// B5c: `register_provider` trampoline. Runs synchronously inside an extension's
+/// `register` call (thread-local `CURRENT_HOST_API` is set). The extension hands its
 /// `provider_id`/`base_url`/`api_style` (borrowed `StbStringRef`s), its
-/// `request_fn`, its own `plugin_free_string` (the `out` StbString `request_fn`
-/// later produces is plugin-owned — the host reclaims it via this fn), and its
+/// `request_fn`, its own `extension_free_string` (the `out` StbString `request_fn`
+/// later produces is extension-owned — the host reclaims it via this fn), and its
 /// opaque `user_data`. We copy the id/base_url/api_style to owned `String`s
 /// (they're the provider's identity, read when building the
 /// [`PluggableProvider`](crate::PluggableProvider) — we can't keep the borrowed
@@ -1661,19 +1663,19 @@ extern "C" fn trampoline_register_provider(
     base_url: StbStringRef,
     api_style: StbStringRef,
     request_fn: ProviderRequestFn,
-    plugin_free_string: FreeStringFn,
+    extension_free_string: FreeStringFn,
     user_data: *mut c_void,
 ) -> i32 {
     if !current_api_present() {
         return -1;
     }
-    // SAFETY: the plugin guarantees the refs are valid for this call.
+    // SAFETY: the extension guarantees the refs are valid for this call.
     let record = crate::registry::RegisteredProvider {
         provider_id: unsafe { provider_id.as_str().to_string() },
         base_url: unsafe { base_url.as_str().to_string() },
         api_style: unsafe { api_style.as_str().to_string() },
         request_fn,
-        plugin_free_string,
+        extension_free_string,
         user_data,
     };
     let ok = with_current_api(
@@ -1690,13 +1692,13 @@ extern "C" fn trampoline_register_provider(
 }
 
 /// Register an OAuth provider manifest and action callback. The manifest is
-/// copied immediately; token-bearing responses remain plugin-owned and are
-/// reclaimed through the plugin free function when invoked by a future host
+/// copied immediately; token-bearing responses remain extension-owned and are
+/// reclaimed through the extension free function when invoked by a future host
 /// OAuth bridge.
 extern "C" fn trampoline_register_oauth_provider(
     manifest_json: StbStringRef,
     request_fn: OAuthRequestFn,
-    plugin_free_string: FreeStringFn,
+    extension_free_string: FreeStringFn,
     user_data: *mut c_void,
 ) -> i32 {
     if !current_api_present() {
@@ -1704,10 +1706,10 @@ extern "C" fn trampoline_register_oauth_provider(
     }
     let manifest = unsafe { manifest_json.as_str().to_string() };
     let record = crate::registry::RegisteredOAuthProvider {
-        plugin: with_current_api(|api| api.name.clone()).unwrap_or_default(),
+        extension: with_current_api(|api| api.name.clone()).unwrap_or_default(),
         manifest_json: manifest,
         request_fn,
-        plugin_free_string,
+        extension_free_string,
         user_data,
     };
     match with_current_api(|api| api.with_registry(|reg| reg.register_oauth_provider(record))) {
@@ -1723,18 +1725,18 @@ fn register_renderer_common(
     name: StbStringRef,
     kind: crate::registry::RegisteredRendererKind,
     render_fn: RenderFn,
-    plugin_free_string: FreeStringFn,
+    extension_free_string: FreeStringFn,
     user_data: *mut c_void,
 ) -> i32 {
     if !current_api_present() {
         return -1;
     }
-    // SAFETY: the plugin guarantees the ref is valid for this call.
+    // SAFETY: the extension guarantees the ref is valid for this call.
     let record = crate::registry::RegisteredRenderer {
         name: unsafe { name.as_str().to_string() },
         kind,
         render_fn,
-        plugin_free_string,
+        extension_free_string,
         user_data,
     };
     let ok = with_current_api(
@@ -1753,14 +1755,14 @@ fn register_renderer_common(
 extern "C" fn trampoline_register_message_renderer(
     name: StbStringRef,
     render_fn: RenderFn,
-    plugin_free_string: FreeStringFn,
+    extension_free_string: FreeStringFn,
     user_data: *mut c_void,
 ) -> i32 {
     register_renderer_common(
         name,
         crate::registry::RegisteredRendererKind::Message,
         render_fn,
-        plugin_free_string,
+        extension_free_string,
         user_data,
     )
 }
@@ -1768,14 +1770,14 @@ extern "C" fn trampoline_register_message_renderer(
 extern "C" fn trampoline_register_markdown_transformer(
     name: StbStringRef,
     render_fn: RenderFn,
-    plugin_free_string: FreeStringFn,
+    extension_free_string: FreeStringFn,
     user_data: *mut c_void,
 ) -> i32 {
     register_renderer_common(
         name,
         crate::registry::RegisteredRendererKind::Markdown,
         render_fn,
-        plugin_free_string,
+        extension_free_string,
         user_data,
     )
 }
@@ -1783,35 +1785,38 @@ extern "C" fn trampoline_register_markdown_transformer(
 extern "C" fn trampoline_register_entry_renderer(
     name: StbStringRef,
     render_fn: RenderFn,
-    plugin_free_string: FreeStringFn,
+    extension_free_string: FreeStringFn,
     user_data: *mut c_void,
 ) -> i32 {
     register_renderer_common(
         name,
         crate::registry::RegisteredRendererKind::Entry,
         render_fn,
-        plugin_free_string,
+        extension_free_string,
         user_data,
     )
 }
 
-extern "C" fn trampoline_dispatch_event(_event: StablePluginEvent, _user_data: *mut c_void) -> i32 {
-    // v1: a plugin emitting an event upstream — we accept it (return 0) but do
+extern "C" fn trampoline_dispatch_event(
+    _event: StableExtensionEvent,
+    _user_data: *mut c_void,
+) -> i32 {
+    // v1: an extension emitting an event upstream — we accept it (return 0) but do
     // not yet forward to host subscribers (no upstream channel wired). B5 wires
     // the reverse-direction event bus.
     0
 }
 
 /// B5b: `register_resources_discover` trampoline. Runs synchronously inside a
-/// plugin's `register` call (so the thread-local `CURRENT_HOST_API` is set → the
+/// extension's `register` call (so the thread-local `CURRENT_HOST_API` is set → the
 /// register-path recovery works, same as the other `trampoline_register_*` fns).
-/// The plugin hands its `handler`, its own `plugin_free_string` (the `out`
-/// StbString the handler later produces is plugin-owned — the host must reclaim
+/// The extension hands its `handler`, its own `extension_free_string` (the `out`
+/// StbString the handler later produces is extension-owned — the host must reclaim
 /// it via this fn), and its opaque `user_data`. The host stores all three in the
 /// registry and later fans the discovery event out via `emit_resources_discover`.
 extern "C" fn trampoline_register_resources_discover(
     handler: ResourcesDiscoverFn,
-    plugin_free_string: FreeStringFn,
+    extension_free_string: FreeStringFn,
     user_data: *mut c_void,
 ) -> i32 {
     if !current_api_present() {
@@ -1819,7 +1824,7 @@ extern "C" fn trampoline_register_resources_discover(
     }
     let ok = with_current_api(|api| {
         match api.with_registry(|reg| {
-            reg.register_resources_discover(handler, plugin_free_string, user_data)
+            reg.register_resources_discover(handler, extension_free_string, user_data)
         }) {
             Some(_) => true,
             None => false,
@@ -1834,12 +1839,12 @@ extern "C" fn trampoline_register_resources_discover(
 
 /// `register_before_agent_start` trampoline. Same shape as
 /// [`trampoline_register_resources_discover`]: runs synchronously inside a
-/// plugin's `register` call (thread-local `CURRENT_HOST_API` is set), stores the
-/// handler plus the plugin's own `plugin_free_string` (the `out` StbString the
-/// handler later produces is plugin-owned) and its opaque `user_data`.
+/// extension's `register` call (thread-local `CURRENT_HOST_API` is set), stores the
+/// handler plus the extension's own `extension_free_string` (the `out` StbString the
+/// handler later produces is extension-owned) and its opaque `user_data`.
 extern "C" fn trampoline_register_before_agent_start(
     handler: BeforeAgentStartFn,
-    plugin_free_string: FreeStringFn,
+    extension_free_string: FreeStringFn,
     user_data: *mut c_void,
 ) -> i32 {
     if !current_api_present() {
@@ -1847,7 +1852,7 @@ extern "C" fn trampoline_register_before_agent_start(
     }
     let ok = with_current_api(|api| {
         match api.with_registry(|reg| {
-            reg.register_before_agent_start(handler, plugin_free_string, user_data)
+            reg.register_before_agent_start(handler, extension_free_string, user_data)
         }) {
             Some(_) => true,
             None => false,
@@ -1861,7 +1866,7 @@ extern "C" fn trampoline_register_before_agent_start(
 }
 
 /// Fallback for [`HostApi`]s built without an [`ActionBridge`] (the
-/// `HostApi::new` path). Return -1 (`EPERM`-ish) so a plugin can detect
+/// `HostApi::new` path). Return -1 (`EPERM`-ish) so an extension can detect
 /// "unsupported" without crashing. When a bridge is present, `build_vtable`
 /// installs [`trampoline_runtime_action`] instead.
 extern "C" fn stub_runtime_action(

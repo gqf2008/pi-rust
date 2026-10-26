@@ -43,4 +43,4 @@ publish-*.log
 # Guest-side workspace (wasm32-wasip2) build output. No trailing slash: the
 # path is sometimes a CARGO_TARGET_DIR symlink, which a directory-only pattern
 # does not match and would leak into `git add -A`.
-plugins/wasm/target
+extensions/wasm/target

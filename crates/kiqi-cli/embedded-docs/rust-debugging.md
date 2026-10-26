@@ -1,10 +1,10 @@
 # ki Rust 扩展与 Agent 调试指引
 
 > **P6 状态（2026-10-26）：cdylib 通道已整体退役。** 本文保留为历史规范，
-> 其中 `kiqi-plugin-sdk`、`ki install`、`ki dev`、`ki dev-local`、`--extensions-dir`
-> 与 `examples/plugin-stub` 均已删除，照做会失败。当前唯一插件通道是 wasm 组件：
-> 契约见 `plugins/kiqi-plugin.wit`，模板见 `plugins/wasm/kiqi-todo-guest`，
-> 安装用 `ki insmod --build plugins/wasm/kiqi-<name>-guest`。
+> 其中 `kiqi-extension-sdk`、`ki install`、`ki dev`、`ki dev-local`、`--extensions-dir`
+> 与 `examples/extension-stub` 均已删除，照做会失败。当前唯一插件通道是 wasm 组件：
+> 契约见 `extensions/kiqi-extension.wit`，模板见 `extensions/wasm/kiqi-todo`，
+> 安装用 `ki insmod --build extensions/wasm/kiqi-<name>`。
 
 
 本文覆盖两条主线：**如何编写 Rust `cdylib` 扩展**（统一 C ABI、工具生命周期、
@@ -13,7 +13,7 @@
 
 ## 1. Rust 扩展快速开始
 
-最小可用扩展是一个 Rust `cdylib` crate，只依赖 `kiqi-plugin-sdk`：
+最小可用扩展是一个 Rust `cdylib` crate，只依赖 `kiqi-extension-sdk`：
 
 ```bash
 cargo new my-kiqi-extension
@@ -32,27 +32,27 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-kiqi-plugin-sdk = "0.1"
+kiqi-extension-sdk = "0.1"
 serde_json = "1"
 ```
 
-**扩展边界规则**：`cdylib` 只依赖 `kiqi-plugin-sdk`。绝不链接 `kiqi-cli`、
+**扩展边界规则**：`cdylib` 只依赖 `kiqi-extension-sdk`。绝不链接 `kiqi-cli`、
 `kiqi-extensions` 或 harness 内部 crate——插件由宿主动态加载，宿主链接插件，
 插件不能反向链接宿主。保留 `rlib` 是为了能在同一 crate 内写 Rust 单元测试。
 
-仓库自带的 `examples/plugin-stub` 是完整可运行的模板，包含 echo 工具、事件
+仓库自带的 `examples/extension-stub` 是完整可运行的模板，包含 echo 工具、事件
 处理器和资源发现三种能力，是复制骨架的首选来源。
 
 ## 2. 统一 ABI 入口
 
-宿主只加载统一 C ABI 符号 `kiqi_plugin_register`。扩展使用 `export_plugin!`，
-通过同一个 `PluginApi` 注册能力并调用 `api.declare` 声明优先级/平台。
+宿主只加载统一 C ABI 符号 `kiqi_extension_register`。扩展使用 `export_extension!`，
+通过同一个 `ExtensionApi` 注册能力并调用 `api.declare` 声明优先级/平台。
 SDK 在注册前检查 `abi_version` 和 `struct_size`；不兼容时返回非零状态，宿主报告加载失败。
 
 ```rust
-kiqi_plugin_sdk::export_plugin!(|api| {
+kiqi_extension_sdk::export_extension!(|api| {
     if let Some(declare) = api.declare {
-        let status = declare(kiqi_plugin_sdk::StbStringRef::from_str(
+        let status = declare(kiqi_extension_sdk::StbStringRef::from_str(
             r#"{"priority":60,"platforms":["linux"]}"#,
         ));
         if status != 0 {
@@ -63,7 +63,7 @@ kiqi_plugin_sdk::export_plugin!(|api| {
         return -1;
     };
     // 构建 StableToolSchema 和 execute/poll/cancel/destroy 函数表，
-    // 然后调用 register_tool。完整实现参考 examples/plugin-stub。
+    // 然后调用 register_tool。完整实现参考 examples/extension-stub。
     let _ = register_tool;
     0
 });
@@ -96,7 +96,7 @@ runtime action ID 返回结构化错误，不会进入分发。
 - 宿主产生的 `StbString`（execute 的 params、事件 payload）由**插件**通过宿主
   提供的 `free_string` 释放。
 - 插件产生的 `StbString`（done 结果、partial 进度、resources_discover 的 out）
-  由**宿主**通过插件注册时提供的 `plugin_free_string` 释放。
+  由**宿主**通过插件注册时提供的 `extension_free_string` 释放。
 - 每个 `extern "C"` 边界都不能 unwind：插件内部 `catch_unwind` 并把 panic 转换为
   结构化错误结果。
 
@@ -136,7 +136,7 @@ extern "C" fn my_destroy(handle: StepHandle) {
 }
 ```
 
-完整模板见 `examples/plugin-stub/src/lib.rs`。创建新工具时复制生命周期骨架，
+完整模板见 `examples/extension-stub/src/lib.rs`。创建新工具时复制生命周期骨架，
 只替换参数 schema 和领域逻辑，不要重新设计所有权协议。
 
 ## 4. 事件处理器、资源发现与 Provider
@@ -153,7 +153,7 @@ extern "C" fn my_destroy(handle: StepHandle) {
 - **ki 特有 / UI**：`BeforeTuiStart`（TUI 初始化前）、`UiPromptStart`/`UiPromptEnd`
   （交互式提示阻塞 agent 时）。
 
-处理器收到 `StablePluginEvent`，**不得释放**事件里的字符串（宿主 fan-out 后统一
+处理器收到 `StableExtensionEvent`，**不得释放**事件里的字符串（宿主 fan-out 后统一
 释放）。返回 `0` 成功；返回 `EVENT_HANDLER_ABORT` 表示 veto。
 
 ### 生命周期 veto（P1）
@@ -169,7 +169,7 @@ extern "C" fn my_destroy(handle: StepHandle) {
 `api.register_resources_discover` 注册一个 handler，宿主在 `startup` / `reload`
 时 fan-out 到所有已注册 handler，合并返回的 `{skillPaths, promptPaths, themePaths}`。
 单个 handler 报错不会中止 fan-out。`out` 是插件拥有的 `StbString`，宿主通过插件
-注册时给的 `plugin_free_string` 回收。
+注册时给的 `extension_free_string` 回收。
 
 ### Provider 与渲染器
 
@@ -226,7 +226,7 @@ ki events tail        # 打印已有内容并持续跟踪（Ctrl+C 停止）
 ```
 
 每一行 JSON 包含 `ts_ms`（Unix 毫秒）、`event`（如 `BeforeTuiStart` /
-`MessageEnd`）、`plugin`（扩展显示名）、`result`（`Continue` / `Error` / `Abort` /
+`MessageEnd`）、`extension`（扩展显示名）、`result`（`Continue` / `Error` / `Abort` /
 `Timeout` / `Panic` / `JoinFailed`）、`duration_ms` 和可选 `detail`。用它回答
 "我的扩展为什么没运行"这类问题。
 
@@ -322,13 +322,13 @@ KI_DEBUG_KEYS=1 ki
 | 手机/远程终端回车变换行 | `KI_DEBUG_KEYS=1` 看按键：`Char('j') mods=CONTROL` = 客户端发的是 LF（已被 `Editor` 当提交处理）；`Enter` + `paste burst` = 粘贴启发式误判（已限定 Windows 平台） |
 | 粘贴内容不是系统剪贴板（而是 TUI 自己的文案） | 远程/手机客户端把粘贴映射成 `Ctrl+V` 时，`read_clipboard_text` 会读**服务器**剪贴板——可能被拖选复制（copy-on-select）写入了 TUI 文案（如欢迎语 `Skills (…): …`）。已限定该回退只在 Windows 生效；Unix 上真实粘贴走括号粘贴 `Event::Paste`，`Ctrl+V` 回退为编辑器 kill-ring yank |
 | panic / 段错误跨 ABI | `extern "C"` 边界不能 unwind；`StbString` 所有权遵守宿主/插件两侧规则 |
-| ABI 版本不匹配 | 宿主日志提示 mismatch 并跳过加载；确认 `kiqi-plugin-sdk` 版本 |
+| ABI 版本不匹配 | 宿主日志提示 mismatch 并跳过加载；确认 `kiqi-extension-sdk` 版本 |
 
 ## 9. 测试与发布
 
 - 领域逻辑写成普通 Rust 函数，FFI 只做转换/生命周期/错误映射；对普通逻辑写
   `rlib` 单元测试。
-- 至少一个宿主 smoke test 验证 ABI 注册、加载和卸载（参考 `plugin-stub` 的
+- 至少一个宿主 smoke test 验证 ABI 注册、加载和卸载（参考 `extension-stub` 的
   测试模式：宿主读取插件导出的 hit counter 断言行为）。
 - `cargo fmt --check`、`cargo clippy --all-targets`、`cargo test` 通过。
 - `ki dev --no-watch` 能编译、加载并注册预期工具。

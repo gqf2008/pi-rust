@@ -497,7 +497,7 @@ pub(super) fn close_extension_editor(
 const ASK_USER_FREEFORM: &str = "\u{0}ask-user-freeform";
 
 /// One in-flight `ask_user` request being shown in the TUI. Unlike
-/// [`JsDialogBridge`], the plugin side is a synchronous `poll` loop that reads
+/// [`JsDialogBridge`], the extension side is a synchronous `poll` loop that reads
 /// answers back through the shared [`kiqi_host::UiDialogMailbox`], so this
 /// bridge only tracks which request id currently occupies the input slot.
 #[derive(Clone)]
@@ -561,7 +561,7 @@ impl AskUserBridge {
         }
     }
 
-    /// Detach + cancel everything (TUI shutdown) so a parked plugin `poll`
+    /// Detach + cancel everything (TUI shutdown) so a parked extension `poll`
     /// observes a terminal state instead of blocking on a dead session.
     pub(super) fn shutdown(&self) {
         self.mailbox.detach();
@@ -644,8 +644,8 @@ pub(crate) fn parse_ask_user_prompt(request: &kiqi_host::UiDialogRequest) -> Ask
         .unwrap_or("selector")
         .to_string();
     // A request may carry a single flat question or a `questions[]` array. The
-    // plugin emits one question per request, but accepting `questions[0]` keeps
-    // the host compatible with hosts/plugins that batch.
+    // extension emits one question per request, but accepting `questions[0]` keeps
+    // the host compatible with hosts/extensions that batch.
     let nested = ui
         .get("questions")
         .and_then(serde_json::Value::as_array)

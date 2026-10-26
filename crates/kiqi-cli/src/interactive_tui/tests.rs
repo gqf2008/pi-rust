@@ -190,12 +190,12 @@ fn pasted_images_accept_multiple_quoted_paths_without_consuming_normal_text() {
 }
 
 #[test]
-fn modal_inputs_keep_registered_plugin_shortcuts_until_closed() {
+fn modal_inputs_keep_registered_extension_shortcuts_until_closed() {
     use kiqi_host::EventTag;
     use kiqi_host::{ExtensionRegistry, ExtensionSession};
-    use kiqi_host::{StablePluginEvent, EVENT_HANDLER_CLAIMED};
+    use kiqi_host::{StableExtensionEvent, EVENT_HANDLER_CLAIMED};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    extern "C" fn claim(_: StablePluginEvent, user_data: *mut std::ffi::c_void) -> i32 {
+    extern "C" fn claim(_: StableExtensionEvent, user_data: *mut std::ffi::c_void) -> i32 {
         // The counter outlives the session and all synchronous dispatch calls.
         let calls = unsafe { &*user_data.cast::<AtomicUsize>() };
         calls.fetch_add(1, Ordering::SeqCst);
@@ -443,7 +443,7 @@ fn test_tui_state() -> Arc<TuiState> {
 /// attributed to `extension`, not to the user.
 ///
 /// A hands-free voice extension stands down whenever `source == "user"`
-/// (the human took the keyboard), so mislabelling the plugin's own injected
+/// (the human took the keyboard), so mislabelling the extension's own injected
 /// transcription would cancel the whole conversation on its first turn.
 #[test]
 fn editor_change_source_separates_tui_writes_from_typing() {
@@ -2927,19 +2927,19 @@ fn the_tui_runtime_never_writes_diagnostics_to_stderr() {
 }
 
 // ---------------------------------------------------------------------------
-// P3(b): plugin command flow state machine
+// P3(b): extension command flow state machine
 // ---------------------------------------------------------------------------
 
-struct FlowTestPlugin;
+struct FlowTestExtension;
 
-impl kiqi_host::Extension for FlowTestPlugin {
+impl kiqi_host::Extension for FlowTestExtension {
     fn id(&self) -> &str {
         "flow-host"
     }
 }
 
 fn flow(
-    host: &Arc<crate::plugins::PluginHost>,
+    host: &Arc<crate::extensions::ExtensionHost>,
     flow_id: &str,
     kind: CommandFlowKind,
 ) -> PendingCommandFlow {
@@ -2954,9 +2954,9 @@ fn flow(
 #[test]
 fn pending_command_flow_rejects_stale_and_wrong_kind_ids() {
     let state = test_tui_state();
-    let host = Arc::new(crate::plugins::PluginHost::new(
+    let host = Arc::new(crate::extensions::ExtensionHost::new(
         "flow-host",
-        Box::new(FlowTestPlugin),
+        Box::new(FlowTestExtension),
     ));
 
     // A matching reply takes the slot exactly once.
@@ -2986,9 +2986,9 @@ fn pending_command_flow_rejects_stale_and_wrong_kind_ids() {
 #[test]
 fn a_second_command_replaces_the_pending_flow() {
     let state = test_tui_state();
-    let host = Arc::new(crate::plugins::PluginHost::new(
+    let host = Arc::new(crate::extensions::ExtensionHost::new(
         "flow-host",
-        Box::new(FlowTestPlugin),
+        Box::new(FlowTestExtension),
     ));
     state.set_command_flow(flow(&host, "first", CommandFlowKind::Selector));
     state.set_command_flow(flow(&host, "second", CommandFlowKind::Prompt));
@@ -3003,9 +3003,9 @@ fn a_second_command_replaces_the_pending_flow() {
 #[test]
 fn esc_cancels_the_pending_flow() {
     let state = test_tui_state();
-    let host = Arc::new(crate::plugins::PluginHost::new(
+    let host = Arc::new(crate::extensions::ExtensionHost::new(
         "flow-host",
-        Box::new(FlowTestPlugin),
+        Box::new(FlowTestExtension),
     ));
     state.set_command_flow(flow(&host, "esc", CommandFlowKind::Editor));
     let cancelled = state.cancel_command_flow().expect("a flow was pending");

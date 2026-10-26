@@ -121,8 +121,8 @@ impl ProviderHttpError {
         Self::Failed(message.into())
     }
 
-    pub(crate) fn into_capability(self) -> crate::wasm::kiqi::plugin::types::CapabilityError {
-        use crate::wasm::kiqi::plugin::types::CapabilityError;
+    pub(crate) fn into_capability(self) -> crate::wasm::kiqi::extension::types::CapabilityError {
+        use crate::wasm::kiqi::extension::types::CapabilityError;
         match self {
             Self::Denied(message) => CapabilityError::Denied(message),
             Self::Failed(message) => CapabilityError::Failed(message),
@@ -369,13 +369,13 @@ fn is_http_token(value: &str) -> bool {
 /// changed since the grant is refused rather than silently used.
 pub(crate) fn resolve_credential(
     profile: &ProviderProfile,
-    plugin_dir: &Path,
+    extension_dir: &Path,
     agent_root: Option<&Path>,
 ) -> Result<Option<ResolvedCredential>, ProviderHttpError> {
     let Some(handle) = profile.credential.as_deref() else {
         return Ok(None);
     };
-    let sidecar_path = plugin_dir.join("credentials.json");
+    let sidecar_path = extension_dir.join("credentials.json");
     let sidecar_text = std::fs::read_to_string(&sidecar_path).map_err(|error| {
         ProviderHttpError::failed(format!("read {}: {error}", sidecar_path.display()))
     })?;
@@ -409,7 +409,7 @@ pub(crate) fn resolve_credential(
     let root = agent_root
         .map(Path::to_path_buf)
         .or_else(|| {
-            plugin_dir
+            extension_dir
                 .parent()
                 .and_then(Path::parent)
                 .map(Path::to_path_buf)
@@ -436,7 +436,7 @@ pub(crate) fn resolve_credential(
     })?;
     if sha256_hex(value.as_bytes()) != recorded.to_ascii_lowercase() {
         return Err(ProviderHttpError::denied(
-            "credential changed since the grant; re-run `ki plugin grant --credential-from`",
+            "credential changed since the grant; re-run `ki extension grant --credential-from`",
         ));
     }
 

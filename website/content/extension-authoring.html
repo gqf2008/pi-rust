@@ -1,6 +1,6 @@
 <h1 id="kiqi-rust">ki Rust 扩展开发最佳实践</h1>
 <p>本文是 ki 创建 Rust <code>cdylib</code> 扩展的模型可读规范。扩展是 Rust 原生动态库，
-通过稳定 C ABI（<code>kiqi-plugin-sdk</code>）注册工具、事件处理器、资源发现、Provider
+通过稳定 C ABI（<code>kiqi-extension-sdk</code>）注册工具、事件处理器、资源发现、Provider
 与渲染器，宿主（<code>ki</code> CLI）负责加载与生命周期。创建完整 Agent 项目的默认结构见
 <code>docs</code> 的 <code>agent</code> 主题；本指南聚焦扩展本身的 ABI 与生命周期。</p>
 <h2 id="1">1. 扩展模型总览</h2>
@@ -18,7 +18,7 @@
 </tr>
 <tr>
 <td>入口</td>
-<td><code>kiqi_plugin_register</code> C ABI 符号</td>
+<td><code>kiqi_extension_register</code> C ABI 符号</td>
 </tr>
 <tr>
 <td>开发反馈</td>
@@ -38,7 +38,7 @@
 </tr>
 </tbody>
 </table>
-<p>扩展应遵循能力检测：只调用宿主明确提供的 capability，检查 <code>PluginApi</code>
+<p>扩展应遵循能力检测：只调用宿主明确提供的 capability，检查 <code>ExtensionApi</code>
 对应注册槽位是否为 <code>Some</code>。缺少能力时返回清晰错误并优雅降级，不要 panic、
 空指针或依赖 <code>undefined</code> 语义。</p>
 <h2 id="2">2. 推荐结构</h2>
@@ -64,19 +64,19 @@ repository = &quot;https://github.com/example/my-kiqi-extension&quot;
 crate-type = [&quot;cdylib&quot;, &quot;rlib&quot;]
 
 [dependencies]
-kiqi-plugin-sdk = &quot;0.1&quot;
+kiqi-extension-sdk = &quot;0.1&quot;
 serde_json = &quot;1&quot;
 </code></pre>
 <p><code>cdylib</code> 是宿主加载的产物；同时保留 <code>rlib</code> 便于 Rust 集成测试。扩展边界只依赖
-<code>kiqi-plugin-sdk</code>，不要依赖 <code>kiqi-cli</code>、<code>kiqi-extensions</code> 或 harness 内部模块，
+<code>kiqi-extension-sdk</code>，不要依赖 <code>kiqi-cli</code>、<code>kiqi-extensions</code> 或 harness 内部模块，
 否则插件会和宿主实现耦合。</p>
 <h2 id="3-abi">3. ABI 入口</h2>
-<p>宿主只加载统一 C ABI 符号 <code>kiqi_plugin_register</code>。扩展使用 <code>export_plugin!</code>，
-通过同一个 <code>PluginApi</code> 注册能力并调用 <code>api.declare</code> 声明优先级/平台。
+<p>宿主只加载统一 C ABI 符号 <code>kiqi_extension_register</code>。扩展使用 <code>export_extension!</code>，
+通过同一个 <code>ExtensionApi</code> 注册能力并调用 <code>api.declare</code> 声明优先级/平台。
 SDK 在注册前检查 <code>abi_version</code> 和 <code>struct_size</code>；不兼容时返回非零状态，宿主报告加载失败。</p>
-<pre><code class="language-rust">kiqi_plugin_sdk::export_plugin!(|api| {
+<pre><code class="language-rust">kiqi_extension_sdk::export_extension!(|api| {
     if let Some(declare) = api.declare {
-        let status = declare(kiqi_plugin_sdk::StbStringRef::from_str(
+        let status = declare(kiqi_extension_sdk::StbStringRef::from_str(
             r#&quot;{&quot;priority&quot;:60,&quot;platforms&quot;:[&quot;linux&quot;]}&quot;#,
         ));
         if status != 0 {
@@ -87,7 +87,7 @@ SDK 在注册前检查 <code>abi_version</code> 和 <code>struct_size</code>；�
         return -1;
     };
     // 构建 StableToolSchema 和 execute/poll/cancel/destroy 函数表，
-    // 然后调用 register_tool。完整实现参考 examples/plugin-stub。
+    // 然后调用 register_tool。完整实现参考 examples/extension-stub。
     let _ = register_tool;
     0
 });
@@ -114,14 +114,14 @@ SDK 在注册前检查 <code>abi_version</code> 和 <code>struct_size</code>；�
 <li>宿主产生的 <code>StbString</code>（execute 的 params、事件 payload）由插件通过宿主的
   <code>free_string</code> 释放。</li>
 <li>插件产生的 <code>StbString</code>（done 结果、partial 进度、resources_discover 的 out）
-  由宿主通过插件注册时提供的 <code>plugin_free_string</code> 释放。</li>
+  由宿主通过插件注册时提供的 <code>extension_free_string</code> 释放。</li>
 <li>每个 <code>extern "C"</code> 边界都不能 unwind；插件内部捕获 panic 并转换为错误结果。</li>
 </ul>
-<p>完整、可运行的 ABI 模板位于 <code>examples/plugin-stub/src/lib.rs</code>。创建新工具时先
+<p>完整、可运行的 ABI 模板位于 <code>examples/extension-stub/src/lib.rs</code>。创建新工具时先
 复制生命周期骨架，再替换参数 schema 和领域逻辑，不要重新设计所有权协议。</p>
 <h3 id="_2">注入到工具参数里的宿主上下文</h3>
 <p>宿主在把参数交给插件<strong>之前</strong>，会往这次调用的 JSON 参数里加一个保留键
-<code>__ki</code>（<code>kiqi_plugin_sdk::HOST_CONTEXT_KEY</code>）：</p>
+<code>__ki</code>（<code>kiqi_extension_sdk::HOST_CONTEXT_KEY</code>）：</p>
 <pre><code class="language-json">{ &quot;action&quot;: &quot;add&quot;, &quot;text&quot;: &quot;…&quot;,
   &quot;__ki&quot;: { &quot;cwd&quot;: &quot;D:\\Projects\\pi-rust&quot;,
              &quot;sessionId&quot;: &quot;01adb026-7230-708b-855b-91eab6b056b8&quot; } }
@@ -150,7 +150,7 @@ SDK 在注册前检查 <code>abi_version</code> 和 <code>struct_size</code>；�
   <code>ToolExecutionStart</code>/<code>Update</code>/<code>End</code>、<code>ToolCall</code>、<code>ToolResult</code>、<code>UserBash</code>、<code>Input</code>。</li>
 <li><strong>ki 特有 / UI</strong>：<code>BeforeTuiStart</code>（TUI 初始化前）、<code>UiPromptStart</code>/<code>UiPromptEnd</code>。</li>
 </ul>
-<p>处理器收到 <code>StablePluginEvent</code>，不得释放事件里的字符串（宿主 fan-out 后统一释放）。
+<p>处理器收到 <code>StableExtensionEvent</code>，不得释放事件里的字符串（宿主 fan-out 后统一释放）。
 返回 <code>0</code> 成功；返回 <code>EVENT_HANDLER_ABORT</code> 表示 veto。</p>
 <h3 id="veto">生命周期 veto</h3>
 <p><code>BeforeTuiStart</code> 是带 veto 语义的 ki 专有钩子：第一个返回 <code>EVENT_HANDLER_ABORT</code>
@@ -161,7 +161,7 @@ SDK 在注册前检查 <code>abi_version</code> 和 <code>struct_size</code>；�
 <p><code>api.register_resources_discover</code> 注册 handler，宿主在 <code>startup</code>/<code>reload</code> 时
 fan-out 到所有已注册 handler，合并返回的 <code>{skillPaths, promptPaths, themePaths}</code>。
 单个 handler 报错不中止 fan-out。<code>out</code> 是插件拥有的 <code>StbString</code>，宿主通过插件
-注册时给的 <code>plugin_free_string</code> 回收。</p>
+注册时给的 <code>extension_free_string</code> 回收。</p>
 <h3 id="provider">Provider 与渲染器</h3>
 <p><code>api.register_provider</code> 注入自定义 LLM Provider（<code>provider_id</code>/<code>base_url</code>/
 <code>api_style</code> + <code>request_fn</code>）。<code>register_message_renderer</code>/<code>register_markdown_transformer</code>/
@@ -260,9 +260,9 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 <h2 id="9_1">9. 发布检查清单</h2>
 <ul>
 <li><code>cargo fmt --check</code>、<code>cargo clippy --all-targets</code>、<code>cargo test</code> 通过。</li>
-<li><code>crate-type</code> 包含 <code>cdylib</code>，使用 <code>export_plugin!</code> 导出
-  <code>kiqi_plugin_register</code>。</li>
-<li>依赖已发布的 <code>kiqi-plugin-sdk</code> 兼容版本，不链接宿主私有 crate。</li>
+<li><code>crate-type</code> 包含 <code>cdylib</code>，使用 <code>export_extension!</code> 导出
+  <code>kiqi_extension_register</code>。</li>
+<li>依赖已发布的 <code>kiqi-extension-sdk</code> 兼容版本，不链接宿主私有 crate。</li>
 <li><code>ki dev --no-watch</code> 能编译、加载并注册预期工具。</li>
 <li><code>ki install &lt;crate&gt; --force</code> 的干净安装路径通过。</li>
 <li>Linux/macOS/Windows 构建由 CI 验证，README 标明支持矩阵。</li>
@@ -272,7 +272,7 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 <ol>
 <li>先调用 <code>docs</code> 查询 <code>authoring</code>（扩展开发）或 <code>debugging</code>（调试）。</li>
 <li>阅读当前仓库现有 manifest、SDK 版本和相邻扩展约定，不猜 API。</li>
-<li>优先复制 <code>examples/plugin-stub</code> 的最小骨架。</li>
+<li>优先复制 <code>examples/extension-stub</code> 的最小骨架。</li>
 <li>实现领域逻辑与边界测试，再连接 loader/ABI。</li>
 <li>使用 <code>ki dev --no-watch</code> 与 <code>ki install &lt;crate&gt; --force</code> 做真实 smoke test。</li>
 <li>不声称未验证的 Pi capability 已完全兼容；明确记录降级行为。</li>
@@ -293,7 +293,7 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 <p>OAuth callback 使用版本化 JSON action envelope。支持的动作是 <code>begin</code>、<code>exchange</code>、
 <code>refresh</code> 和 <code>revoke</code>，但 action input 和平台流程完全由扩展定义。OAuth token 属于
 敏感信息：不得写入普通事件、模型消息、工具结果、调试日志或错误文本。插件拥有
-自己产生的输出字符串，宿主通过注册时提供的 <code>plugin_free_string</code> 回收。插件应使用
+自己产生的输出字符串，宿主通过注册时提供的 <code>extension_free_string</code> 回收。插件应使用
 KI 的 provider-scoped credential bridge，而不是自行把 token 写入项目目录。</p>
 <p>宿主只实现标准 interaction/credential/success/error response；浏览器、device-code、
 PKCE、state、callback 解析和平台 token 映射全部属于扩展。API key fallback 继续保留，
@@ -321,7 +321,7 @@ PKCE、state、callback 解析和平台 token 映射全部属于扩展。API key
 transcript、普通插件事件或日志。</p>
 <p><code>kiqi-extensions</code> 提供 <code>list_oauth_providers</code> 和 <code>request_oauth</code> 两个宿主侧入口。
 它们只允许调用已经注册且 manifest <code>id</code> 匹配的 provider，并在读取插件输出后立即
-调用插件提供的 <code>plugin_free_string</code>。宿主只做 opaque input 转发和标准 response
+调用插件提供的 <code>extension_free_string</code>。宿主只做 opaque input 转发和标准 response
 校验，不包含任何平台 provider 特判。</p>
 <p>已接入通用 CLI 流程：</p>
 <pre><code class="language-text">ki auth login --provider &lt;id&gt;

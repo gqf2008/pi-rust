@@ -180,7 +180,7 @@ pub fn run_exit_code(outcome: &HarnessRunOutcome, budget_stopped: bool) -> i32 {
 /// return the exit code. Mirrors TS `runPrintMode` (text).
 ///
 /// On every exit path (including the early no-op and prompt-rejection returns)
-/// the run ends with a `SessionShutdown` dispatch, so plugins (compiled + wasm)
+/// the run ends with a `SessionShutdown` dispatch, so extensions (compiled + wasm)
 /// release per-run resources — the wasm langfuse guest flushes its traces
 /// there. The veto is advisory; see
 /// [`crate::session::dispatch_session_shutdown_advisory`].
@@ -306,7 +306,7 @@ pub async fn print(
     };
     let code = code.await;
     heartbeat.stop().await;
-    // `SessionShutdown`: the one-shot run is over — plugins release per-run
+    // `SessionShutdown`: the one-shot run is over — extensions release per-run
     // resources (the wasm langfuse guest flushes its buffered traces here).
     // Advisory veto; dispatched exactly once, on every exit path.
     crate::session::dispatch_session_shutdown_advisory(reload_context).await;
@@ -318,7 +318,7 @@ pub async fn print(
 /// text. Mirrors TS `runPrintMode` (`mode === "json"`) streaming every event.
 ///
 /// On every exit path (including the structured prompt-rejection error return)
-/// the run ends with a `SessionShutdown` dispatch, so plugins (compiled + wasm)
+/// the run ends with a `SessionShutdown` dispatch, so extensions (compiled + wasm)
 /// release per-run resources — the wasm langfuse guest flushes its traces
 /// there. The veto is advisory; see
 /// [`crate::session::dispatch_session_shutdown_advisory`].
@@ -449,7 +449,7 @@ pub async fn json(
         last_exit
     };
     let code = code.await;
-    // `SessionShutdown`: the one-shot run is over — plugins release per-run
+    // `SessionShutdown`: the one-shot run is over — extensions release per-run
     // resources (the wasm langfuse guest flushes its buffered traces here).
     // Advisory veto; dispatched exactly once, on every exit path (the
     // structured prompt-rejection return routes through this tail too).
@@ -801,7 +801,7 @@ where
 
     // EOF closes the input half of the protocol, not an accepted prompt.
     // There can be no more dialog answers, so release approvals, then await the
-    // run before SessionShutdown can unload plugins or the runtime exits.
+    // run before SessionShutdown can unload extensions or the runtime exits.
     ui_dialog.detach();
     if cancel_on_exit {
         run_cancel.cancel();
@@ -1654,14 +1654,14 @@ mod tests {
         output
             .wait_for(|m| m["type"] == "ui_dialog_closed" && m["requestId"] == "cancelled")
             .await;
-        // The notification must not consume the cancellation meant for the plugin.
+        // The notification must not consume the cancellation meant for the extension.
         assert_eq!(ui.poll("cancelled").unwrap()["status"], "cancelled");
         client.shutdown().await.unwrap();
         assert_eq!(task.await.unwrap(), 0);
     }
 
     #[tokio::test]
-    async fn rpc_accepts_native_dialog_responses_without_consuming_plugin_answers() {
+    async fn rpc_accepts_native_dialog_responses_without_consuming_extension_answers() {
         use crate::remote::protocol::RemoteCommand;
         use tokio::io::AsyncWriteExt;
         let harness = AgentHarness::create(Default::default()).await.unwrap();
@@ -1864,9 +1864,12 @@ mod tests {
     /// that is the only signal the wasm langfuse guest gets to flush its
     /// traces (`-p` / `--mode json` never reach the TUI/rpc lifecycle).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn print_mode_dispatches_session_shutdown_to_plugins() {
+    async fn print_mode_dispatches_session_shutdown_to_extensions() {
         use std::sync::atomic::AtomicUsize;
-        extern "C" fn record(_: kiqi_host::StablePluginEvent, data: *mut std::ffi::c_void) -> i32 {
+        extern "C" fn record(
+            _: kiqi_host::StableExtensionEvent,
+            data: *mut std::ffi::c_void,
+        ) -> i32 {
             unsafe { &*(data as *const AtomicUsize) }
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             0
@@ -1903,9 +1906,12 @@ mod tests {
     /// Same contract for `--mode json`: the structured error path returns
     /// early, and it too must route through the `SessionShutdown` tail.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn json_mode_dispatches_session_shutdown_to_plugins() {
+    async fn json_mode_dispatches_session_shutdown_to_extensions() {
         use std::sync::atomic::AtomicUsize;
-        extern "C" fn record(_: kiqi_host::StablePluginEvent, data: *mut std::ffi::c_void) -> i32 {
+        extern "C" fn record(
+            _: kiqi_host::StableExtensionEvent,
+            data: *mut std::ffi::c_void,
+        ) -> i32 {
             unsafe { &*(data as *const AtomicUsize) }
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             0

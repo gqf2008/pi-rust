@@ -5,7 +5,7 @@
 | File | What it is | Where it goes |
 | --- | --- | --- |
 | [`01-benchmark-vs-native-pi.md`](01-benchmark-vs-native-pi.md) | The measured comparison against native TypeScript `pi`, in Chinese and English | 掘金 / OSCHINA / RustCC / HN |
-| [`02-rust-agent-runtime-architecture.md`](02-rust-agent-runtime-architecture.md) | Long-form Chinese article on the layering, the provider seam, the plugin ABI and crash recovery | 掘金 / OSCHINA / 知乎 |
+| [`02-rust-agent-runtime-architecture.md`](02-rust-agent-runtime-architecture.md) | Long-form Chinese article on the layering, the provider seam, the extension ABI and crash recovery | 掘金 / OSCHINA / 知乎 |
 | [`03-english-showhn-devto-reddit.md`](03-english-showhn-devto-reddit.md) | English posts | Hacker News, DEV.to / Hashnode, r/rust, r/LocalLLaMA, Lobsters |
 | [`04-submissions-twir-and-awesome-rust.md`](04-submissions-twir-and-awesome-rust.md) | Verified submission rules for two third-party lists | This Week in Rust, Awesome Rust |
 | [`05-awesome-list-survey.md`](05-awesome-list-survey.md) | Five curated lists checked against their written rules, with the exact gate on each | 历史调研，投稿前重新核实 |
@@ -15,7 +15,7 @@
 | [`09-tool-execution-and-sandbox.md`](09-tool-execution-and-sandbox.md) | AgentTool、ExecutionEnv 与可测试工具执行 | Rust / Agent 工具链社区 |
 | [`10-session-jsonl-crash-recovery.md`](10-session-jsonl-crash-recovery.md) | JSONL 会话、流式帧进度与崩溃恢复 | 架构 / 后端 / Agent 社区 |
 | [`11-steering-follow-up-queues.md`](11-steering-follow-up-queues.md) | Steering 与 Follow-up 消息队列设计 | Agent / 交互式开发工具社区 |
-| [`12-plugin-abi-design.md`](12-plugin-abi-design.md) | Rust cdylib 插件 ABI、版本协商与 panic 隔离 | Rust / 系统编程社区 |
+| [`12-extension-abi-design.md`](12-extension-abi-design.md) | Rust cdylib 插件 ABI、版本协商与 panic 隔离 | Rust / 系统编程社区 |
 | [`13-remote-server-client.md`](13-remote-server-client.md) | 无头远程 Agent 服务与零状态 TUI 客户端 | DevOps / 远程开发社区 |
 | [`14-context-compaction-and-skills.md`](14-context-compaction-and-skills.md) | Context compaction、Skills 与 Harness 分层 | LLM 应用 / Agent 架构社区 |
 | [`15-tui-rendering-performance.md`](15-tui-rendering-performance.md) | 长会话 TUI 的缓存渲染与性能优化 | Rust / TUI / 性能社区 |

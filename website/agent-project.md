@@ -12,7 +12,7 @@
 | --- | --- | --- | --- |
 | 库内嵌 Agent | 你的 `[[bin]]` / 服务进程 | `kiqi-agent` + `kiqi-ai`（需要内置工具再加 `kiqi-tools`） | 在自己的进程里跑 loop，完全掌控事件、工具和输出 |
 | CLI 项目 | 全局 `ki` 宿主 | 无（资源与 cdylib） | 想要现成的 TUI、`-p`/`--mode json`、会话和 skills |
-| Rust 扩展 | 宿主加载 `.ki/extensions/*.dll` | `kiqi-plugin-sdk` | 给全局 `ki` 加工具/Provider/事件，不改宿主 |
+| Rust 扩展 | 宿主加载 `.ki/extensions/*.dll` | `kiqi-extension-sdk` | 给全局 `ki` 加工具/Provider/事件，不改宿主 |
 
 一个项目**可以同时提供"内嵌 Agent"和"cdylib 扩展"两份适配器，共享同一套工具实现**。
 这也是本指南默认推荐的形态：本地用内嵌 Agent 调试，线上/交互用全局 `ki` 加载
@@ -80,7 +80,7 @@ crate-type = ["cdylib", "rlib"]   # cdylib 给宿主；rlib 便于集成测试
 kiqi-agent = "<ki>"
 kiqi-ai = { version = "<ki>", features = ["providers"] }
 kiqi-tools = "<ki>"
-kiqi-plugin-sdk = "<ki>"          # 只有 cdylib 适配需要
+kiqi-extension-sdk = "<ki>"          # 只有 cdylib 适配需要
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -94,7 +94,7 @@ thiserror = "1"
 
 边界规则：
 
-- **扩展只依赖 `kiqi-plugin-sdk`，绝不依赖 `kiqi-cli`、`kiqi-extensions`、`kiqi-harness`
+- **扩展只依赖 `kiqi-extension-sdk`，绝不依赖 `kiqi-cli`、`kiqi-extensions`、`kiqi-harness`
   内部模块**——宿主链接插件，不是插件链接宿主，否则 ABI 和版本会耦合。
 - 内嵌 Agent 只依赖 `kiqi-agent`/`kiqi-ai`/`kiqi-tools`，与扩展 ABI 解耦。
 - 需要会话、压缩、skills、上下文文件时再加 `kiqi-harness`。
@@ -179,12 +179,12 @@ while let Some(event) = events.recv().await {
 
 ## 6. cdylib ABI 适配（给全局 `ki` 用）
 
-宿主只加载统一 C ABI 符号 `kiqi_plugin_register`。扩展使用 `export_plugin!`，
-通过同一个 `PluginApi` 注册能力并调用 `api.declare` 声明优先级/平台。
+宿主只加载统一 C ABI 符号 `kiqi_extension_register`。扩展使用 `export_extension!`，
+通过同一个 `ExtensionApi` 注册能力并调用 `api.declare` 声明优先级/平台。
 SDK 在注册前检查 `abi_version` 和 `struct_size`；不兼容时返回非零状态，宿主报告加载失败。
 
 ```rust
-kiqi_plugin_sdk::export_plugin!(|api| {
+kiqi_extension_sdk::export_extension!(|api| {
     let Some(register_tool) = api.register_tool else {
         return -1;                         // 能力检测：槽位缺失就明确失败
     };
@@ -199,7 +199,7 @@ kiqi_plugin_sdk::export_plugin!(|api| {
 handle，`poll` 必须非阻塞并响应取消标记，`cancel` 只置位不释放，`destroy` 由宿主
 调用一次并释放。任何 `extern "C"` 边界都不能 unwind。
 
-**先复制 `examples/plugin-stub/src/lib.rs` 的骨架**，再替换 schema 和领域逻辑；
+**先复制 `examples/extension-stub/src/lib.rs` 的骨架**，再替换 schema 和领域逻辑；
 不要重新设计所有权协议。完整的 ABI、能力检测、事件处理、资源发现与发布检查见
 `docs` 的 `authoring` 主题。
 
@@ -291,7 +291,7 @@ Cargo target DLL 复制成固定文件名。
 - `ki dev --no-watch` 能编译、加载并注册预期工具；`ki install <crate> --force`
   的干净安装路径通过。
 - 提供 `cdylib` 时，`crate-type` 包含 `"cdylib"`，导出
-  `kiqi_plugin_register`，依赖已发布的 `kiqi-plugin-sdk`。
+  `kiqi_extension_register`，依赖已发布的 `kiqi-extension-sdk`。
 - `README` 写明工具 schema、权限边界、持久化文件、网络访问、支持平台和卸载方式；
   `AGENTS.md`、`config/agent.json`、`prompts/`、`skills/`、`.ki/settings.json`
   之间的路径保持一致。
@@ -304,7 +304,7 @@ Cargo target DLL 复制成固定文件名。
 4. 写工具登记表 `TOOLS` + 唯一 `run_tool`，再写两个适配器。
 5. 写 `prompts/system.md` 与 `AGENTS.md`，约束保持一致。
 6. 写 `config/agent.json` 和 `.ki/settings.json`。
-7. 接内嵌 Agent 入口；需要全局宿主时复制 `examples/plugin-stub` 的 ABI 骨架。
+7. 接内嵌 Agent 入口；需要全局宿主时复制 `examples/extension-stub` 的 ABI 骨架。
 8. 加脚本：编译扩展、启动内嵌 Agent、启动全局 ki。
 9. 加 schema 对齐测试和至少一个端到端 smoke test。
 10. 用 `--debug-system-prompt` 确认项目提示词与动态 skill 路由进入最终 composed prompt。
@@ -316,6 +316,6 @@ Cargo target DLL 复制成固定文件名。
 1. 先调用 `docs` 查询 `agent`（本指南）；扩展开发查 `authoring`，调试查 `debugging`。
 2. 读当前仓库现有 `Cargo.toml`、SDK 版本与相邻项目约定，不猜 API。
 3. 先落目录和单一工具登记点，再写适配器，最后接入口。
-4. 优先复制仓库内最小骨架（`examples/minimal`、`examples/plugin-stub`）。
+4. 优先复制仓库内最小骨架（`examples/minimal`、`examples/extension-stub`）。
 5. 用 faux provider 做离线测试，用 `ki dev --no-watch` 做真实加载 smoke test。
 6. 不声称未验证的 ABI/capability 已完全兼容；如实记录降级行为。

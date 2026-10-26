@@ -24,7 +24,7 @@ categories = [
 kiqi-host = { workspace = true }
 kiqi-agent = { workspace = true }
 kiqi-ai = { workspace = true }
-# For the env-var names the host and its plugins share (see `HOST_PRIVATE_ENV`).
+# For the env-var names the host and its extensions share (see `HOST_PRIVATE_ENV`).
 # Only the constants are used; the edge is about shared names, not code.
 tokio = { workspace = true }
 tokio-util = { workspace = true }

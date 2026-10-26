@@ -3,7 +3,7 @@
 //! A provider call is different in kind from a tool call: it streams for
 //! minutes, it needs its own HTTP channel, and it must never hold the mutex a
 //! tool call, an event dispatch or a shortcut lookup needs. [`ProviderHost`] is
-//! therefore **not** a [`crate::wasm::WasmPlugin`]: it loads the same component onto
+//! therefore **not** a [`crate::wasm::WasmExtension`]: it loads the same component onto
 //! its own [`Engine`]/[`Store`] with a deny-all [`Grants`] and only the one
 //! `provider` profile, and it installs the credential-backed HTTP state for the
 //! duration of each `provider-api.request`.
@@ -27,12 +27,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 use crate::grants::{Grants, ProviderModel, ProviderProfile};
-use crate::{CancelProbe, HostCaps, Log, LogLevel, PluginError};
+use crate::{CancelProbe, ExtensionError, HostCaps, Log, LogLevel};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::WasiCtxBuilder;
 
-use crate::wasm::kiqi::plugin::types::{
+use crate::wasm::kiqi::extension::types::{
     DeltaKind as WitDeltaKind, DeltaPhase as WitDeltaPhase, ProviderDelta as WitDelta,
     ProviderSpec as WitProviderSpec,
 };
@@ -98,7 +98,7 @@ pub struct ProviderHostOptions {
     /// inject a fake so policy and streaming are asserted without a network.
     pub transport: Option<Arc<dyn ProviderHttpTransport>>,
     /// Where `auth.json` lives, for credential resolution. `None` derives it
-    /// from the component path (`plugins/<id>/../..`).
+    /// from the component path (`extensions/<id>/../..`).
     pub agent_root: Option<PathBuf>,
     /// Optional fuel budget for the guest.
     pub fuel: Option<u64>,
@@ -308,8 +308,8 @@ fn validate_tool_call(text: &str) -> Result<(), String> {
 /// instance without bound would accumulate both.
 pub const PROVIDER_MAX_ABANDONED_WORKERS: usize = 2;
 
-/// Abandoned provider workers per `(provider id, plugin dir)`, kept until
-/// their threads finish. The plugin dir is part of the key because two agent
+/// Abandoned provider workers per `(provider id, extension dir)`, kept until
+/// their threads finish. The extension dir is part of the key because two agent
 /// roots can grant the same install id; their workers are independent.
 static ABANDONED_WORKERS: OnceLock<Mutex<HashMap<String, Vec<JoinHandle<()>>>>> = OnceLock::new();
 
@@ -317,8 +317,8 @@ fn abandoned_workers() -> &'static Mutex<HashMap<String, Vec<JoinHandle<()>>>> {
     ABANDONED_WORKERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn abandoned_key(id: &str, plugin_dir: &Path) -> String {
-    format!("{id}\u{0}{}", plugin_dir.display())
+fn abandoned_key(id: &str, extension_dir: &Path) -> String {
+    format!("{id}\u{0}{}", extension_dir.display())
 }
 
 /// Drop entries whose worker threads have finished.
@@ -330,26 +330,26 @@ fn prune_abandoned(workers: &mut HashMap<String, Vec<JoinHandle<()>>>) {
 }
 
 /// How many abandoned workers of one provider are still running.
-pub fn abandoned_worker_count(id: &str, plugin_dir: &Path) -> usize {
+pub fn abandoned_worker_count(id: &str, extension_dir: &Path) -> usize {
     let mut workers = abandoned_workers()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     prune_abandoned(&mut workers);
     workers
-        .get(&abandoned_key(id, plugin_dir))
+        .get(&abandoned_key(id, extension_dir))
         .map_or(0, Vec::len)
 }
 
 /// Record a worker a deadline abandoned, so instance replacement can stay
 /// bounded. A worker that already finished occupies no budget: the next prune
 /// drops it.
-fn record_abandoned_worker(id: &str, plugin_dir: &Path, worker: JoinHandle<()>) {
+fn record_abandoned_worker(id: &str, extension_dir: &Path, worker: JoinHandle<()>) {
     let mut workers = abandoned_workers()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     prune_abandoned(&mut workers);
     workers
-        .entry(abandoned_key(id, plugin_dir))
+        .entry(abandoned_key(id, extension_dir))
         .or_default()
         .push(worker);
 }
@@ -358,10 +358,13 @@ fn record_abandoned_worker(id: &str, plugin_dir: &Path, worker: JoinHandle<()>) 
 /// at the cap: each one pins a thread and a store, and a guest parked in a
 /// host import can keep them alive indefinitely. The caller's request fails
 /// closed and succeeds again once the parked workers return.
-fn refuse_when_abandoned_workers_overflow(id: &str, plugin_dir: &Path) -> Result<(), PluginError> {
-    let count = abandoned_worker_count(id, plugin_dir);
+fn refuse_when_abandoned_workers_overflow(
+    id: &str,
+    extension_dir: &Path,
+) -> Result<(), ExtensionError> {
+    let count = abandoned_worker_count(id, extension_dir);
     if count >= PROVIDER_MAX_ABANDONED_WORKERS {
-        return Err(PluginError::Failed(format!(
+        return Err(ExtensionError::Failed(format!(
             "{id}: {count} abandoned provider workers are still being reaped (cap \
              {PROVIDER_MAX_ABANDONED_WORKERS}); retry once the parked calls return"
         )));
@@ -378,8 +381,8 @@ pub struct ProviderHost {
     #[allow(dead_code)]
     component: Component,
     profile: ProviderProfile,
-    /// `plugins/<id>/`, where `credentials.json` lives.
-    plugin_dir: PathBuf,
+    /// `extensions/<id>/`, where `credentials.json` lives.
+    extension_dir: PathBuf,
     agent_root: Option<PathBuf>,
     transport: Arc<dyn ProviderHttpTransport>,
     /// One request's wall clock. A call that exceeds it is aborted.
@@ -407,7 +410,7 @@ impl ProviderHost {
         id: impl Into<String>,
         wasm: &Path,
         grants: &Grants,
-    ) -> Result<Option<Self>, PluginError> {
+    ) -> Result<Option<Self>, ExtensionError> {
         Self::load_with_options(id, wasm, grants, ProviderHostOptions::default())
     }
 
@@ -417,9 +420,9 @@ impl ProviderHost {
         wasm: &Path,
         grants: &Grants,
         options: ProviderHostOptions,
-    ) -> Result<Option<Self>, PluginError> {
+    ) -> Result<Option<Self>, ExtensionError> {
         let bytes = std::fs::read(wasm)
-            .map_err(|error| PluginError::Failed(format!("read {}: {error}", wasm.display())))?;
+            .map_err(|error| ExtensionError::Failed(format!("read {}: {error}", wasm.display())))?;
         Self::load_bytes_with_options(id, wasm, &bytes, grants, options)
     }
 
@@ -434,7 +437,7 @@ impl ProviderHost {
         bytes: &[u8],
         grants: &Grants,
         options: ProviderHostOptions,
-    ) -> Result<Option<Self>, PluginError> {
+    ) -> Result<Option<Self>, ExtensionError> {
         let id = id.into();
         let Some(profile) = grants
             .provider
@@ -445,14 +448,14 @@ impl ProviderHost {
             return Ok(None);
         };
         if profile.models.is_empty() {
-            return Err(PluginError::Failed(format!(
+            return Err(ExtensionError::Failed(format!(
                 "{id}: provider profile has no models"
             )));
         }
-        let plugin_dir = wasm.parent().unwrap_or_else(|| Path::new("."));
-        refuse_when_abandoned_workers_overflow(&id, plugin_dir)?;
+        let extension_dir = wasm.parent().unwrap_or_else(|| Path::new("."));
+        refuse_when_abandoned_workers_overflow(&id, extension_dir)?;
         let ticker = crate::wasm::render_ticker().ok_or_else(|| {
-            PluginError::Failed(format!("{id}: provider epoch ticker is unavailable"))
+            ExtensionError::Failed(format!("{id}: provider epoch ticker is unavailable"))
         })?;
 
         let mut config = crate::wasm::wasmtime_config(&crate::wasm::Options {
@@ -461,19 +464,20 @@ impl ProviderHost {
             ..crate::wasm::Options::default()
         });
         config.epoch_interruption(true);
-        let engine = Arc::new(
-            Engine::new(&config)
-                .map_err(|error| PluginError::Failed(format!("{id}: provider engine: {error}")))?,
-        );
+        let engine =
+            Arc::new(Engine::new(&config).map_err(|error| {
+                ExtensionError::Failed(format!("{id}: provider engine: {error}"))
+            })?);
         ticker.register(&engine);
         let component = Component::new(&engine, bytes)
-            .map_err(|error| PluginError::Failed(format!("load {}: {error}", wasm.display())))?;
+            .map_err(|error| ExtensionError::Failed(format!("load {}: {error}", wasm.display())))?;
 
         let mut linker = Linker::new(&engine);
-        World::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state)
-            .map_err(|error| PluginError::Failed(format!("link plugin interfaces: {error}")))?;
+        World::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state).map_err(
+            |error| ExtensionError::Failed(format!("link extension interfaces: {error}")),
+        )?;
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-            .map_err(|error| PluginError::Failed(format!("link wasi: {error}")))?;
+            .map_err(|error| ExtensionError::Failed(format!("link wasi: {error}")))?;
 
         let limits = wasmtime::StoreLimitsBuilder::new()
             .memory_size(
@@ -491,7 +495,7 @@ impl ProviderHost {
             grants: Grants::default(),
             fs_root: wasm.parent().map(|dir| dir.join("data")),
             project_dir: None,
-            plugin_id: Some(id.clone()),
+            extension_id: Some(id.clone()),
             declared_flags: Arc::new(std::collections::BTreeSet::new()),
             sockets: HashMap::new(),
             next_socket: 1,
@@ -518,7 +522,7 @@ impl ProviderHost {
             ),
             fuel: options.fuel.unwrap_or(u64::MAX),
             profile,
-            plugin_dir: plugin_dir.to_path_buf(),
+            extension_dir: extension_dir.to_path_buf(),
             agent_root: options.agent_root,
             transport: options
                 .transport
@@ -578,7 +582,7 @@ impl ProviderHost {
                     crate::wasm::install_context_kind(None, &caps, CallKind::Metadata, None);
                 let outcome = inner
                     .guest
-                    .kiqi_plugin_provider_api()
+                    .kiqi_extension_provider_api()
                     .call_list_providers(&mut inner.store);
                 crate::wasm::clear_context();
                 inner.store.data_mut().reap_call_scoped();
@@ -604,7 +608,7 @@ impl ProviderHost {
                 self.disabled.store(true, Ordering::Release);
                 // The metadata worker still owns the store; keep it on the
                 // abandonment ledger so replacement stays bounded.
-                record_abandoned_worker(&self.id, &self.plugin_dir, worker);
+                record_abandoned_worker(&self.id, &self.extension_dir, worker);
                 Err(format!(
                     "{}: list-providers did not finish within {}s",
                     self.id,
@@ -692,7 +696,7 @@ impl ProviderHost {
         }
         let credential = crate::wasm::provider_http::resolve_credential(
             &self.profile,
-            &self.plugin_dir,
+            &self.extension_dir,
             self.agent_root.as_deref(),
         )
         .map_err(|error| match error {
@@ -753,7 +757,7 @@ impl ProviderHost {
                 );
                 let outcome = inner
                     .guest
-                    .kiqi_plugin_provider_api()
+                    .kiqi_extension_provider_api()
                     .call_request(&mut inner.store, &request);
                 crate::wasm::clear_context();
                 inner.store.data_mut().provider_call = None;
@@ -810,7 +814,7 @@ impl ProviderHost {
                 // The worker still owns the store and may sit parked in a
                 // host import for a long time; the abandonment ledger is
                 // what bounds how many such instances may pile up.
-                record_abandoned_worker(&self.id, &self.plugin_dir, worker);
+                record_abandoned_worker(&self.id, &self.extension_dir, worker);
                 Err(format!(
                     "{}: provider request exceeded its {}s deadline",
                     self.id,
@@ -876,7 +880,7 @@ impl ProviderHost {
         if let Some(mut inner) = guard.take() {
             let _ = inner
                 .guest
-                .kiqi_plugin_plugin_api()
+                .kiqi_extension_extension_api()
                 .call_shutdown(&mut inner.store);
             inner.store.data_mut().reap_call_scoped();
         }

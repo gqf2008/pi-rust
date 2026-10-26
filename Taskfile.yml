@@ -10,9 +10,9 @@
 # `cargo publish`. Keep this file as the ergonomic entry point so the
 # dependency order is encoded once and `cargo test` stays the pre-flight.
 #
-# Dependency order (v0.1.4+): telemetry → ai → agent → plugin →
+# Dependency order (v0.1.4+): telemetry → ai → agent → extension →
 # host → tools → harness → tui → cli. `kiqi-host` is a leaf and
-# extensions depends on plugin + ai + agent, so both land before
+# extensions depends on extension + ai + agent, so both land before
 # tools/harness (which are independent of them but published in family order).
 #
 # Usage:

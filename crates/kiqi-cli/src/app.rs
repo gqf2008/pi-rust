@@ -74,10 +74,10 @@ pub async fn run() -> i32 {
     // Startup profiling wrapper: KI_TIMING=1 records namespace timings and
     // flushes them to stderr once the run completes, regardless of exit path.
     crate::timings::reset(crate::timings::TimingNamespace::Main);
-    // plugin-host 的 guest 失败诊断（tracing::warn）在 ki 里没有 subscriber，
+    // extension-host 的 guest 失败诊断（tracing::warn）在 ki 里没有 subscriber，
     // 会整体被丢弃——接进 ki 自己的运行时日志（agent_dir/logs/ki.log），
     // 与 MCP signal、goal continuation 的诊断走同一处。
-    crate::plugins::install_guest_error_sink();
+    crate::extensions::install_guest_error_sink();
     let code = run_inner().await;
     crate::timings::print_timings();
     code
@@ -89,7 +89,7 @@ async fn run_inner() -> i32 {
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
     // P6: the cdylib dev channel (`ki dev`, `__kiqi_dev_cleanup`) is retired —
-    // wasm guests (`ki insmod`) are the only plugin channel.
+    // wasm guests (`ki insmod`) are the only extension channel.
     // ---- `ki --connect <addr>` — pure remote client ----
     // Intercepted before any provider / harness / session / extension work so
     // the client holds no local agent resources at all: it only connects to a
@@ -107,7 +107,7 @@ async fn run_inner() -> i32 {
     // user's muscle memory must not silently turn into a prompt run).
     if matches!(argv.first().map(String::as_str), Some("dev" | "dev-local")) {
         eprintln!(
-            "error: the cdylib dev channel (`ki dev`) was removed; wasm plugins install via `ki insmod --build plugins/wasm/<guest>`"
+            "error: the cdylib dev channel (`ki dev`) was removed; wasm extensions install via `ki insmod --build extensions/wasm/<guest>`"
         );
         return EXIT_USAGE;
     }
@@ -130,7 +130,7 @@ async fn run_inner() -> i32 {
         }
         Some("auth") => {
             // P6: the cdylib extension providers are gone; auth sees an empty
-            // registry (wasm plugins surface OAuth through the host instead).
+            // registry (wasm extensions surface OAuth through the host instead).
             let extension_session = kiqi_host::ExtensionSession::none();
             return crate::auth::run_with_extensions(&argv[1..], extension_session.snapshot_arc())
                 .await;
@@ -138,23 +138,23 @@ async fn run_inner() -> i32 {
         Some("events") => return crate::events::run(&argv[1..]).await,
         Some("configure") => return crate::configure::run(&argv[1..]).await,
         Some("update") => return crate::updates::run_self_update(&argv[1..]),
-        Some("plugin") => return crate::plugin_cli::run(&argv[1..]),
+        Some("extension") => return crate::extension_cli::run(&argv[1..]),
         // Kernel-flavoured spellings for the wasm tier.
-        Some("insmod") => return crate::plugin_cli::insmod(&argv[1..]),
-        Some("rmmod") => return crate::plugin_cli::rmmod(&argv[1..]),
+        Some("insmod") => return crate::extension_cli::insmod(&argv[1..]),
+        Some("rmmod") => return crate::extension_cli::rmmod(&argv[1..]),
         // These removed commands are intentionally rejected instead of falling
         // through to the prompt path: a retired command must never silently
         // become a prompt run (that is exactly the `ki package` hang the
         // fall-through guard was added for).
         Some(removed @ ("install" | "uninstall" | "package")) => {
             eprintln!(
-                "error: `ki {removed}` is not available; the cdylib extension channel was removed — wasm plugins install via `ki insmod --build plugins/wasm/<guest>`"
+                "error: `ki {removed}` is not available; the cdylib extension channel was removed — wasm extensions install via `ki insmod --build extensions/wasm/<guest>`"
             );
             return EXIT_USAGE;
         }
         Some(removed @ ("pi-package" | "pi-update" | "install-pi" | "uninstall-pi")) => {
             eprintln!(
-                "error: `ki {removed}` is not available; use `ki insmod` (wasm plugins) or `ki update`."
+                "error: `ki {removed}` is not available; use `ki insmod` (wasm extensions) or `ki update`."
             );
             return EXIT_USAGE;
         }
@@ -213,12 +213,12 @@ async fn run_inner() -> i32 {
     // loop nothing to read. `--mode rpc` and `--server` both select RunMode::Rpc.
     //
     // NOTE: the actual `read_piped_stdin()` call is deferred until *after*
-    // extension load (below), because a plugin may `declare
+    // extension load (below), because an extension may `declare
     // {"ownsStdio":true}` — an ACP/MCP-style stdio server that owns this
-    // process's stdin/stdout. Draining stdin before that plugin's `register`
+    // process's stdin/stdout. Draining stdin before that extension's `register`
     // runs would deadlock it (and the host would swallow the client handshake).
-    // `--mode rpc`/`--server` are a static pre-computation (no plugin needed);
-    // the plugin claim is only known once `build()` has loaded extensions.
+    // `--mode rpc`/`--server` are a static pre-computation (no extension needed);
+    // the extension claim is only known once `build()` has loaded extensions.
     let wants_rpc_channel =
         parsed.mode == crate::args::Mode::Rpc || parsed.unknown_flags.contains_key("server");
 
@@ -312,7 +312,7 @@ async fn run_inner() -> i32 {
             }
         };
     // ---- post-load stdin claim + initial message ----
-    // Extensions are loaded by `build()` (above). A plugin may have declared
+    // Extensions are loaded by `build()` (above). An extension may have declared
     // `{"ownsStdio":true}`: this process's stdio belongs to it (an ACP/MCP stdio
     // server), so the host must neither drain stdin nor run a prompt/TUI mode
     // that writes to stdout. Only now — after load — do we know. `--mode
@@ -371,12 +371,12 @@ async fn run_inner() -> i32 {
         mode
     };
 
-    // A plugin that claimed stdio owns this process's stdin/stdout: force the
+    // An extension that claimed stdio owns this process's stdin/stdout: force the
     // headless Rpc lifecycle (dispatch startup events, then wait for completion)
-    // and let the plugin's own protocol server read/write stdio. This is
+    // and let the extension's own protocol server read/write stdio. This is
     // authoritative — it must win over TTY detection and KI_FORCE_TUI,
     // otherwise the host would start a TUI/print run that writes to a stream the
-    // plugin owns.
+    // extension owns.
     let mode = if stdio_claimed { RunMode::Rpc } else { mode };
 
     let exit_code = match mode {
@@ -453,9 +453,9 @@ async fn run_inner() -> i32 {
                 }
 
                 let code = if parsed.unknown_flags.contains_key("server") || stdio_claimed {
-                    // Server mode OR a plugin-claimed stdio server: the extension
+                    // Server mode OR an extension-claimed stdio server: the extension
                     // owns the process's I/O. Wait for its completion or Ctrl+C,
-                    // then dispatch SessionShutdown before unloading plugins.
+                    // then dispatch SessionShutdown before unloading extensions.
                     eprintln!(
                         "[ki] running in headless mode (no TUI); extension owns stdio; Ctrl+C to stop"
                     );

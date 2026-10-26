@@ -17,7 +17,7 @@ ShortDescription: Rust-native, library-first coding-agent runtime and terminal C
 Description: |-
   ki is a library-first coding-agent runtime written in Rust, plus a terminal
   agent built on it. Nine composable crates take you from provider adapters to a
-  durable, crash-resumable agent loop with a stable plugin ABI. Sessions persist
+  durable, crash-resumable agent loop with a stable extension ABI. Sessions persist
   as JSONL and resume after a crash, and the session log self-heals when it was
   written by two processes at once. It can be used as an embedded SDK or as a
   ready-to-run `ki` command.

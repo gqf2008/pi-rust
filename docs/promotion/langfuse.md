@@ -485,7 +485,7 @@ rust-version = "1.78"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-kiqi-plugin-sdk = { workspace = true }  # 稳定 ABI
+kiqi-extension-sdk = { workspace = true }  # 稳定 ABI
 serde_json = { workspace = true }      # JSON 序列化
 reqwest = { workspace = true }         # HTTP 客户端
 ```

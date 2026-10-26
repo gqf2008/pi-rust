@@ -137,10 +137,10 @@ keep the type prefix and scope in the conventional form.
 4. Expect review comments on API additions; the public surface of these crates
    is intended to be small and stable.
 
-If your change touches the plugin contract (`plugins/kiqi-plugin.wit`,
+If your change touches the extension contract (`extensions/kiqi-extension.wit`,
 `kiqi-host`), call it out explicitly in the PR description. Contract changes
-affect every already-built wasm plugin and require a documented negotiation
-story (`docs/design/plugin-abi.md`).
+affect every already-built wasm extension and require a documented negotiation
+story (`docs/design/extension-abi.md`).
 
 If your change touches session persistence (`kiqi-harness`), describe the
 recovery behaviour for a crash in the middle of the affected operation.

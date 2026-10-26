@@ -4,7 +4,7 @@
 //! granted provider id and a small form, and gets back a status enum. Everything
 //! token-bearing happens here — the grant supplies the endpoints and client id,
 //! the host performs the POST, parses the standard OAuth response itself and
-//! hands the token to an injected [`PluginCredentialSink`]. No token value is
+//! hands the token to an injected [`ExtensionCredentialSink`]. No token value is
 //! ever returned to the guest (or logged).
 //!
 //! Device authorization is **host-side too**: [`request_device_authorization`]
@@ -40,7 +40,7 @@ pub const TOKEN_FORM_KEYS: &[&str] = &[
 pub const MAX_OAUTH_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// A token pair the host parsed and will store. It never leaves the host: the
-/// guest sees only [`crate::wasm::kiqi::plugin::types::oauth_credential_status`].
+/// guest sees only [`crate::wasm::kiqi::extension::types::oauth_credential_status`].
 #[derive(Clone, PartialEq, Eq)]
 pub struct OAuthTokens {
     pub access: String,
@@ -129,7 +129,7 @@ pub fn ensure_oauth_profile_matches(
     Ok(())
 }
 
-/// Where a plugin's own OAuth credential goes.
+/// Where an extension's own OAuth credential goes.
 ///
 /// This is the **only** way a guest's token reaches disk. The host crate cannot
 /// depend on `kiqi-cli` (the dependency runs the other way), so the CLI installs
@@ -137,10 +137,10 @@ pub fn ensure_oauth_profile_matches(
 /// an exchange return `failed` rather than writing somewhere it should not.
 ///
 /// Implementations must namespace the key as
-/// `plugin:<install-id>:<provider-id>` and must never replace a non-plugin
+/// `extension:<install-id>:<provider-id>` and must never replace a non-extension
 /// `auth.json` entry.
-pub trait PluginCredentialSink: fmt::Debug + Send + Sync {
-    fn store_plugin_oauth(
+pub trait ExtensionCredentialSink: fmt::Debug + Send + Sync {
+    fn store_extension_oauth(
         &self,
         install_id: &str,
         provider_id: &str,
@@ -150,13 +150,13 @@ pub trait PluginCredentialSink: fmt::Debug + Send + Sync {
         profile_fingerprint: &str,
     ) -> Result<(), String>;
 
-    fn read_plugin_oauth(
+    fn read_extension_oauth(
         &self,
         install_id: &str,
         provider_id: &str,
     ) -> Result<Option<StoredOAuthToken>, String>;
 
-    fn delete_plugin_oauth(&self, install_id: &str, provider_id: &str) -> Result<bool, String>;
+    fn delete_extension_oauth(&self, install_id: &str, provider_id: &str) -> Result<bool, String>;
 }
 
 /// One HTTP response from a token/device/revocation endpoint.
@@ -233,7 +233,7 @@ impl OAuthTransport for HttpOAuthTransport {
 
 /// One flow's request/deadline budget, derived from the grant.
 ///
-/// The clock starts at the first charge, so loading a plugin does not consume
+/// The clock starts at the first charge, so loading an extension does not consume
 /// the budget before the user begins a login. Enforcement is host-side because
 /// epoch/fuel cannot interrupt a guest blocked in a host import.
 #[derive(Debug, Clone)]
@@ -310,7 +310,7 @@ impl Default for OAuthRequestBudget {
 ///
 /// Returns the fields in a host-controlled order. Refusals are policy, not
 /// transport failures: `client_secret`, `client_id` and every unknown key are
-/// rejected, and `grant_type` is limited to the two grants a plugin may use.
+/// rejected, and `grant_type` is limited to the two grants an extension may use.
 pub fn parse_token_form(form: &str) -> Result<Vec<(String, String)>, String> {
     let value: serde_json::Value = serde_json::from_str(form)
         .map_err(|_| "`oauth-http` form must be a JSON object of string values".to_string())?;

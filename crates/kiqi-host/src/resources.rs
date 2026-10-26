@@ -2,9 +2,9 @@
 //!
 //! pi's `resources_discover` is the one extension event that **returns a
 //! result to the host** (all other `on()` handlers are fire-and-forget). The
-//! plugin hands back `{skillPaths?, promptPaths?, themePaths?}` — bare string
+//! extension hands back `{skillPaths?, promptPaths?, themePaths?}` — bare string
 //! arrays — which the host merges across handlers and feeds into Part A's
-//! loaders (the "三者同交付" coherence point: the plugin's discovered paths
+//! loaders (the "三者同交付" coherence point: the extension's discovered paths
 //! reuse the same skill/prompt loaders as the static Part-A dirs).
 //!
 //! ## The signature problem and its fix
@@ -12,8 +12,8 @@
 //! The SDK's [`EventHandlerFn`] (`i32` return, no `out`) cannot express this
 //! result return, so B5b adds a distinct [`ResourcesDiscoverFn`] with an owning
 //! `out: *mut StbString` (mirror of [`RuntimeActionFn`]'s out-param shape). The
-//! `out` StbString is **plugin-produced**, so the host reclaims it via the
-//! plugin's own `plugin_free_string`, which traveled alongside the handler at
+//! `out` StbString is **extension-produced**, so the host reclaims it via the
+//! extension's own `extension_free_string`, which traveled alongside the handler at
 //! registration (stored in [`ResourcesDiscoverHandler`]). This ownership detail
 //! is the load-bearing thing the fire-and-forget event signature cannot express.
 //!
@@ -54,8 +54,8 @@ pub struct DiscoveredResources {
 ///
 /// Per-handler errors (nonzero `rc`) and panics are logged and skipped; they do
 /// NOT abort the fan-out (mirrors pi `runner.ts:1179-1188`). The `out`
-/// StbString each handler produces is plugin-owned and reclaimed via that
-/// handler's stored `plugin_free_string` before moving to the next handler.
+/// StbString each handler produces is extension-owned and reclaimed via that
+/// handler's stored `extension_free_string` before moving to the next handler.
 pub fn emit_resources_discover(
     cwd: &str,
     reason: &str,
@@ -69,7 +69,7 @@ pub fn emit_resources_discover(
         return DiscoveredResources::default();
     }
 
-    // Borrowed inputs for every call: cwd + reason as StbStringRef (the plugin
+    // Borrowed inputs for every call: cwd + reason as StbStringRef (the extension
     // reads them during the call; we hold the &str on this stack). pi's event
     // envelope also carries `type: "resources_discover"` but the handler
     // signature passes cwd/reason directly (the type is implicit in the slot).
@@ -105,7 +105,7 @@ pub fn emit_resources_discover(
 
 /// Call one handler and reclaim its `out` StbString. Returns the parsed paths
 /// (`Ok(DiscoveredResources)`) on `rc==0`, or the nonzero `rc` on error. The
-/// `out` string is always freed (via the handler's `plugin_free_string`) before
+/// `out` string is always freed (via the handler's `extension_free_string`) before
 /// returning, whether or not parsing succeeded — a handler returning `0` with a
 /// malformed payload still has its allocation reclaimed.
 fn call_one_handler(
@@ -114,7 +114,7 @@ fn call_one_handler(
     reason_ref: StbStringRef,
 ) -> Result<DiscoveredResources, i32> {
     // The uninitialized `out` slot the handler writes into on success. pi's
-    // contract: `rc==0` ⇒ `out` is a plugin-owned JSON string the host frees;
+    // contract: `rc==0` ⇒ `out` is an extension-owned JSON string the host frees;
     // `rc!=0` ⇒ `out` is left untouched (the handler wrote nothing). We zero it
     // so a `rc==0` handler that forgets to write still yields an empty parse
     // rather than UB.
@@ -124,15 +124,15 @@ fn call_one_handler(
         // Handler reported an error and should NOT have written `out`. Defensively
         // free a non-empty `out` anyway (a misbehaving handler that wrote then
         // returned nonzero would otherwise leak). `free_with` is a no-op on empty.
-        out.free_with(Some(h.plugin_free_string));
+        out.free_with(Some(h.extension_free_string));
         return Err(rc);
     }
 
-    // Copy the plugin-owned bytes into a safe String, THEN free the plugin
-    // allocation (the plugin owns the bytes; we must not keep a reference past
+    // Copy the extension-owned bytes into a safe String, THEN free the extension
+    // allocation (the extension owns the bytes; we must not keep a reference past
     // the free). `to_string_lossy` copies without freeing.
     let json = out.to_string_lossy();
-    out.free_with(Some(h.plugin_free_string));
+    out.free_with(Some(h.extension_free_string));
 
     let paths = parse_discover_payload(&json);
     Ok(paths)
@@ -183,7 +183,7 @@ mod tests {
     use crate::{ResourcesDiscoverFn, StbString};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Plugin-side `free_string` for the test handlers: reconstructs the
+    /// Extension-side `free_string` for the test handlers: reconstructs the
     /// `Box<[u8]>` from ptr+len and drops it (matches `StbString::from_string`'s
     /// allocation, same as the real `host_free_string` in lib.rs).
     extern "C" fn test_free(s: StbString) {

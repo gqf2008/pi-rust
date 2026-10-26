@@ -349,7 +349,7 @@ pub(crate) async fn done_when_cmd_satisfied(cwd: &std::path::Path, cmd: &str) ->
     }
 }
 
-/// After a run ends, keep an active goal moving. The goal plugin injects the
+/// After a run ends, keep an active goal moving. The goal extension injects the
 /// goal into context but cannot start runs; without this the session would sit
 /// idle between turns. A signal wake in the same boundary wins (its run already
 /// carries the goal), and user input / Esc always take precedence.

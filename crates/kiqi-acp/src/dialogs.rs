@@ -1,7 +1,7 @@
-//! The dialog pump: plugin UI dialogs → `session/request_permission`
+//! The dialog pump: extension UI dialogs → `session/request_permission`
 //! (batch 2 wave 2, design doc §13).
 //!
-//! The mailbox is a plain polling structure and the plugin "blocks" inside its
+//! The mailbox is a plain polling structure and the extension "blocks" inside its
 //! own runtime action (`UiDialogMailbox` poll loop), so `drive_turn` never
 //! sees the dialog — the pump is the only piece that has to exist: it polls
 //! `take_pending`, maps `purpose=permission` dialogs onto the ACP permission
@@ -103,7 +103,7 @@ fn kind_for(permission: &str) -> Option<PermissionOptionKind> {
 }
 
 /// The kiqi-acp `permission_answer` mapping: a Selected outcome whose
-/// `optionId` parses back to one of OUR indices answers the plugin with the
+/// `optionId` parses back to one of OUR indices answers the extension with the
 /// option's original title; anything else — Cancelled, an unknown/foreign
 /// option id, a future variant — cancels. Never guessed.
 pub(crate) fn apply_outcome(
@@ -141,7 +141,7 @@ pub(crate) fn apply_outcome(
 }
 
 /// One dialog, panic-isolated: a poisoned dialog must neither take the pump
-/// (or the connection) down nor leave the plugin's poll blocked, so the guard
+/// (or the connection) down nor leave the extension's poll blocked, so the guard
 /// logs the panic and releases the mailbox entry.
 async fn guarded_dialog<F, T>(request_id: &str, mailbox: &UiDialogMailbox, work: F) -> Option<T>
 where
@@ -201,7 +201,7 @@ async fn dialog_work(
             &dialog.titles,
         ),
         Err(error) => {
-            // The connection is closing (or answered uncleanly): the plugin
+            // The connection is closing (or answered uncleanly): the extension
             // must never hang on a dead client.
             diag::diagln!(
                 "request_permission for {} failed ({error}); cancelling",
@@ -288,7 +288,7 @@ impl DialogPump {
     }
 
     /// `session/cancel` for the live session: release every open dialog on the
-    /// plugin side and stop waiting on the client for them. The pump itself
+    /// extension side and stop waiting on the client for them. The pump itself
     /// keeps running for the rest of the session.
     pub(crate) fn cancel_all(&self) {
         self.mailbox.cancel_all();
@@ -296,7 +296,7 @@ impl DialogPump {
     }
 
     /// Session close. Detach comes FIRST (the rpc-mode EOF order): cancelled
-    /// mailbox entries release the plugin polls while the plugin runtime is
+    /// mailbox entries release the extension polls while the extension runtime is
     /// still alive to observe them; the caller then dispatches the
     /// `SessionShutdown` advisory before the reload context drops.
     pub(crate) fn shutdown(&self) {
@@ -538,7 +538,7 @@ mod tests {
             }))
             .expect("open");
         // A default panic hook prints the panic; catching it must still yield
-        // `None` and release the entry so the plugin poll cannot hang.
+        // `None` and release the entry so the extension poll cannot hang.
         let result = guarded_dialog("q1", &mailbox, async { panic!("poisoned dialog") }).await;
         assert!(result.is_none());
         let poll = mailbox

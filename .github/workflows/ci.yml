@@ -45,7 +45,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-          # The plugin-host e2e test builds the conformance guest component.
+          # The extension-host e2e test builds the conformance guest component.
           targets: wasm32-wasip2
 
       - name: Check formatting
@@ -141,7 +141,7 @@ jobs:
       #
       # The `--all-features` step above only *checks* the workspace, so a
       # feature-gated test that fails to compile or fails at runtime stays
-      # invisible. (`kiqi-plugin-sdk` used to be listed here; the crate went
+      # invisible. (`kiqi-extension-sdk` used to be listed here; the crate went
       # away with the cdylib channel on 2026-10-26.)
       - name: Test the crates whose tests need non-default features
         run: >
@@ -151,7 +151,7 @@ jobs:
       # Guests build for `wasm32-wasip2`, but wit-bindgen also generates host
       # stubs, so their pure-logic unit tests run natively here.
       - name: Test wasm guests' native unit tests
-        run: cargo test --manifest-path plugins/wasm/Cargo.toml -p kiqi-plan-mode-guest --locked
+        run: cargo test --manifest-path extensions/wasm/Cargo.toml -p kiqi-plan-mode --locked
 
 
   # Compile the workspace on Windows. Nothing else did: the release matrix is

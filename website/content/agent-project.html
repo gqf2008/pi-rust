@@ -29,7 +29,7 @@
 <tr>
 <td>Rust 扩展</td>
 <td>宿主加载 <code>.ki/extensions/*.dll</code></td>
-<td><code>kiqi-plugin-sdk</code></td>
+<td><code>kiqi-extension-sdk</code></td>
 <td>给全局 <code>ki</code> 加工具/Provider/事件，不改宿主</td>
 </tr>
 </tbody>
@@ -93,7 +93,7 @@ crate-type = [&quot;cdylib&quot;, &quot;rlib&quot;]   # cdylib 给宿主；rlib 
 kiqi-agent = &quot;&lt;ki&gt;&quot;
 kiqi-ai = { version = &quot;&lt;ki&gt;&quot;, features = [&quot;providers&quot;] }
 kiqi-tools = &quot;&lt;ki&gt;&quot;
-kiqi-plugin-sdk = &quot;&lt;ki&gt;&quot;          # 只有 cdylib 适配需要
+kiqi-extension-sdk = &quot;&lt;ki&gt;&quot;          # 只有 cdylib 适配需要
 tokio = { version = &quot;1&quot;, features = [&quot;full&quot;] }
 async-trait = &quot;0.1&quot;
 serde = { version = &quot;1&quot;, features = [&quot;derive&quot;] }
@@ -106,7 +106,7 @@ thiserror = &quot;1&quot;
 </code></pre>
 <p>边界规则：</p>
 <ul>
-<li><strong>扩展只依赖 <code>kiqi-plugin-sdk</code>，绝不依赖 <code>kiqi-cli</code>、<code>kiqi-extensions</code>、<code>kiqi-harness</code>
+<li><strong>扩展只依赖 <code>kiqi-extension-sdk</code>，绝不依赖 <code>kiqi-cli</code>、<code>kiqi-extensions</code>、<code>kiqi-harness</code>
   内部模块</strong>——宿主链接插件，不是插件链接宿主，否则 ABI 和版本会耦合。</li>
 <li>内嵌 Agent 只依赖 <code>kiqi-agent</code>/<code>kiqi-ai</code>/<code>kiqi-tools</code>，与扩展 ABI 解耦。</li>
 <li>需要会话、压缩、skills、上下文文件时再加 <code>kiqi-harness</code>。</li>
@@ -179,10 +179,10 @@ while let Some(event) = events.recv().await {
 <li>需要 CLI 级别的会话/压缩/skills 时，用 <code>kiqi-harness</code> 而不是自己重造。</li>
 </ul>
 <h2 id="6-cdylib-abi-ki">6. cdylib ABI 适配（给全局 <code>ki</code> 用）</h2>
-<p>宿主只加载统一 C ABI 符号 <code>kiqi_plugin_register</code>。扩展使用 <code>export_plugin!</code>，
-通过同一个 <code>PluginApi</code> 注册能力并调用 <code>api.declare</code> 声明优先级/平台。
+<p>宿主只加载统一 C ABI 符号 <code>kiqi_extension_register</code>。扩展使用 <code>export_extension!</code>，
+通过同一个 <code>ExtensionApi</code> 注册能力并调用 <code>api.declare</code> 声明优先级/平台。
 SDK 在注册前检查 <code>abi_version</code> 和 <code>struct_size</code>；不兼容时返回非零状态，宿主报告加载失败。</p>
-<pre><code class="language-rust">kiqi_plugin_sdk::export_plugin!(|api| {
+<pre><code class="language-rust">kiqi_extension_sdk::export_extension!(|api| {
     let Some(register_tool) = api.register_tool else {
         return -1;                         // 能力检测：槽位缺失就明确失败
     };
@@ -195,7 +195,7 @@ SDK 在注册前检查 <code>abi_version</code> 和 <code>struct_size</code>；�
 <p>工具生命周期固定为 <code>execute → poll → cancel → destroy</code>：<code>execute</code> 分配每次调用的
 handle，<code>poll</code> 必须非阻塞并响应取消标记，<code>cancel</code> 只置位不释放，<code>destroy</code> 由宿主
 调用一次并释放。任何 <code>extern "C"</code> 边界都不能 unwind。</p>
-<p><strong>先复制 <code>examples/plugin-stub/src/lib.rs</code> 的骨架</strong>，再替换 schema 和领域逻辑；
+<p><strong>先复制 <code>examples/extension-stub/src/lib.rs</code> 的骨架</strong>，再替换 schema 和领域逻辑；
 不要重新设计所有权协议。完整的 ABI、能力检测、事件处理、资源发现与发布检查见
 <code>docs</code> 的 <code>authoring</code> 主题。</p>
 <h2 id="7-promptsskillsagentsmd">7. 项目资源：prompts、skills、AGENTS.md</h2>
@@ -275,7 +275,7 @@ Cargo target DLL 复制成固定文件名。</p>
 <li><code>ki dev --no-watch</code> 能编译、加载并注册预期工具；<code>ki install &lt;crate&gt; --force</code>
   的干净安装路径通过。</li>
 <li>提供 <code>cdylib</code> 时，<code>crate-type</code> 包含 <code>"cdylib"</code>，导出
-  <code>kiqi_plugin_register</code>，依赖已发布的 <code>kiqi-plugin-sdk</code>。</li>
+  <code>kiqi_extension_register</code>，依赖已发布的 <code>kiqi-extension-sdk</code>。</li>
 <li><code>README</code> 写明工具 schema、权限边界、持久化文件、网络访问、支持平台和卸载方式；
   <code>AGENTS.md</code>、<code>config/agent.json</code>、<code>prompts/</code>、<code>skills/</code>、<code>.ki/settings.json</code>
   之间的路径保持一致。</li>
@@ -288,7 +288,7 @@ Cargo target DLL 复制成固定文件名。</p>
 <li>写工具登记表 <code>TOOLS</code> + 唯一 <code>run_tool</code>，再写两个适配器。</li>
 <li>写 <code>prompts/system.md</code> 与 <code>AGENTS.md</code>，约束保持一致。</li>
 <li>写 <code>config/agent.json</code> 和 <code>.ki/settings.json</code>。</li>
-<li>接内嵌 Agent 入口；需要全局宿主时复制 <code>examples/plugin-stub</code> 的 ABI 骨架。</li>
+<li>接内嵌 Agent 入口；需要全局宿主时复制 <code>examples/extension-stub</code> 的 ABI 骨架。</li>
 <li>加脚本：编译扩展、启动内嵌 Agent、启动全局 ki。</li>
 <li>加 schema 对齐测试和至少一个端到端 smoke test。</li>
 <li>用 <code>--debug-system-prompt</code> 确认项目提示词与动态 skill 路由进入最终 composed prompt。</li>
@@ -299,7 +299,7 @@ Cargo target DLL 复制成固定文件名。</p>
 <li>先调用 <code>docs</code> 查询 <code>agent</code>（本指南）；扩展开发查 <code>authoring</code>，调试查 <code>debugging</code>。</li>
 <li>读当前仓库现有 <code>Cargo.toml</code>、SDK 版本与相邻项目约定，不猜 API。</li>
 <li>先落目录和单一工具登记点，再写适配器，最后接入口。</li>
-<li>优先复制仓库内最小骨架（<code>examples/minimal</code>、<code>examples/plugin-stub</code>）。</li>
+<li>优先复制仓库内最小骨架（<code>examples/minimal</code>、<code>examples/extension-stub</code>）。</li>
 <li>用 faux provider 做离线测试，用 <code>ki dev --no-watch</code> 做真实加载 smoke test。</li>
 <li>不声称未验证的 ABI/capability 已完全兼容；如实记录降级行为。</li>
 </ol>

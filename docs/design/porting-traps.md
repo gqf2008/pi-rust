@@ -2,7 +2,7 @@
 
 > 来源：ki（Rust）实现与多轮对抗审查中**实际踩过并在测试里钉住**的坑。每条是
 > 「陷阱 → 不变量 → 验收」三段，语言无关，Zig 侧按自己的并发模型映射即可。
-> 详细取舍见 `ki-acp-serve.md`、`ki-mcp-builtin.md`、`plugin-abi.md`。
+> 详细取舍见 `ki-acp-serve.md`、`ki-mcp-builtin.md`、`extension-abi.md`。
 
 ## 1. ACP / 控制面
 

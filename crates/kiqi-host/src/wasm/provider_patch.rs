@@ -1,7 +1,7 @@
 //! Validation and clamping for a `before-provider-request` patch.
 //!
 //! A wasm guest may answer the provider gate with `event-action.patch(json)`.
-//! The patch is untrusted: it is the only path by which a sandboxed plugin can
+//! The patch is untrusted: it is the only path by which a sandboxed extension can
 //! change the live request options, so the host validates it against a fixed
 //! table before anything is applied. Any violation rejects the WHOLE patch —
 //! partial application is not intended — and the request proceeds unpatched.
@@ -21,7 +21,7 @@
 //! `null` deletes a map entry (the same inner-`None` semantics the native
 //! [`kiqi_ai::SimpleStreamOptionsPatch`] uses). Header names are matched
 //! case-insensitively against [`DENIED_HEADERS`] for **insertion and deletion**:
-//! a plugin cannot shadow a credential header by removing and re-adding it.
+//! an extension cannot shadow a credential header by removing and re-adding it.
 
 use serde_json::Value;
 

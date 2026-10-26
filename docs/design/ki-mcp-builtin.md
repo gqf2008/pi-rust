@@ -3,7 +3,7 @@
 > 状态：**已立项，方案待评审**（2026-10-16）。目标：把 MCP 客户端从「插件」提升为 **ki 宿主级能力**
 > ——外部 MCP server 在 `settings.json` 里配置、连接随会话存活、工具展开成原生工具；ACP 的
 > `session/new mcpServers` 从拒绝改为接受。
-> 关联：`plugin-abi.md` §6.2（mcp-adapter 不迁 wasm 的裁定：长连/起子进程，宿主级功能）；
+> 关联：`extension-abi.md` §6.2（mcp-adapter 不迁 wasm 的裁定：长连/起子进程，宿主级功能）；
 > `ki-acp-serve.md`（ACP 面，批次 3 在此合流）。前身实现：`rpi-package/packages/kiqi-mcp-adapter`
 > （手写客户端 2299 行，本机曾以 dylib 运行，已于 2026-10-16 退役）。
 
@@ -12,7 +12,7 @@
 | 事实 | 证据 |
 |---|---|
 | MCP 连接必须跨工具调用存活 | 前身实现按 `(host_scope, identity, name)` 键把连接存进程级 map，跨调用复用（`runtime.rs:134-185`）；stdio server 是长活子进程 |
-| wasm ABI 表达不了 | `exec`/`proc` 句柄随调用收（`plugin-abi.md` §6.32/§6.34）；`net-http` 请求级 |
+| wasm ABI 表达不了 | `exec`/`proc` 句柄随调用收（`extension-abi.md` §6.32/§6.34）；`net-http` 请求级 |
 | ACP 协议面本就期待宿主管 MCP | `session/new` 携带 `mcpServers`（schema `v1/agent.rs:2659`）；ki 现为**响亮拒绝**（`acp/mod.rs:266-276, 374-383`） |
 | 宿主内建的所有机制已就位 | 内建工具 trait（`kiqi-agent/src/agent_tool.rs:29`）、装配 seam（`session.rs:371-378` 之间）、会话级长活资源先例（ReloadContext/ACP LiveSession） |
 | 生态有官方 SDK | `rmcp`（modelcontextprotocol/rust-sdk，Apache-2.0）；ABB 已在本组织内用 1.8.0 跑通 stdio 全链路（`abb/crates/abb-agent/src/mcp.rs`，1253 行） |
@@ -40,7 +40,7 @@
 ## 4. 设计取舍
 
 ### 4.1 宿主级，不是插件（已裁定，不重复论证）
-`plugin-abi.md` §6.2 已裁：长连 + 起子进程，宿主级功能。本机已据此退役 mcp-adapter dylib。
+`extension-abi.md` §6.2 已裁：长连 + 起子进程，宿主级功能。本机已据此退役 mcp-adapter dylib。
 
 ### 4.2 引擎：`rmcp` 1.x，pin 精确版本
 采用 `rmcp = { version = "1.8", default-features = false, features = ["client", "transport-child-process"] }`（与 ABB 同为 1.x 线；3.x 近周级 churn + 1.88 MSRV，v1 不冒险）。协议值经 `serde_json` 中转，不依赖 rmcp 的 typed fields。HTTP 传输留批次 2（rmcp 的 HTTP 要 reqwest 0.13，与 ki 的 0.12 重复——届时裁决「接受重复」或「自写 HTTP 层」，前身实现有现成的 SSE 解码器）。

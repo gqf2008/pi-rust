@@ -12,7 +12,7 @@
 //!
 //! Historically only the *tests* took a lock (`config::test_support::env_lock`),
 //! which serialized test-against-test but not test-against-the-product-code it
-//! calls. `plugin_session_actions_reattach_the_signal_host` reached
+//! calls. `extension_session_actions_reattach_the_signal_host` reached
 //! `set_active_session` without the lock and rewrote `KI_AGENT_ID` under a
 //! sibling test's assertion — measured at 15/40 runs failing with
 //! `--test-threads=16` and 0/20 with a single thread. Every writer therefore

@@ -95,7 +95,7 @@ node scripts/bench-vs-pi.mjs --pi .bench/node_modules/.bin/pi --runs 11 --warmup
 
 ## 项目
 
-ki 是 Rust 原生、library-first 的 coding-agent runtime，九个 crate 同版本发布：`kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli`，另有 `kiqi-plugin-sdk`（稳定 `#[repr(C)]` ABI）与 `kiqi-extensions`（宿主加载器）。MIT 许可。
+ki 是 Rust 原生、library-first 的 coding-agent runtime，九个 crate 同版本发布：`kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli`，另有 `kiqi-extension-sdk`（稳定 `#[repr(C)]` ABI）与 `kiqi-extensions`（宿主加载器）。MIT 许可。
 
 - GitHub：https://github.com/gqf2008/pi-rust
 - 官网：https://ki.laofu.online/
@@ -161,7 +161,7 @@ The first bug was RSS sampling inside the timing window. Spawning `tasklist` eve
 
 The second was npm's `.bin/pi` shim, which needs `cmd.exe` on Windows and would have charged that startup to pi. The harness now resolves the shim to its JS entrypoint and runs `node` directly.
 
-The third was the worst: ki was not actually isolated. I set `PI_CODING_AGENT_DIR` and `PI_OFFLINE`, which are pi's variables; ki reads `KI_CODING_AGENT_DIR` and `KI_OFFLINE`. So pi ran against an empty config dir while ki read the real `~/.ki/agent` and loaded the 25 plugin DLLs installed there (`kiqi_voice.dll` at 19 MB, `kiqi_im_message.dll` at 7 MB, plus `mcp_adapter`, `langfuse`, `codegraph`). The proof is in the `get_state` reply: that run reported 31 tools; properly isolated, 6 built-ins. The "83 ms of initialisation" was almost all my own plugins. Fixing isolation took cold start from 101 ms to 10 ms.
+The third was the worst: ki was not actually isolated. I set `PI_CODING_AGENT_DIR` and `PI_OFFLINE`, which are pi's variables; ki reads `KI_CODING_AGENT_DIR` and `KI_OFFLINE`. So pi ran against an empty config dir while ki read the real `~/.ki/agent` and loaded the 25 extension DLLs installed there (`kiqi_voice.dll` at 19 MB, `kiqi_im_message.dll` at 7 MB, plus `mcp_adapter`, `langfuse`, `codegraph`). The proof is in the `get_state` reply: that run reported 31 tools; properly isolated, 6 built-ins. The "83 ms of initialisation" was almost all my own extensions. Fixing isolation took cold start from 101 ms to 10 ms.
 
 But 10 ms was not the whole story either. A cold start smaller than `--version` is impossible, and that is what I got. The stopwatch was the problem:
 
@@ -172,9 +172,9 @@ const startedAt = performance.now();   // the clock starts after it
 
 `measureVersion` timed from before `spawnSync`, so the two were not comparable. Node's `spawn()` does a synchronous chunk of process creation, measured at 7.3 ms for `ki.exe` on Windows. Adding it back took ki's cold start from 10.1 ms to 17.7 ms, in line with `--version`.
 
-For the record, cold start means: clock starts before `spawn()`, stops when the parent parses the `get_state` response from the child's stdout. In between: process creation, arg parsing, config, model catalog, tool registry, extension and plugin discovery/loading, harness and session build, emitting `{"type":"ready"}`, reading and answering `get_state`. Process teardown is excluded (the child is killed right after), and so is any LLM or tool work.
+For the record, cold start means: clock starts before `spawn()`, stops when the parent parses the `get_state` response from the child's stdout. In between: process creation, arg parsing, config, model catalog, tool registry, extension and extension discovery/loading, harness and session build, emitting `{"type":"ready"}`, reading and answering `get_state`. Process teardown is excluded (the child is killed right after), and so is any LLM or tool work.
 
-That third number also says something about plugins: loading them costs time, so a big plugin set makes startup slower. That is about what you installed, not about the runtime.
+That third number also says something about extensions: loading them costs time, so a big extension set makes startup slower. That is about what you installed, not about the runtime.
 
 ### What is not measured
 

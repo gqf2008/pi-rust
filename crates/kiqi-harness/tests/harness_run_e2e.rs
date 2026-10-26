@@ -778,7 +778,7 @@ async fn harness_fires_provider_hooks_before_request_per_call() {
 /// prompt a hook installs is the prompt the model is asked with.
 ///
 /// This is the load-bearing half of the pi `transform_context` parity work. The
-/// bridge test proves a plugin's text comes back through the ABI; this one
+/// bridge test proves an extension's text comes back through the ABI; this one
 /// proves the harness then applies it to the LIVE `Context` handed to
 /// `stream_simple` — and that the base prompt the hook received is still there
 /// underneath, so nothing downstream silently dropped it.

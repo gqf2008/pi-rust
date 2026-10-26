@@ -8,7 +8,7 @@
 
 `ki` is a library-first coding-agent runtime written in Rust, plus a terminal
 agent built on top of it. Nine composable crates span provider adapters, a
-durable crash-resumable agent loop, a terminal UI, and a stable plugin ABI — so
+durable crash-resumable agent loop, a terminal UI, and a stable extension ABI — so
 the same code works as an embedded SDK or as a ready-to-run `ki` command.
 
 Website: <https://ki.laofu.online/> · Docs: <https://ki.laofu.online/docs.html>
@@ -27,7 +27,7 @@ Website: <https://ki.laofu.online/> · Docs: <https://ki.laofu.online/docs.html>
 | -------- | --------- | -------- |
 | A working terminal coding agent | nothing | `scripts/install.sh` (see below) |
 | Your own agent inside your process | `kiqi-agent` (+ `kiqi-ai`, `kiqi-tools`) | [`examples/minimal`](examples/minimal) |
-| A tool/provider that extends every session | `plugins/kiqi-plugin.wit` | [`plugins/wasm/kiqi-todo-guest`](plugins/wasm/kiqi-todo-guest) |
+| A tool/provider that extends every session | `extensions/kiqi-extension.wit` | [`extensions/wasm/kiqi-todo`](extensions/wasm/kiqi-todo) |
 
 The three share one implementation. Build your tools once, debug them inside an
 embedded agent, and ship the same code as a wasm guest that the global `ki`
@@ -155,14 +155,14 @@ kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness
 A few crates sit outside that chain:
 
 - `kiqi-tui` depends on no other `kiqi-*` crate.
-- `kiqi-plugin` is a leaf too (it has no `kiqi-*` deps), but it is not only
-  the host's plugin contract: `kiqi-tools` also reads its env-var names, so the
-  host and its plugins cannot disagree about the strings they exchange across
+- `kiqi-extension` is a leaf too (it has no `kiqi-*` deps), but it is not only
+  the host's extension contract: `kiqi-tools` also reads its env-var names, so the
+  host and its extensions cannot disagree about the strings they exchange across
   the boundary. That edge is names-only — nothing is linked or called.
-- `kiqi-extensions` is `kiqi-plugin` plus `kiqi-ai`/`kiqi-agent`, since it hosts
-  the dispatch spine every plugin tier registers through.
-- `kiqi-plugin-host` runs wasm guests on wasmtime; `kiqi-cli` depends on both,
-  which is how the `ki` binary gets the TUI, the harness and the plugin runtime
+- `kiqi-extensions` is `kiqi-extension` plus `kiqi-ai`/`kiqi-agent`, since it hosts
+  the dispatch spine every extension tier registers through.
+- `kiqi-extension-host` runs wasm guests on wasmtime; `kiqi-cli` depends on both,
+  which is how the `ki` binary gets the TUI, the harness and the extension runtime
   at once.
 
 | Crate | What it is |
@@ -173,9 +173,9 @@ A few crates sit outside that chain:
 | [`kiqi-tools`](./crates/kiqi-tools) | `read`/`write`/`edit`/`bash` (+ `grep`, `find`, `ls`, `powershell`) and the `ExecutionEnv` seam |
 | [`kiqi-harness`](./crates/kiqi-harness) | Session tree, JSONL persistence, compaction, crash recovery, the run loop |
 | [`kiqi-tui`](./crates/kiqi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
-| [`kiqi-cli`](./crates/kiqi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, plugin loading |
-| [`kiqi-plugin`](./crates/kiqi-plugin) | The shared plugin contract: `Plugin` trait, event tags, grants, env-var names and dialog semantics |
-| [`kiqi-plugin-host`](./crates/kiqi-plugin-host) | The wasmtime host that runs wasm plugins against `plugins/kiqi-plugin.wit` |
+| [`kiqi-cli`](./crates/kiqi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, extension loading |
+| [`kiqi-extension`](./crates/kiqi-extension) | The shared extension contract: `Extension` trait, event tags, grants, env-var names and dialog semantics |
+| [`kiqi-extension-host`](./crates/kiqi-extension-host) | The wasmtime host that runs wasm extensions against `extensions/kiqi-extension.wit` |
 | [`kiqi-extensions`](./crates/kiqi-extensions) | Host-side dispatch spine: registry, event funnels, compiled/wasm sink, action mailboxes |
 
 Every crate has its own README. The crates are **not** published to crates.io
@@ -197,11 +197,11 @@ changes what you can build with it:
 - **Durable.** Sessions are a tree with JSONL persistence and per-frame
   progress. A crash mid-tool-call resumes instead of losing the turn or
   double-executing the tool.
-- **Extensible across a stable boundary.** Plugins are wasm components behind
-  the versioned `plugins/kiqi-plugin.wit` contract, sandboxed by wasmtime and
+- **Extensible across a stable boundary.** Extensions are wasm components behind
+  the versioned `extensions/kiqi-extension.wit` contract, sandboxed by wasmtime and
   granted only the capabilities their install approves.
 - **One implementation, two surfaces.** The global CLI and an embedded agent load
-  the same tools. You do not maintain a plugin and a library variant separately.
+  the same tools. You do not maintain an extension and a library variant separately.
 
 ### How it compares
 
@@ -214,7 +214,7 @@ tools are as of 2026-09 and change often — check their documentation; only the
 | Language | Rust | TypeScript | Rust | TypeScript/Go | Python |
 | Source available | ✅ MIT | ❌ | ✅ | ✅ | ✅ |
 | Usable as an embedded library | ✅ | ❌ | ❌ | ⚠️ | ⚠️ |
-| First-class plugin ABI | ✅ | hooks/MCP | ❌ | plugin API | ❌ |
+| First-class extension ABI | ✅ | hooks/MCP | ❌ | extension API | ❌ |
 | Headless server + remote client | ✅ | ⚠️ | ✅ | ✅ | ⚠️ |
 | Provider-agnostic gateways | ✅ | ❌ | ❌ | ✅ | ✅ |
 
@@ -251,23 +251,23 @@ creation, not initialisation; Pi is dominated by Node boot.
 
 Isolation caveat: ki reads `KI_CODING_AGENT_DIR` / `KI_OFFLINE`, native Pi reads
 `PI_CODING_AGENT_DIR` / `PI_OFFLINE`. Set the matching pair for each, or ki
-silently loads the machine's global plugins.
+silently loads the machine's global extensions.
 
 Method, raw per-run numbers, and what is *not* measured (LLM latency, tool-loop
 throughput, long sessions, TUI frame cost) are in
 [`docs/performance/benchmark-vs-pi.md`](docs/performance/benchmark-vs-pi.md).
 
-## Plugins
+## Extensions
 
 Extensions arrive through two channels.
 
 **The capabilities that ship with this repository are wasm components.** Each is
-a WebAssembly component (`plugins/kiqi-plugin.wit` is the contract) running in a
+a WebAssembly component (`extensions/kiqi-extension.wit` is the contract) running in a
 wasmtime sandbox, granted only the capabilities its install approves:
 
 ```bash
 rustup target add wasm32-wasip2                   # once, to build guests
-ki insmod --build plugins/wasm/kiqi-todo-guest    # build that guest, then install it
+ki insmod --build extensions/wasm/kiqi-todo    # build that guest, then install it
 ki insmod path/to/component.wasm --yes            # install an already-built component
 ```
 
@@ -276,10 +276,10 @@ capabilities are available this way, with the exact command for each.
 
 **The cdylib channel is retired.** Up to 2026-10-26 a third-party extension
 could be a Rust `cdylib` behind a `#[repr(C)]` ABI, installed with `ki install`
-and hot-reloaded with `ki dev`. Those commands, the `kiqi-plugin-sdk` crate and
+and hot-reloaded with `ki dev`. Those commands, the `kiqi-extension-sdk` crate and
 the loader are gone; a cdylib no longer loads. Port the extension to a wasm
-guest against [`plugins/kiqi-plugin.wit`](plugins/kiqi-plugin.wit) (contract
-notes in [`docs/design/plugin-abi.md`](docs/design/plugin-abi.md)) and install
+guest against [`extensions/kiqi-extension.wit`](extensions/kiqi-extension.wit) (contract
+notes in [`docs/design/extension-abi.md`](docs/design/extension-abi.md)) and install
 it with `ki insmod`.
 
 Ready-to-install wasm extensions live in the companion
@@ -302,7 +302,7 @@ machine. See [`docs/remote/user-guide.md`](docs/remote/user-guide.md).
 | | |
 | --- | --- |
 | Current release | **[0.4.1](https://github.com/gqf2008/pi-rust/releases/tag/v0.4.1)** (all crates share one workspace version) |
-| Stability | `kiqi-ai`, `kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-plugin` are the intended stable surface |
+| Stability | `kiqi-ai`, `kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-extension` are the intended stable surface |
 | MSRV | 1.96 |
 | Platforms | Linux, macOS, Windows (CI runs the suite on Linux) |
 | Binary release targets | Linux (x86_64/aarch64), macOS (Intel/Apple silicon), Windows (x86_64) |
@@ -315,7 +315,7 @@ required and none is loaded.
 - [User guide](docs/guides/user-guide.md) — commands, config, sessions, skills
 - [Architecture](docs/architecture/overview.md) — how the crates fit together and why
 - [Building an agent project](docs/agent/project-structure.md) — recommended structure
-- [Extension authoring](docs/extensions/authoring.md) — plugin templates and ABI rules
+- [Extension authoring](docs/extensions/authoring.md) — extension templates and ABI rules
 - [Remote mode](docs/remote/user-guide.md) — protocol, tokens, limitations
 - [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
 - [docs.rs](https://docs.rs/kiqi-cli) for per-crate API docs

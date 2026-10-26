@@ -448,7 +448,7 @@ impl Component for FooterComponent {
             format!(" {}", color.fg(&sanitized))
         };
 
-        // Extension status (e.g. the langfuse plugin) sits after the run status
+        // Extension status (e.g. the langfuse extension) sits after the run status
         // and is dimmed so it never competes with `Aborting…`/hints.
         let extension_word = if extension_status.trim().is_empty() {
             String::new()

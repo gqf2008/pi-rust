@@ -17,7 +17,7 @@ ki --version
 ki --help
 ```
 
-`cargo install` 安装的是可执行文件；它不等同于 `ki install`。后者用于安装由 `kiqi-plugin-sdk` 构建的 Rust 动态库扩展。
+`cargo install` 安装的是可执行文件；它不等同于 `ki install`。后者用于安装由 `kiqi-extension-sdk` 构建的 Rust 动态库扩展。
 
 ### 从源码启动与构建
 
@@ -430,14 +430,14 @@ KI_AGENTS_DIR=/work/shared-agents ki
 
 ## 6. Rust 插件
 
-Rust 原生插件是 `cdylib`，只依赖 `kiqi-plugin-sdk`，由 `kiqi-extensions` 动态加载：
+Rust 原生插件是 `cdylib`，只依赖 `kiqi-extension-sdk`，由 `kiqi-extensions` 动态加载：
 
 ```bash
-cargo build -p plugin-stub
+cargo build -p extension-stub
 ki --extensions-dir target/debug -p 'echo "hi"'
 ```
 
-本仓库的 crate 全部 `publish = false`，crates.io 上没有可解析的同名包：`ki install <name>`（不带 `--path`）必然失败，第三方扩展要从源码路径安装。一方能力不走 cdylib 通道——它们是 wasm 组件，用 `ki insmod --build plugins/wasm/kiqi-<name>-guest` 安装，可用清单见 `website/data/packages.json`。
+本仓库的 crate 全部 `publish = false`，crates.io 上没有可解析的同名包：`ki install <name>`（不带 `--path`）必然失败，第三方扩展要从源码路径安装。一方能力不走 cdylib 通道——它们是 wasm 组件，用 `ki insmod --build extensions/wasm/kiqi-<name>` 安装，可用清单见 `website/data/packages.json`。
 
 本地开发：
 
@@ -539,7 +539,7 @@ cargo test --workspace
 
 ```text
 kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness →
-kiqi-plugin-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
+kiqi-extension-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
 ```
 
 发布前更新版本号和 `docs/release-vX.Y.Z.md`，确认 README、官网 `website/data/docs.json` 和本手册中的命令一致。官网是静态站点，文档文件提交到仓库后仍需按项目部署流程重新部署。
@@ -548,7 +548,7 @@ kiqi-plugin-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
 
 - 在线文档：<https://ki.laofu.online/docs.html>
 - 源码仓库：<https://github.com/gqf2008/pi-rust>
-- Rust API：<https://docs.rs/kiqi-agent>、<https://docs.rs/kiqi-plugin-sdk>
+- Rust API：<https://docs.rs/kiqi-agent>、<https://docs.rs/kiqi-extension-sdk>
 
 - Package 与扩展作者指南：<https://ki.laofu.online/extension-authoring.md>
 - 远程模式：<docs/remote/user-guide.md>

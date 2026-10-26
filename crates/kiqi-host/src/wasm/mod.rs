@@ -1,8 +1,8 @@
-//! Host-side backend for **wasm plugins** (the component model tier).
+//! Host-side backend for **wasm extensions** (the component model tier).
 //!
-//! Binds `plugins/kiqi-plugin.wit` (ABI 0.8.0) with wasmtime's `bindgen!` and
-//! hosts a plugin component behind the same [`crate::Plugin`] seam the
-//! compiled-in plugins implement.
+//! Binds `extensions/kiqi-extension.wit` (ABI 0.8.0) with wasmtime's `bindgen!` and
+//! hosts an extension component behind the same [`crate::Extension`] seam the
+//! compiled-in extensions implement.
 //!
 //! Two deliberate choices:
 //!
@@ -10,22 +10,22 @@
 //!   on `wasi:io/poll`), so the generated guest calls are sync and no async
 //!   runtime is needed. When a host import eventually needs real async I/O, it
 //!   blocks inside its own implementation — the async stays here, not in the
-//!   plugin trait.
+//!   extension trait.
 //! * **The host provides every interface.** The component model requires each
 //!   import a component declares to be satisfied at instantiation, so the host
 //!   implements all of them: `log` writes, `progress` forwards to the running
 //!   call's sink, `session-read` returns placeholders, and every capability that
 //!   is not granted is a **deny stub** returning `denied`. A component only
-//!   imports the interfaces it uses, so a plugin that never touches `exec` never
+//!   imports the interfaces it uses, so an extension that never touches `exec` never
 //!   asks for it.
 //!
-//! `WasmPlugin::unload` (and `Drop`, and [`crate::Plugin::shutdown`])
-//! releases the instance so `/reload` can swap a plugin without leaking linear
+//! `WasmExtension::unload` (and `Drop`, and [`crate::Extension::shutdown`])
+//! releases the instance so `/reload` can swap an extension without leaking linear
 //! memory.
 
 wasmtime::component::bindgen!({
-    path: "../../plugins/kiqi-plugin.wit",
-    world: "plugin",
+    path: "../../extensions/kiqi-extension.wit",
+    world: "extension",
 });
 
 use std::cell::RefCell;
@@ -36,31 +36,31 @@ use crate::grants::{
     resolve_provider_request_policy, HeadersMode, MessagesMode, ObserveMode, ProviderRequestPolicy,
 };
 use crate::{
-    Block, CommandSpec, Event, EventAction, Extension as ExtensionTrait, FlagSpec, HostCaps,
-    OAuthAction, OAuthCredentialStatus, OAuthInteraction, OAuthProvider, OAuthResponse,
-    PluginError, Progress, ProgressSink, ShortcutSpec, ToolOutcome, ToolSpec, Verdict,
+    Block, CommandSpec, Event, EventAction, Extension as ExtensionTrait, ExtensionError, FlagSpec,
+    HostCaps, OAuthAction, OAuthCredentialStatus, OAuthInteraction, OAuthProvider, OAuthResponse,
+    Progress, ProgressSink, ShortcutSpec, ToolOutcome, ToolSpec, Verdict,
 };
 use serde_json::Value;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use crate::wasm::kiqi::plugin::types::{
+use crate::wasm::kiqi::extension::types::{
     CapabilityError, ContentBlock, Event as WitEvent, EventAction as WitEventAction, InputEvent,
     InputKind, LogLevel, OauthAction as WitOauthAction, OauthCredentialStatus,
     OauthProvider as WitOauthProvider, OauthResponse as WitOauthResponse, OauthTokenOutcome,
     OtherEvent, ProgressBlock, ProviderDelta as WitDelta, ToolCall, ToolResult, ToolResultEvent,
     Verdict as WitVerdict,
 };
-use crate::wasm::Plugin as World;
+use crate::wasm::Extension as World;
 
 pub mod oauth;
 pub use oauth::{
     default_transport, ensure_oauth_profile_matches, exchange_authorization_code,
     oauth_profile_fingerprint, poll_device_token, refresh_stored_token,
-    request_device_authorization, revoke_stored_token, DeviceAuthorization, HttpOAuthTransport,
-    HttpResponse, OAuthRequestBudget, OAuthTokens, OAuthTransport, PluginCredentialSink,
-    StoredOAuthToken,
+    request_device_authorization, revoke_stored_token, DeviceAuthorization,
+    ExtensionCredentialSink, HttpOAuthTransport, HttpResponse, OAuthRequestBudget, OAuthTokens,
+    OAuthTransport, StoredOAuthToken,
 };
 
 mod provider_patch;
@@ -79,14 +79,14 @@ pub use provider_http::{
     ProviderHttpTransport, ReqwestTransport, ResolvedCredential, STRIPPED_HEADERS,
 };
 
-/// The generated world struct is named after the world (`plugin`); alias it so
-/// it does not collide with the `crate::Plugin` trait.
+/// The generated world struct is named after the world (`extension`); alias it so
+/// it does not collide with the `crate::Extension` trait.
 const NOT_GRANTED: &str = "capability not granted";
 
 /// Which kind of entry point is running on this thread.
 ///
 /// The kind is what makes a contribution channel call-scoped rather than
-/// plugin-scoped: `provider-stream.emit` is honored only for
+/// extension-scoped: `provider-stream.emit` is honored only for
 /// [`CallKind::ProviderRequest`], as `event-action.patch` is honored only for
 /// the provider gate. `Metadata` is the implicit answer outside a call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,7 +105,7 @@ pub enum CallKind {
 /// What the call running on this thread may reach.
 ///
 /// The host imports run on the thread that drives the guest call, and
-/// [`WasmPlugin`] serializes calls behind a mutex, so one thread-local carries
+/// [`WasmExtension`] serializes calls behind a mutex, so one thread-local carries
 /// the running call's capabilities, progress sink and delta sink. The pointers
 /// only need to live for the duration of that call.
 #[derive(Clone, Copy)]
@@ -226,7 +226,7 @@ fn with_ui<R>(f: impl FnOnce(&dyn crate::UiApi) -> R) -> Option<R> {
 }
 
 /// Collapse a capability call into a `capability-error` on any failure.
-fn forward(result: Option<Result<(), PluginError>>) -> Result<(), CapabilityError> {
+fn forward(result: Option<Result<(), ExtensionError>>) -> Result<(), CapabilityError> {
     match result {
         Some(Ok(())) => Ok(()),
         Some(Err(error)) => Err(capability_error(error)),
@@ -235,9 +235,9 @@ fn forward(result: Option<Result<(), PluginError>>) -> Result<(), CapabilityErro
 }
 
 /// A granted capability whose *operation* failed is `failed`, not `denied`.
-fn capability_error(error: PluginError) -> CapabilityError {
+fn capability_error(error: ExtensionError) -> CapabilityError {
     match error {
-        PluginError::Denied(reason) => CapabilityError::Denied(reason),
+        ExtensionError::Denied(reason) => CapabilityError::Denied(reason),
         other => CapabilityError::Failed(other.to_string()),
     }
 }
@@ -246,14 +246,14 @@ fn denied() -> CapabilityError {
     CapabilityError::Denied(NOT_GRANTED.to_string())
 }
 
-/// What the user authorized for one plugin, shared with the CLI through the
-/// contract crate (`kiqi-plugin`).
+/// What the user authorized for one extension, shared with the CLI through the
+/// contract crate (`kiqi-extension`).
 pub use crate::grants::{
     allows, ExecCwd, ExecGrant, FsGrant, Grants, NetHttpGrant, NetSocketsGrant, ProcGrant,
     RenderGrant, RENDER_KIND_MARKDOWN, RENDER_MAX_OUTPUT_BYTES_MAX, RENDER_TIMEOUT_MS_MAX,
 };
 
-/// The user-grantable capabilities a component declares: the `kiqi:plugin/*`
+/// The user-grantable capabilities a component declares: the `kiqi:extension/*`
 /// interfaces that need authorization.
 ///
 /// Imports and exports both count. An import names a channel the guest reaches
@@ -266,7 +266,7 @@ pub use crate::grants::{
 ///
 /// The domain interfaces (`log`, `session-read`, …) are always available through
 /// `HostCaps` and are not part of the grant set, so they are filtered out. This
-/// is what `ki plugin install` shows the user and re-prompts about when it grows.
+/// is what `ki extension install` shows the user and re-prompts about when it grows.
 /// `resources` has no interface at all (it is a package convention,
 /// `resources.json`), so it is grantable but never declared here.
 pub fn declared_capabilities(wasm: &Path) -> Result<Vec<String>, String> {
@@ -310,11 +310,11 @@ const GRANTABLE: &[&str] = &[
 /// Record the grant key `name` declares, if it is grantable.
 ///
 /// The interface→grant-key map handles the 0.8.0 names; the fallback keeps the
-/// capability-as-interface convention (`kiqi:plugin/exec@0.7.1` → `exec`), which
+/// capability-as-interface convention (`kiqi:extension/exec@0.7.1` → `exec`), which
 /// is what every 0.7.1 component imports.
 fn note_declared(name: &str, caps: &mut Vec<String>) {
     let key = crate::grants::grant_key_for_interface(name).or_else(|| {
-        let bare = name.strip_prefix("kiqi:plugin/").unwrap_or(name);
+        let bare = name.strip_prefix("kiqi:extension/").unwrap_or(name);
         let bare = bare.split('@').next().unwrap_or(bare);
         GRANTABLE.iter().copied().find(|cap| *cap == bare)
     });
@@ -343,7 +343,7 @@ pub fn exported_interfaces(wasm: &Path) -> Result<Vec<String>, String> {
                 let bare = export
                     .name
                     .name
-                    .strip_prefix("kiqi:plugin/")
+                    .strip_prefix("kiqi:extension/")
                     .unwrap_or(export.name.name);
                 let bare = bare.split('@').next().unwrap_or(bare);
                 if matches!(bare, "oauth-api" | "provider-api" | "render-api")
@@ -361,7 +361,7 @@ pub fn exported_interfaces(wasm: &Path) -> Result<Vec<String>, String> {
 /// The capabilities this build of the host actually enforces.
 ///
 /// [`declared_capabilities`] reports what a *component* asks for; this reports
-/// what the host can honour. `ki plugin install` names any difference, so a user
+/// what the host can honour. `ki extension install` names any difference, so a user
 /// is never asked to grant something that would only ever come back denied.
 /// All ten grantable capabilities are enforced: `net-http`, `fs`, `exec`,
 /// `proc`, `net-sockets`, `oauth`, `provider`, `render`, `resources` and
@@ -385,7 +385,7 @@ pub fn capability_is_enforced(name: &str) -> bool {
 }
 
 /// Fuel granted to one install-time discovery instance. A guest that spins
-/// traps instead of hanging `ki plugin install`.
+/// traps instead of hanging `ki extension install`.
 pub const DISCOVERY_FUEL: u64 = 200_000_000;
 
 /// Linear-memory cap for discovery: enough for a metadata call, far below the
@@ -473,7 +473,7 @@ pub fn discover_providers(wasm: &Path) -> Discovery {
     let (tx, rx) = std::sync::mpsc::channel();
     let worker_engine = engine.clone();
     let spawned = std::thread::Builder::new()
-        .name("kiqi-plugin-discovery".to_string())
+        .name("kiqi-extension-discovery".to_string())
         .spawn(move || {
             let _ = tx.send(probe_providers(&worker_engine, &component, &interfaces));
         });
@@ -550,8 +550,8 @@ fn probe_interface(
     interface: &str,
 ) -> Result<Vec<DiscoveredProvider>, String> {
     let names = [
-        format!("kiqi:plugin/{interface}@0.8.0"),
-        format!("kiqi:plugin/{interface}"),
+        format!("kiqi:extension/{interface}@0.8.0"),
+        format!("kiqi:extension/{interface}"),
         interface.to_string(),
     ];
     let Some(interface_index) = names
@@ -630,7 +630,7 @@ fn record_string(value: &wasmtime::component::Val, field: &str) -> Option<String
 /// The bounded load-time `oauth-api.list-providers` cross-check.
 ///
 /// The call runs on its own thread so a guest that spins cannot hang
-/// `WasmPlugin::load`: the caller waits at most `timeout`. A trap or an
+/// `WasmExtension::load`: the caller waits at most `timeout`. A trap or an
 /// over-cap answer is reported and treated as "no narrowing" (`None`); only a
 /// call that never returns loses the instance, which aborts the load. The
 /// grant stays the sole catalog authority — this can only take ids away.
@@ -648,10 +648,10 @@ fn bounded_oauth_provider_ids(
 > {
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
-        .name("kiqi-plugin-oauth-probe".to_string())
+        .name("kiqi-extension-oauth-probe".to_string())
         .spawn(move || {
             let result = guest
-                .kiqi_plugin_oauth_api()
+                .kiqi_extension_oauth_api()
                 .call_list_providers(&mut store);
             // The receiver may be gone on timeout; the store still drops here.
             let _ = tx.send((result, store, guest));
@@ -711,7 +711,7 @@ fn bounded_oauth_ids(
     Ok(ids)
 }
 
-/// The plugin-side `oauth-action` → the WIT variant.
+/// The extension-side `oauth-action` → the WIT variant.
 fn to_wit_oauth_action(action: OAuthAction) -> WitOauthAction {
     match action {
         OAuthAction::Begin(challenge) => WitOauthAction::Begin(challenge),
@@ -721,9 +721,9 @@ fn to_wit_oauth_action(action: OAuthAction) -> WitOauthAction {
     }
 }
 
-/// The WIT `oauth-response` → the plugin-side type (no token material exists on
+/// The WIT `oauth-response` → the extension-side type (no token material exists on
 /// either side; only the expiry crosses).
-fn to_plugin_oauth_response(response: WitOauthResponse) -> OAuthResponse {
+fn to_extension_oauth_response(response: WitOauthResponse) -> OAuthResponse {
     match response {
         WitOauthResponse::Interaction(interaction) => {
             OAuthResponse::Interaction(OAuthInteraction {
@@ -750,18 +750,18 @@ struct HostState {
     table: ResourceTable,
     grants: Grants,
     /// The install id this instance was loaded under. Kept so host-side
-    /// features that must name the plugin (diagnostics, declaration scope,
+    /// features that must name the extension (diagnostics, declaration scope,
     /// credential namespacing) can do so without re-reading the file path.
     /// P4 wires the credential sink; until then nothing reads it here.
     #[allow(dead_code)]
-    plugin_id: Option<String>,
-    /// The flag names THIS plugin declared in `list-flags`, captured once at
+    extension_id: Option<String>,
+    /// The flag names THIS extension declared in `list-flags`, captured once at
     /// instantiation. `session-read.cli-flag` is declaration-scoped: a name
-    /// that is not in this set returns `None` even when another plugin (or the
+    /// that is not in this set returns `None` even when another extension (or the
     /// CLI) knows the flag. That stops one installed component from reading
     /// another's configuration through a shared flag namespace.
     declared_flags: std::sync::Arc<std::collections::BTreeSet<String>>,
-    /// The plugin's own data directory (`plugins/<id>/data/`). The `fs`
+    /// The extension's own data directory (`extensions/<id>/data/`). The `fs`
     /// capability is jailed here, and `exec`'s working directory is resolved
     /// inside it, so the jail *is* the policy and both grants stay simple.
     /// `None` when the component's path has no parent (in-memory components in
@@ -796,12 +796,12 @@ struct HostState {
 
 /// The OAuth machinery one instance carries.
 ///
-/// The budget lives per instance so a flow cannot outlive the plugin that
+/// The budget lives per instance so a flow cannot outlive the extension that
 /// started it, and `sink` is the only route from a guest exchange to disk.
 struct OAuthState {
     budget: OAuthRequestBudget,
     transport: Option<std::sync::Arc<dyn OAuthTransport>>,
-    sink: Option<std::sync::Arc<dyn PluginCredentialSink>>,
+    sink: Option<std::sync::Arc<dyn ExtensionCredentialSink>>,
 }
 
 impl Default for OAuthState {
@@ -829,18 +829,18 @@ impl WasiView for HostState {
 
 /// `types` exports no functions, but the world-level linker still requires its
 /// (empty) host trait to be implemented.
-impl crate::wasm::kiqi::plugin::types::Host for HostState {}
+impl crate::wasm::kiqi::extension::types::Host for HostState {}
 
-impl crate::wasm::kiqi::plugin::log::Host for HostState {
+impl crate::wasm::kiqi::extension::log::Host for HostState {
     fn write(&mut self, _level: LogLevel, message: String) {
-        eprintln!("[kiqi-plugin] {message}");
+        eprintln!("[kiqi-extension] {message}");
     }
 }
 
 /// Read-only session state, forwarded to the call's `HostCaps::session`.
-impl crate::wasm::kiqi::plugin::session_read::Host for HostState {
-    fn info(&mut self) -> crate::wasm::kiqi::plugin::types::SessionInfo {
-        crate::wasm::kiqi::plugin::types::SessionInfo {
+impl crate::wasm::kiqi::extension::session_read::Host for HostState {
+    fn info(&mut self) -> crate::wasm::kiqi::extension::types::SessionInfo {
+        crate::wasm::kiqi::extension::types::SessionInfo {
             session_id: with_session(|session| session.session_id())
                 .flatten()
                 .unwrap_or_default(),
@@ -866,11 +866,11 @@ impl crate::wasm::kiqi::plugin::session_read::Host for HostState {
     fn thinking_level(&mut self) -> String {
         with_session(|session| session.thinking_level()).unwrap_or_default()
     }
-    fn cli_flag(&mut self, name: String) -> Option<crate::wasm::kiqi::plugin::types::FlagValue> {
-        use crate::wasm::kiqi::plugin::types::FlagValue as Wit;
-        // Declaration-scoped: the calling plugin may only read a flag it
+    fn cli_flag(&mut self, name: String) -> Option<crate::wasm::kiqi::extension::types::FlagValue> {
+        use crate::wasm::kiqi::extension::types::FlagValue as Wit;
+        // Declaration-scoped: the calling extension may only read a flag it
         // declared itself. This is the default (no grant), so an install-tree
-        // plugin cannot probe the flags of its neighbours.
+        // extension cannot probe the flags of its neighbours.
         if !self.declared_flags.contains(&name) {
             return None;
         }
@@ -887,7 +887,7 @@ impl crate::wasm::kiqi::plugin::session_read::Host for HostState {
     }
 }
 
-impl crate::wasm::kiqi::plugin::progress::Host for HostState {
+impl crate::wasm::kiqi::extension::progress::Host for HostState {
     fn emit(&mut self, block: ProgressBlock) {
         emit_progress(match block {
             ProgressBlock::Text(text) => Progress::Text(text),
@@ -901,7 +901,7 @@ impl crate::wasm::kiqi::plugin::progress::Host for HostState {
 /// Streamed provider deltas. Honored only while a `provider-api.request` call
 /// is on the stack; outside one this is a no-op by contract, so a tool or an
 /// event handler cannot smuggle deltas into another call's stream.
-impl crate::wasm::kiqi::plugin::provider_stream::Host for HostState {
+impl crate::wasm::kiqi::extension::provider_stream::Host for HostState {
     fn emit(&mut self, delta: WitDelta) {
         emit_provider_delta(delta);
     }
@@ -914,7 +914,7 @@ impl crate::wasm::kiqi::plugin::provider_stream::Host for HostState {
 
 /// Host-attributed OAuth endpoints. Deny-by-default: a provider id is reachable
 /// only when the `oauth` grant names exactly that profile.
-impl crate::wasm::kiqi::plugin::oauth_http::Host for HostState {
+impl crate::wasm::kiqi::extension::oauth_http::Host for HostState {
     fn token_request(
         &mut self,
         provider_id: String,
@@ -933,7 +933,7 @@ impl crate::wasm::kiqi::plugin::oauth_http::Host for HostState {
 /// thread-local call kind), and that call must have installed a grant-backed
 /// [`HostState::provider_call`]. The tool and OAuth instances satisfy neither,
 /// so they can never hold a handle.
-impl crate::wasm::kiqi::plugin::provider_http::Host for HostState {
+impl crate::wasm::kiqi::extension::provider_http::Host for HostState {
     fn open(&mut self, request: String) -> Result<u32, CapabilityError> {
         self.provider_http_open(&request)
             .map_err(provider_http::ProviderHttpError::into_capability)
@@ -1015,7 +1015,7 @@ impl HostState {
 
 /// Session mutations, forwarded to the call's `HostCaps::control`; a call
 /// without that capability gets `denied`.
-impl crate::wasm::kiqi::plugin::session_control::Host for HostState {
+impl crate::wasm::kiqi::extension::session_control::Host for HostState {
     fn set_session_name(&mut self, name: String) -> Result<(), CapabilityError> {
         forward(with_control(|control| control.set_session_name(&name)))
     }
@@ -1049,7 +1049,7 @@ impl crate::wasm::kiqi::plugin::session_control::Host for HostState {
 }
 
 /// Content injection, forwarded to the call's `HostCaps::inject`.
-impl crate::wasm::kiqi::plugin::inject::Host for HostState {
+impl crate::wasm::kiqi::extension::inject::Host for HostState {
     fn send_message(&mut self, message: String) -> Result<(), CapabilityError> {
         let message = serde_json::from_str(&message).unwrap_or(serde_json::Value::Null);
         forward(with_inject(|inject| inject.send_message(&message)))
@@ -1074,7 +1074,7 @@ impl crate::wasm::kiqi::plugin::inject::Host for HostState {
 }
 
 /// UI, forwarded to the call's `HostCaps::ui`.
-impl crate::wasm::kiqi::plugin::ui::Host for HostState {
+impl crate::wasm::kiqi::extension::ui::Host for HostState {
     fn dialog(&mut self, request: String) -> Result<String, CapabilityError> {
         let request = serde_json::from_str(&request).unwrap_or(serde_json::Value::Null);
         match with_ui(|ui| ui.dialog(&request)) {
@@ -1104,12 +1104,12 @@ impl crate::wasm::kiqi::plugin::ui::Host for HostState {
 }
 
 /// Response bodies are capped. A granted — or compromised — host must not be
-/// able to make the *host* allocate without bound; a plugin that genuinely needs
+/// able to make the *host* allocate without bound; an extension that genuinely needs
 /// a larger document should stream it through `net-sockets`.
 const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Host-mediated HTTP: the request's host must be in the grant's allow-list.
-impl crate::wasm::kiqi::plugin::net_http::Host for HostState {
+impl crate::wasm::kiqi::extension::net_http::Host for HostState {
     fn fetch(&mut self, request: String) -> Result<String, CapabilityError> {
         let request: serde_json::Value = serde_json::from_str(&request).map_err(|error| {
             CapabilityError::Failed(format!("invalid net-http request: {error}"))
@@ -1140,7 +1140,7 @@ impl crate::wasm::kiqi::plugin::net_http::Host for HostState {
             // A redirect is a second request, to a host the user may not have
             // granted. Follow it only when that host is allow-listed too;
             // otherwise stop and hand the 3xx back, so a granted host cannot
-            // bounce the plugin somewhere it was never allowed to go.
+            // bounce the extension somewhere it was never allowed to go.
             .redirect(reqwest::redirect::Policy::custom(move |attempt| {
                 if attempt.previous().len() >= 10 {
                     return attempt.error("too many redirects");
@@ -1212,8 +1212,8 @@ impl HostState {
     /// The exact granted profile, or a policy refusal.
     ///
     /// Provider ids are matched exactly: there is no wildcard, no prefix and no
-    /// case folding, because the grant is what stops one plugin from driving
-    /// another plugin's IdP profile.
+    /// case folding, because the grant is what stops one extension from driving
+    /// another extension's IdP profile.
     fn oauth_profile(
         &self,
         provider_id: &str,
@@ -1235,8 +1235,8 @@ impl HostState {
 
     /// The install id inside the namespaced credential key.
     fn oauth_install_id(&self) -> Result<String, CapabilityError> {
-        self.plugin_id.clone().ok_or_else(|| {
-            CapabilityError::Denied("this plugin instance has no install id".to_string())
+        self.extension_id.clone().ok_or_else(|| {
+            CapabilityError::Denied("this extension instance has no install id".to_string())
         })
     }
 
@@ -1311,7 +1311,7 @@ impl HostState {
                 "OAuth credential store is not configured".to_string(),
             ));
         };
-        if let Err(error) = sink.store_plugin_oauth(
+        if let Err(error) = sink.store_extension_oauth(
             &install_id,
             provider_id,
             &tokens.access,
@@ -1347,7 +1347,7 @@ impl HostState {
             CapabilityError::Failed("OAuth credential store is not configured".to_string())
         })?;
         let stored = sink
-            .read_plugin_oauth(&install_id, provider_id)
+            .read_extension_oauth(&install_id, provider_id)
             .map_err(CapabilityError::Failed)?
             .ok_or_else(|| {
                 CapabilityError::Failed("no stored OAuth credential for this provider".to_string())
@@ -1380,19 +1380,19 @@ impl HostState {
                 response.status
             )));
         }
-        sink.delete_plugin_oauth(&install_id, provider_id)
+        sink.delete_extension_oauth(&install_id, provider_id)
             .map_err(CapabilityError::Failed)?;
         self.oauth.budget.reset();
         Ok(())
     }
 
     /// Resolve a guest-supplied relative path inside the fs grant's scope, or
-    /// explain why it may not: `plugin-data` jails to the plugin's own data
+    /// explain why it may not: `extension-data` jails to the extension's own data
     /// directory, `project` to the project tree (same scope `exec`/`proc`
     /// use).
     ///
     /// A path with any `..`, root or prefix component is refused outright, so a
-    /// plugin cannot walk out of its jail — and `starts_with` is checked as well
+    /// extension cannot walk out of its jail — and `starts_with` is checked as well
     /// rather than relied on.
     fn fs_checked(
         &self,
@@ -1403,14 +1403,14 @@ impl HostState {
             return Err(CapabilityError::Denied("fs is not granted".to_string()));
         };
         let (root, what) = match grant.scope() {
-            crate::grants::ExecCwd::PluginData => (self.data_dir()?, "the plugin directory"),
+            crate::grants::ExecCwd::ExtensionData => (self.data_dir()?, "the extension directory"),
             crate::grants::ExecCwd::Project => (self.project_dir()?, "the project directory"),
         };
         let resolved = jail_under(&root, rel, what)?;
         symlink_checked_under(&root, &resolved, create_parents, what)
     }
 
-    /// Resolve a relative path inside the plugin's data directory without any
+    /// Resolve a relative path inside the extension's data directory without any
     /// capability check — the lexical half of the jail, exposed to tests so each
     /// guard can be asserted in isolation. Production paths go through
     /// [`fs_checked`](Self::fs_checked) or [`scoped_cwd`](Self::scoped_cwd), which
@@ -1418,14 +1418,14 @@ impl HostState {
     /// non-test build (which is what the compiler was reporting).
     #[cfg(test)]
     fn jail(&self, rel: &str) -> Result<std::path::PathBuf, CapabilityError> {
-        jail_under(&self.data_dir()?, rel, "the plugin directory")
+        jail_under(&self.data_dir()?, rel, "the extension directory")
     }
 
     /// Resolve the working directory `exec` and `proc` share: the grant's
-    /// scope decides the root (`plugin-data` = the plugin's sandbox,
+    /// scope decides the root (`extension-data` = the extension's sandbox,
     /// `project` = the user's tree), and the guest-supplied path gets the same
     /// lexical + symlink checks `fs` uses. The data directory is created on
-    /// demand — it is the plugin's own sandbox; the project directory is the
+    /// demand — it is the extension's own sandbox; the project directory is the
     /// user's, so a misspelled cwd fails there instead of `mkdir -p`-ing into
     /// it.
     fn scoped_cwd(
@@ -1434,10 +1434,10 @@ impl HostState {
         cwd: Option<String>,
     ) -> Result<std::path::PathBuf, CapabilityError> {
         let (root, what) = match scope {
-            crate::grants::ExecCwd::PluginData => (self.data_dir()?, "the plugin directory"),
+            crate::grants::ExecCwd::ExtensionData => (self.data_dir()?, "the extension directory"),
             crate::grants::ExecCwd::Project => (self.project_dir()?, "the project directory"),
         };
-        let sandboxed = matches!(scope, crate::grants::ExecCwd::PluginData);
+        let sandboxed = matches!(scope, crate::grants::ExecCwd::ExtensionData);
         let resolved = match cwd {
             Some(rel) => {
                 let resolved = jail_under(&root, &rel, what)?;
@@ -1493,9 +1493,9 @@ impl HostState {
     }
 
     fn data_dir(&self) -> Result<std::path::PathBuf, CapabilityError> {
-        self.fs_root
-            .clone()
-            .ok_or_else(|| CapabilityError::Failed("this plugin has no data directory".to_string()))
+        self.fs_root.clone().ok_or_else(|| {
+            CapabilityError::Failed("this extension has no data directory".to_string())
+        })
     }
 
     /// The project directory an `exec` cwd scope of `project` resolves against.
@@ -1520,7 +1520,7 @@ impl HostState {
     /// directory (by `exec`, or by the user) would be followed straight out of
     /// it. So the parent is canonicalized and must still sit inside the
     /// canonical root, and the final component must not itself be a link.
-    /// The symlink half of the jail for the plugin's data directory; see [`jail`]
+    /// The symlink half of the jail for the extension's data directory; see [`jail`]
     /// for why this is test-only.
     ///
     /// [`jail`]: Self::jail
@@ -1534,7 +1534,7 @@ impl HostState {
             &self.data_dir()?,
             resolved,
             create_parents,
-            "the plugin directory",
+            "the extension directory",
         )
     }
 }
@@ -1543,8 +1543,8 @@ impl HostState {
 /// not.
 ///
 /// A path with any `..`, root or prefix component is refused outright, so a
-/// plugin cannot walk out of its jail — and `starts_with` is checked as well
-/// rather than relied on. `what` names the jail in errors (`the plugin
+/// extension cannot walk out of its jail — and `starts_with` is checked as well
+/// rather than relied on. `what` names the jail in errors (`the extension
 /// directory` for `fs`, `the project directory` for a project-scoped `exec`).
 fn jail_under(
     root: &std::path::Path,
@@ -1631,8 +1631,8 @@ fn symlink_checked_under(
     Ok(resolved.to_path_buf())
 }
 
-/// Plugin filesystem, jailed to `plugins/<id>/data/`.
-impl crate::wasm::kiqi::plugin::fs::Host for HostState {
+/// Extension filesystem, jailed to `extensions/<id>/data/`.
+impl crate::wasm::kiqi::extension::fs::Host for HostState {
     fn read(&mut self, rel_path: String) -> Result<Vec<u8>, CapabilityError> {
         let path = self.fs_checked(&rel_path, false)?;
         std::fs::read(&path)
@@ -1662,7 +1662,7 @@ impl crate::wasm::kiqi::plugin::fs::Host for HostState {
 /// Raw TCP, allow-listed per host. The host holds the sockets and hands the
 /// guest opaque handles (which is exactly the shape the WIT already declared),
 /// so the grant cannot be bypassed by a second connect.
-impl crate::wasm::kiqi::plugin::net_sockets::Host for HostState {
+impl crate::wasm::kiqi::extension::net_sockets::Host for HostState {
     fn connect(&mut self, address: String) -> Result<u32, CapabilityError> {
         let (host, port) = split_host_port(&address)?;
         if !self.grants.allows_socket_host(&host) {
@@ -1672,10 +1672,10 @@ impl crate::wasm::kiqi::plugin::net_sockets::Host for HostState {
         }
         // Bound the live handles the way `proc` bounds its children: unbounded
         // they let a looping guest exhaust the host process's file
-        // descriptors, which breaks every other plugin's fs/exec too.
+        // descriptors, which breaks every other extension's fs/exec too.
         if self.sockets.len() >= MAX_OPEN_SOCKETS {
             return Err(CapabilityError::Failed(format!(
-                "net-sockets: {MAX_OPEN_SOCKETS} sockets are already open on this plugin; close one first"
+                "net-sockets: {MAX_OPEN_SOCKETS} sockets are already open on this extension; close one first"
             )));
         }
         use std::net::ToSocketAddrs;
@@ -1782,7 +1782,7 @@ fn truncate_chars(text: &str, max_bytes: u64) -> String {
 /// * **Nothing unbounded**: channels are bounded (a chatty child blocks on its
 ///   own write), lines and stderr are capped, and the number of live children
 ///   is the grant's `max-open`.
-impl crate::wasm::kiqi::plugin::proc::Host for HostState {
+impl crate::wasm::kiqi::extension::proc::Host for HostState {
     fn spawn(
         &mut self,
         cmd: String,
@@ -2003,7 +2003,7 @@ impl crate::wasm::kiqi::plugin::proc::Host for HostState {
         }
         // The guest's own deadline may be shorter than the child's budget:
         // `timeout_ms = 0` means "however long the budget allows", anything
-        // else caps this wait so a plugin can report its own timeout.
+        // else caps this wait so an extension can report its own timeout.
         let wait = match timeout_ms {
             0 => remaining,
             ms => remaining.min(std::time::Duration::from_millis(ms)),
@@ -2082,14 +2082,14 @@ impl crate::wasm::kiqi::plugin::proc::Host for HostState {
 /// cleared environment, capped output, wall-clock timeout. No shell is
 /// involved, so shell metacharacters in `args` stay literal.
 ///
-/// The cwd scope rides with the grant: `plugin-data` jails the child's working
-/// directory to `plugins/<id>/data/`; `project` jails it to the project
-/// directory (for diagnostic plugins that run `cargo`/`clippy`). Note the jail
+/// The cwd scope rides with the grant: `extension-data` jails the child's working
+/// directory to `extensions/<id>/data/`; `project` jails it to the project
+/// directory (for diagnostic extensions that run `cargo`/`clippy`). Note the jail
 /// bounds where the child *starts*, not what it can reach: the child inherits
 /// the user's privileges and can read or write anywhere it can path to. The
-/// scope exists so a plugin cannot *accidentally* operate on the wrong tree
+/// scope exists so an extension cannot *accidentally* operate on the wrong tree
 /// and so the grant's intent stays legible — not to sandbox the child.
-impl crate::wasm::kiqi::plugin::exec::Host for HostState {
+impl crate::wasm::kiqi::extension::exec::Host for HostState {
     fn run(
         &mut self,
         cmd: String,
@@ -2152,7 +2152,7 @@ fn split_host_port(address: &str) -> Result<(String, u16), CapabilityError> {
 fn effective_proc_timeout(timeout_seconds: u64) -> std::time::Duration {
     if timeout_seconds == 0 {
         eprintln!(
-            "[kiqi-plugin] proc grant timeout 0s is not a usable budget; using 1s \
+            "[kiqi-extension] proc grant timeout 0s is not a usable budget; using 1s \
              (the parse layer rejects 0, so only an in-code grant can say it)"
         );
         return std::time::Duration::from_secs(1);
@@ -2160,7 +2160,7 @@ fn effective_proc_timeout(timeout_seconds: u64) -> std::time::Duration {
     let clamped = timeout_seconds.min(crate::grants::PROC_TIMEOUT_MAX_SECONDS);
     if clamped != timeout_seconds {
         eprintln!(
-            "[kiqi-plugin] proc grant timeout {timeout_seconds}s exceeds the {clamped}s cap; \
+            "[kiqi-extension] proc grant timeout {timeout_seconds}s exceeds the {clamped}s cap; \
              clamped (a hand-edited grants.json is the only way in past the CLI's check)"
         );
     }
@@ -2176,7 +2176,7 @@ fn effective_proc_max_open(max_open: u32) -> u32 {
     let clamped = max_open.min(crate::grants::PROC_MAX_OPEN_MAX);
     if clamped != max_open {
         eprintln!(
-            "[kiqi-plugin] proc grant max-open {max_open} exceeds the {clamped} cap; \
+            "[kiqi-extension] proc grant max-open {max_open} exceeds the {clamped} cap; \
              clamped (a hand-edited grants.json is the only way in past the CLI's check)"
         );
     }
@@ -2191,7 +2191,7 @@ fn effective_proc_max_open(max_open: u32) -> u32 {
 fn effective_exec_timeout(timeout_seconds: u64) -> std::time::Duration {
     if timeout_seconds == 0 {
         eprintln!(
-            "[kiqi-plugin] exec grant timeout 0s is not a usable budget; using 1s \
+            "[kiqi-extension] exec grant timeout 0s is not a usable budget; using 1s \
              (the parse layer rejects 0, so only an in-code grant can say it)"
         );
         return std::time::Duration::from_secs(1);
@@ -2199,7 +2199,7 @@ fn effective_exec_timeout(timeout_seconds: u64) -> std::time::Duration {
     let clamped = timeout_seconds.min(crate::grants::EXEC_TIMEOUT_MAX_SECONDS);
     if clamped != timeout_seconds {
         eprintln!(
-            "[kiqi-plugin] exec grant timeout {timeout_seconds}s exceeds the {clamped}s cap; \
+            "[kiqi-extension] exec grant timeout {timeout_seconds}s exceeds the {clamped}s cap; \
              clamped (a hand-edited grants.json is the only way in past the CLI's check)"
         );
     }
@@ -2218,7 +2218,7 @@ const PROC_STDERR_CAP: usize = 256 * 1024;
 /// from buffering the host's memory.
 const PROC_CHANNEL_DEPTH: usize = 1024;
 
-/// How many sockets one plugin may hold open at once through `net-sockets`.
+/// How many sockets one extension may hold open at once through `net-sockets`.
 /// The map would otherwise grow without bound — nothing else reaps it — and a
 /// guest that loops `connect` would drain the host's file descriptors.
 const MAX_OPEN_SOCKETS: usize = 256;
@@ -2308,7 +2308,7 @@ fn run_with_limits(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Cleared, then only `PATH` back: a plugin must not inherit the host's
+        // Cleared, then only `PATH` back: an extension must not inherit the host's
         // `KI_SESSION_ID` or any other ambient secret.
         .env_clear();
     // Its own process group, so descendants can be reaped with it: a command that
@@ -2364,7 +2364,7 @@ fn run_with_limits(
 }
 
 // ---------------------------------------------------------------------------
-// WasmPlugin
+// WasmExtension
 // ---------------------------------------------------------------------------
 
 struct Inner {
@@ -2376,7 +2376,7 @@ struct Inner {
 /// component.
 ///
 /// A call with a wall-clock budget (`oauth`) that overruns it hands its store
-/// to the abandoned worker, which still owns it. The plugin re-instantiates
+/// to the abandoned worker, which still owns it. The extension re-instantiates
 /// from this recipe instead of staying "unloaded" for the rest of the process.
 struct InstanceRecipe {
     grants: Grants,
@@ -2385,14 +2385,14 @@ struct InstanceRecipe {
     fuel: Option<u64>,
     max_memory_bytes: usize,
     oauth_transport: Option<std::sync::Arc<dyn OAuthTransport>>,
-    credential_sink: Option<std::sync::Arc<dyn PluginCredentialSink>>,
+    credential_sink: Option<std::sync::Arc<dyn ExtensionCredentialSink>>,
     /// The engine is epoch-instrumented (a `patch` grant exists), so a fresh
     /// store must start with a disarmed epoch deadline.
     gate_epoch: bool,
     declared_flags: std::sync::Arc<std::collections::BTreeSet<String>>,
 }
 
-/// The declarative surfaces a plugin publishes, captured once per instance.
+/// The declarative surfaces an extension publishes, captured once per instance.
 ///
 /// `shortcut_hosts` runs on every key event and `probe_tool_call` on every
 /// tool call, so asking the guest each time would put a mutex and a wasm call
@@ -2410,7 +2410,7 @@ struct DeclaredSurfaces {
 /// Load-time knobs.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// Bound the guest's execution. With a budget, a plugin that spins traps
+    /// Bound the guest's execution. With a budget, an extension that spins traps
     /// instead of hanging the host; `None` leaves it unbounded.
     pub fuel: Option<u64>,
     /// Cap the guest's linear memory. `None` uses [`DEFAULT_MAX_MEMORY_BYTES`];
@@ -2426,14 +2426,14 @@ pub struct Options {
     /// depend on `kiqi-cli`, so the CLI installs this when it constructs the
     /// instance. `None` means a granted exchange returns `failed` rather than
     /// writing anywhere — the safe default for embedders and tests.
-    pub credential_sink: Option<std::sync::Arc<dyn PluginCredentialSink>>,
+    pub credential_sink: Option<std::sync::Arc<dyn ExtensionCredentialSink>>,
     /// The HTTP seam for `oauth-http`. `None` uses the real transport; tests
     /// inject a fake so policy and bounds are asserted without a network.
     pub oauth_transport: Option<std::sync::Arc<dyn OAuthTransport>>,
 }
 
 /// The default linear-memory cap for a guest: 256 MiB, which is far above what
-/// any real plugin needs and far below the wasm32 address space.
+/// any real extension needs and far below the wasm32 address space.
 pub const DEFAULT_MAX_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 
 /// The wasmtime configuration every engine in this process is built from.
@@ -2453,7 +2453,7 @@ pub const DEFAULT_MAX_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 fn wasmtime_config(options: &Options) -> wasmtime::Config {
     let mut config = wasmtime::Config::new();
     if options.fuel.is_some() {
-        // Metering is off unless a bound is asked for, so ordinary plugins do
+        // Metering is off unless a bound is asked for, so ordinary extensions do
         // not pay for it.
         config.consume_fuel(true);
     }
@@ -2462,8 +2462,8 @@ fn wasmtime_config(options: &Options) -> wasmtime::Config {
     config
 }
 
-/// A plugin loaded from a wasm component.
-pub struct WasmPlugin {
+/// An extension loaded from a wasm component.
+pub struct WasmExtension {
     id: String,
     /// Kept so a reload can re-instantiate without recompiling the wasm, and
     /// so an instance abandoned by a timed-out call can be replaced.
@@ -2494,7 +2494,7 @@ pub struct WasmPlugin {
     inner: Mutex<Option<Inner>>,
 }
 
-/// 宿主侧 guest 失败诊断汇。kiqi-plugin-host 是库，`tracing::warn!` 只有在
+/// 宿主侧 guest 失败诊断汇。kiqi-extension-host 是库，`tracing::warn!` 只有在
 /// 宿主进程装了 subscriber 时才可见——ki（kiqi-cli）至今没有装，P0 加的
 /// 诊断因此是死代码。嵌入方（kiqi-cli）在进程启动时调用
 /// [`set_guest_error_sink`] 把诊断接进自己的日志文件；未设置时只剩 tracing。
@@ -2503,10 +2503,10 @@ static GUEST_ERROR_SINK: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 /// 把一条 guest 失败诊断同时发给 tracing 与已安装的 sink（若有的话）。
-fn emit_guest_error(plugin: &str, op: &str, error: &str) {
-    tracing::warn!(plugin = %plugin, op, %error, "guest call failed");
+fn emit_guest_error(extension: &str, op: &str, error: &str) {
+    tracing::warn!(extension = %extension, op, %error, "guest call failed");
     if let Some(sink) = GUEST_ERROR_SINK.get() {
-        sink(plugin, op, error);
+        sink(extension, op, error);
     }
 }
 
@@ -2515,7 +2515,7 @@ pub fn set_guest_error_sink(sink: std::sync::Arc<dyn Fn(&str, &str, &str) + Send
     let _ = GUEST_ERROR_SINK.set(sink);
 }
 
-impl WasmPlugin {
+impl WasmExtension {
     /// 宿主侧 guest 调用诊断汇（卡：0.8.0 能力补齐，P0）。
     ///
     /// 元数据/观测类入口原先用 `Err(_) => Vec::new()` / `result.ok()` 把 trap 吞掉，
@@ -2527,9 +2527,9 @@ impl WasmPlugin {
     }
 
     /// Load and instantiate a component with the grants the user recorded for
-    /// this plugin id (a missing `grants.json` grants nothing). `init` is called
+    /// this extension id (a missing `grants.json` grants nothing). `init` is called
     /// before returning.
-    pub fn load(id: impl Into<String>, wasm: &Path) -> Result<Self, PluginError> {
+    pub fn load(id: impl Into<String>, wasm: &Path) -> Result<Self, ExtensionError> {
         let id = id.into();
         let grants = Grants::load_for(&id);
         Self::load_with_grants(id, wasm, grants)
@@ -2541,7 +2541,7 @@ impl WasmPlugin {
         id: impl Into<String>,
         wasm: &Path,
         grants: Grants,
-    ) -> Result<Self, PluginError> {
+    ) -> Result<Self, ExtensionError> {
         Self::load_with_options(id, wasm, grants, Options::default())
     }
 
@@ -2551,12 +2551,12 @@ impl WasmPlugin {
         wasm: &Path,
         grants: Grants,
         options: Options,
-    ) -> Result<Self, PluginError> {
+    ) -> Result<Self, ExtensionError> {
         let id = id.into();
         // Resolve the provider-request policy before the grants move into the
         // store: the fan-out needs it without locking the guest. A `patch`
         // grant also decides whether the engine is epoch-instrumented: only
-        // the gate has a deadline, so only a patch-capable plugin pays for
+        // the gate has a deadline, so only a patch-capable extension pays for
         // interruption (and needs the ticker that makes a deadline fire).
         let provider_request = resolve_provider_request_policy(&grants);
         let gate_epoch = provider_request.as_ref().is_some_and(|policy| policy.patch);
@@ -2566,18 +2566,18 @@ impl WasmPlugin {
         }
         let engine = std::sync::Arc::new(
             Engine::new(&config)
-                .map_err(|error| PluginError::Failed(format!("wasmtime engine: {error}")))?,
+                .map_err(|error| ExtensionError::Failed(format!("wasmtime engine: {error}")))?,
         );
         if gate_epoch {
             let ticker = render_ticker().ok_or_else(|| {
-                PluginError::Failed(format!(
+                ExtensionError::Failed(format!(
                     "{id}: epoch ticker is unavailable; a provider gate could never time out"
                 ))
             })?;
             ticker.register(&engine);
         }
         let component = Component::from_file(&engine, wasm)
-            .map_err(|error| PluginError::Failed(format!("load {}: {error}", wasm.display())))?;
+            .map_err(|error| ExtensionError::Failed(format!("load {}: {error}", wasm.display())))?;
 
         // Hoist the OAuth grant before it moves into the store: `oauth_providers`
         // is read by `ki auth` and must not lock the guest. `None` is the
@@ -2595,13 +2595,13 @@ impl WasmPlugin {
             declared_flags: std::sync::Arc::new(std::collections::BTreeSet::new()),
         };
         let Inner { mut store, guest } = Self::instantiate(&id, &engine, &component, &recipe)?;
-        // The plugin declares its own identity. The install directory stays the
+        // The extension declares its own identity. The install directory stays the
         // authorization key (grants live beside the file and were read by it), so
         // a mismatch is reported rather than silently trusted.
-        if let Ok(declared) = guest.kiqi_plugin_plugin_api().call_id(&mut store) {
+        if let Ok(declared) = guest.kiqi_extension_extension_api().call_id(&mut store) {
             if !declared.is_empty() && declared != id {
                 eprintln!(
-                    "[kiqi-plugin] {id}: component declares id `{declared}`; \
+                    "[kiqi-extension] {id}: component declares id `{declared}`; \
                      grants remain keyed by the install directory"
                 );
             }
@@ -2610,26 +2610,28 @@ impl WasmPlugin {
         // `session-read.cli-flag` can be declaration-scoped without touching
         // the guest on every read. A trap here is a broken guest: report it and
         // scope to the empty set (fail closed — no flag is readable).
-        let (declared_flag_names, declared_flag_specs) =
-            match guest.kiqi_plugin_plugin_api().call_list_flags(&mut store) {
-                Ok(specs) => {
-                    // One call serves both consumers: the declaration scope on
-                    // `HostState` and the cached `flags()` surface.
-                    let names = specs.iter().map(|spec| spec.name.clone()).collect();
-                    let flags = specs
-                        .into_iter()
-                        .map(|spec| crate::FlagSpec {
-                            name: spec.name,
-                            description: spec.description,
-                        })
-                        .collect();
-                    (names, flags)
-                }
-                Err(error) => {
-                    tracing::warn!(plugin = %id, op = "list-flags", %error, "guest call failed");
-                    (std::collections::BTreeSet::new(), Vec::new())
-                }
-            };
+        let (declared_flag_names, declared_flag_specs) = match guest
+            .kiqi_extension_extension_api()
+            .call_list_flags(&mut store)
+        {
+            Ok(specs) => {
+                // One call serves both consumers: the declaration scope on
+                // `HostState` and the cached `flags()` surface.
+                let names = specs.iter().map(|spec| spec.name.clone()).collect();
+                let flags = specs
+                    .into_iter()
+                    .map(|spec| crate::FlagSpec {
+                        name: spec.name,
+                        description: spec.description,
+                    })
+                    .collect();
+                (names, flags)
+            }
+            Err(error) => {
+                tracing::warn!(extension = %id, op = "list-flags", %error, "guest call failed");
+                (std::collections::BTreeSet::new(), Vec::new())
+            }
+        };
         store.data_mut().reap_call_scoped();
         let declared_flag_names = std::sync::Arc::new(declared_flag_names);
         store.data_mut().declared_flags = std::sync::Arc::clone(&declared_flag_names);
@@ -2644,7 +2646,7 @@ impl WasmPlugin {
             match bounded_oauth_provider_ids(store, guest, DISCOVERY_WAIT) {
                 Ok((ids, store, guest)) => (ids, store, guest),
                 Err(error) => {
-                    return Err(PluginError::Failed(format!("{id}: {error}")));
+                    return Err(ExtensionError::Failed(format!("{id}: {error}")));
                 }
             }
         } else {
@@ -2671,19 +2673,20 @@ impl WasmPlugin {
     ///
     /// Called at load, and again after an `oauth` call times out: the worker
     /// that overran its deadline still owns the old store, so re-instantiating
-    /// is the only way to put the plugin back in service without waiting for
+    /// is the only way to put the extension back in service without waiting for
     /// it (and, in the worst case, without ever waiting for it at all).
     fn instantiate(
         id: &str,
         engine: &Engine,
         component: &Component,
         recipe: &InstanceRecipe,
-    ) -> Result<Inner, PluginError> {
+    ) -> Result<Inner, ExtensionError> {
         let mut linker = Linker::new(engine);
-        World::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state)
-            .map_err(|error| PluginError::Failed(format!("link plugin interfaces: {error}")))?;
+        World::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state).map_err(
+            |error| ExtensionError::Failed(format!("link extension interfaces: {error}")),
+        )?;
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-            .map_err(|error| PluginError::Failed(format!("link wasi: {error}")))?;
+            .map_err(|error| ExtensionError::Failed(format!("link wasi: {error}")))?;
         let oauth = OAuthState {
             budget: recipe
                 .grants
@@ -2705,7 +2708,7 @@ impl WasmPlugin {
                 grants: recipe.grants.clone(),
                 fs_root: recipe.fs_root.clone(),
                 project_dir: recipe.project_dir.clone(),
-                plugin_id: Some(id.to_string()),
+                extension_id: Some(id.to_string()),
                 declared_flags: std::sync::Arc::clone(&recipe.declared_flags),
                 sockets: std::collections::HashMap::new(),
                 next_socket: 1,
@@ -2727,19 +2730,19 @@ impl WasmPlugin {
         }
         if let Some(fuel) = recipe.fuel {
             store.set_fuel(fuel).map_err(|error| {
-                PluginError::Failed(format!("set fuel budget for {id}: {error}"))
+                ExtensionError::Failed(format!("set fuel budget for {id}: {error}"))
             })?;
         }
         let guest = World::instantiate(&mut store, component, &linker)
-            .map_err(|error| PluginError::Failed(format!("instantiate {id}: {error}")))?;
+            .map_err(|error| ExtensionError::Failed(format!("instantiate {id}: {error}")))?;
         Ok(Inner { store, guest })
     }
 
     /// Call the guest `shutdown` and release the instance.
     ///
-    /// This is the counterpart of [`WasmPlugin::load`]: after it returns, the
+    /// This is the counterpart of [`WasmExtension::load`]: after it returns, the
     /// component's linear memory and resources are gone. `/reload` relies on it,
-    /// and [`Drop`] calls it so a dropped plugin cannot leak an instance.
+    /// and [`Drop`] calls it so a dropped extension cannot leak an instance.
     pub fn unload(&self) {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(mut inner) = guard.take() {
@@ -2747,9 +2750,9 @@ impl WasmPlugin {
             // the instance.
             let _ = inner
                 .guest
-                .kiqi_plugin_plugin_api()
+                .kiqi_extension_extension_api()
                 .call_shutdown(&mut inner.store);
-            // `shutdown` is a guest entry point like any other: a plugin may
+            // `shutdown` is a guest entry point like any other: an extension may
             // spawn through `proc` in it, and nothing else runs after this
             // point, so reap here too — a handle's lifetime is "one call".
             inner.store.data_mut().reap_call_scoped();
@@ -2758,7 +2761,7 @@ impl WasmPlugin {
     }
 }
 
-impl WasmPlugin {
+impl WasmExtension {
     /// Shared body of the two `on_event` faces: call the guest with the call
     /// lock already held (blocking) or skipped (observe).
     fn dispatch_event(
@@ -2771,7 +2774,7 @@ impl WasmPlugin {
             return EventAction::Continue;
         };
         // Provider observation is deny-by-default and field-graded per guest:
-        // the payload is cut down to what *this* plugin's provider-request
+        // the payload is cut down to what *this* extension's provider-request
         // grant allows, and an ungranted guest is never called at all. The
         // grants live in the store (that is why this happens here and not in
         // kiqi-extensions, which cannot see them).
@@ -2799,7 +2802,7 @@ impl WasmPlugin {
         let _context = install_context_kind(None, caps, CallKind::Event, None);
         let result = inner
             .guest
-            .kiqi_plugin_plugin_api()
+            .kiqi_extension_extension_api()
             .call_on_event(&mut inner.store, &wit);
         clear_context();
         // A `proc` handle lives for this call and nothing beyond it.
@@ -2808,19 +2811,19 @@ impl WasmPlugin {
             Ok(WitEventAction::Continue) => EventAction::Continue,
             Ok(WitEventAction::Claimed) => EventAction::Claimed,
             // The patch channel belongs to the provider gate, which calls
-            // [`WasmPlugin::provider_gate`] directly. An observe or claiming
+            // [`WasmExtension::provider_gate`] directly. An observe or claiming
             // dispatch ignores it: a patch returned for any tag (including
             // `before-provider-request` on the observe path) changes nothing.
             Ok(WitEventAction::Patch(_)) => EventAction::Continue,
             Err(trap) => {
-                eprintln!("[kiqi-plugin] {}: on-event trapped: {trap}", self.id);
+                eprintln!("[kiqi-extension] {}: on-event trapped: {trap}", self.id);
                 EventAction::Continue
             }
         }
     }
 }
 
-impl WasmPlugin {
+impl WasmExtension {
     /// Run the provider gate for one `before-provider-request` event.
     ///
     /// Deny-by-default: a host whose policy does not grant `patch` is never
@@ -2872,7 +2875,7 @@ impl WasmPlugin {
         let _context = install_context_kind(None, caps, CallKind::Event, None);
         let result = inner
             .guest
-            .kiqi_plugin_plugin_api()
+            .kiqi_extension_extension_api()
             .call_on_event(&mut inner.store, &wit);
         clear_context();
         // A `proc` handle lives for this call and nothing beyond it.
@@ -2932,7 +2935,7 @@ impl WasmPlugin {
         };
         let result = inner
             .guest
-            .kiqi_plugin_plugin_api()
+            .kiqi_extension_extension_api()
             .call_list_commands(&mut inner.store);
         inner.store.data_mut().reap_call_scoped();
         let commands = match result {
@@ -2972,7 +2975,7 @@ impl WasmPlugin {
         };
         let result = inner
             .guest
-            .kiqi_plugin_plugin_api()
+            .kiqi_extension_extension_api()
             .call_list_flags(&mut inner.store);
         inner.store.data_mut().reap_call_scoped();
         let flags: Vec<crate::FlagSpec> = match result {
@@ -3013,7 +3016,7 @@ impl WasmPlugin {
         };
         let result = inner
             .guest
-            .kiqi_plugin_plugin_api()
+            .kiqi_extension_extension_api()
             .call_list_shortcuts(&mut inner.store);
         inner.store.data_mut().reap_call_scoped();
         let shortcuts: Vec<crate::ShortcutSpec> = match result {
@@ -3053,7 +3056,7 @@ impl WasmPlugin {
         };
         let result = inner
             .guest
-            .kiqi_plugin_plugin_api()
+            .kiqi_extension_extension_api()
             .call_list_probe_points(&mut inner.store);
         inner.store.data_mut().reap_call_scoped();
         let points = match result {
@@ -3071,13 +3074,13 @@ impl WasmPlugin {
     }
 }
 
-impl Drop for WasmPlugin {
+impl Drop for WasmExtension {
     fn drop(&mut self) {
         self.unload();
     }
 }
 
-impl ExtensionTrait for WasmPlugin {
+impl ExtensionTrait for WasmExtension {
     fn id(&self) -> &str {
         &self.id
     }
@@ -3087,7 +3090,7 @@ impl ExtensionTrait for WasmPlugin {
         let Some(inner) = guard.as_mut() else {
             return Vec::new();
         };
-        let guest = inner.guest.kiqi_plugin_plugin_api();
+        let guest = inner.guest.kiqi_extension_extension_api();
         let result = guest.call_list_tools(&mut inner.store);
         // Spawning in a metadata call is legal; nothing survives it either.
         inner.store.data_mut().reap_call_scoped();
@@ -3102,7 +3105,7 @@ impl ExtensionTrait for WasmPlugin {
                 })
                 .collect(),
             Err(error) => {
-                eprintln!("[kiqi-plugin] {}: list-tools trapped: {error}", self.id);
+                eprintln!("[kiqi-extension] {}: list-tools trapped: {error}", self.id);
                 Vec::new()
             }
         }
@@ -3117,13 +3120,13 @@ impl ExtensionTrait for WasmPlugin {
         name: &str,
         arguments: &str,
         caps: &HostCaps<'_>,
-    ) -> Result<crate::CommandResult, PluginError> {
+    ) -> Result<crate::CommandResult, ExtensionError> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let Some(inner) = guard.as_mut() else {
-            return Err(PluginError::Failed(format!("{} is unloaded", self.id)));
+            return Err(ExtensionError::Failed(format!("{} is unloaded", self.id)));
         };
         let _context = install_context_kind(None, caps, CallKind::Command, None);
-        let result = inner.guest.kiqi_plugin_plugin_api().call_run_command(
+        let result = inner.guest.kiqi_extension_extension_api().call_run_command(
             &mut inner.store,
             name,
             arguments,
@@ -3136,13 +3139,13 @@ impl ExtensionTrait for WasmPlugin {
                 Ok(result) => Ok(result),
                 Err(diagnostic) => {
                     self.report_guest_error("run-command", &diagnostic);
-                    Err(PluginError::Failed(diagnostic))
+                    Err(ExtensionError::Failed(diagnostic))
                 }
             },
-            Ok(Err(error)) => Err(map_plugin_error(error)),
+            Ok(Err(error)) => Err(map_extension_error(error)),
             Err(trap) => {
                 self.report_guest_error("run-command", &trap);
-                Err(PluginError::Failed(format!(
+                Err(ExtensionError::Failed(format!(
                     "{}: command `{name}` trapped: {trap}",
                     self.id
                 )))
@@ -3150,7 +3153,7 @@ impl ExtensionTrait for WasmPlugin {
         }
     }
 
-    /// Answer a selector/editor/prompt flow started by [`Plugin::run_command`].
+    /// Answer a selector/editor/prompt flow started by [`Extension::run_command`].
     ///
     /// The CLI owns the pending slot and validates the id before this is
     /// called; the host still sanitizes and types the returned body so a guest
@@ -3161,18 +3164,16 @@ impl ExtensionTrait for WasmPlugin {
         flow_id: &str,
         reply: crate::CommandReply,
         caps: &HostCaps<'_>,
-    ) -> Result<crate::CommandResult, PluginError> {
+    ) -> Result<crate::CommandResult, ExtensionError> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let Some(inner) = guard.as_mut() else {
-            return Err(PluginError::Failed(format!("{} is unloaded", self.id)));
+            return Err(ExtensionError::Failed(format!("{} is unloaded", self.id)));
         };
         let _context = install_context_kind(None, caps, CallKind::Command, None);
-        let result = inner.guest.kiqi_plugin_plugin_api().call_continue_command(
-            &mut inner.store,
-            name,
-            flow_id,
-            &to_wit_reply(reply),
-        );
+        let result = inner
+            .guest
+            .kiqi_extension_extension_api()
+            .call_continue_command(&mut inner.store, name, flow_id, &to_wit_reply(reply));
         clear_context();
         inner.store.data_mut().reap_call_scoped();
         match result {
@@ -3180,13 +3181,13 @@ impl ExtensionTrait for WasmPlugin {
                 Ok(result) => Ok(result),
                 Err(diagnostic) => {
                     self.report_guest_error("continue-command", &diagnostic);
-                    Err(PluginError::Failed(diagnostic))
+                    Err(ExtensionError::Failed(diagnostic))
                 }
             },
-            Ok(Err(error)) => Err(map_plugin_error(error)),
+            Ok(Err(error)) => Err(map_extension_error(error)),
             Err(trap) => {
                 self.report_guest_error("continue-command", &trap);
-                Err(PluginError::Failed(format!(
+                Err(ExtensionError::Failed(format!(
                     "{}: command `{name}` continuation trapped: {trap}",
                     self.id
                 )))
@@ -3212,7 +3213,7 @@ impl ExtensionTrait for WasmPlugin {
         let _context = install_context_kind(None, caps, CallKind::PromptHook, None);
         let result = inner
             .guest
-            .kiqi_plugin_plugin_api()
+            .kiqi_extension_extension_api()
             .call_before_agent_start(&mut inner.store, &prompt.to_string());
         clear_context();
         // A `proc` handle lives for this call and nothing beyond it.
@@ -3236,7 +3237,7 @@ impl ExtensionTrait for WasmPlugin {
             return Verdict::Continue;
         };
         let _context = install_context_kind(None, caps, CallKind::Probe, None);
-        let result = inner.guest.kiqi_plugin_plugin_api().call_probe(
+        let result = inner.guest.kiqi_extension_extension_api().call_probe(
             &mut inner.store,
             point,
             &payload.to_string(),
@@ -3251,7 +3252,7 @@ impl ExtensionTrait for WasmPlugin {
             }
             Ok(WitVerdict::Block(reason)) => Verdict::Block { reason },
             Err(trap) => {
-                eprintln!("[kiqi-plugin] {}: probe trapped: {trap}", self.id);
+                eprintln!("[kiqi-extension] {}: probe trapped: {trap}", self.id);
                 Verdict::Continue
             }
         }
@@ -3263,27 +3264,27 @@ impl ExtensionTrait for WasmPlugin {
         arguments: &serde_json::Value,
         caps: &HostCaps<'_>,
         sink: &dyn ProgressSink,
-    ) -> Result<ToolOutcome, PluginError> {
+    ) -> Result<ToolOutcome, ExtensionError> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let Some(inner) = guard.as_mut() else {
-            return Err(PluginError::Failed(format!("{} is unloaded", self.id)));
+            return Err(ExtensionError::Failed(format!("{} is unloaded", self.id)));
         };
 
         let arguments = serde_json::to_string(arguments).unwrap_or_else(|_| "null".to_string());
         let _context = install_context_kind(Some(sink), caps, CallKind::Tool, None);
-        let result =
-            inner
-                .guest
-                .kiqi_plugin_plugin_api()
-                .call_call_tool(&mut inner.store, name, &arguments);
+        let result = inner.guest.kiqi_extension_extension_api().call_call_tool(
+            &mut inner.store,
+            name,
+            &arguments,
+        );
         clear_context();
         // A `proc` handle lives for this call and nothing beyond it.
         inner.store.data_mut().reap_call_scoped();
 
         match result {
             Ok(Ok(tool_result)) => Ok(to_tool_outcome(tool_result)),
-            Ok(Err(error)) => Err(map_plugin_error(error)),
-            Err(trap) => Err(PluginError::Failed(format!(
+            Ok(Err(error)) => Err(map_extension_error(error)),
+            Err(trap) => Err(ExtensionError::Failed(format!(
                 "{}: tool `{name}` trapped: {trap}",
                 self.id
             ))),
@@ -3346,11 +3347,11 @@ impl ExtensionTrait for WasmPlugin {
         &self,
         provider_id: &str,
         action: OAuthAction,
-    ) -> Result<OAuthResponse, PluginError> {
+    ) -> Result<OAuthResponse, ExtensionError> {
         // Deny-by-default: the grant decides whether the guest is reached at
         // all, and it must name exactly this provider.
         let Some(grant) = self.oauth_grant.as_ref() else {
-            return Err(PluginError::Denied(format!(
+            return Err(ExtensionError::Denied(format!(
                 "oauth is not granted for provider `{provider_id}`"
             )));
         };
@@ -3359,7 +3360,7 @@ impl ExtensionTrait for WasmPlugin {
             .iter()
             .any(|profile| profile.id == provider_id)
         {
-            return Err(PluginError::Denied(format!(
+            return Err(ExtensionError::Denied(format!(
                 "oauth provider `{provider_id}` is not granted"
             )));
         }
@@ -3368,7 +3369,7 @@ impl ExtensionTrait for WasmPlugin {
         // check could not run, so the grant stands alone.
         if let Some(ids) = self.oauth_crosscheck.as_ref() {
             if !ids.contains(provider_id) {
-                return Err(PluginError::Denied(format!(
+                return Err(ExtensionError::Denied(format!(
                     "oauth provider `{provider_id}` is not declared by the guest"
                 )));
             }
@@ -3380,16 +3381,16 @@ impl ExtensionTrait for WasmPlugin {
             + std::time::Duration::from_secs(1);
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let Some(inner) = guard.take() else {
-            return Err(PluginError::Failed(format!("{} is unloaded", self.id)));
+            return Err(ExtensionError::Failed(format!("{} is unloaded", self.id)));
         };
         let pid = provider_id.to_string();
         let wit_action = to_wit_oauth_action(action);
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
-            .name("kiqi-plugin-oauth".to_string())
+            .name("kiqi-extension-oauth".to_string())
             .spawn(move || {
                 let mut inner = inner;
-                let result = inner.guest.kiqi_plugin_oauth_api().call_action(
+                let result = inner.guest.kiqi_extension_oauth_api().call_action(
                     &mut inner.store,
                     &pid,
                     &wit_action,
@@ -3400,7 +3401,7 @@ impl ExtensionTrait for WasmPlugin {
                 let _ = tx.send((result, inner));
             });
         if let Err(error) = spawned {
-            return Err(PluginError::Failed(format!(
+            return Err(ExtensionError::Failed(format!(
                 "{}: cannot start the oauth thread: {error}",
                 self.id
             )));
@@ -3409,11 +3410,11 @@ impl ExtensionTrait for WasmPlugin {
             Ok((result, inner)) => {
                 *guard = Some(inner);
                 match result {
-                    Ok(Ok(response)) => Ok(to_plugin_oauth_response(response)),
-                    Ok(Err(error)) => Err(map_plugin_error(error)),
+                    Ok(Ok(response)) => Ok(to_extension_oauth_response(response)),
+                    Ok(Err(error)) => Err(map_extension_error(error)),
                     Err(trap) => {
                         self.report_guest_error("oauth-action", &trap);
-                        Err(PluginError::Failed(format!(
+                        Err(ExtensionError::Failed(format!(
                             "{}: oauth action trapped: {trap}",
                             self.id
                         )))
@@ -3422,19 +3423,19 @@ impl ExtensionTrait for WasmPlugin {
             }
             Err(_) => {
                 // The worker that overran the deadline still owns the store,
-                // so the plugin must not stay "unloaded" for good: build a
+                // so the extension must not stay "unloaded" for good: build a
                 // fresh instance from the retained engine and component. The
                 // abandoned store drops on its own thread when (if) the guest
                 // finally returns.
                 match Self::instantiate(&self.id, &self.engine, &self.component, &self.recipe) {
                     Ok(fresh) => *guard = Some(fresh),
                     Err(error) => tracing::warn!(
-                        plugin = %self.id,
+                        extension = %self.id,
                         %error,
-                        "cannot re-instantiate after an oauth timeout; plugin stays unloaded"
+                        "cannot re-instantiate after an oauth timeout; extension stays unloaded"
                     ),
                 }
-                Err(PluginError::Failed(format!(
+                Err(ExtensionError::Failed(format!(
                     "{}: oauth action timed out after {}s",
                     self.id,
                     timeout.as_secs()
@@ -3450,7 +3451,7 @@ impl ExtensionTrait for WasmPlugin {
     fn provider_gate(&self, event: &Event, caps: &HostCaps<'_>) -> Result<Option<Value>, String> {
         // The inherent method is the real one; this is the trait surface the
         // fan-out dispatcher calls.
-        WasmPlugin::provider_gate(self, event, caps)
+        WasmExtension::provider_gate(self, event, caps)
     }
 
     fn shutdown(&self) {
@@ -3462,20 +3463,22 @@ impl ExtensionTrait for WasmPlugin {
 // Mapping between the host's types and the ABI's
 // ---------------------------------------------------------------------------
 
-fn map_plugin_error(error: crate::wasm::kiqi::plugin::types::PluginError) -> PluginError {
-    use crate::wasm::kiqi::plugin::types::PluginError as Wit;
+fn map_extension_error(
+    error: crate::wasm::kiqi::extension::types::ExtensionError,
+) -> ExtensionError {
+    use crate::wasm::kiqi::extension::types::ExtensionError as Wit;
     match error {
-        Wit::UnknownTool(name) => PluginError::UnknownTool(name),
-        Wit::InvalidArguments(detail) => PluginError::InvalidArguments(detail),
-        Wit::Denied(detail) => PluginError::Denied(detail),
-        Wit::Failed(detail) => PluginError::Failed(detail),
+        Wit::UnknownTool(name) => ExtensionError::UnknownTool(name),
+        Wit::InvalidArguments(detail) => ExtensionError::InvalidArguments(detail),
+        Wit::Denied(detail) => ExtensionError::Denied(detail),
+        Wit::Failed(detail) => ExtensionError::Failed(detail),
     }
 }
 
 fn to_command_result(
-    result: crate::wasm::kiqi::plugin::types::CommandResult,
+    result: crate::wasm::kiqi::extension::types::CommandResult,
 ) -> crate::CommandResult {
-    use crate::wasm::kiqi::plugin::types::CommandResultBody as Wit;
+    use crate::wasm::kiqi::extension::types::CommandResultBody as Wit;
     let body = match result.body {
         Wit::Message(text) => crate::CommandResultBody::Message(text),
         Wit::Selector(spec) => crate::CommandResultBody::Selector(crate::SelectorSpec {
@@ -3497,8 +3500,8 @@ fn to_command_result(
 }
 
 /// Convert a reply crossing back into the guest.
-fn to_wit_reply(reply: crate::CommandReply) -> crate::wasm::kiqi::plugin::types::CommandReply {
-    use crate::wasm::kiqi::plugin::types::CommandReply as Wit;
+fn to_wit_reply(reply: crate::CommandReply) -> crate::wasm::kiqi::extension::types::CommandReply {
+    use crate::wasm::kiqi::extension::types::CommandReply as Wit;
     match reply {
         crate::CommandReply::Selected(value) => Wit::Selected(value),
         crate::CommandReply::Submitted(value) => Wit::Submitted(value),
@@ -3637,7 +3640,7 @@ fn to_wit_tool_call(event: &Event) -> ToolCall {
 /// `None` means the event is not delivered to this guest:
 ///
 /// * no `provider-request` grant — the grant is the only authorization for
-///   observation, so a merely-loaded plugin sees nothing;
+///   observation, so a merely-loaded extension sees nothing;
 /// * the observe fan-out, when `observe` is not `requests`; the provider gate
 ///   (`for_gate`) also requires `patch`, so a grant with neither delivers
 ///   nothing on either path.
@@ -3784,7 +3787,7 @@ pub(crate) fn epoch_ticks(deadline: std::time::Duration) -> u64 {
     deadline.as_millis().div_ceil(RENDER_TICK_MS as u128).max(1) as u64
 }
 
-/// Instantiate a full plugin world without letting component start code run
+/// Instantiate a full extension world without letting component start code run
 /// unbounded. Compilation happens before this worker starts; fuel, the epoch
 /// deadline and the outer wall clock cover only untrusted instantiation.
 fn instantiate_bounded(
@@ -3793,14 +3796,14 @@ fn instantiate_bounded(
     mut store: Store<HostState>,
     component: Component,
     linker: Linker<HostState>,
-) -> Result<(Store<HostState>, World), PluginError> {
+) -> Result<(Store<HostState>, World), ExtensionError> {
     store.set_fuel(DISCOVERY_FUEL).map_err(|error| {
-        PluginError::Failed(format!("instantiate {id} for {kind}: set fuel: {error}"))
+        ExtensionError::Failed(format!("instantiate {id} for {kind}: set fuel: {error}"))
     })?;
     store.set_epoch_deadline(epoch_ticks(DISCOVERY_DEADLINE));
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::Builder::new()
-        .name("kiqi-plugin-instantiate".to_string())
+        .name("kiqi-extension-instantiate".to_string())
         .spawn(move || {
             let outcome =
                 World::instantiate(&mut store, &component, &linker).map(|guest| (store, guest));
@@ -3809,23 +3812,23 @@ fn instantiate_bounded(
     match worker {
         Ok(handle) => drop(handle),
         Err(error) => {
-            return Err(PluginError::Failed(format!(
+            return Err(ExtensionError::Failed(format!(
                 "instantiate {id} for {kind}: cannot start worker: {error}"
             )))
         }
     }
     match rx.recv_timeout(DISCOVERY_WAIT) {
         Ok(Ok(pair)) => Ok(pair),
-        Ok(Err(error)) => Err(PluginError::Failed(format!(
+        Ok(Err(error)) => Err(ExtensionError::Failed(format!(
             "instantiate {id} for {kind}: {error}"
         ))),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(PluginError::Failed(format!(
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ExtensionError::Failed(format!(
             "instantiate {id} for {kind}: exceeded the {}s instantiation deadline",
             DISCOVERY_WAIT.as_secs()
         ))),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(PluginError::Failed(format!(
-            "instantiate {id} for {kind}: worker ended without a result"
-        ))),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(ExtensionError::Failed(
+            format!("instantiate {id} for {kind}: worker ended without a result"),
+        )),
     }
 }
 
@@ -3890,7 +3893,7 @@ fn render_ticker() -> Option<&'static std::sync::Arc<RenderTicker>> {
                 Err(error) => {
                     tracing::warn!(
                         %error,
-                        "cannot start the render epoch ticker; render plugins stay disabled"
+                        "cannot start the render epoch ticker; render extensions stay disabled"
                     );
                     None
                 }
@@ -3901,7 +3904,7 @@ fn render_ticker() -> Option<&'static std::sync::Arc<RenderTicker>> {
 
 /// One instantiated markdown renderer.
 ///
-/// Deliberately **not** a [`WasmPlugin`]: the render instance has its own
+/// Deliberately **not** a [`WasmExtension`]: the render instance has its own
 /// [`Engine`] (epoch interruption enabled), its own [`Store`] whose
 /// [`Grants`] are `Grants::default()` (deny everything), and it never calls
 /// [`install_context`]. The guest call runs on a freshly spawned thread, whose
@@ -3948,7 +3951,7 @@ impl RenderHost {
         id: impl Into<String>,
         wasm: &Path,
         grants: &Grants,
-    ) -> Result<Option<Self>, PluginError> {
+    ) -> Result<Option<Self>, ExtensionError> {
         match Self::granted(grants) {
             Some(grant) => Self::new(id, wasm, grant).map(Some),
             None => Ok(None),
@@ -3960,10 +3963,10 @@ impl RenderHost {
         id: impl Into<String>,
         wasm: &Path,
         grant: &RenderGrant,
-    ) -> Result<Self, PluginError> {
+    ) -> Result<Self, ExtensionError> {
         let id = id.into();
         if !grant.kinds.iter().any(|kind| kind == RENDER_KIND_MARKDOWN) {
-            return Err(PluginError::Failed(format!(
+            return Err(ExtensionError::Failed(format!(
                 "{id}: render grant does not include `{RENDER_KIND_MARKDOWN}`"
             )));
         }
@@ -3974,14 +3977,14 @@ impl RenderHost {
         let max_output_bytes = grant.max_output_bytes.clamp(1, RENDER_MAX_OUTPUT_BYTES_MAX);
         if timeout_ms != grant.timeout_ms || max_output_bytes != grant.max_output_bytes {
             tracing::warn!(
-                plugin = %id,
+                extension = %id,
                 "render grant budget is outside the host range; clamped to {timeout_ms}ms/\
                  {max_output_bytes} bytes"
             );
         }
 
         let ticker = render_ticker().ok_or_else(|| {
-            PluginError::Failed(format!("{id}: render epoch ticker is unavailable"))
+            ExtensionError::Failed(format!("{id}: render epoch ticker is unavailable"))
         })?;
 
         let mut config = wasmtime_config(&Options {
@@ -3989,19 +3992,20 @@ impl RenderHost {
             ..Options::default()
         });
         config.epoch_interruption(true);
-        let engine = std::sync::Arc::new(
-            Engine::new(&config)
-                .map_err(|error| PluginError::Failed(format!("{id}: render engine: {error}")))?,
-        );
+        let engine =
+            std::sync::Arc::new(Engine::new(&config).map_err(|error| {
+                ExtensionError::Failed(format!("{id}: render engine: {error}"))
+            })?);
         ticker.register(&engine);
         let component = Component::from_file(&engine, wasm)
-            .map_err(|error| PluginError::Failed(format!("load {}: {error}", wasm.display())))?;
+            .map_err(|error| ExtensionError::Failed(format!("load {}: {error}", wasm.display())))?;
 
         let mut linker = Linker::new(&engine);
-        World::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state)
-            .map_err(|error| PluginError::Failed(format!("link plugin interfaces: {error}")))?;
+        World::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state).map_err(
+            |error| ExtensionError::Failed(format!("link extension interfaces: {error}")),
+        )?;
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-            .map_err(|error| PluginError::Failed(format!("link wasi: {error}")))?;
+            .map_err(|error| ExtensionError::Failed(format!("link wasi: {error}")))?;
 
         let limits = wasmtime::StoreLimitsBuilder::new()
             .memory_size(DEFAULT_MAX_MEMORY_BYTES)
@@ -4015,7 +4019,7 @@ impl RenderHost {
             grants: Grants::default(),
             fs_root: None,
             project_dir: None,
-            plugin_id: None,
+            extension_id: None,
             declared_flags: std::sync::Arc::new(std::collections::BTreeSet::new()),
             sockets: std::collections::HashMap::new(),
             next_socket: 1,
@@ -4077,7 +4081,7 @@ impl RenderHost {
         let input = text.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::Builder::new()
-            .name("kiqi-plugin-render".to_string())
+            .name("kiqi-extension-render".to_string())
             .spawn(move || {
                 let mut inner = inner;
                 // This thread was just spawned, so `CURRENT` is empty and no
@@ -4090,7 +4094,7 @@ impl RenderHost {
                 );
                 let outcome = inner
                     .guest
-                    .kiqi_plugin_render_api()
+                    .kiqi_extension_render_api()
                     .call_transform_markdown(&mut inner.store, &input);
                 // The receiver is gone on a deadline; the failed send drops the
                 // abandoned store on this thread, which is exactly what we want.
@@ -4161,7 +4165,7 @@ impl RenderHost {
 
 /// Apply a render result, falling back to the original on any failure.
 ///
-/// This is the contract the CLI transformer relies on: a plugin can never make
+/// This is the contract the CLI transformer relies on: an extension can never make
 /// assistant output disappear or come back half-sanitized.
 pub fn render_or_original(original: &str, result: Result<String, String>) -> String {
     match result {
@@ -4277,13 +4281,13 @@ mod tests {
             table: ResourceTable::new(),
             grants: Grants {
                 fs: Some(crate::grants::FsGrant {
-                    cwd: crate::grants::ExecCwd::PluginData,
+                    cwd: crate::grants::ExecCwd::ExtensionData,
                 }),
                 ..Grants::default()
             },
             fs_root: Some(root.to_path_buf()),
             project_dir: None,
-            plugin_id: Some("test".to_string()),
+            extension_id: Some("test".to_string()),
             declared_flags: std::sync::Arc::new(std::collections::BTreeSet::new()),
             sockets: std::collections::HashMap::new(),
             next_socket: 1,
@@ -4591,12 +4595,12 @@ mod tests {
     #[test]
     fn declared_capabilities_scan_imports_and_exports_through_the_grant_map() {
         let dir = tempfile::tempdir().unwrap();
-        let wasm = dir.path().join("plugin.wasm");
+        let wasm = dir.path().join("extension.wasm");
         std::fs::write(
             &wasm,
             synthetic_component(
-                &["kiqi:plugin/provider-http@0.8.0"],
-                &["kiqi:plugin/oauth-api@0.8.0"],
+                &["kiqi:extension/provider-http@0.8.0"],
+                &["kiqi:extension/oauth-api@0.8.0"],
             ),
         )
         .unwrap();
@@ -4616,12 +4620,15 @@ mod tests {
     #[test]
     fn legacy_imports_and_render_exports_declare_their_keys() {
         let dir = tempfile::tempdir().unwrap();
-        let wasm = dir.path().join("plugin.wasm");
+        let wasm = dir.path().join("extension.wasm");
         std::fs::write(
             &wasm,
             synthetic_component(
-                &["kiqi:plugin/exec@0.7.1", "kiqi:plugin/fs@0.7.1"],
-                &["kiqi:plugin/render-api@0.8.0", "kiqi:plugin/log@0.8.0"],
+                &["kiqi:extension/exec@0.7.1", "kiqi:extension/fs@0.7.1"],
+                &[
+                    "kiqi:extension/render-api@0.8.0",
+                    "kiqi:extension/log@0.8.0",
+                ],
             ),
         )
         .unwrap();
@@ -4641,12 +4648,12 @@ mod tests {
     #[test]
     fn discovery_fails_closed_without_an_instantiable_component() {
         let dir = tempfile::tempdir().unwrap();
-        let wasm = dir.path().join("plugin.wasm");
+        let wasm = dir.path().join("extension.wasm");
         std::fs::write(
             &wasm,
             synthetic_component(
-                &["kiqi:plugin/provider-http@0.8.0"],
-                &["kiqi:plugin/provider-api@0.8.0"],
+                &["kiqi:extension/provider-http@0.8.0"],
+                &["kiqi:extension/provider-api@0.8.0"],
             ),
         )
         .unwrap();
@@ -4664,10 +4671,10 @@ mod tests {
     #[test]
     fn discovery_is_skipped_without_provider_exports() {
         let dir = tempfile::tempdir().unwrap();
-        let wasm = dir.path().join("plugin.wasm");
+        let wasm = dir.path().join("extension.wasm");
         std::fs::write(
             &wasm,
-            synthetic_component(&["kiqi:plugin/net-http@0.7.1"], &[]),
+            synthetic_component(&["kiqi:extension/net-http@0.7.1"], &[]),
         )
         .unwrap();
 
@@ -4823,7 +4830,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use crate::grants::{OAuthFlow, OAuthGrant, OAuthProviderProfile};
-    use crate::wasm::kiqi::plugin::oauth_http::Host as _;
+    use crate::wasm::kiqi::extension::oauth_http::Host as _;
 
     fn oauth_profile() -> OAuthProviderProfile {
         OAuthProviderProfile {
@@ -4858,8 +4865,8 @@ mod tests {
         deleted: Mutex<Vec<(String, String)>>,
     }
 
-    impl PluginCredentialSink for RecordingSink {
-        fn store_plugin_oauth(
+    impl ExtensionCredentialSink for RecordingSink {
+        fn store_extension_oauth(
             &self,
             install_id: &str,
             provider_id: &str,
@@ -4885,7 +4892,7 @@ mod tests {
             Ok(())
         }
 
-        fn read_plugin_oauth(
+        fn read_extension_oauth(
             &self,
             _install_id: &str,
             _provider_id: &str,
@@ -4893,7 +4900,11 @@ mod tests {
             Ok(self.token.lock().unwrap().clone())
         }
 
-        fn delete_plugin_oauth(&self, install_id: &str, provider_id: &str) -> Result<bool, String> {
+        fn delete_extension_oauth(
+            &self,
+            install_id: &str,
+            provider_id: &str,
+        ) -> Result<bool, String> {
             self.deleted
                 .lock()
                 .unwrap()
@@ -4943,7 +4954,7 @@ mod tests {
     fn oauth_state(
         grants: Grants,
         transport: std::sync::Arc<dyn OAuthTransport>,
-        sink: std::sync::Arc<dyn PluginCredentialSink>,
+        sink: std::sync::Arc<dyn ExtensionCredentialSink>,
     ) -> HostState {
         HostState {
             wasi: WasiCtxBuilder::new().build(),
@@ -4951,7 +4962,7 @@ mod tests {
             grants,
             fs_root: None,
             project_dir: None,
-            plugin_id: Some("install-1".to_string()),
+            extension_id: Some("install-1".to_string()),
             declared_flags: std::sync::Arc::new(std::collections::BTreeSet::new()),
             sockets: std::collections::HashMap::new(),
             next_socket: 1,
@@ -5280,18 +5291,18 @@ mod guest_error_sink_tests {
         let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let for_sink = std::sync::Arc::clone(&captured);
         set_guest_error_sink(std::sync::Arc::new(
-            move |plugin: &str, op: &str, error: &str| {
+            move |extension: &str, op: &str, error: &str| {
                 for_sink
                     .lock()
                     .unwrap()
-                    .push(format!("{plugin}/{op}/{error}"));
+                    .push(format!("{extension}/{op}/{error}"));
             },
         ));
-        emit_guest_error("test-plugin", "list-commands", "boom");
+        emit_guest_error("test-extension", "list-commands", "boom");
         let got = captured.lock().unwrap();
         assert!(
             got.iter()
-                .any(|line| line == "test-plugin/list-commands/boom"),
+                .any(|line| line == "test-extension/list-commands/boom"),
             "sink must capture the diagnostic verbatim: {got:?}"
         );
     }

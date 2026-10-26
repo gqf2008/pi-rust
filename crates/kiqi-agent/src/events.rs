@@ -134,7 +134,7 @@ pub trait AgentEmitter: Send + Sync {
     /// message dropped.
     ///
     /// Unlike [`emit`](Self::emit) this is not an `AgentEvent`: it is a
-    /// loop → settle-observer contract, not part of the plugin-visible event
+    /// loop → settle-observer contract, not part of the extension-visible event
     /// stream (`docs/design/soft-interrupt.md` §5.2 decision #2 keeps the event
     /// enum unchanged). A settle observer needs it because the dropped message
     /// leaves the transcript while the loop still emitted `MessageStart` for it;

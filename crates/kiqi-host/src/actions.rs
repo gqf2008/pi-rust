@@ -1,16 +1,16 @@
-//! B5a — the plugin→host `runtime_action` bridge (inverted FFI).
+//! B5a — the extension→host `runtime_action` bridge (inverted FFI).
 //!
-//! A plugin invokes `PluginApi::runtime_action` to drive the harness (send a
+//! An extension invokes `ExtensionApi::runtime_action` to drive the harness (send a
 //! message, switch models, fork a session, reload extensions, …). Unlike the
 //! register trampolines — which run synchronously inside the selected register
 //! entrypoint
 //! and recover host state via the thread-local `CURRENT_HOST_API` —
 //! `runtime_action` is called **post-register**, from (a) a `spawn_blocking`
-//! pool thread mid-tool-drive, or (b) a foreign thread the plugin spawned
+//! pool thread mid-tool-drive, or (b) a foreign thread the extension spawned
 //! itself. Neither has the thread-local set, and the host cannot predict which
-//! threads a plugin will call from. Thread-local is the wrong tool here.
+//! threads an extension will call from. Thread-local is the wrong tool here.
 //!
-//! The verified-correct recovery channel is [`PluginApi::user_data`]: it is
+//! The verified-correct recovery channel is [`ExtensionApi::user_data`]: it is
 //! `Send+Sync`, populated at vtable build, passed back unchanged on every call,
 //! and the SDK designates it "the host's opaque context". Today every register
 //! trampoline ignores `user_data` (the register path uses the thread-local), so
@@ -21,9 +21,9 @@
 //! for the foreign-thread case: `Handle::spawn` works from any thread, no
 //! ambient runtime needed. The real [`trampoline_runtime_action`] derefs
 //! `user_data` as `&ActionBridge`, drives the host's async dispatch on the
-//! runtime via a `std::sync::mpsc::sync_channel(1)`, and parks the plugin thread
+//! runtime via a `std::sync::mpsc::sync_channel(1)`, and parks the extension thread
 //! on `rx.recv()` (STD — not `tokio::oneshot`, whose `recv` needs a runtime the
-//! plugin's foreign thread lacks).
+//! extension's foreign thread lacks).
 //!
 //! ## Cycle-free leaf DAG
 //!
@@ -42,7 +42,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use crate::{RuntimeActionId, StbString, StbStringRef};
 use tokio::runtime::Handle;
 
-/// A pending host UI request emitted by a plugin runtime action.
+/// A pending host UI request emitted by an extension runtime action.
 ///
 /// The request and tool-call ids are intentionally separate: a single tool
 /// call may ask more than one question, while concurrent tool calls must never
@@ -69,7 +69,7 @@ struct UiDialogState {
     cancelled_tool_calls: std::collections::HashSet<String>,
 }
 
-/// Thread-safe mailbox connecting plugin runtime actions to an interactive
+/// Thread-safe mailbox connecting extension runtime actions to an interactive
 /// host (normally the TUI). It deliberately carries only JSON and primitives,
 /// so the extension crate remains independent of the UI crate.
 #[derive(Clone)]
@@ -104,7 +104,7 @@ impl UiDialogMailbox {
     }
 
     /// Detach the consumer and cancel every outstanding request. This prevents
-    /// a TUI restart/reload from leaving plugin polls blocked forever.
+    /// a TUI restart/reload from leaving extension polls blocked forever.
     pub fn detach(&self) {
         let mut state = self.state.lock().expect("ui dialog mailbox poisoned");
         state.attached = false;
@@ -145,7 +145,7 @@ impl UiDialogMailbox {
             .len()
     }
 
-    /// Inspect lifecycle without consuming the answer reserved for a plugin.
+    /// Inspect lifecycle without consuming the answer reserved for an extension.
     pub fn is_pending(&self, request_id: &str) -> bool {
         self.state
             .lock()
@@ -176,7 +176,7 @@ impl UiDialogMailbox {
     }
 
     /// Mark one request cancelled. The terminal state remains visible to the
-    /// plugin's next `poll`, then is reclaimed by that poll.
+    /// extension's next `poll`, then is reclaimed by that poll.
     pub fn cancel(&self, request_id: &str) -> Result<(), String> {
         let mut state = self
             .state
@@ -356,7 +356,7 @@ impl UiDialogMailbox {
 /// arrive as parsed JSON (`serde_json::Value`); complex results return as
 /// `serde_json::Value`. The host maps its native types (Model, AgentMessage, …)
 /// to/from JSON at the impl boundary. Errors are `String` (become the action's
-/// nonzero `i32` + `{"error": msg}` JSON on the plugin side).
+/// nonzero `i32` + `{"error": msg}` JSON on the extension side).
 ///
 /// The 18 methods map 1:1 to [`RuntimeActionId`]; `dispatch` below is the
 /// exhaustive switch that connects the FFI id to the method.
@@ -427,7 +427,7 @@ pub trait RuntimeActionHost: Send + Sync {
     }
 
     /// `SessionId` — the id of the session the host is currently serving, when
-    /// known. Read by `SessionRead::session_id` so a compiled or wasm plugin can
+    /// known. Read by `SessionRead::session_id` so a compiled or wasm extension can
     /// label what it observes; the same value the `BeforeAgentStart` payload
     /// carries as `sessionId`.
     fn session_id(&self) -> Option<String> {
@@ -435,7 +435,7 @@ pub trait RuntimeActionHost: Send + Sync {
     }
 }
 
-/// The host-side bridge carried in [`PluginApi::user_data`] so
+/// The host-side bridge carried in [`ExtensionApi::user_data`] so
 /// [`trampoline_runtime_action`] can recover the harness state from any thread.
 ///
 /// `runtime: Handle` is captured at build time (the host is on the runtime when
@@ -447,25 +447,25 @@ pub trait RuntimeActionHost: Send + Sync {
 /// ## Staleness (B5d)
 ///
 /// `active: Arc<AtomicBool>` is shared with a [`ReloadMailbox`]-driven swap
-/// site. A `/reload` (TUI command OR a plugin's `runtime_action(Reload)`) builds
+/// site. A `/reload` (TUI command OR an extension's `runtime_action(Reload)`) builds
 /// a fresh `ExtensionSession` + a fresh `ActionBridge`, calls
 /// [`invalidate`](Self::invalidate) on the old bridge, and swaps the new one in.
 /// In-flight `runtime_action` calls that recovered the OLD bridge from
-/// `user_data` (the pointer a plugin stored during the prior `register`) then
+/// `user_data` (the pointer an extension stored during the prior `register`) then
 /// hit the staleness guard in [`run_action`] and fail with a structured error
-/// instead of driving a half-swapped harness. (Plugins load fresh on reload,
+/// instead of driving a half-swapped harness. (Extensions load fresh on reload,
 /// handing them the NEW bridge pointer; the guard only catches the race window
 /// where an old call is still parked on `rx.recv()`.)
 ///
 /// Held behind `Arc` (pointer-stable for the bridge's lifetime via
 /// [`Arc::as_ptr`]); `kiqi-cli` keeps one clone for the session lifetime so the
-/// pointer a plugin stored during register stays valid post-register. (The
+/// pointer an extension stored during register stays valid post-register. (The
 /// transient `HostApi` built per `load_one` holds a clone only during register
 /// — when it drops after `take_registry`, the master `Arc` in `kiqi-cli` keeps
 /// the allocation alive.)
 pub struct ActionBridge {
     stdio: crate::StdioLifecycle,
-    plugin_identity: Option<(u64, String)>,
+    extension_identity: Option<(u64, String)>,
     component_owners: Arc<std::sync::Mutex<Vec<u64>>>,
     /// Captured at build time from a thread running the target runtime.
     pub(crate) runtime: Handle,
@@ -496,7 +496,7 @@ impl ActionBridge {
     pub fn new(runtime: Handle, host: Arc<dyn RuntimeActionHost>) -> Arc<Self> {
         Arc::new(Self {
             stdio: crate::StdioLifecycle::default(),
-            plugin_identity: None,
+            extension_identity: None,
             component_owners: Arc::new(std::sync::Mutex::new(Vec::new())),
             runtime,
             host,
@@ -533,7 +533,7 @@ impl ActionBridge {
     ) -> Arc<Self> {
         Arc::new(Self {
             stdio: crate::StdioLifecycle::default(),
-            plugin_identity: None,
+            extension_identity: None,
             component_owners: Arc::new(std::sync::Mutex::new(Vec::new())),
             runtime,
             host,
@@ -556,7 +556,7 @@ impl ActionBridge {
     ) -> Arc<Self> {
         Arc::new(Self {
             stdio: crate::StdioLifecycle::default(),
-            plugin_identity: None,
+            extension_identity: None,
             component_owners: Arc::new(std::sync::Mutex::new(Vec::new())),
             runtime,
             host,
@@ -568,7 +568,7 @@ impl ActionBridge {
         })
     }
 
-    pub(crate) fn for_plugin(&self, name: &str) -> Arc<Self> {
+    pub(crate) fn for_extension(&self, name: &str) -> Arc<Self> {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let owner = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         self.component_owners
@@ -578,7 +578,7 @@ impl ActionBridge {
         Arc::new(Self {
             component_owners: self.component_owners.clone(),
             stdio: self.stdio.clone(),
-            plugin_identity: Some((owner, name.to_owned())),
+            extension_identity: Some((owner, name.to_owned())),
             runtime: self.runtime.clone(),
             host: self.host.clone(),
             reload: self.reload.clone(),
@@ -595,14 +595,14 @@ impl ActionBridge {
 
     pub(crate) fn claim_stdio(&self) -> Result<(), String> {
         let (id, name) = self
-            .plugin_identity
+            .extension_identity
             .as_ref()
-            .ok_or("missing plugin identity")?;
+            .ok_or("missing extension identity")?;
         self.stdio.claim(*id, name)
     }
 
     pub(crate) fn release_stdio_claim(&self) {
-        if let Some((id, _)) = &self.plugin_identity {
+        if let Some((id, _)) = &self.extension_identity {
             self.stdio.release_failed_registration(*id);
             self.ext_status.remove_owner(*id);
         }
@@ -656,13 +656,13 @@ impl ActionBridge {
 
 /// A reload-signal mail slot (B5d). The reload callback (built by
 /// [`reload_callback_from_mailbox`]) captures a clone; the TUI installs a
-/// `tokio` unbounded sender after it starts. When a plugin calls
+/// `tokio` unbounded sender after it starts. When an extension calls
 /// `runtime_action(Reload)`, the callback signals `()` (if a TUI is installed)
-/// and the TUI performs the reload **asynchronously** — the plugin's call
-/// returns `Ok(null)` immediately, so the calling plugin's cdylib is NOT
+/// and the TUI performs the reload **asynchronously** — the extension's call
+/// returns `Ok(null)` immediately, so the calling extension's cdylib is NOT
 /// unmapped while its `runtime_action` frame is still on the stack (the reload,
 /// which drops the old keepalive, happens after the call returns). This breaks
-/// the self-unmapping race a synchronous plugin-initiated reload would have.
+/// the self-unmapping race a synchronous extension-initiated reload would have.
 ///
 /// kiqi-extensions carries only `()` (no pi-cli `TuiMessage` type) — preserving
 /// the leaf DAG. The TUI owns the receiver + the actual reload routine.
@@ -692,10 +692,10 @@ impl ReloadMailbox {
         *self.tx.lock().unwrap() = Some(tx);
     }
 
-    /// Signal a reload (plugin-initiated via `runtime_action(Reload)`).
+    /// Signal a reload (extension-initiated via `runtime_action(Reload)`).
     /// `Ok(())` if a TUI is installed (the signal was enqueued; the TUI may
     /// still be mid-reload). `Err(())` if no TUI is installed (the host returns
-    /// a "reload not available" error to the plugin).
+    /// a "reload not available" error to the extension).
     pub fn signal(&self) -> Result<(), ()> {
         let g = self.tx.lock().unwrap();
         match &*g {
@@ -714,8 +714,8 @@ impl ReloadMailbox {
 }
 
 /// Build the reload callback the bridge carries, backed by a [`ReloadMailbox`].
-/// When a plugin calls `runtime_action(Reload)`, the bridge's spawn site awaits
-/// this callback, which signals the TUI (if installed) and returns; the plugin
+/// When an extension calls `runtime_action(Reload)`, the bridge's spawn site awaits
+/// this callback, which signals the TUI (if installed) and returns; the extension
 /// receives `Ok(null)` and the TUI performs the reload asynchronously. If no
 /// TUI is installed, the callback returns without signalling and the host's
 /// [`RuntimeActionHost::reload`] fallback surfaces the "not configured" error.
@@ -770,13 +770,13 @@ async fn dispatch(
         // UI-only action: handled by the bridge (no harness call), exactly like
         // `UiDialog`. Written straight into the shared registry the TUI polls.
         RuntimeActionId::SetStatus => ext_status.handle(args),
-        RuntimeActionId::UiComponent => Err("UiComponent requires a plugin bridge".into()),
+        RuntimeActionId::UiComponent => Err("UiComponent requires an extension bridge".into()),
         // Editor-only action: served by the bridge (no harness call), exactly
         // like `SetStatus`/`UiDialog`. The TUI drains the queue each tick.
         RuntimeActionId::SetEditorText => editor_text.handle(args),
         RuntimeActionId::GetSessionBranch => host.get_session_branch(args).await,
         RuntimeActionId::StdioLifecycle => {
-            Err("stdio lifecycle requires a plugin context".to_owned())
+            Err("stdio lifecycle requires an extension context".to_owned())
         }
     }
 }
@@ -786,13 +786,13 @@ async fn dispatch(
 ///
 /// Recovers `&ActionBridge` from `user_data`, parses `args_json`, drives the
 /// host's async dispatch on the bridge's runtime via `Handle::spawn`, and parks
-/// the plugin thread on a std `mpsc` `recv` (works from ANY thread — no ambient
-/// runtime needed, which is the load-bearing property for foreign plugin
+/// the extension thread on a std `mpsc` `recv` (works from ANY thread — no ambient
+/// runtime needed, which is the load-bearing property for foreign extension
 /// threads).
 ///
 /// ## Return codes
 /// - `0` — success; `*out` written with the result JSON (host-owned
-///   [`StbString`]; the plugin frees it via the host `free_string` from the
+///   [`StbString`]; the extension frees it via the host `free_string` from the
 ///   vtable).
 /// - `1` — host-level error; `*out` written with `{"error": msg}` JSON.
 /// - `2` — unknown numeric action id; `*out` contains a structured error and
@@ -858,7 +858,7 @@ fn run_action(
                 })
                 .to_string();
                 // SAFETY: `out` is non-null and points to the caller-provided
-                // output slot. The plugin reclaims this host allocation via
+                // output slot. The extension reclaims this host allocation via
                 // `host_free_string` from the vtable.
                 unsafe {
                     *out = StbString::from_string(json);
@@ -878,11 +878,11 @@ fn run_action(
     let bridge: &ActionBridge = unsafe { &*(user_data as *const ActionBridge) };
 
     // B5d staleness guard: a `/reload` that swapped in a fresh bridge calls
-    // `invalidate` on the old one. A plugin that still holds the old pointer
+    // `invalidate` on the old one. An extension that still holds the old pointer
     // (stored during the prior `register`) must not drive the swapped-out
-    // session. Surface a structured "stale bridge" error so the plugin's
+    // session. Surface a structured "stale bridge" error so the extension's
     // `runtime_action` returns nonzero + `{"error": ...}` instead of racing
-    // the swap. (The new bridge's pointer was handed to the reloaded plugins;
+    // the swap. (The new bridge's pointer was handed to the reloaded extensions;
     // this guard only catches the race window where an old call is still parked.)
     if !bridge.is_active() {
         if out.is_null() {
@@ -909,9 +909,9 @@ fn run_action(
     };
 
     // Drive the host's async dispatch on the bridge's runtime. STD mpsc so the
-    // plugin thread can recv from any thread (no ambient runtime). sync_channel
+    // extension thread can recv from any thread (no ambient runtime). sync_channel
     // (1): bounded; the send completes once the value is delivered. rx.recv()
-    // parks the plugin thread until the spawn finishes (or its sender drops).
+    // parks the extension thread until the spawn finishes (or its sender drops).
     let (tx, rx) = mpsc::sync_channel::<Result<serde_json::Value, String>>(1);
     // Clone the bridge's host + reload callback into the spawned task. We pass
     // an owned `Arc<dyn RuntimeActionHost>` plus a reload-option snapshot so the
@@ -923,12 +923,12 @@ fn run_action(
     let reload_cb = bridge.reload.clone();
     if action == RuntimeActionId::StdioLifecycle {
         let result = bridge.stdio.handle(
-            bridge.plugin_identity.as_ref().map_or(0, |(id, _)| *id),
+            bridge.extension_identity.as_ref().map_or(0, |(id, _)| *id),
             args,
         );
         let _ = tx.send(result);
     } else if action == RuntimeActionId::UiComponent {
-        let owner = bridge.plugin_identity.as_ref().map_or(0, |(id, _)| *id);
+        let owner = bridge.extension_identity.as_ref().map_or(0, |(id, _)| *id);
         let _owners = bridge
             .component_owners
             .lock()
@@ -936,12 +936,12 @@ fn run_action(
         let result = if bridge.is_active() {
             ext_status.component(owner, args)
         } else {
-            Err("stale plugin bridge".into())
+            Err("stale extension bridge".into())
         };
         let _ = tx.send(result);
     } else if action == RuntimeActionId::SetStatus {
         // Same reasoning as `UiDialog`: this action never touches the harness,
-        // so it must not need a Tokio worker. A plugin calling it from inside a
+        // so it must not need a Tokio worker. An extension calling it from inside a
         // single-threaded runtime (a tool poll callback, say) would otherwise
         // park that executor and deadlock.
         std::thread::spawn(move || {
@@ -954,7 +954,7 @@ fn run_action(
             let _ = tx.send(editor_text.handle(args));
         });
     } else if action == RuntimeActionId::UiDialog {
-        // UiDialog is intentionally synchronous at the plugin ABI boundary:
+        // UiDialog is intentionally synchronous at the extension ABI boundary:
         // `open` waits until the TUI answers. Never park that wait inside the
         // Tokio worker that services the bridge. A SEARCH/extension tool that
         // invokes `ui_request/open` from a single-thread runtime would
@@ -974,7 +974,7 @@ fn run_action(
             } else {
                 dispatch(&host, &ui_dialog, &ext_status, &editor_text, action, args).await
             };
-            // If the plugin thread already moved on (dropped rx), discard — a
+            // If the extension thread already moved on (dropped rx), discard — a
             // send error is NOT a host fault.
             let _ = tx.send(r);
         });
@@ -992,7 +992,7 @@ fn run_action(
     };
 
     // Write the result (or error) into `*out` as a host-owned StbString. The
-    // plugin frees it via the vtable's `free_string` (= `host_free_string`).
+    // extension frees it via the vtable's `free_string` (= `host_free_string`).
     if out.is_null() {
         // Nothing to write to; still report the outcome via the return code.
         return match result {
@@ -1011,9 +1011,9 @@ fn run_action(
             (1, json)
         }
     };
-    // SAFETY: `out` is a valid `*mut StbString` the plugin provided for this
+    // SAFETY: `out` is a valid `*mut StbString` the extension provided for this
     // call (null checked above). `from_string` allocates a `Box<[u8]>` the host
-    // owns; the plugin reclaims it via `host_free_string` (which reconstructs
+    // owns; the extension reclaims it via `host_free_string` (which reconstructs
     // the Box from ptr+len — matches `from_string`'s allocation, same pattern
     // used by translate.rs/tool.rs).
     unsafe {
@@ -1024,11 +1024,11 @@ fn run_action(
 
 // ===========================================================================
 // Tests — round-trip the real trampoline + dispatch + Handle::spawn + mpsc
-// against a mock host. This is the B5a unit proof: plugin→host `runtime_action`
+// against a mock host. This is the B5a unit proof: extension→host `runtime_action`
 // recovers the `ActionBridge` via `user_data`, drives the host's async method on
 // the runtime, parks the caller on `rx.recv()`, and writes the result JSON back
 // through `*out` (freed via `host_free_string`). No cdylib needed — the trampoline
-// is the same `extern "C" fn` a plugin's vtable carries.
+// is the same `extern "C" fn` an extension's vtable carries.
 // ===========================================================================
 #[cfg(test)]
 mod tests {
@@ -1044,7 +1044,7 @@ mod tests {
                 saw: Mutex::new(Vec::new()),
             }),
         );
-        let diag: Arc<dyn crate::PluginDiagnostics> = Arc::new(crate::NullDiagnostics);
+        let diag: Arc<dyn crate::ExtensionDiagnostics> = Arc::new(crate::NullDiagnostics);
         let owner = crate::HostApi::with_action_bridge(
             "owner",
             crate::ExtensionRegistry::new(),
@@ -1200,7 +1200,7 @@ mod tests {
     /// via `Handle::spawn` on the runtime. Under a current-thread runtime the
     /// test's own worker is the only thread that can poll the spawned task —
     /// blocking it on `recv` self-deadlocks. In the real host the caller is a
-    /// plugin / `spawn_blocking` thread (never a runtime worker), so there is no
+    /// extension / `spawn_blocking` thread (never a runtime worker), so there is no
     /// deadlock; multi_thread here mirrors that (another worker runs the spawn
     /// while the test thread parks).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1241,9 +1241,9 @@ mod tests {
     }
 
     /// The `SetEditorText` runtime action must reach the bridge's editor-text
-    /// mailbox through the ABI trampoline. This is the wiring a plugin relies on
+    /// mailbox through the ABI trampoline. This is the wiring an extension relies on
     /// (a voice extension writes a transcription draft here); a broken action id
-    /// or a dropped dispatch would be invisible to the plugin — it only sees
+    /// or a dropped dispatch would be invisible to the extension — it only sees
     /// `ok: true` — so pin it here.
     #[tokio::test]
     async fn trampoline_routes_set_editor_text_into_the_mailbox() {
@@ -1626,16 +1626,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn component_bridge_isolates_plugins_and_cleans_up_reload_and_drop() {
+    async fn component_bridge_isolates_extensions_and_cleans_up_reload_and_drop() {
         let host = Arc::new(MockHost {
             prompt: String::new(),
             saw: Mutex::new(Vec::new()),
         });
         let root = ActionBridge::new(tokio::runtime::Handle::current(), host);
-        let a = root.for_plugin("a");
-        let b = root.for_plugin("b");
+        let a = root.for_extension("a");
+        let b = root.for_extension("b");
         let mailbox = root.extension_status_mailbox();
-        for plugin in [&a, &b] {
+        for extension in [&a, &b] {
             let mut out = StbString::empty();
             assert_eq!(
                 trampoline_runtime_action(
@@ -1644,7 +1644,7 @@ mod tests {
                         r#"{"op":"register","id":"same","slot":"footer.after"}"#
                     ),
                     &mut out,
-                    Arc::as_ptr(plugin) as *mut c_void
+                    Arc::as_ptr(extension) as *mut c_void
                 ),
                 0
             );
@@ -1713,7 +1713,7 @@ mod tests {
 
 impl Drop for ActionBridge {
     fn drop(&mut self) {
-        if let Some((owner, _)) = &self.plugin_identity {
+        if let Some((owner, _)) = &self.extension_identity {
             self.ext_status.remove_owner(*owner);
         }
     }

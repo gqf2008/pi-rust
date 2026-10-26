@@ -13,7 +13,7 @@
           "title": "完整使用手册",
           "summary": "从安装、模型配置、.ki 资源和 Rust 插件，到 SDK、排错和发布的完整路径。",
           "body": [
-            "官网文档与仓库内 /user-guide.md 保持同步。安装后的 ki 默认提供核心工具，并通过 wasm 插件（`ki insmod`，组件模型 + `plugins/kiqi-plugin.wit` 契约）增加工具、Provider 和事件处理。",
+            "官网文档与仓库内 /user-guide.md 保持同步。安装后的 ki 默认提供核心工具，并通过 wasm 插件（`ki insmod`，组件模型 + `extensions/kiqi-extension.wit` 契约）增加工具、Provider 和事件处理。",
             "推荐先阅读安装与第一次运行，再按需求进入 Provider、Rust 扩展、Agent 项目结构或 SDK 集成章节。"
           ],
           "links": [
@@ -163,18 +163,18 @@
           "title": "插件与扩展",
           "summary": "用 wasm 组件插件注册工具、Provider、命令和资源，能力按 grants.json 逐项授权。",
           "body": [
-            "插件编译为 wasm 组件（`wasm32-wasip2`），实现 `plugins/kiqi-plugin.wit` 的 `kiqi:plugin` world；宿主用 wasmtime 在沙箱里加载，授权走 `$KI_AGENT_DIR/plugins/<id>/grants.json`，缺失即不授予任何能力。cdylib 通道已于 2026-10-26 退役。",
-            "跨边界只传 WIT 定义的类型；宿主的 `kiqi-plugin-host` 负责实例化、授权与生命周期，事件经 `kiqi-extensions` 的漏斗分发。"
+            "插件编译为 wasm 组件（`wasm32-wasip2`），实现 `extensions/kiqi-extension.wit` 的 `kiqi:extension` world；宿主用 wasmtime 在沙箱里加载，授权走 `$KI_AGENT_DIR/extensions/<id>/grants.json`，缺失即不授予任何能力。cdylib 通道已于 2026-10-26 退役。",
+            "跨边界只传 WIT 定义的类型；宿主的 `kiqi-extension-host` 负责实例化、授权与生命周期，事件经 `kiqi-extensions` 的漏斗分发。"
           ],
           "code": {
             "language": "shell",
-            "file": "plugins/wasm/kiqi-<name>-guest",
-            "content": "# 编译并安装一个 wasm guest\nki insmod --build plugins/wasm/kiqi-<name>-guest\n\n# 查看/修改授权（缺失 = 不授予）\ncat \"$KI_AGENT_DIR/plugins/<id>/grants.json\"\n\n# 卸载\nki rmmod <id>"
+            "file": "extensions/wasm/kiqi-<name>",
+            "content": "# 编译并安装一个 wasm guest\nki insmod --build extensions/wasm/kiqi-<name>\n\n# 查看/修改授权（缺失 = 不授予）\ncat \"$KI_AGENT_DIR/extensions/<id>/grants.json\"\n\n# 卸载\nki rmmod <id>"
           },
           "links": [
             {
               "label": "WIT 契约",
-              "url": "https://github.com/gqf2008/pi-rust/blob/main/plugins/kiqi-plugin.wit"
+              "url": "https://github.com/gqf2008/pi-rust/blob/main/extensions/kiqi-extension.wit"
             },
             {
               "label": "插件加载器",
@@ -358,23 +358,23 @@
           ]
         },
         {
-          "id": "plugin-abi",
-          "kicker": "08 / PLUGIN ABI",
+          "id": "extension-abi",
+          "kicker": "08 / EXTENSION ABI",
           "title": "插件 ABI",
-          "summary": "`plugins/kiqi-plugin.wit` 是插件和宿主之间唯一应依赖的边界。",
+          "summary": "`extensions/kiqi-extension.wit` 是插件和宿主之间唯一应依赖的边界。",
           "body": [
-            "插件以 wasm 组件编译，由 kiqi-plugin-host（wasmtime）加载；每个 guest 在独立实例里跑，能力按 grants.json 授予。宿主侧的 registry/事件漏斗由 kiqi-extensions 提供，卸载与错误隔离归宿主。",
-            "契约变更要先改 `plugins/kiqi-plugin.wit`（当前 `kiqi:plugin@0.8.0`）并同步 trait 面与 guest，再在 `crates/kiqi-plugin-host/tests/e2e.rs` 从宿主侧验证；不要让插件直接依赖 kiqi-cli 私有模块。"
+            "插件以 wasm 组件编译，由 kiqi-extension-host（wasmtime）加载；每个 guest 在独立实例里跑，能力按 grants.json 授予。宿主侧的 registry/事件漏斗由 kiqi-extensions 提供，卸载与错误隔离归宿主。",
+            "契约变更要先改 `extensions/kiqi-extension.wit`（当前 `kiqi:extension@0.8.0`）并同步 trait 面与 guest，再在 `crates/kiqi-extension-host/tests/e2e.rs` 从宿主侧验证；不要让插件直接依赖 kiqi-cli 私有模块。"
           ],
           "code": {
             "language": "wit",
-            "file": "plugins/kiqi-plugin.wit",
-            "content": "package kiqi:plugin@0.8.0;\n\nworld plugin {\n  // 工具 / 事件 / 资源 / provider / oauth / render 接口\n}"
+            "file": "extensions/kiqi-extension.wit",
+            "content": "package kiqi:extension@0.8.0;\n\nworld extension {\n  // 工具 / 事件 / 资源 / provider / oauth / render 接口\n}"
           },
           "links": [
             {
               "label": "WIT 契约",
-              "url": "https://github.com/gqf2008/pi-rust/blob/main/plugins/kiqi-plugin.wit"
+              "url": "https://github.com/gqf2008/pi-rust/blob/main/extensions/kiqi-extension.wit"
             },
             {
               "label": "ABI smoke test",

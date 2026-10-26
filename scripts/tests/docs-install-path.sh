@@ -82,21 +82,21 @@ do
 
     # `ki install <name>` resolves the crate through crates.io (install.rs's header
     # describes the temporary workspace it builds), so without `--path` it can only
-    # work for a published crate. A first-party plugin name there is doubly wrong:
+    # work for a published crate. A first-party extension name there is doubly wrong:
     # those crates were never published and were deleted with the compile-time
     # channel on 2026-10-21. The wasm guest is the supported spelling now.
     if grep -n 'ki install kiqi-' "$doc" | grep -v -- '--path' >/dev/null; then
         echo "FAIL: $rel tells users to 'ki install kiqi-<name>' from crates.io," >&2
-        echo "      which resolves nothing; first-party plugins are wasm (ki insmod --build)" >&2
+        echo "      which resolves nothing; first-party extensions are wasm (ki insmod --build)" >&2
         grep -n 'ki install kiqi-' "$doc" | grep -v -- '--path' | head -5 | sed 's/^/      /' >&2
         status=1
     fi
 done
 
-# --- The plugin channel must be described as it exists -----------------------
-# First-party plugins are wasm components (plugins/wasm/kiqi-*-guest, contract in
-# plugins/kiqi-plugin.wit); the compile-time `plugins/kiqi-*` crates, their
-# `plugin-kiqi-*` features and their cdylib build were retired. The README kept the
+# --- The extension channel must be described as it exists -----------------------
+# First-party extensions are wasm components (extensions/wasm/kiqi-*, contract in
+# extensions/kiqi-extension.wit); the compile-time `extensions/kiqi-*` crates, their
+# `extension-kiqi-*` features and their cdylib build were retired. The README kept the
 # old description anyway: its only install example was `ki install kiqi-todo`
 # (`build from crates.io`), a crate that was unpublished and then deleted, and the
 # word `insmod` did not appear anywhere in the file. Following it gives
@@ -104,7 +104,7 @@ done
 for doc in "$ROOT/README.md" "$ROOT/docs/kiqi-tool/README.md"; do
     [ -f "$doc" ] || continue
     rel=${doc#"$ROOT"/}
-    grep -q 'ki insmod --build plugins/wasm/kiqi-' "$doc" || {
+    grep -q 'ki insmod --build extensions/wasm/kiqi-' "$doc" || {
         echo "FAIL: $rel does not show the wasm install path ('ki insmod --build ...')" >&2
         status=1
     }
@@ -127,7 +127,7 @@ is_exempt_file() {
         docs/design/*) return 0 ;;
         crates/kiqi-cli/embedded-docs/changelog.md) return 0 ;;
         AGENTS.md) return 0 ;;
-        plugins/*/DESIGN.md) return 0 ;;
+        extensions/*/DESIGN.md) return 0 ;;
     esac
     return 1
 }
@@ -193,10 +193,10 @@ if [ -f "$catalog" ]; then
     fi
     # The extension cards used to say `ki install <name>`, which resolves
     # through crates.io and is equally unexecutable while nothing is published.
-    # In-repo guests now show `ki insmod --build ...`, compiled plugins show a
-    # source build, and unknown external plugins are explicitly "not published".
+    # In-repo guests now show `ki insmod --build ...`, compiled extensions show a
+    # source build, and unknown external extensions are explicitly "not published".
     if grep -n '"install"[[:space:]]*:[[:space:]]*"ki install ' "$catalog" >/dev/null; then
-        echo "FAIL: $rel tells users to 'ki install' a plugin that is not published" >&2
+        echo "FAIL: $rel tells users to 'ki install' an extension that is not published" >&2
         grep -n '"install"[[:space:]]*:[[:space:]]*"ki install ' "$catalog" | head -5 | sed 's/^/      /' >&2
         status=1
     fi
@@ -205,7 +205,7 @@ fi
 # --- The site's own copy-paste surfaces ---------------------------------------
 # `packages.json` was guarded but the page that displays it was not, so the
 # Packages hero kept showing `cargo add kiqi-tools` and `ki install
-# kiqi-ask-user` — neither can run (publish = false, and the plugin crate was
+# kiqi-ask-user` — neither can run (publish = false, and the extension crate was
 # deleted) — while claiming "every package in this catalog is published on
 # crates.io" and, in the same breath, "9 core crates and 20 installable
 # extensions" against a 28-entry catalog. A copy button makes these worse than
@@ -237,7 +237,7 @@ done
 # A page whose install block is entirely unexecutable is the failure being
 # guarded, so absence of both is a failure too.
 if [ -f "$ROOT/website/packages.html" ]; then
-    grep -qE 'cargo install --path crates/kiqi-cli|ki insmod --build plugins/wasm/kiqi-' \
+    grep -qE 'cargo install --path crates/kiqi-cli|ki insmod --build extensions/wasm/kiqi-' \
         "$ROOT/website/packages.html" || {
         echo "FAIL: website/packages.html shows no install command that can run" >&2
         status=1
@@ -249,7 +249,7 @@ fi
 # name that is not a workspace member fails with "package not found". The docs and
 # the website used `ki dev --package kiqi-todo`, `ki dev -P kiqi-webfetch` and
 # `ki dev --package kiqi-todo -- --model gateway/model` in eight files - all names
-# of compile-time plugin crates deleted with the retired channel (d7297b0), none of
+# of compile-time extension crates deleted with the retired channel (d7297b0), none of
 # them in `Cargo.toml`'s member list. The examples now use `my-ext-a`/`my-ext-b`
 # and say they are placeholders.
 #
@@ -268,16 +268,16 @@ for rel in $(git ls-files 'website/*.md' 'website/content/*.html' 'docs/*.md' \
     }
 done
 
-# Source comments citing a deleted plugin file send the next reader to a path that
-# cannot be opened. `crates/kiqi-cli/src/plugins.rs` cited
-# `plugins/kiqi-goal/src/lib.rs:134-138` for the goal's `current_dir()` write.
+# Source comments citing a deleted extension file send the next reader to a path that
+# cannot be opened. `crates/kiqi-cli/src/extensions.rs` cited
+# `extensions/kiqi-goal/src/lib.rs:134-138` for the goal's `current_dir()` write.
 # `docs/design/*` keeps such paths as historical record (each file carries the
 # 2026-10-21 retirement note) and is exempt above.
 for rel in $(git ls-files 'crates/*/src/*.rs' 'crates/*/src/*/*.rs' 2>/dev/null); do
     [ -f "$rel" ] || continue
-    grep -n 'plugins/kiqi-[a-z-]*/src' "$rel" >/dev/null && {
-        echo "FAIL: $rel cites a deleted plugin source path (plugins/kiqi-*/src)" >&2
-        grep -n 'plugins/kiqi-[a-z-]*/src' "$rel" | head -3 | sed 's/^/      /' >&2
+    grep -n 'extensions/kiqi-[a-z-]*/src' "$rel" >/dev/null && {
+        echo "FAIL: $rel cites a deleted extension source path (extensions/kiqi-*/src)" >&2
+        grep -n 'extensions/kiqi-[a-z-]*/src' "$rel" | head -3 | sed 's/^/      /' >&2
         status=1
     }
 done

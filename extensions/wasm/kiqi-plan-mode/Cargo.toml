@@ -1,0 +1,20 @@
+[package]
+publish = false
+name = "kiqi-plan-mode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "kiqi-plan-mode ported to the kiqi wasm ABI (session capabilities)"
+readme = "README.md"
+keywords = ["ki", "kiqi", "wasm", "extension", "plan"]
+categories = ["development-tools"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+kiqi-wasm-bindings = { path = "../kiqi-wasm-bindings" }
+serde_json = "1"

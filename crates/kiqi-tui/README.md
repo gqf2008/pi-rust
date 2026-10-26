@@ -9,7 +9,7 @@ and main-screen terminal modes.
 
 This is the rendering layer, not an extension point. Agents extend `ki` by
 registering tools and event handlers (see
-[`kiqi-plugin-sdk`](https://crates.io/crates/kiqi-plugin-sdk)), and the CLI decides
+[`kiqi-extension-sdk`](https://crates.io/crates/kiqi-extension-sdk)), and the CLI decides
 how to draw them.
 
 ## Install

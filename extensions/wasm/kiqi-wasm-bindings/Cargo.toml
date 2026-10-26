@@ -1,0 +1,19 @@
+[package]
+publish = false
+name = "kiqi-wasm-bindings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Guest SDK for writing kiqi wasm extensions (component model, ABI 0.7.1)"
+readme = "README.md"
+keywords = ["ki", "kiqi", "wasm", "extension", "component-model"]
+categories = ["development-tools"]
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+wit-bindgen = "0.62"

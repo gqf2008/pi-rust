@@ -33,8 +33,8 @@ use extensions::*;
 pub(crate) use extensions::{ask_user_frame, parse_ask_user_prompt, AskUserPrompt};
 mod commands;
 use commands::*;
-mod plugin_commands;
-use plugin_commands::*;
+mod extension_commands;
+use extension_commands::*;
 mod settings;
 use settings::*;
 mod sessions;
@@ -110,7 +110,7 @@ type MarkdownTransformer = Arc<dyn Fn(&str) -> String + Send + Sync>;
 /// blocking TUI key loop. Node's `ctx.ui.*` methods are promises, so the host
 /// request must remain pending while the user interacts with the native
 /// B5e: build the `AssistantMessageComponent` markdown-transformer closure the
-/// render path applies to raw assistant text before styling. Wraps any plugin
+/// render path applies to raw assistant text before styling. Wraps any extension
 /// `register_markdown_transformer` handlers registered in `snapshot` (chained
 /// in registration order: each handler's output feeds the next). `None` when
 /// no markdown transformers are registered (the component defaults to the
@@ -122,13 +122,13 @@ type MarkdownTransformer = Arc<dyn Fn(&str) -> String + Send + Sync>;
 /// `emit_resources_discover`/event translation; a reloaded session's old
 /// snapshot flips false, so a stale closure no-ops rather than driving a
 /// half-swapped registry — the transformer falls back to the input unchanged
-/// on an inactive snapshot, matching the plugin's per-handler skip-on-error).
+/// on an inactive snapshot, matching the extension's per-handler skip-on-error).
 ///
 /// This is the cycle-free seam: `kiqi-tui` takes a `Fn(&str) -> String` trait
 /// object (no `kiqi-extensions` dep); `kiqi-cli` (which already depends on
 /// `kiqi-extensions`) builds the closure from the live `RegistrySnapshot`. The
-/// calling pattern mirrors `plugin_stub_smoke.rs`'s direct `RenderFn` round-
-/// trip (input `{"markdown":…}` → `render_fn` → reclaim `out` via the plugin's
+/// calling pattern mirrors `extension_stub_smoke.rs`'s direct `RenderFn` round-
+/// trip (input `{"markdown":…}` → `render_fn` → reclaim `out` via the extension's
 /// `free_string` → parse `{"markdown":…}`).
 fn build_markdown_transformer(
     snapshot: Option<std::sync::Arc<kiqi_host::RegistrySnapshot>>,
@@ -144,12 +144,12 @@ fn build_markdown_transformer(
     // Wasm renderers hold a `render` grant. The chain runs them after the
     // cdylib tier, in install-directory order. `None` means "no granted
     // renderer", in which case the guest is never loaded or called.
-    #[cfg(feature = "plugin-wasm")]
+    #[cfg(feature = "extension-wasm")]
     let wasm = {
-        let transformer = crate::plugins::WasmRenderTransformer::load();
+        let transformer = crate::extensions::WasmRenderTransformer::load();
         (!transformer.is_empty()).then(|| std::sync::Arc::new(transformer))
     };
-    #[cfg(not(feature = "plugin-wasm"))]
+    #[cfg(not(feature = "extension-wasm"))]
     let wasm: Option<()> = None;
 
     if cdylib.is_none() && wasm.is_none() {
@@ -160,7 +160,7 @@ fn build_markdown_transformer(
         if let Some((snapshot, renderers)) = &cdylib {
             current = transform_markdown_chain(snapshot, renderers, &current);
         }
-        #[cfg(feature = "plugin-wasm")]
+        #[cfg(feature = "extension-wasm")]
         if let Some(wasm) = &wasm {
             // Finalize-only by construction: the component never consults the
             // transformer while streaming, so this is one call per finalized
@@ -186,7 +186,7 @@ fn transform_markdown_chain(
     // A stale snapshot (post-/reload) must not drive a swapped-out registry.
     // The renderers were captured from this snapshot; if it has gone inactive,
     // fall back to the raw input so the UI never renders stale-transformed text
-    // from a dead plugin.
+    // from a dead extension.
     if !snapshot.is_active() {
         return raw.to_string();
     }
@@ -197,13 +197,13 @@ fn transform_markdown_chain(
             Ok(s) => s,
             Err(_) => return current, // serialize failure — keep current, stop chain
         };
-        // SAFETY: `render_fn` is a plugin-provided `extern "C" fn` over a
-        // borrowed `StbStringRef` + an out-param. The plugin warrants
+        // SAFETY: `render_fn` is an extension-provided `extern "C" fn` over a
+        // borrowed `StbStringRef` + an out-param. The extension warrants
         // `poll`/`render` are non-blocking + thread-safe (the same contract
-        // the tool adapter relies on). `user_data` is the plugin's opaque
+        // the tool adapter relies on). `user_data` is the extension's opaque
         // pointer, stable for the registry lifetime (the keepalive keeps the
-        // cdylib mapped). We reclaim `out` via the plugin's `free_string`
-        // exactly once. The whole call is `catch_unwind`-wrapped — a plugin
+        // cdylib mapped). We reclaim `out` via the extension's `free_string`
+        // exactly once. The whole call is `catch_unwind`-wrapped — an extension
         // panic must not unwind across the FFI boundary (same policy as the
         // tool partial cb + the runtime_action trampoline).
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -219,10 +219,10 @@ fn transform_markdown_chain(
             } else {
                 None
             };
-            // Reclaim the plugin-owned `out` regardless of rc (rc!=0 may still
-            // have written an error JSON the plugin allocated). `free_with` is
+            // Reclaim the extension-owned `out` regardless of rc (rc!=0 may still
+            // have written an error JSON the extension allocated). `free_with` is
             // idempotent on an empty `StbString`.
-            out.free_with(Some(renderer.plugin_free_string));
+            out.free_with(Some(renderer.extension_free_string));
             text
         }));
         let out_text = match outcome {
@@ -493,13 +493,14 @@ fn dispatch_key_event(state: &TuiState, key: &KeyEvent, editor: &Editor) -> bool
     let native_claims = snapshot.as_ref().is_some_and(|snapshot| {
         snapshot.has_shortcut(&name) && !snapshot.handlers_for(EventTag::Input).is_empty()
     });
-    // Compiled-in and wasm plugins declare their keys the same way; whether any
+    // Compiled-in and wasm extensions declare their keys the same way; whether any
     // of them declared this one decides if the key is ours at all. Delivery is a
     // single pass through the dispatch funnel below, which asks exactly those
-    // plugins and reports their claim — dispatching here as well would hand a
-    // compiled plugin the same key twice.
+    // extensions and reports their claim — dispatching here as well would hand a
+    // compiled extension the same key twice.
     let compiled_declares_key =
-        !crate::plugins::shortcut_hosts(&crate::plugins::compiled_plugin_hosts(), &name).is_empty();
+        !crate::extensions::shortcut_hosts(&crate::extensions::compiled_extension_hosts(), &name)
+            .is_empty();
     // Nothing claimed this key — not ours.
     if !native_claims && !compiled_declares_key {
         return false;
@@ -526,7 +527,7 @@ fn dispatch_key_event(state: &TuiState, key: &KeyEvent, editor: &Editor) -> bool
     // The handler decides whether it actually wants the key: it returns the
     // `CLAIMED` code while its feature is active and `CONTINUE` otherwise, so a
     // registered-but-disabled shortcut (push-to-talk toggled off) still lets the
-    // key reach the editor normally. Compiled plugins answer through the same
+    // key reach the editor normally. Compiled extensions answer through the same
     // call — the funnel fans the event to them and folds in their verdict.
     let claimed = kiqi_host::dispatch_data_event_claiming(
         snapshot.as_deref(),
@@ -726,7 +727,7 @@ enum TuiMessage {
     /// restarting ki.
     ReloadModels,
     /// `/reload` — re-run extension + resource discovery into the live harness
-    /// (B5d). The command (and a plugin's `runtime_action(Reload)` via the
+    /// (B5d). The command (and an extension's `runtime_action(Reload)` via the
     /// mailbox) signal the main loop, which awaits
     /// `reload_extension_resources` on the async runtime.
     ReloadExtensions,
@@ -750,9 +751,9 @@ enum TuiMessage {
     /// a run. The batch's detailed notice entry is already in the transcript;
     /// this is the short external-signal trigger built by `signal_wake`.
     SignalWake(String),
-    /// A plugin `run_command`/`continue_command` finished on its worker thread.
+    /// An extension `run_command`/`continue_command` finished on its worker thread.
     /// Handled on the async loop, which owns selector/editor installation.
-    PluginCommandDone(PluginCommandOutcome),
+    ExtensionCommandDone(ExtensionCommandOutcome),
     /// A `.ki/cron.json` job fired while the session was idle. The text is
     /// already the final injected user message (`⏰ cron:<name> …`). Delivered
     /// through the main loop so it starts a run exactly like an editor submit;
@@ -1092,7 +1093,7 @@ pub async fn interactive_tui(
     // ---- TUI + containers ----
     let terminal = Box::new(ProcessTerminal::new());
     let tui = Arc::new(TuiAltScreen::new(terminal, true, None));
-    // Plugin `ask_user` prompts (runtime action 17). Attaching marks this
+    // Extension `ask_user` prompts (runtime action 17). Attaching marks this
     // session as interactive so a detached/headless host fails loudly instead
     // of returning a fabricated answer. The mailbox is session-scoped (held in
     // `ReloadContext`) so in-flight prompts survive a `/reload`.
@@ -1718,8 +1719,8 @@ pub async fn interactive_tui(
         })
     };
 
-    // ---- B5d: plugin→TUI reload bridge ----
-    // A plugin's `runtime_action(Reload)` can't drive the reload synchronously
+    // ---- B5d: extension→TUI reload bridge ----
+    // An extension's `runtime_action(Reload)` can't drive the reload synchronously
     // (its cdylib would be unmapped while the call frame is still on the stack).
     // Instead the `ActionBridge`'s reload callback signals `reload_context.mailbox`
     // (an `UnboundedSender<()>`); this task drains those signals and forwards
@@ -1748,13 +1749,13 @@ pub async fn interactive_tui(
     // fire even when the user types nothing.
     let tx_tick = tx.clone();
     let pet_tick = pet_document.clone();
-    let mut plugin_panels = panels::Panels::with_sidebar(
+    let mut extension_panels = panels::Panels::with_sidebar(
         transcript_stack,
         scroll_view.clone(),
         reload_context.ext_status.clone(),
     );
-    plugin_panels.regular_mode = matches!(args.tui_mode, crate::args::TuiMode::Regular);
-    plugin_panels.sync(tui.as_ref(), &reload_context.ext_status);
+    extension_panels.regular_mode = matches!(args.tui_mode, crate::args::TuiMode::Regular);
+    extension_panels.sync(tui.as_ref(), &reload_context.ext_status);
     let scroll_tick = scroll_view.clone();
     let tick_handle = tokio::spawn(async move {
         // 80ms per frame — upstream's `DEFAULT_INTERVAL_MS`, i.e. a full
@@ -1782,7 +1783,7 @@ pub async fn interactive_tui(
             }
             // Extension status (langfuse ✓ …, …) — cheap revision check, and the
             // only reason an idle session repaints its footer.
-            let panels_changed = plugin_panels.sync(tui_tick.as_ref(), &state_tick.ext_status);
+            let panels_changed = extension_panels.sync(tui_tick.as_ref(), &state_tick.ext_status);
             if state_tick.sync_extension_status() || panels_changed {
                 // Status/panel updates leave chat content untouched. The scroll
                 // cache regenerates itself if enabling a sidebar changes width.
@@ -1791,7 +1792,7 @@ pub async fn interactive_tui(
             if pet_tick.tick(scroll_tick.viewport_height()) {
                 tui_tick.request_render(false);
             }
-            // Extension editor-text injection (`SetEditorText`): a voice plugin
+            // Extension editor-text injection (`SetEditorText`): a voice extension
             // drops a transcription in as an editable draft.
             if state_tick.drain_editor_text() {
                 tui_tick.request_render(false);
@@ -2071,7 +2072,7 @@ pub async fn interactive_tui(
             // Extension shortcuts see Press *and* Release (this is what lets a
             // push-to-talk extension time a hold). Checked before the
             // release-drop below; a claimed key with an empty editor is routed
-            // to the plugin's `Input` handler instead of the editor.
+            // to the extension's `Input` handler instead of the editor.
             if dispatch_key_event(&state_for_key, &key, &editor_for_key) {
                 continue;
             }
@@ -3169,7 +3170,7 @@ pub async fn interactive_tui(
                                 &chat_container,
                                 "Moved to the selected session entry.",
                             );
-                            // `SessionTree`: the active point moved — plugins
+                            // `SessionTree`: the active point moved — extensions
                             // (compiled + wasm) re-restore their state from the
                             // new branch. Advisory; fired after the move.
                             crate::session::notify_session_tree(reload_context).await;
@@ -3413,7 +3414,7 @@ pub async fn interactive_tui(
                 // B5d: drive the shared reload routine on the async runtime,
                 // then surface the outcome. `reload_context` was passed into
                 // `interactive_tui` and is the same `Arc<ReloadContext>` the
-                // `ReloadCommand` + the plugin mailbox both route through —
+                // `ReloadCommand` + the extension mailbox both route through —
                 // clone the `Arc` out so the borrow of `harness` (the main
                 // loop's `&AgentHarness`) lives across the await.
                 let reload_ctx = ctx.reload_context.clone();
@@ -3433,7 +3434,7 @@ pub async fn interactive_tui(
                 // B5e: the reload swapped a fresh `ExtensionSession` into the
                 // context's cell. Rebuild the markdown transformer from that
                 // fresh snapshot and install it on the in-flight streaming
-                // component (so a reloaded plugin's transformer takes effect on
+                // component (so a reloaded extension's transformer takes effect on
                 // the visible message immediately) + future components (they
                 // read `state.markdown_transformer()` at construction). The old
                 // closure no-ops once its snapshot's `active` flag flips false
@@ -3477,7 +3478,7 @@ pub async fn interactive_tui(
                 );
                 tui.request_render(false);
             }
-            Some(TuiMessage::PluginCommandDone(outcome)) => {
+            Some(TuiMessage::ExtensionCommandDone(outcome)) => {
                 handle_command_outcome(&ctx, outcome);
             }
             None => break,

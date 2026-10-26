@@ -82,7 +82,7 @@ pub struct AssistantMessageComponent {
     last_blocks: Mutex<Vec<AssistantBlock>>,
     /// B5e: an optional markdown transformer applied to the raw assistant text
     /// BEFORE it reaches the [`Markdown`] renderer. The host (`kiqi-cli`) injects
-    /// a closure wrapping any plugin `register_markdown_transformer` handlers
+    /// a closure wrapping any extension `register_markdown_transformer` handlers
     /// (called as a sync request/response across the cdylib FFI). `None` is the
     /// no-op identity transform, so this render crate gains **no** `kiqi-extensions`
     /// dep — only a `Fn(&str) -> String` trait object. The transform is
@@ -144,7 +144,7 @@ impl AssistantMessageComponent {
     /// thinking arm of `rebuild_content` route through here so a single install
     /// point covers both. Thinking is treated like text — the spec transforms
     /// "assistant markdown text" and thinking is rendered as markdown too; a
-    /// plugin that wants to skip thinking can inspect the input it receives (no
+    /// extension that wants to skip thinking can inspect the input it receives (no
     /// flag is carried in the `{"markdown": …}` envelope).
     fn transform_markdown(&self, raw: &str) -> String {
         if *self.is_streaming.lock().unwrap() {
@@ -218,7 +218,7 @@ impl AssistantMessageComponent {
             match block {
                 AssistantBlock::Text(t) if !t.trim().is_empty() => {
                     // B5e: apply the installed markdown transformer (identity
-                    // when none) BEFORE styling, so a plugin's
+                    // when none) BEFORE styling, so an extension's
                     // `register_markdown_transformer` sees the raw assistant
                     // markdown and `Markdown::render_markdown` styles the
                     // transformed text.
@@ -278,7 +278,7 @@ impl AssistantMessageComponent {
                         // rest of the block.
                         let body = joined.join("\n\n");
                         // B5e: transform the PLAIN thinking markdown first (the
-                        // plugin must see markdown, not ANSI).
+                        // extension must see markdown, not ANSI).
                         let transformed = self.transform_markdown(&body);
                         let base_style = format!("\x1b[3m{}", theme().colors.thinking_text.to_fg());
                         let md = Arc::new(
@@ -374,7 +374,7 @@ impl AssistantMessageComponent {
 
     /// The currently installed markdown transformer (B5e), if any. The host
     /// reads this to carry an existing transform into a fresh component (e.g.
-    /// after a `/reload`) so the new component renders with the same plugin
+    /// after a `/reload`) so the new component renders with the same extension
     /// transformer without the host re-querying the registry.
     pub fn markdown_transformer(&self) -> Option<Arc<dyn Fn(&str) -> String + Send + Sync>> {
         self.markdown_transformer.lock().unwrap().clone()

@@ -18,7 +18,7 @@ it works. Delete any section that does not apply.
 - [ ] `kiqi-harness`
 - [ ] `kiqi-tui`
 - [ ] `kiqi-cli`
-- [ ] `kiqi-plugin`
+- [ ] `kiqi-extension`
 - [ ] `kiqi-extensions`
 - [ ] docs / website / CI only
 
@@ -27,7 +27,7 @@ it works. Delete any section that does not apply.
 - [ ] Bug fix (non-breaking)
 - [ ] New feature (non-breaking, additive)
 - [ ] Breaking change to a published API
-- [ ] Plugin ABI change
+- [ ] Extension ABI change
 - [ ] Documentation or CI only
 
 ## How this was verified
@@ -48,7 +48,7 @@ cargo test  --workspace --locked
 
 <!--
 Call out anything that needs a second opinion: dependency direction, a public
-API addition, a change to session persistence, the plugin ABI, or the security
+API addition, a change to session persistence, the extension ABI, or the security
 boundary described in SECURITY.md.
 -->
 

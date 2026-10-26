@@ -26,7 +26,7 @@
  *     extensions or sessions. ki uses **its own** variable names
  *     (`KI_OFFLINE` / `KI_CODING_AGENT_DIR`), so the harness sets those too —
  *     setting only the `PI_*` names leaves ki pointed at the real
- *     `~/.ki/agent` and silently loads the machine's global plugin set, which
+ *     `~/.ki/agent` and silently loads the machine's global extension set, which
  *     dominates startup and makes the comparison meaningless.
  *   - a placeholder `ANTHROPIC_API_KEY` for both tools. ki refuses to build a
  *     session in an empty config dir without some provider credential, so an

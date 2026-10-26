@@ -298,7 +298,7 @@ pub(crate) async fn run_server(
     // connection's task actor — and every spawned turn with it — by the time
     // `connect_to` resolves, so there is no in-flight turn left to abort here.
     // Run the SessionShutdown advisory before the reload context (and with it
-    // the plugin cdylibs) drops.
+    // the extension cdylibs) drops.
     close_live_sessions(&shared).await;
     result
 }
@@ -482,7 +482,7 @@ async fn handle_session_new(
         }
     };
     // Same stance: additional workspace roots cannot be honored (the harness
-    // and its plugins are rooted at cwd alone), so a multi-root client granting
+    // and its extensions are rooted at cwd alone), so a multi-root client granting
     // them must hear it now instead of watching tools silently fail on paths it
     // believed were in scope.
     if !request.additional_directories.is_empty() {
@@ -520,7 +520,7 @@ async fn handle_session_new(
             // notices as user-facing `SessionUpdate::Notice`s only when the
             // client said it can present them.
             session.client_notices = shared.lock().unwrap().client_notices;
-            // The dialog pump starts with the session: a plugin can ask a
+            // The dialog pump starts with the session: an extension can ask a
             // permission on the very first turn, so the mailbox must be live
             // before the session id is ever handed out.
             session.start_dialog_pump(cx);
@@ -697,7 +697,7 @@ async fn handle_session_load(
                     // Built but unreadable: leaving it in the live map would
                     // expose an id whose history could not be replayed, so answer
                     // the error and run the advisory dispatch (close()) before
-                    // the reload context — and the plugin cdylibs — drop.
+                    // the reload context — and the extension cdylibs — drop.
                     diag::diagln!("session/load replay failed: {error}");
                     session.close().await;
                     let _ = responder.respond_with_error(Error::new(
@@ -1082,7 +1082,7 @@ fn handle_cancel(shared: &SharedServer, notification: CancelNotification) {
         session.turn.cancel();
         // The protocol has the client answer Cancelled for in-flight
         // permission requests after `session/cancel`; on our side the mirror
-        // obligation is that the plugin never hangs: release every open
+        // obligation is that the extension never hangs: release every open
         // dialog in the mailbox and stop waiting on the client for them
         // (aborting a per-dialog task drops its unanswered outbound request,
         // which auto-sends `$/cancel_request`).
@@ -1283,7 +1283,7 @@ mod tests {
 
     /// A deterministic FauxProvider harness with its broadcast receiver — the
     /// seam tests use instead of `session::build` (which writes session JSONL
-    /// and installs global plugin state).
+    /// and installs global extension state).
     async fn faux_deps(text: &str, tokens_per_second: f64) -> sessions::SessionDeps {
         faux_deps_with_responses(text, tokens_per_second, 1).await
     }
@@ -1385,7 +1385,7 @@ mod tests {
         })
     }
 
-    /// Open a dialog through the plugin envelope (`op=open`), exactly as the
+    /// Open a dialog through the extension envelope (`op=open`), exactly as the
     /// runtime action would.
     fn open_dialog(mailbox: &kiqi_host::UiDialogMailbox, request_id: &str) {
         mailbox
@@ -1395,9 +1395,9 @@ mod tests {
             .expect("dialog open");
     }
 
-    /// Poll the mailbox through the plugin envelope until the request reaches
+    /// Poll the mailbox through the extension envelope until the request reaches
     /// a terminal state (`poll` reclaims terminal states, mirroring the
-    /// plugin's own loop).
+    /// extension's own loop).
     async fn wait_for_terminal(
         mailbox: &kiqi_host::UiDialogMailbox,
         request_id: &str,
@@ -3017,10 +3017,10 @@ mod tests {
 
     /// Happy path: a permission dialog rides the live session id with the
     /// blueprint's exact shape (index option ids, original labels, title
-    /// fallback chain), the selected option routes back to the plugin as the
+    /// fallback chain), the selected option routes back to the extension as the
     /// original title, and the session keeps prompting.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn permission_round_trip_answers_the_plugin_and_the_turn_continues() {
+    async fn permission_round_trip_answers_the_extension_and_the_turn_continues() {
         let (updates_tx, _updates_rx) = tokio::sync::mpsc::unbounded_channel();
         let mailbox = kiqi_host::UiDialogMailbox::new();
         let (hook, mut requests_rx) = dialog_hook(vec![Decision::Answer(selected("1"))]);
@@ -3147,7 +3147,7 @@ mod tests {
     }
 
     /// kiqi-acp race property ⑤ plus the hang-risk pin: `session/cancel` while
-    /// a permission sits unanswered releases the plugin's poll immediately
+    /// a permission sits unanswered releases the extension's poll immediately
     /// (long before any client answer could arrive) and still answers the
     /// prompt `cancelled`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3173,7 +3173,7 @@ mod tests {
                     let _ = tx.send(result);
                     Ok(())
                 })?;
-                // The dialog opens mid-turn, as the plugin's runtime action
+                // The dialog opens mid-turn, as the extension's runtime action
                 // would; the handler stalls on it.
                 open_dialog(&mailbox, "q1");
                 let _request = next_permission(&mut requests_rx).await;
@@ -3195,7 +3195,7 @@ mod tests {
     }
 
     /// The wire half of the `session/cancel` obligation: releasing the
-    /// plugin's poll is not enough — the client's outstanding
+    /// extension's poll is not enough — the client's outstanding
     /// `session/request_permission` must be told too. Aborting the per-dialog
     /// task drops its unanswered `SentRequest`, which auto-sends
     /// `$/cancel_request` (the only sender in this flow), so losing that
@@ -3228,7 +3228,7 @@ mod tests {
                 open_dialog(&mailbox, "q1");
                 let _request = next_permission(&mut requests_rx).await;
                 cx.send_notification(CancelNotification::new(sid))?;
-                // The plugin side releases, and the prompt still answers
+                // The extension side releases, and the prompt still answers
                 // cancelled (same shape as the release pin above).
                 let answer = wait_for_terminal(&mailbox, "q1", 700).await;
                 assert_eq!(answer["status"], "cancelled");
@@ -3257,7 +3257,7 @@ mod tests {
     }
 
     /// EOF with a permission still unanswered: the close path detaches the
-    /// mailbox BEFORE the SessionShutdown advisory, so the plugin's poll
+    /// mailbox BEFORE the SessionShutdown advisory, so the extension's poll
     /// cannot outlive the connection.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn eof_detaches_the_mailbox_and_cancels_pending_dialogs() {

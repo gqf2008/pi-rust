@@ -208,7 +208,7 @@ impl McpNoticeMailbox {
 }
 
 /// The customType stamped on the batched transcript entry a boundary drain
-/// appends (the goal-guest injection precedent).
+/// appends (the goal extension's injection precedent).
 pub const NOTICE_CUSTOM_TYPE: &str = "mcp-resource-notice";
 
 /// Render a drained batch as the text of ONE batched transcript entry: a
@@ -240,7 +240,7 @@ pub fn notice_entry_text(batch: &McpNoticeBatch) -> String {
     text
 }
 
-/// The ONE batched transcript entry a boundary drain appends (the goal-guest
+/// The ONE batched transcript entry a boundary drain appends (the goal extension
 /// injection precedent): a generic custom message, stored as an ordinary entry
 /// and forwarded to the model as a user message on the NEXT context build — no
 /// harness-specific projector required, and never a mid-run splice (drains

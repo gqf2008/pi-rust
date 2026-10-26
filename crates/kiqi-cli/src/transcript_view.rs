@@ -97,13 +97,13 @@ pub struct TranscriptView {
     /// Global tool-output expansion preference (toggled by the host).
     expanded: Arc<Mutex<bool>>,
     /// Optional transformer applied to raw assistant markdown before rendering
-    /// (installed by the local host from plugin `register_markdown_transformer`
+    /// (installed by the local host from extension `register_markdown_transformer`
     /// handlers; always `None` on the remote client).
     markdown_transformer: Arc<Mutex<Option<MarkdownTransformer>>>,
 }
 
 /// A sync `Fn(&str) -> String` applied to raw assistant markdown. Kept as a
-/// trait object so this crate stays free of any plugin types.
+/// trait object so this crate stays free of any extension types.
 pub type MarkdownTransformer = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 impl TranscriptView {

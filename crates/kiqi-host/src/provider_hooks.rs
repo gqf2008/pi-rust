@@ -1,7 +1,7 @@
 //! B4 — extension provider hooks. Bridges an extension's `on(BeforeProviderRequest)`
 //! / `on(BeforeProviderHeaders)` / `on(AfterProviderResponse)` handlers into
 //! kiqi-ai's [`ProviderHooks`] slot, so every provider call fans the live
-//! request/response context out to the subscribed plugins.
+//! request/response context out to the subscribed extensions.
 //!
 //! **Observer semantics (v1):** the SDK `EventHandlerFn` returns `i32` (no
 //! result payload), so a handler observes the request/response — it can record
@@ -51,13 +51,13 @@ impl ExtensionProviderHooks {
     ///
     /// Two independent reasons to install it, and both must be checked:
     ///
-    /// - **Provider-hook tags** — a plugin observing request/response. Includes
+    /// - **Provider-hook tags** — an extension observing request/response. Includes
     ///   `BeforeAgentStart`, which is emitted from this bridge (see
     ///   [`Self::before_request`]) because the harness never emits a prompt
     ///   message event.
-    /// - **`before_agent_start` transformers** — a plugin that *replaces* the
+    /// - **`before_agent_start` transformers** — an extension that *replaces* the
     ///   system prompt. This is a separate slot, not an event subscription, so a
-    ///   plugin that only transforms the prompt registers no handlers at all;
+    ///   extension that only transforms the prompt registers no handlers at all;
     ///   keying this check on the tags alone would skip the bridge and silently
     ///   ignore its transform.
     pub fn from_session(session: &ExtensionSession) -> Option<Self> {
@@ -73,7 +73,7 @@ impl ExtensionProviderHooks {
         let transforms_prompt = !snapshot.before_agent_start().is_empty();
         // A wasm-only install has no cdylib handler in the snapshot, but the
         // compiled/wasm fan-out is still installed and is the observer. Without
-        // this, a sandboxed plugin's provider-request grant would be dead in a
+        // this, a sandboxed extension's provider-request grant would be dead in a
         // real session (it was only ever exercised by direct host tests).
         let observes_compiled = crate::compiled::sink_installed();
         if !observes_events && !transforms_prompt && !observes_compiled {
@@ -89,11 +89,11 @@ impl ExtensionProviderHooks {
 
 impl ProviderHooks for ExtensionProviderHooks {
     /// pi's `transform_context` / `before_agent_start`-returns-`systemPrompt`:
-    /// let a plugin replace the prompt the request carries.
+    /// let an extension replace the prompt the request carries.
     ///
     /// Computed once per prompt and cached, so every provider call of a run
     /// (the tool loop) sees the same prompt — see
-    /// [`Self::last_forced_prompt`]. Returns `None` when no plugin registered a
+    /// [`Self::last_forced_prompt`]. Returns `None` when no extension registered a
     /// transformer, when they all declined, or when the registry is stale, all
     /// of which mean "leave the prompt alone".
     fn transform_context(&self, _model: &Model, ctx: &Context) -> Option<ContextPatch> {
@@ -126,7 +126,7 @@ impl ProviderHooks for ExtensionProviderHooks {
 
     /// Fan the planned request out to `BeforeProviderRequest` +
     /// `BeforeProviderHeaders` subscribers. Returns `None` for the stream options
-    /// — observer-only (the event handler ABI has no result channel); a plugin's
+    /// — observer-only (the event handler ABI has no result channel); an extension's
     /// influence on the *prompt* travels through [`Self::transform_context`]
     /// instead.
     fn before_request(
@@ -138,7 +138,7 @@ impl ProviderHooks for ExtensionProviderHooks {
         // (A) pi's `before_agent_start`: observe each NEW user prompt exactly
         // once. The harness persists prompts before the run and calls
         // `run_agent_loop` with an empty prompts vec, so no
-        // MessageStart/MessageEnd reaches plugins for them. This bridge is the
+        // MessageStart/MessageEnd reaches extensions for them. This bridge is the
         // first place the prompt is visible, so it emits the pi-equivalent
         // event. Dedupe by prompt timestamp: one run can make several provider
         // calls, but `before_agent_start` fires once per prompt.
@@ -186,7 +186,7 @@ impl ProviderHooks for ExtensionProviderHooks {
             // (B) the model-facing messages, so observers (e.g. kiqi-langfuse)
             // can record the real generation input. `ctx` was previously
             // discarded entirely, which is why generation/trace input was
-            // always null for plugins.
+            // always null for extensions.
             "messages": ctx.messages,
         });
         // The redacted form (header names only, never values) goes to cdylib
@@ -226,9 +226,9 @@ impl ProviderHooks for ExtensionProviderHooks {
         patch.as_ref().and_then(options_patch_from_value)
     }
 
-    // `AfterProviderResponse` 不再派发（0.8.0 契约，见 plugin-abi §6.41）：
+    // `AfterProviderResponse` 不再派发（0.8.0 契约，见 extension-abi §6.41）：
     // wasm 侧没有消费者，cdylib 侧也会在 P6 随通道删除；宿主侧同时拒绝向
-    // wasm 转发该 tag（见 kiqi-plugin-host `dispatch_event`）。终端 assistant
+    // wasm 转发该 tag（见 kiqi-extension-host `dispatch_event`）。终端 assistant
     // 消息由 `MessageEnd` 覆盖观测需求。
 }
 
@@ -320,14 +320,14 @@ fn options_patch_from_value(value: &serde_json::Value) -> Option<SimpleStreamOpt
 /// order pi uses in `assistant.ts` — transform, then request). So an observer
 /// sees the prompt the provider is about to be given. pi's own
 /// `before_agent_start` fires earlier in the run and therefore carries the base
-/// prompt; a plugin that needs the pre-transform value should capture it from
+/// prompt; an extension that needs the pre-transform value should capture it from
 /// its own transformer's input instead of from this event.
 fn before_agent_start_event(prompt: &str, image_count: usize, ctx: &Context) -> serde_json::Value {
     serde_json::json!({
         "prompt": prompt,
         "imageCount": image_count,
         "systemPrompt": ctx.system_prompt,
-        // The session this process serves. A plugin that traces the run reports
+        // The session this process serves. An extension that traces the run reports
         // it as the session id (nothing else tells an observer which session it
         // is watching). Read from the environment per turn rather than captured
         // at harness build, so an in-process session swap is reflected on the
@@ -336,13 +336,13 @@ fn before_agent_start_event(prompt: &str, image_count: usize, ctx: &Context) -> 
         // Who this extension is embedded in, so it can label its own output
         // (trace name, tags, `service.name`) without hardcoding a brand that a
         // rename would silently invalidate. Sent per turn, so it describes the
-        // process actually running rather than the SDK the plugin was built
+        // process actually running rather than the SDK the extension was built
         // against.
         "host": host_identity(),
     })
 }
 
-/// The `BeforeAgentStart` payload for a compiled plugin, plus the user-prompt
+/// The `BeforeAgentStart` payload for a compiled extension, plus the user-prompt
 /// timestamp that keys a once-per-prompt transform.
 ///
 /// One source of truth for the payload shape: the native transform and a
@@ -357,12 +357,12 @@ pub fn before_agent_start_input(ctx: &Context) -> Option<(i64, serde_json::Value
     ))
 }
 
-/// The host's own identity, as handed to plugins.
+/// The host's own identity, as handed to extensions.
 ///
-/// The name is the plugin contract's constant ([`crate::HOST_NAME`])
+/// The name is the extension contract's constant ([`crate::HOST_NAME`])
 /// and the version is this host crate's own `CARGO_PKG_VERSION` — every
 /// workspace crate shares one version, so this is the running host's version
-/// and not the SDK a plugin was compiled against. Both are compile-time
+/// and not the SDK an extension was compiled against. Both are compile-time
 /// aliases, so there is exactly one place to change either.
 fn host_identity() -> serde_json::Value {
     serde_json::json!({
@@ -412,7 +412,7 @@ fn user_content_image_count(content: &UserContent) -> usize {
 mod tests {
     use super::*;
     use crate::EventTag;
-    use crate::StablePluginEvent;
+    use crate::StableExtensionEvent;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
@@ -420,14 +420,14 @@ mod tests {
     static PROVIDER_LOCK: Mutex<()> = Mutex::new(());
     static CAPTURED: Mutex<Vec<(EventTag, String)>> = Mutex::new(Vec::new());
 
-    extern "C" fn capture_handler(ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
+    extern "C" fn capture_handler(ev: StableExtensionEvent, _ud: *mut std::ffi::c_void) -> i32 {
         let payload = unsafe { ev.payload.data.data.to_string_lossy() };
         CAPTURED.lock().unwrap().push((ev.tag, payload));
         0
     }
 
     extern "C" fn counting_provider_handler(
-        ev: StablePluginEvent,
+        ev: StableExtensionEvent,
         _ud: *mut std::ffi::c_void,
     ) -> i32 {
         // Count every dispatch on the subscribed tags (BeforeProviderRequest +
@@ -458,13 +458,13 @@ mod tests {
 
         let mut registry = crate::registry::ExtensionRegistry::new();
         registry.register_event_handler(
-            "test-plugin".to_string(),
+            "test-extension".to_string(),
             EventTag::BeforeAgentStart,
             capture_handler,
             std::ptr::null_mut(),
         );
         registry.register_event_handler(
-            "test-plugin".to_string(),
+            "test-extension".to_string(),
             EventTag::BeforeProviderRequest,
             capture_handler,
             std::ptr::null_mut(),
@@ -518,13 +518,13 @@ mod tests {
             "sessionId must mirror the host's session id env var: {}",
             agent_starts[0].1
         );
-        // And the host identifies itself, so a plugin can label its own output
+        // And the host identifies itself, so an extension can label its own output
         // (trace name, tags, service.name) without hardcoding a brand.
         assert_eq!(start_payload["host"]["name"], crate::HOST_NAME);
         assert_eq!(
             start_payload["host"]["version"],
             env!("CARGO_PKG_VERSION"),
-            "the host reports the version of the host, not of the plugin SDK"
+            "the host reports the version of the host, not of the extension SDK"
         );
 
         let requests: Vec<_> = captured
@@ -653,7 +653,7 @@ mod tests {
 
         let mut registry = crate::registry::ExtensionRegistry::new();
         registry.register_event_handler(
-            "test-plugin".to_string(),
+            "test-extension".to_string(),
             EventTag::BeforeProviderRequest,
             capture_handler,
             std::ptr::null_mut(),
@@ -715,13 +715,13 @@ mod tests {
         let mut registry = crate::registry::ExtensionRegistry::new();
         let handler: crate::EventHandlerFn = counting_provider_handler;
         registry.register_event_handler(
-            "test-plugin".to_string(),
+            "test-extension".to_string(),
             EventTag::BeforeProviderRequest,
             handler,
             std::ptr::null_mut(),
         );
         registry.register_event_handler(
-            "test-plugin".to_string(),
+            "test-extension".to_string(),
             EventTag::BeforeProviderHeaders,
             handler,
             std::ptr::null_mut(),
@@ -776,7 +776,7 @@ mod tests {
     // ---- before_agent_start prompt transform ------------------------------
     //
     // These use in-process `extern "C"` handlers rather than a cdylib: the ABI
-    // round-trip has its own end-to-end test (`plugin_stub_smoke`), so what is
+    // round-trip has its own end-to-end test (`extension_stub_smoke`), so what is
     // left to pin here is the semantics — chaining, failure isolation, and the
     // "no change" signal — which are easier to express with direct handlers.
 
@@ -826,7 +826,7 @@ mod tests {
     ) -> ExtensionProviderHooks {
         let mut registry = crate::registry::ExtensionRegistry::new();
         for h in handlers {
-            registry.register_before_agent_start(h.handler, h.plugin_free_string, h.user_data);
+            registry.register_before_agent_start(h.handler, h.extension_free_string, h.user_data);
         }
         ExtensionProviderHooks {
             snapshot: Arc::new(registry.snapshot()),
@@ -846,12 +846,12 @@ mod tests {
         let hooks = hooks_with(vec![
             crate::registry::BeforeAgentStartHandler {
                 handler: append_marker,
-                plugin_free_string: noop_free,
+                extension_free_string: noop_free,
                 user_data: leak(a),
             },
             crate::registry::BeforeAgentStartHandler {
                 handler: append_marker,
-                plugin_free_string: noop_free,
+                extension_free_string: noop_free,
                 user_data: leak(b),
             },
         ]);
@@ -889,12 +889,12 @@ mod tests {
         let hooks = hooks_with(vec![
             crate::registry::BeforeAgentStartHandler {
                 handler: fails,
-                plugin_free_string: noop_free,
+                extension_free_string: noop_free,
                 user_data: std::ptr::null_mut(),
             },
             crate::registry::BeforeAgentStartHandler {
                 handler: append_marker,
-                plugin_free_string: noop_free,
+                extension_free_string: noop_free,
                 user_data: leaked,
             },
         ]);
@@ -923,13 +923,13 @@ mod tests {
     }
 
     /// All handlers declining ⇒ `None`, i.e. the harness leaves the prompt
-    /// alone. A plugin that only observes must be able to say nothing without
+    /// alone. An extension that only observes must be able to say nothing without
     /// installing an empty prompt.
     #[test]
     fn declining_transformers_leave_the_prompt_untouched() {
         let hooks = hooks_with(vec![crate::registry::BeforeAgentStartHandler {
             handler: declines,
-            plugin_free_string: noop_free,
+            extension_free_string: noop_free,
             user_data: std::ptr::null_mut(),
         }]);
         let model = kiqi_ai::Model::new(
@@ -952,7 +952,7 @@ mod tests {
     }
 
     /// No registered transformer ⇒ `None` and the ABI is never entered. A
-    /// session with only observer plugins must not pay for (or risk) this path.
+    /// session with only observer extensions must not pay for (or risk) this path.
     #[test]
     fn no_transformers_means_no_patch() {
         let hooks = hooks_with(vec![]);
@@ -968,7 +968,7 @@ mod tests {
     }
 
     /// Minimal free fn for handlers whose `out` is built by the SDK (they never
-    /// hand back a plugin allocation in these tests, but the registry requires
+    /// hand back an extension allocation in these tests, but the registry requires
     /// the field).
     extern "C" fn noop_free(_s: crate::StbString) {}
 
@@ -989,7 +989,7 @@ mod tests {
 
         let mut registry = crate::registry::ExtensionRegistry::new();
         registry.register_event_handler(
-            "test-plugin".to_string(),
+            "test-extension".to_string(),
             EventTag::BeforeAgentStart,
             capture_handler,
             std::ptr::null_mut(),

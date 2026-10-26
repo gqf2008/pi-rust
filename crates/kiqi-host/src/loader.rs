@@ -1,8 +1,8 @@
-//! The host session's plugin-lifetime holder.
+//! The host session's extension-lifetime holder.
 //!
 //! P6: the cdylib channel is retired (the `libloading` loader, the
-//! `kiqi_plugin_register` entrypoint contract, `ki install` / `ki dev`).
-//! Plugins ship as wasm guests and drive the host through `kiqi-plugin-host`.
+//! `kiqi_extension_register` entrypoint contract, `ki install` / `ki dev`).
+//! Extensions ship as wasm guests and drive the host through `kiqi-extension-host`.
 //! What survives here is [`ExtensionSession`] — the per-harness holder of the
 //! registry snapshot the event funnels dispatch through, plus the session's
 //! [`ActionBridge`]. Without a loader it presents an **empty registry**, which
@@ -24,21 +24,21 @@ use crate::ActionBridge;
 #[derive(Clone)]
 pub struct ExtensionSession {
     snapshot: Option<Arc<RegistrySnapshot>>,
-    /// B5a: the session's action bridge (`None` when no plugins / tests / the
+    /// B5a: the session's action bridge (`None` when no extensions / tests / the
     /// `--no-extensions` path). Kept here so `kiqi-cli` can recover it after
     /// `AgentHarness::create` to call `set_harness` — the bridge must outlive
-    /// any plugin→host `runtime_action` call. Cloning is cheap (an `Arc`).
+    /// any extension→host `runtime_action` call. Cloning is cheap (an `Arc`).
     action_bridge: Option<Arc<ActionBridge>>,
 }
 
 impl ExtensionSession {
-    /// An empty session (no plugins — `--no-extensions`, no wasm guests, or
+    /// An empty session (no extensions — `--no-extensions`, no wasm guests, or
     /// tests).
     ///
     /// Carries an **empty registry**, not `None`: the event fan-out hangs off
     /// the snapshot the host threads into `translate`'s funnels — which call
     /// the compiled/wasm sink unconditionally, precisely so a `ki` with no
-    /// plugins still delivers events. A `None` snapshot therefore used to gate
+    /// extensions still delivers events. A `None` snapshot therefore used to gate
     /// every event call site off (a wasm-only install delivered nothing, not
     /// even to `on_event`).
     pub fn none() -> Self {
@@ -64,7 +64,7 @@ impl ExtensionSession {
     /// registered. Borrowed view for iterating tools/commands; for an owned
     /// share (e.g. handing to the emitter) use [`snapshot_arc`](Self::snapshot_arc).
     ///
-    /// Always `Some` for sessions this module builds, including a plugin-free
+    /// Always `Some` for sessions this module builds, including an extension-free
     /// [`none`](Self::none) (an empty registry); [`snapshot_arc`](Self::snapshot_arc)
     /// carries the reason the `Option` is not collapsed away.
     pub fn snapshot(&self) -> Option<&RegistrySnapshot> {
@@ -76,20 +76,20 @@ impl ExtensionSession {
     /// [`ExtensionEmitter`](crate::ExtensionEmitter) installed into
     /// `AgentHarnessOptions.agent_emitter`.
     ///
-    /// Always `Some` for sessions this module builds, including a plugin-free
+    /// Always `Some` for sessions this module builds, including an extension-free
     /// [`none`](Self::none) (an empty registry). The event call sites match on
     /// this value to decide whether to enter `translate`'s funnels at all, and
     /// those funnels reach the compiled/wasm sink unconditionally — so treating
-    /// "no plugins" as `None` used to switch the whole plugin event surface off.
+    /// "no extensions" as `None` used to switch the whole extension event surface off.
     pub fn snapshot_arc(&self) -> Option<Arc<RegistrySnapshot>> {
         self.snapshot.clone()
     }
 
-    /// Whether any registered plugin claimed ownership of this host process's
+    /// Whether any registered extension claimed ownership of this host process's
     /// stdio (`declare {"ownsStdio":true}`). When `true`, the host (pi-cli)
     /// must run the headless `Rpc` lifecycle (dispatch BeforeTuiStart +
     /// SessionStart, then park) instead of Print/TUI so it never writes to the
-    /// plugin's stdio. With the cdylib channel gone nothing sets it any more
+    /// extension's stdio. With the cdylib channel gone nothing sets it any more
     /// (the wasm contract has no stdio claim), so this is always `false` in
     /// production.
     pub fn owns_stdio(&self) -> bool {
@@ -110,8 +110,8 @@ impl ExtensionSession {
     /// B5a: the session's action bridge, if one was threaded in. `kiqi-cli`
     /// recovers this after `AgentHarness::create` succeeds to call
     /// `HarnessActionHost::set_harness` (filling the host cell the bridge's
-    /// recovered host reads on the first plugin→host action). `None` when no
-    /// plugins loaded / tests / `--no-extensions`.
+    /// recovered host reads on the first extension→host action). `None` when no
+    /// extensions loaded / tests / `--no-extensions`.
     pub fn action_bridge(&self) -> Option<Arc<ActionBridge>> {
         self.action_bridge.clone()
     }

@@ -2,7 +2,7 @@
 
 > 状态：**已落地**（批次 1/2 于 2026-10-16，批次 3 于 2026-10-22）。目标：让 Zed（及任何 ACP 客户端）把 `ki` 当外部 coding
 > agent 用——客户端拉起 `ki acp serve`，在 stdin/stdout 上走 Agent Client Protocol 的 JSON-RPC。
-> 关联：`plugin-abi.md` §6.2（acp 不迁 wasm 的裁定，2026-10-16）；`plugin-process-capability.md`
+> 关联：`extension-abi.md` §6.2（acp 不迁 wasm 的裁定，2026-10-16）；`extension-process-capability.md`
 > （同套格式的上一个立项）；前身实现 `rpi-package/packages/kiqi-acp`（ACP↔RPC 桥）；
 > 参考实现 `../abb`（`abb-agent` 手写 ACP server + `src/runtime/acp.rs` 客户端）。
 
@@ -10,7 +10,7 @@
 
 | 事实 | 证据 |
 |---|---|
-| acp 不能做成插件：要独占宿主进程 stdin/stdout，跨 SessionStart→Shutdown 维持服务线程 | `plugin-abi.md:177-179`（§6.2 裁定）；原始实现的声明面 `rpi-package/packages/kiqi-acp/src/lib.rs:4-8,67-70` |
+| acp 不能做成插件：要独占宿主进程 stdin/stdout，跨 SessionStart→Shutdown 维持服务线程 | `extension-abi.md:177-179`（§6.2 裁定）；原始实现的声明面 `rpi-package/packages/kiqi-acp/src/lib.rs:4-8,67-70` |
 | ki 已有 headless 事件驱动先例 `--mode rpc`：prompt 在独立 task 跑、主循环持续读 stdin、abort 可在轮中送达 | `crates/kiqi-cli/src/app.rs:224-236`、`modes.rs:320,343,500`；宿主对「拥有 stdio 的 ACP/MCP 型 server」已有概念与生命周期（`app.rs:231-240`、`app.rs:450-470`） |
 | 进程内组装点已存在：`session::build` 一站式产出 `AgentHarness`（工具/JSONL 存储/插件工具合并/权限钩子/事件总线/崩溃恢复） | `crates/kiqi-cli/src/session.rs:209`；`kiqi-harness` 的 `AgentHarness::create`（`agent_harness.rs:665`）、`AgentLane` trait（`:318`） |
 | 事件投影原料齐全：`AgentEvent` broadcast（core 刻意不 serde，投影类型单独定义是既有做法） | `kiqi-agent/src/events.rs:26`（`type_tag` :82）；投影先例 `remote/protocol.rs:30`（`RemoteEvent`）、`modes.rs` 的 `agent_event_json` |
@@ -26,7 +26,7 @@
 | ✅ | 事件→`session/update` 投影 | 事件在，无 ACP 面 | 逐 delta 投影（§4.5），abb 的 `event_updates` 做语义对照 |
 | ✅ | 取消贯穿（cancel 打断在途回合） | harness 原语齐 | abb 三件套落到 ki 原语上（§4.4） |
 | ⏳ | `session/request_permission`（插件 UI 对话框→客户端授权） | `UiDialogMailbox` 桥已在 RPC 通道打通 | 批次 2（§4.6） |
-| ❌ | wasm 化 acp | 已裁定不做 | §9；`plugin-abi.md` §6.2 |
+| ❌ | wasm 化 acp | 已裁定不做 | §9；`extension-abi.md` §6.2 |
 | ❌ | `_session/steering`、`_meta.abbSandbox`、terminal/*、fs/* 委托、auth 方法 | — | §9 明确不做 |
 
 ## 3. 三个参考实现，各取什么
@@ -41,7 +41,7 @@
 
 ### 4.1 宿主级子命令，而非插件（已裁定，不重复论证）
 
-`plugin-abi.md` §6.2 的裁定不变：acp 要独占 stdio、跨会话生命周期，正确形态是宿主功能。
+`extension-abi.md` §6.2 的裁定不变：acp 要独占 stdio、跨会话生命周期，正确形态是宿主功能。
 本方案即该裁定的落地文件。
 
 ### 4.2 进程内驱动，而非 kiqi-acp 的桥接形态
@@ -56,7 +56,7 @@ kiqi-acp 之所以是桥（ACP server → 每会话 spawn 一个 `ki --mode rpc`
   会话目录按 cwd 天然隔离（`session.rs:188` `<cwd>/.ki/sessions/`）；
 - 形态先例：abb-agent 就是「ACP server 进程内驱动 ki 库」的完整样板。
 
-进程内多会话的共享状态注意：`compiled_plugin_hosts()` 是进程级 `OnceLock`（同二进制共享
+进程内多会话的共享状态注意：`compiled_extension_hosts()` 是进程级 `OnceLock`（同二进制共享
 无害，但要写进文档）；settings/models 解析走 per-cwd 的 `resolve_for_cwd`（`provider.rs:401`）。
 
 ### 4.3 协议层用官方 crate，语义层自己写
@@ -203,7 +203,7 @@ ABB 已有一个 4710 行的 ACP 客户端。它对 agent 的六点硬假设（�
 
 ## 9. 明确不做（边界）
 
-- **不迁 wasm**：`plugin-abi.md` §6.2 裁定（独占 stdio + 跨会话服务线程），且
+- **不迁 wasm**：`extension-abi.md` §6.2 裁定（独占 stdio + 跨会话服务线程），且
   `837444e` 已记录排除理由；
 - 不做 steering、sandbox 元数据、terminal/*、fs/* 委托、auth 方法、`session/set_mode`；
 - 不做会话级 `mcpServers` 注入（§4.7 明确拒绝）；
@@ -217,7 +217,7 @@ ABB 已有一个 4710 行的 ACP 客户端。它对 agent 的六点硬假设（�
 |---|---|---|
 | 1（骨架+验证） | 依赖引入（pin 3.3.0）、`ki acp serve` 入口+生命周期挂接、initialize/session/new/prompt/cancel、投影层、stderr 纪律、响亮失败；**官方 crate 分发模型实测**（§4.4 两条一致性测试） | 进程内协议测试全绿；门禁全绿 |
 | 2（交互面） | `session/request_permission`（UiDialogMailbox 桥 + 簿记竞态测试）、`session/load` 回放、Zed 真机验收 | kiqi-acp 同款竞态测试移植全绿；Zed 手测一轮 |
-| 3（固化+对接） | `ki acp install-zed`/`--print-zed` one-shot（zed.rs 移植）、ABB 客户端实测（§7）、文档（handover §7 指针、plugin-abi §7 待定项销账、README） | ABB 驱动一轮记录在案 |
+| 3（固化+对接） | `ki acp install-zed`/`--print-zed` one-shot（zed.rs 移植）、ABB 客户端实测（§7）、文档（handover §7 指针、extension-abi §7 待定项销账、README） | ABB 驱动一轮记录在案 |
 
 ## 11. 已定 / 待定
 
@@ -230,7 +230,7 @@ stdio/失败面纪律全盘继承（§6）。
 - ~~`Suspended` → stopReason 的准确命名~~（✅ 批次 1 落定：`end_turn` + stderr 说明，
   deferred resume 留批次 2+）；
 - ~~多会话共享进程的插件宿主语义上限~~（批次 1 曾临时裁定为**每进程一个活跃会话**；
-  ✅ 2026-10-24 已改为按 `sessionId` 路由的多会话模型，见 §15。legacy compiled-plugin
+  ✅ 2026-10-24 已改为按 `sessionId` 路由的多会话模型，见 §15。legacy compiled-extension
   sink 与部分第三方插件读取进程 cwd 的限制仍未按会话隔离，见 `kiqi-acp/src/sessions.rs` 模块注释，
   不再用它拒绝第二个普通 ACP 会话）；
 - zed 注册是否进 `ki acp serve` 默认行为（现按 one-shot 子命令设计）；
@@ -340,9 +340,9 @@ session/new / EOF 全通，应答见 §7 表）。Zed 真机手测仍待人工�
   （fmt/clippy/11 条触面测试/探针复跑 9.30s），approve（blocking=0 non-blocking=2：
   harness 启动日志缺子命令形状、探针 tempdir 泄漏）。walgit CI 分支任务无 runner 认领，
   验证由本地门禁 + 评审独立复跑承担（已记录在 merge_result note）。
-- **文档销账（本仓库，本提交）**：README 增 Editor integration (ACP) 小节；`plugin-abi.md`
+- **文档销账（本仓库，本提交）**：README 增 Editor integration (ACP) 小节；`extension-abi.md`
   「明确不迁」名单 `acp` 销账（「不迁 wasm」裁定不变，落地形态即宿主功能）；
-  `plugin-abi-handover.md` §7 行销账；本文档头部状态行更新为已落地。
+  `extension-abi-handover.md` §7 行销账；本文档头部状态行更新为已落地。
 - **Zed 真机手测：关闭（2026-10-22，业主裁定）**。实测到一半：`ki acp install-zed` 注册 +
   Zed 真机拉起 `ki acp serve` 并保持连接（spawn/注册面通过，进程与 initialize 实证）；
   完整回合由业主终止——Zed 弃用并卸载。abb 生产发行包继续走随包 abb-agent，`ki acp serve`
@@ -373,7 +373,7 @@ session/new / EOF 全通，应答见 §7 表）。Zed 真机手测仍待人工�
 - 每个 `LiveSession` 独立持有 cwd、harness/上下文、事件接收器、system prompt 覆盖、
   turn/cancel 与对话框状态，禁止串话。`initialize` 的协议版本协商和客户端能力快照
   （包括 notices）属于**连接**，能力在会话激活时复制，不随某个会话关闭而丢失。
-- 进程级共享资源不因此复制成协议级全局会话；legacy compiled-plugin sink
+- 进程级共享资源不因此复制成协议级全局会话；legacy compiled-extension sink
   （last-writer-wins）及第三方插件读取进程 cwd 的既有边界如实保留在
   `kiqi-acp/src/sessions.rs`。内置工具的显式 cwd、ACP run/cancel、标题与上下文不经过这些全局槽。
 

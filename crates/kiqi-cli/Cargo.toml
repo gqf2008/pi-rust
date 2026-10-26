@@ -94,15 +94,15 @@ pkg-fmt = "tgz"
 pkg-fmt = "zip"
 
 [features]
-# First-party plugins are wasm guests only (`plugins/wasm/kiqi-*-guest`,
+# First-party extensions are wasm guests only (`extensions/wasm/kiqi-*`,
 # installed with `ki insmod`). The compiled-in channel was retired on
-# 2026-10-21: its crates, `plugin-kiqi-*` features and cdylib CI builds are
+# 2026-10-21: its crates, `extension-kiqi-*` features and cdylib CI builds are
 # gone. The cdylib channel was retired on 2026-10-26 (`ki dev`/`ki install`/
-# `kiqi-plugin-sdk` removed); wasm is the only plugin channel.
-default = ["clipboard", "plugin-wasm"]
-# Loads `plugins/<id>/plugin.wasm` through `kiqi-plugin-host` (wasmtime). Off
+# `kiqi-extension-sdk` removed); wasm is the only extension channel.
+default = ["clipboard", "extension-wasm"]
+# Loads `extensions/<id>/extension.wasm` through `kiqi-extension-host` (wasmtime). Off
 # only for builds that want the leaner binary without the wasm tier.
-plugin-wasm = ["kiqi-host/wasm"]
+extension-wasm = ["kiqi-host/wasm"]
 # Enables real clipboard support for `/copy` and image paste (best-effort).
 clipboard = ["dep:arboard"]
 
@@ -119,10 +119,10 @@ name = "ki"
 path = "src/bin/ki.rs"
 
 [lints.rust]
-# The compiled-in plugin channel was retired; its historical test blocks still
-# carry `#[cfg(feature = "plugin-kiqi-*")]`. Those features are gone, so the
+# The compiled-in extension channel was retired; its historical test blocks still
+# carry `#[cfg(feature = "extension-kiqi-*")]`. Those features are gone, so the
 # blocks never compile, but telling check-cfg the names keeps the warnings
 # meaningful rather than "unknown feature value".
 unexpected_cfgs = { level = "warn", check-cfg = [
-  'cfg(feature, values("plugin-kiqi-todo", "plugin-kiqi-lens", "plugin-kiqi-orchestrator", "plugin-kiqi-webfetch", "plugin-kiqi-websearch", "plugin-kiqi-subagents", "plugin-kiqi-permissions", "plugin-kiqi-goal", "plugin-kiqi-plan-mode", "plugin-kiqi-codegraph", "plugin-kiqi-ask-user", "plugin-kiqi-langfuse"))',
+  'cfg(feature, values("extension-kiqi-todo", "extension-kiqi-lens", "extension-kiqi-orchestrator", "extension-kiqi-webfetch", "extension-kiqi-websearch", "extension-kiqi-subagents", "extension-kiqi-permissions", "extension-kiqi-goal", "extension-kiqi-plan-mode", "extension-kiqi-codegraph", "extension-kiqi-ask-user", "extension-kiqi-langfuse"))',
 ] }

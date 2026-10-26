@@ -13,34 +13,45 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
-- **`kiqi-plugin` + `kiqi-plugin-host` + `kiqi-extensions` → one crate,
-  `kiqi-host` (breaking for Rust consumers).** The `Extension` contract, the
-  event dispatch spine and the wasm backend now live together
-  (`docs/design/kiqi-host-merge.md`). The plugin trait is renamed
-  `Plugin → Extension`; the wasmtime dependencies sit behind the crate's `wasm`
+- **The extension rename is complete (breaking).** Every surface now says extension. The WIT
+  package is `kiqi:extension@0.9.0` (`world extension`, `extension-api`), the
+  repo tree is `extensions/` (`extensions/wasm/kiqi-*`), the Rust API
+  speaks `Extension` throughout (`StableExtensionEvent`, `ExtensionApi`,
+  `ExtensionError`, `WasmExtension`, bindings crate `kiqi-wasm-bindings`), the
+  CLI is `ki extension …`, the install directory is
+  `$KI_AGENT_DIR/extensions/<id>/` and the component file is `extension.wasm`.
+  The guest directories and packages drop their `-guest` suffix too
+  (`extensions/wasm/kiqi-todo/`, crate `kiqi-todo`); the shared bindings crate
+  is `kiqi-wasm-bindings`.
+  No compatibility shims: installed guests must be re-installed with
+  `ki insmod`. Notes in `docs/design/extension-abi.md` §6.48.
+- **The host-side crates are merged.** The three former host crates (contract,
+  wasm backend, dispatch spine) are now the single `kiqi-host` crate
+  (`docs/design/kiqi-host-merge.md`), breaking for Rust consumers. The contract
+  trait is `Extension`; the wasmtime dependencies sit behind the crate's `wasm`
   feature, which only `kiqi-cli` enables, so `kiqi-tools` / `kiqi-mcp` /
-  `kiqi-acp` stay wasmtime-free. Code paths change: `kiqi_plugin::` and
-  `kiqi_extensions::` → `kiqi_host::`, `kiqi_plugin_host::` → `kiqi_host::wasm::`.
+  `kiqi-acp` stay wasmtime-free. Code paths: `kiqi_host::` for the contract and
+  spine, `kiqi_host::wasm::` for the backend.
 
 ### Removed
 
-- **The cdylib plugin channel is retired (breaking).** wasm guests
-  (`plugins/wasm/kiqi-*-guest`, `ki insmod`) are the only plugin channel now.
-  Gone: the `kiqi-plugin-sdk` crate (C ABI types), `examples/plugin-stub`, the
+- **The cdylib extension channel is retired (breaking).** wasm guests
+  (`extensions/wasm/kiqi-*`, `ki insmod`) are the only extension channel now.
+  Gone: the `kiqi-extension-sdk` crate (C ABI types), `examples/extension-stub`, the
   `libloading` loader inside `kiqi-extensions`, `ki dev` / `ki dev-local` (hot
   reload), `ki install` / `ki uninstall` (crates.io cdylib extensions) and
   `ki package link|unlink`. The native-package update checks went with them.
   Anything declaring `#[repr(C)]` handler vtables no longer loads; port the
-  plugin to a wasm guest against `plugins/kiqi-plugin.wit`. `kiqi-extensions`
+  extension to a wasm guest against `extensions/kiqi-extension.wit`. `kiqi-extensions`
   survives as the host-side dispatch spine (registry, `translate` funnels,
   compiled/wasm sink, action mailboxes); its C-ABI bus types moved to
   `kiqi-extensions::abi` and the shared contract constants live in
-  `kiqi-plugin`.
+  `kiqi-extension`.
 - **`kiqi-plan-mode-core` is gone — its logic lives in the guest.** The crate
   existed only to make plan-mode logic unit-testable, on the premise that wasm
   guests cannot carry tests; that premise is false (wit-bindgen generates host
-  stubs, so `cargo test -p kiqi-plan-mode-guest` runs natively). The logic and
-  its six tests now live in `plugins/wasm/kiqi-plan-mode-guest/src/plan.rs`,
+  stubs, so `cargo test -p kiqi-plan-mode` runs natively). The logic and
+  its six tests now live in `extensions/wasm/kiqi-plan-mode/src/plan.rs`,
   with the WIT adapter as `src/lib.rs`.
 - **`kiqi-acp` is a crate now.** The ACP server moved out of `kiqi-cli`
   (`crates/kiqi-cli/src/acp/`) into `crates/kiqi-acp`; the host keeps the
@@ -56,7 +67,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   delivered to the agent as an injected user message (`⏰ cron:<name> …`); missed minutes
   are skipped rather than backfilled, and a command job never overlaps itself. Commands
   run through the platform shell in the session cwd with merged stdout/stderr, a 60 s
-  default timeout (max 600 s) and a 64 KiB output cap. Host-side only: no plugin ABI or
+  default timeout (max 600 s) and a 64 KiB output cap. Host-side only: no extension ABI or
   WIT change.
 - **Spawned MCP servers are told the session id.** A stdio server used to be
   started with a scrubbed environment, so it could never answer "whose write was
@@ -83,19 +94,19 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   (`event.input`, `event-action.patch`). All 12 in-repo guests are rebuilt in this
   release; no third-party wasm ecosystem exists to migrate. The world also gains the
   exports `oauth-api`, `provider-api` and `render-api`, which every guest must
-  implement (`kiqi_plugin_guest::deny_contribution_exports!` supplies empty/denied
+  implement (`kiqi_wasm_bindings::deny_contribution_exports!` supplies empty/denied
   stubs), and the imports `oauth-http`, `provider-stream` and `provider-http`.
 
   Five capabilities arrive **deny-by-default**, each carrying its policy in the grant:
   `oauth`, `provider`, `render`, `resources` and `provider-request`. None is
   auto-granted by `--yes` (`AUTO_GRANT_EXEMPT`): an install lists them and stops, and
-  the user grants explicitly with `ki plugin grant <id> <capability> …`. A missing
+  the user grants explicitly with `ki extension grant <id> <capability> …`. A missing
   grants file still grants nothing, and a hand-edited file fails closed — a key that
   fails validation is dropped while the others survive.
 
   Behaviour changes worth knowing before upgrading: OAuth tokens never cross the wasm
   boundary (the host performs the token-endpoint HTTP and stores
-  `plugin:<install-id>:<provider-id>`; a guest sees only `oauth-credential-status`).
+  `extension:<install-id>:<provider-id>`; a guest sees only `oauth-credential-status`).
   Stored tokens are bound to a fingerprint of the provider id, client id and endpoint
   origins, so refresh/logout/revoke refuse a changed issuing profile. Logout requires
   the explicit `--force-local` path to delete locally after a mismatch, and typed
@@ -125,7 +136,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   starve shared probes or tool calls.
 
   Consent and residual-risk behavior is explicit: a resources manifest never grants
-  `resources`, including on reinstall or with `--yes`; use `ki plugin grant`. Granting
+  `resources`, including on reinstall or with `--yes`; use `ki extension grant`. Granting
   `oauth`/`provider` alongside existing `exec`/`fs`/`net-sockets` emits the implemented
   O17 warning but does not refuse the grant.
 
@@ -134,7 +145,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   wasm provider can use an OAuth access token through an explicit, fingerprint-checked
   `--credential-from` grant. The cdylib OAuth/provider/renderer/resources registrations
   are superseded but their P6 deletion is still pending. The process-level compiled
-  event sink used by legacy plugins also remains last-writer-wins across session builds.
+  event sink used by legacy extensions also remains last-writer-wins across session builds.
 
 - **MCP notices can suppress a session's own collab echoes.** Collab entries
   now carry the writing session (from `KI_AGENT_ID`), and the client keeps the
@@ -168,13 +179,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   now keep running until the done condition or a budget stops them instead of
   exiting after one prompt (unbounded goals are still capped at
   `MAX_GOAL_AUTO_RUNS` host runs).
-- **The compiled-in plugin channel is retired (2026-10-21).** The 12
-  `plugins/kiqi-*` crates, their `plugin-kiqi-*` features, the opt-in-feature
+- **The compiled-in extension channel is retired (2026-10-21).** The 12
+  `extensions/kiqi-*` crates, their `extension-kiqi-*` features, the opt-in-feature
   and standalone-cdylib CI steps, and `scripts/check-feature-parity.sh` are
   gone; the website no longer advertises a `cargo build -p kiqi-permissions`
-  install for a host-owned policy. First-party plugins are wasm guests only
-  (`ki insmod --build plugins/wasm/kiqi-*-guest`). The
-  `kiqi_plugin::Plugin` trait and `ki dev` cdylib hot-load remain for
+  install for a host-owned policy. First-party extensions are wasm guests only
+  (`ki insmod --build extensions/wasm/kiqi-*`). The
+  `kiqi_extension::Extension` trait and `ki dev` cdylib hot-load remain for
   third-party extensions.
 - **The TUI now defaults to the `light` theme.** With no saved `theme`, ki
   starts in the light palette; `dark`/`monochrome`/`claude` remain one
@@ -187,7 +198,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   to both light and dark terminals instead of painting near-black blocks.
 - **The declared minimum Rust version is now 1.96** (`rust-version` in
   `[workspace.package]`), up from a 1.78 that the workspace could no longer build
-  against. `wasmtime 49` (via `kiqi-plugin-host`) pulls
+  against. `wasmtime 49` (via `kiqi-extension-host`) pulls
   `cranelift-assembler-x64 0.136.2`, which itself requires 1.96.0; cargo refuses to
   resolve the workspace below that. Measured, not assumed: 1.94 fails with
   "not supported by the following packages", while 1.96 and 1.98 both build the
@@ -251,42 +262,42 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   `set_active_session` reproduces the flake at 7/20; removing it from
   `publish_session_identity` does not, which is why both are annotated with what
   the mutation showed.
-- **Documented examples named plugin crates that no longer exist.** Eight files
+- **Documented examples named extension crates that no longer exist.** Eight files
   (the website, the user-facing authoring and debugging guides, and their
   embedded copies) showed `ki dev --package kiqi-todo`, `ki dev -P kiqi-webfetch`
   and `ki dev --package kiqi-todo -- --model gateway/model`; those crates were
   deleted with the compile-time channel, so the command answers "package not
   found". They now use `my-ext-a` / `my-ext-b` and say the names are
-  placeholders. `crates/kiqi-cli/src/plugins.rs` cited
-  `plugins/kiqi-goal/src/lib.rs:134-138` for the goal's `current_dir()` write and
+  placeholders. `crates/kiqi-cli/src/extensions.rs` cited
+  `extensions/kiqi-goal/src/lib.rs:134-138` for the goal's `current_dir()` write and
   now names the wasm guest that actually implements it;
-  `docs/design/plugin-abi-handover.md` still called the first-party channel
+  `docs/design/extension-abi-handover.md` still called the first-party channel
   "compile-time" and claimed the retired crates, features and cdylib builds were
   "all kept". `scripts/tests/docs-install-path.sh` now rejects a
   `ki dev --package kiqi-<name>` example and any source comment citing
-  `plugins/kiqi-<name>/src` (design docs keep theirs as historical record).
+  `extensions/kiqi-<name>/src` (design docs keep theirs as historical record).
 - **The Packages page recommended commands that cannot run.** Its hero showed
   `cargo add kiqi-tools` and `ki install kiqi-ask-user` — the first cannot
-  resolve (`publish = false`), the second names a plugin crate that was deleted
+  resolve (`publish = false`), the second names an extension crate that was deleted
   with the compile-time channel — next to the claim that everything is
   published on crates.io and a count of "9 core crates and 20 installable
   extensions" for a 28-entry catalog. `website/user-guide.md`,
   `website/content/user-guide.html` and the authoring guide carried the same
   `ki install kiqi-extension-example` example. The hero now shows
   `cargo install --path crates/kiqi-cli` and
-  `ki insmod --build plugins/wasm/kiqi-ask-user-guest`, the counts are gone
+  `ki insmod --build extensions/wasm/kiqi-ask-user`, the counts are gone
   (the card list already computes them), and every page says plainly that
   nothing is published. `scripts/tests/docs-install-path.sh` now covers
   `website/packages.html`, `website/data/locales.json` and the two user-guide
   copies in addition to `packages.json`, and requires the Packages page to show
   at least one command that runs.
-- **The README described a plugin channel that no longer exists.** Its Plugins
-  section still read "Plugins are Rust `cdylib` libraries" and its only install
+- **The README described an extension channel that no longer exists.** Its Extensions
+  section still read "Extensions are Rust `cdylib` libraries" and its only install
   example was `ki install kiqi-todo  # build from crates.io and install` — a
   crate that was never published and was deleted with the compile-time channel,
   so the first command a reader copies fails before they learn that anything
   runs. The section now leads with the wasm channel
-  (`ki insmod --build plugins/wasm/kiqi-<name>-guest`, pointing at
+  (`ki insmod --build extensions/wasm/kiqi-<name>`, pointing at
   `website/data/packages.json` for what is available) and keeps the cdylib
   channel for third-party extensions with a `--path` install; the same crates.io
   example was dropped from the user guides and the crate README.
@@ -332,8 +343,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - **The extension catalogue no longer promises unpublished installs.** The 20
   extension cards told visitors to run `ki install <name>`, which resolves
   through crates.io and cannot work while every crate is `publish = false`.
-  In-repo wasm guests now show `ki insmod --build plugins/wasm/<name>-guest`,
-  the compiled permissions plugin shows a source build, and external plugins are
+  In-repo wasm guests now show `ki insmod --build extensions/wasm/<name>`,
+  the compiled permissions extension shows a source build, and external extensions are
   marked "not published". `docs-install-path.sh` rejects a bare `ki install` in
   the catalogue.
 - **A shell command can no longer take over the permission policy.** Before a
@@ -354,7 +365,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   background node first so a pending node is killed rather than orphaned. The
   wasm guest's `subagent` also polls `proc.cancel-requested` before spawning and
   while its child runs, so a cancelled call kills the child and returns instead
-  of waiting out `timeoutSeconds` (default 300 s) while holding the plugin's
+  of waiting out `timeoutSeconds` (default 300 s) while holding the extension's
   call mutex.
 - **The release pipeline no longer targets the unrelated fork.**
   `release.sh`, `refresh-channels.sh`, the Homebrew/Scoop/winget manifests, the
@@ -412,20 +423,20 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - **A wasm `ask_user` dialog no longer deadlocks the TUI.** The observe event
   fan-out (including `UiPromptStart`, which the key loop dispatches right before
   it opens the dialog) called every wasm host's `on_event`; a guest call such as
-  `ask_user` holds that plugin's call lock while it waits for the user, so the
+  `ask_user` holds that extension's call lock while it waits for the user, so the
   dispatch waited forever — the dialog never opened, the run showed `Working…`
   indefinitely, and Esc stopped responding (observed: 36 minutes). Observe
   dispatches now use a non-blocking `try_on_event` that skips a busy guest; the
   claiming fan-out that decides control flow keeps the blocking call.
   Regression test:
-  `observe_events_skip_a_guest_that_is_waiting_on_the_ui` (plugin-host e2e).
+  `observe_events_skip_a_guest_that_is_waiting_on_the_ui` (extension-host e2e).
 
 ### Changed
 
 - **An active goal keeps running without a user prompt.** After a run ends,
-  the TUI reads the goal plugin's `active` state (`.ki/goals.json`, read-only)
+  the TUI reads the goal extension's `active` state (`.ki/goals.json`, read-only)
   and starts the next run automatically when the goal is still active and has
-  budget left. A goal with `maxTurns`/`maxMinutes` is bounded by the plugin; an
+  budget left. A goal with `maxTurns`/`maxMinutes` is bounded by the extension; an
   unbounded goal is capped at 20 consecutive host continuations. User input,
   Esc, a paused/completed goal, or a signal wake in the same boundary stops or
   takes precedence over the continuation.
@@ -434,11 +445,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   the current goal, and to ask the user only when the action needs
   authorization or the intent is genuinely ambiguous. Routine confirmation is
   explicitly discouraged.
-- **The `rpi-*` → `kiqi-*` rename is finished.** Every crate, plugin and wasm
-  guest directory, package name, feature flag (`plugin-rpi-*` →
-  `plugin-kiqi-*`), Rust path (`rpi_ai` → `kiqi_ai`), plugin id and file name
-  now uses the `kiqi-` prefix the fork's own `kiqi-plugin` /
-  `kiqi-plugin-host` / `kiqi-*-guest` already used; `ki` stays the command. The
+- **The `rpi-*` → `kiqi-*` rename is finished.** Every crate, extension and wasm
+  guest directory, package name, feature flag (`extension-rpi-*` →
+  `extension-kiqi-*`), Rust path (`rpi_ai` → `kiqi_ai`), extension id and file name
+  now uses the `kiqi-` prefix the fork's own `kiqi-extension` /
+  `kiqi-extension-host` / `kiqi-*` already used; `ki` stays the command. The
   docs, website data, `Taskfile.yml`, CI, packaging manifests (Homebrew
   `Formula/ki.rb`, Scoop `ki.json`, winget `bigfish1913.ki.*`) and release-asset
   names (`kiqi-v<version>-<target>`) follow. The project-local runtime directory
@@ -450,7 +461,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   pre-fork `RPI_*` / `.rpi` fallbacks in `kiqi-langfuse` and
   `kiqi-permissions`. Deliberately **not** renamed, because they name other
   projects rather than this one: `pi-rust/rpi-package` (the extension registry
-  the ported plugins came from) and `@juicesharp/rpiv-todo`.
+  the ported extensions came from) and `@juicesharp/rpiv-todo`.
 
 ### Added
 - **The model can watch MCP resources at runtime**: `{server}__watch_resource`
@@ -483,12 +494,12 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   `.ki/`, legacy `.pi/`, then the global agent dir) is evaluated in
   `before_tool_call` before any tool runs — explicit deny rules block, an allow
   list restricts, and the policy file itself cannot be written by the agent.
-  Until now the plugin only offered a `permissions` tool, so deny rules were
+  Until now the extension only offered a `permissions` tool, so deny rules were
   advisory; `kiqi-permissions` leaves the default build (opt-in feature kept).
-- **Installed wasm plugins carry a SHA-256 sidecar**: `ki insmod` writes
-  `plugin.wasm.sha256`, load verifies it before wasmtime sees the component
-  (mismatch skips the plugin with the expected and actual digests; a missing
-  sidecar still loads with one aggregate warning), and `ki plugin show`
+- **Installed wasm extensions carry a SHA-256 sidecar**: `ki insmod` writes
+  `extension.wasm.sha256`, load verifies it before wasmtime sees the component
+  (mismatch skips the extension with the expected and actual digests; a missing
+  sidecar still loads with one aggregate warning), and `ki extension show`
   reports the verification state. Integrity/corruption only — signatures are
   deferred until there is a third-party distribution channel.
 - **MCP over HTTP/Streamable works**: HTTP `mcpServers` connect through rmcp's
@@ -512,7 +523,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   run surfaces as a JSON-RPC error; a client cancel always answers `cancelled`), restart-stable
   session ids a later load restores with the full transcript streamed back
   before the response, and stderr-only diagnostics (`KI_ACP_DEBUG` traces
-  method flow). Permission dialogs bridge ki's plugin UI prompts to
+  method flow). Permission dialogs bridge ki's extension UI prompts to
   `session/request_permission` (question-shaped dialogs are cancelled on their
   original request id, never reinterpreted). `ki acp install-zed` / `ki acp print-zed` register ki in Zed's
   settings.json with a comment-preserving JSONC splice (a `.ki-bak` backup is
@@ -540,27 +551,27 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   resource updates reach notice-capable clients as user-facing
   `SessionUpdate::Notice`s. HTTP transport and prompts/sampling remain later
   batches.
-- **`fs` grants carry a scope (grant-model change; the ABI stays 0.7.1 — no WIT change)**: `ki plugin grant <id> fs --cwd project`
-  opts a plugin into reading and writing the project tree (same scope as
-  `exec`/`proc`); the default stays the plugin's own data directory, and legacy
+- **`fs` grants carry a scope (grant-model change; the ABI stays 0.7.1 — no WIT change)**: `ki extension grant <id> fs --cwd project`
+  opts an extension into reading and writing the project tree (same scope as
+  `exec`/`proc`); the default stays the extension's own data directory, and legacy
   `"fs": true` files keep working unchanged.
-- **`kiqi-orchestrator` ported to wasm** (`plugins/wasm/kiqi-orchestrator-guest`):
+- **`kiqi-orchestrator` ported to wasm** (`extensions/wasm/kiqi-orchestrator`):
   the same three tools and guidance, with waves that run to completion inside
   the dispatch call (children in parallel on `proc`; per-node timeouts enforced
   in the guest). Semantic reductions, documented in the guest README: no
   background waves (`waitSeconds: 0` refused), no mid-wave reshape, and the
   child turn ceiling is not enforced (no env equivalent). It leaves the default
   build too — which now compiles in only `kiqi-permissions`.
-- **`kiqi-codegraph` ported to wasm** (`plugins/wasm/kiqi-codegraph-guest`):
+- **`kiqi-codegraph` ported to wasm** (`extensions/wasm/kiqi-codegraph`):
   the same eight tools, with the index probe/`init`/`sync` on `exec` and the
   per-call MCP session on `proc`. `proc.read-line` gained a `timeout-ms`
   parameter so the port keeps the 20-second session timeout and its
   "try `codegraph unlock`" message (the contract gap the first real consumer
   found). It leaves the default build, which now compiles in only
   `kiqi-orchestrator` and `kiqi-permissions`. Windows stays on the compiled
-  plugin: resolving npm/Scoop shims needs PowerShell, and `exec`/`proc` take
+  extension: resolving npm/Scoop shims needs PowerShell, and `exec`/`proc` take
   bare command names.
-- **`proc` (ABI 0.7.0): a child process the plugin may talk to for the length
+- **`proc` (ABI 0.7.0): a child process the extension may talk to for the length
   of one tool call** — `spawn` / `write` / `read-line` / `read-stderr` /
   `wait` / `kill`, handle-based like `net-sockets`. Its grant carries the
   policy (`--command`/`--cwd` as `exec`, `--timeout` default 600s / cap
@@ -569,36 +580,36 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   returns, so a guest that forgets `kill` or traps leaves nothing behind
   (asserted on the OS, not on the host's bookkeeping). It exists to migrate
   `kiqi-codegraph`, whose search runs a per-call MCP server over stdio; it
-  deliberately does not give plugins a subprocess that outlives a call —
+  deliberately does not give extensions a subprocess that outlives a call —
   kiqi-orchestrator's background model needs the host to own the scheduler,
   which is a separate design.
 
 - **`ki insmod <path.wasm>` / `ki rmmod <id>`** — kernel-flavoured top-level
-  commands for the wasm tier, identical to `ki plugin install` /
-  `ki plugin uninstall` (same flags, same move-aside uninstall). They exist so
+  commands for the wasm tier, identical to `ki extension install` /
+  `ki extension uninstall` (same flags, same move-aside uninstall). They exist so
   the wasm module verbs do not collide with `ki install`/`ki uninstall`, which
   build and remove Rust cdylib extensions — a different artifact.
 
 ### Changed
 
-- **Only the plugins without a wasm port are compiled in by default.** A
-  `plugins/kiqi-*` crate that has a `plugins/wasm/kiqi-*-guest` counterpart is
-  now opt-in: `--features plugin-kiqi-<name>`, or install the wasm guest with
-  `ki insmod --build plugins/wasm/kiqi-<name>-guest`. Default: `kiqi-orchestrator`,
+- **Only the extensions without a wasm port are compiled in by default.** A
+  `extensions/kiqi-*` crate that has a `extensions/wasm/kiqi-*` counterpart is
+  now opt-in: `--features extension-kiqi-<name>`, or install the wasm guest with
+  `ki insmod --build extensions/wasm/kiqi-<name>`. Default: `kiqi-orchestrator`,
   `kiqi-permissions`, `kiqi-codegraph` (nothing else registered). The crates,
   their features, their cdylib faces and their tests all stay, and CI runs the
   opt-in configuration, so nothing rots. One coupling to know about: the
   orchestrator's goal-linked guidance reads `.ki/goals.json`, which the
-  **compiled** `kiqi-goal` writes — with that plugin opt-in, the guidance no
+  **compiled** `kiqi-goal` writes — with that extension opt-in, the guidance no
   longer turns itself on (set `KI_ORCHESTRATOR_GUIDE=1` to force it, or build
-  `--features plugin-kiqi-goal`). The **wasm** tier closes this gap (below):
-  `kiqi-goal-guest` writes the same `.ki/goals.json` and
-  `kiqi-orchestrator-guest` gates its guidance on it.
-- **The goal→orchestrator coupling is restored in the wasm tier.** `kiqi-goal-guest`
+  `--features extension-kiqi-goal`). The **wasm** tier closes this gap (below):
+  `kiqi-goal` writes the same `.ki/goals.json` and
+  `kiqi-orchestrator` gates its guidance on it.
+- **The goal→orchestrator coupling is restored in the wasm tier.** `kiqi-goal`
   now keeps its state in `<project>/.ki/goals.json` in the compiled shape
   (`{"active": …|null, "archived": […]}`) through the project-scoped `fs`
   grant, instead of a `{project: Goals}` map in its own data directory — so the
-  compiled `kiqi-orchestrator` reads it too. `kiqi-orchestrator-guest` gates its
+  compiled `kiqi-orchestrator` reads it too. `kiqi-orchestrator` gates its
   "## Subagent orchestration" guidance on that file (an active goal, the compiled
   `active_goal_from` semantics, fail-closed) instead of injecting it
   unconditionally; the compiled `KI_ORCHESTRATOR_GUIDE` override is dropped (a
@@ -610,20 +621,20 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 - **`ki insmod --build <guest-crate-dir>`** compiles a wasm guest for
   `wasm32-wasip2` and installs the component cargo reported — the one-command
-  way to get a plugin back now that its compiled version is opt-in.
+  way to get an extension back now that its compiled version is opt-in.
 
 ### Changed (previous)
 
 - **`kiqi-langfuse` is no longer in the default build.** The tracing tier needs a
   Langfuse instance and an API key pair, so it is now opt-in:
-  `cargo build --features plugin-kiqi-langfuse` (or a `ki` built that way). The
+  `cargo build --features extension-kiqi-langfuse` (or a `ki` built that way). The
   crate, the wasm port and the feature flag all stay, and CI builds the feature
   explicitly so the compiled path keeps compiling.
 
 
 ### Added
 
-- **`kiqi-orchestrator` is compiled in** behind `plugin-kiqi-orchestrator`
+- **`kiqi-orchestrator` is compiled in** behind `extension-kiqi-orchestrator`
   (default on): bounded DAG subagent orchestration — `subagent` runs one task
   in a child `ki -p --no-session` process, `plan` authors/edits the task graph,
   `dispatch` runs the ready wave, and a goal-coupled guidance section is
@@ -632,7 +643,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   (`.ki/` → `.ki/`, `KI_MAX_TURNS_PER_RUN` → `KI_MAX_TURNS_PER_RUN`,
   `KI_ORCHESTRATOR_*` → `KI_ORCHESTRATOR_*`); under `ki` the old names were
   silently inert. The harness's tool-call cancellation token now reaches
-  compiled plugins as `HostCaps::cancel`, so aborting a call winds down the
+  compiled extensions as `HostCaps::cancel`, so aborting a call winds down the
   subagents it spawned instead of leaving them running.
 
 
@@ -641,27 +652,27 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - **Zero budgets are rejected at parse, and proc budgets are capped everywhere**:
   a hand-edited `grants.json` with `timeout-seconds: 0` / `max-open: 0` used to
   parse (now fail-closed, naming the field and bound); `proc`'s `max-open` gained
-  the host-side 256 cap it was missing; and `ki plugin grant --timeout` no longer
+  the host-side 256 cap it was missing; and `ki extension grant --timeout` no longer
   applies `exec`'s 300s ceiling to `proc` (600s default / 1800s cap are reachable
   again, and the error names the right bound).
 - **Langfuse exports real costs again**: the host reports `UsageCost` as a float
-  while the plugin read it as an integer, so every cost came back `None` and the
+  while the extension read it as an integer, so every cost came back `None` and the
   `costDetails` block never reached Langfuse; query-string values are now
   percent-encoded too.
 
 
 ### Fixed
 
-- **Plugin events survive a dylib-free install**: the whole plugin event surface
+- **Extension events survive a dylib-free install**: the whole extension event surface
   (`session_start`/`session_shutdown`, turn end, tool events, the session tree,
   UI prompt boundaries) was gated on the cdylib tier being non-empty — the host
   matches on `ExtensionSession::snapshot_arc()` before entering the dispatch
   funnels, and that answered `None` when no cdylibs loaded, so a wasm-only `ki`
-  delivered nothing to any plugin (goal's turn budget never charged; todo and
+  delivered nothing to any extension (goal's turn budget never charged; todo and
   plan-mode never restored). A dylib-free session now carries an empty registry,
   so the funnels — which fan out to the compiled/wasm sink unconditionally —
   are entered. One consequence worth naming: `--no-extensions` now only shuts
-  the cdylib tier. Compiled-in plugins (goal's turn budget, todo and plan-mode
+  the cdylib tier. Compiled-in extensions (goal's turn budget, todo and plan-mode
   restoration, Langfuse) and wasm guests still receive events on such a run,
   because that tier belongs to the host rather than to the cdylib loader.
 
@@ -670,15 +681,15 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
-- **Compile-time plugins now receive events.** The host fans `SessionStart`,
+- **Compile-time extensions now receive events.** The host fans `SessionStart`,
   `BeforeAgentStart`, provider requests, messages and tool calls out to every
-  compiled-in plugin's `on_event`, so a `ki` with no dynamic libraries still
+  compiled-in extension's `on_event`, so a `ki` with no dynamic libraries still
   traces a run and restores session state. `kiqi-extensions` owns the dispatch
   sink; `ki` installs it per session with that session's capabilities.
-- **`kiqi-langfuse` is compiled in** behind `plugin-kiqi-langfuse` (default on):
+- **`kiqi-langfuse` is compiled in** behind `extension-kiqi-langfuse` (default on):
   automatic Langfuse tracing over OTLP, plus the `langfuse_score`,
   `langfuse_prompt` and `langfuse_trace` tools. Its 14 event handlers and three
-  tools left the cdylib ABI for the `Plugin` trait, and `set_status` now goes
+  tools left the cdylib ABI for the `Extension` trait, and `set_status` now goes
   through the host capability instead of a raw runtime-action id.
 
 ### Fixed
@@ -721,11 +732,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [0.3.20] - 2026-10-11
 
-- Add plugin-owned text components: register layout once, update content separately,
+- Add extension-owned text components: register layout once, update content separately,
   configure positions, show/hide, and automatically clean up on unload or reload.
 - Keep legacy footer status text and remove the experimental panel payload.
 - Improve footer/sidebar rendering, scroll navigation, Unicode line updates,
-  and terminal stdio lifecycle support for plugins.
+  and terminal stdio lifecycle support for extensions.
 
 
 ## [0.3.19] - 2026-10-10
@@ -749,7 +760,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - macOS TUI keyboard setup stays on the active screen buffer and requests
   printable-key release events where supported. Local Terminal.app recognizes
   Shift+Enter through native modifier state; suspension restores terminal modes.
-- Plugin shortcuts no longer intercept modal dialog, selector or search input.
+- Extension shortcuts no longer intercept modal dialog, selector or search input.
   Passive panels render at their allocated width, stay clear of the editor/footer,
   clamp offsets and avoid each other while space permits.
 - `/changelog` displays the real packaged changelog instead of a static summary,
@@ -759,7 +770,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
-- TUI plugin panels support positioned transcript, sidebar, and popup layouts,
+- TUI extension panels support positioned transcript, sidebar, and popup layouts,
   including pet companion and live run statistics panels. Task lists and plans
   retain their current state across tool updates and restored sessions.
 - TUI prompts accept multiple pasted image paths, clipboard screenshots, and
@@ -809,7 +820,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
-- Plugin `message_update` events now carry native Pi's `assistantMessageEvent`
+- Extension `message_update` events now carry native Pi's `assistantMessageEvent`
   delta envelope (`text_delta`, `thinking_delta`, `toolcall_delta`, …) instead
   of a growing `AgentMessage` snapshot. A streaming consumer reads each delta's
   real `delta` field once, so it no longer has to diff successive cumulative
@@ -843,24 +854,24 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
-- Plugins can now replace the system prompt at runtime via
+- Extensions can now replace the system prompt at runtime via
   `register_before_agent_start` — the mechanism pi's extensions use as a
   `before_agent_start` handler returning `systemPrompt`. ki already broadcast
-  `BeforeAgentStart` so a plugin could watch a turn start, but the event handler
+  `BeforeAgentStart` so an extension could watch a turn start, but the event handler
   ABI is fire-and-forget (`i32` only), so it could not influence one. The new
   slot carries an `out` pointer instead, which is the shape
   `register_resources_discover` already used for the same reason.
 
-  Semantics match pi: the return value **replaces** the prompt (a plugin that
+  Semantics match pi: the return value **replaces** the prompt (an extension that
   wants to append reads the envelope's `systemPrompt` and concatenates),
   handlers chain in registration order, a handler that errors or panics is
   skipped without aborting the fan-out, and the result applies to that run only.
   It is computed once per user prompt, so a tool loop's several provider calls
   see the same prompt rather than re-running handlers mid-run.
 
-  The slot is appended at the end of the plugin API struct, which keeps every
-  earlier field offset valid — existing plugins keep loading unchanged and a
-  plugin checks for the slot before using it, so there is no ABI version bump.
+  The slot is appended at the end of the extension API struct, which keeps every
+  earlier field offset valid — existing extensions keep loading unchanged and a
+  extension checks for the slot before using it, so there is no ABI version bump.
 
 ## [0.3.11] - 2026-10-01
 
@@ -877,8 +888,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   host-private exclusion list, because the prefix-based check could not see
   these. They are now excluded; a launcher that sets them deliberately still
   gets through, which is the supported nesting path. Two tests pin both halves.
-- The subagent channel's variable names moved into the plugin contract
-  (`kiqi_plugin_sdk::SUBAGENT_PARENT_*`, with `SUBAGENT_PARENT_ENV` as the
+- The subagent channel's variable names moved into the extension contract
+  (`kiqi_extension_sdk::SUBAGENT_PARENT_*`, with `SUBAGENT_PARENT_ENV` as the
   family), and `kiqi-tools` now consults that declaration instead of restating
   the strings. Restating them is what made the leak above possible in the first
   place: the exclusion and the extension each held a private copy of the names,
@@ -892,32 +903,32 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
-- The plugin contract now owns the host identity: `kiqi_plugin_sdk::HOST_NAME`
+- The extension contract now owns the host identity: `kiqi_extension_sdk::HOST_NAME`
   (`"ki"`) and `HOST_VERSION`, with `kiqi_cli::APP_NAME` / `VERSION` defined as
   aliases of them so the two cannot drift. `BeforeAgentStart`'s payload carries
   `host: {name, version}`, giving an extension a way to label its own output (a
   trace name, a tag, `service.name`) from the host instead of hardcoding a brand
   that a rename silently invalidates. `kiqi-langfuse` had been reporting the
-  upstream TypeScript plugin's `"Pi Turn"` / `"pi"` for exactly that reason.
+  upstream TypeScript extension's `"Pi Turn"` / `"pi"` for exactly that reason.
 - The host now publishes the session id twice, so an extension that observes a
   run can name the session it is watching. `KI_SESSION_ID` (constant:
-  `kiqi_plugin_sdk::SESSION_ID_ENV`) is written whenever a session becomes active,
+  `kiqi_extension_sdk::SESSION_ID_ENV`) is written whenever a session becomes active,
   and `BeforeAgentStart`'s payload carries `sessionId` next to
   `prompt`/`imageCount`, recomputed each turn. Previously the only channel was
-  `__ki.sessionId` on a plugin **tool** call, so a tracing extension reported a
+  `__ki.sessionId` on an extension **tool** call, so a tracing extension reported a
   placeholder session for a pure-chat run and for every turn before the first
   tool call. The payload field is the one that makes the first turn correct; the
-  environment variable is a convenience for plugins that never see a tool call.
+  environment variable is a convenience for extensions that never see a tool call.
 
 ### Fixed
 
-- Switching sessions no longer leaves plugins naming the previous one. The
-  session id reaches a plugin on two channels — the `ToolCallContext` (read per
-  plugin **tool** call) and `KI_SESSION_ID` (read per turn by the provider
+- Switching sessions no longer leaves extensions naming the previous one. The
+  session id reaches an extension on two channels — the `ToolCallContext` (read per
+  extension **tool** call) and `KI_SESSION_ID` (read per turn by the provider
   hooks) — and only the startup build republished them. An in-process swap
-  (`/import`, `/fork`, the `/session` selector, and the plugin
+  (`/import`, `/fork`, the `/session` selector, and the extension
   `NewSession`/`Fork`/`SwitchSession` runtime actions) changed the session the
-  harness serves without touching either, so a plugin keyed to the old id went
+  harness serves without touching either, so an extension keyed to the old id went
   on serving it. All of them now route through one funnel that republishes both.
 - `KI_SESSION_ID` no longer leaks into the shell that `bash`/`powershell`
   spawn. The shell inherited the whole process environment, so the variable
@@ -1075,14 +1086,14 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
-- **Plugin tools now receive the session they run in.** The host merges a
-  reserved `__ki` object — `{"cwd", "sessionId"}` — into every plugin tool
+- **Extension tools now receive the session they run in.** The host merges a
+  reserved `__ki` object — `{"cwd", "sessionId"}` — into every extension tool
   call's arguments, in the tool adapter's `execute` rather than in the agent loop
-  or `prepare_arguments`, so the field reaches the plugin and nothing else: not
+  or `prepare_arguments`, so the field reaches the extension and nothing else: not
   the model, not the `ToolExecutionStart`/`Update` events, not the session log.
   A model cannot forge it either — the host's value overrides one that matches.
   Built-in tools are unaffected; they already receive an
-  `ExecutionToolContext`. This is what lets a plugin keep per-session state
+  `ExecutionToolContext`. This is what lets an extension keep per-session state
   without asking the model to guess an identity. `docs/extensions/authoring.md`
   documents the contract, including the one failure mode worth naming: a
   `#[serde(deny_unknown_fields)]` parameter struct will reject the injected key.
@@ -1168,9 +1179,9 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 
 ### Fixed
 
-- **`kiqi-plugin-sdk` did not compile on `main`.** Duplicate definitions added
-  after 0.3.0 shipped — a `pub type PluginApi = PluginApiVt` alias beside the
-  `PluginApi` struct, and a second `register_entrypoint_unified` — produced
+- **`kiqi-extension-sdk` did not compile on `main`.** Duplicate definitions added
+  after 0.3.0 shipped — a `pub type ExtensionApi = ExtensionApiVt` alias beside the
+  `ExtensionApi` struct, and a second `register_entrypoint_unified` — produced
   `E0428`, `E0119` and `E0609`, so `cargo test --workspace` failed immediately
   for anyone cloning the repository. The duplicates are removed and the build is
   green again. The published 0.3.0 artifacts were built before they landed and
@@ -1181,7 +1192,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 - Every crate declares `homepage` and `documentation`, and ships its own
   `README.md` instead of the workspace README. Previously all nine crates.io and
   docs.rs pages showed the same generic document, and its relative links
-  (`docs/architecture/overview.md`, `LICENSE`, `examples/plugin-stub`) resolved to 404 on
+  (`docs/architecture/overview.md`, `LICENSE`, `examples/extension-stub`) resolved to 404 on
   those sites.
 - docs.rs now builds with `all-features` for every crate except `kiqi-cli`, whose
   clipboard feature needs platform libraries that are not present there.
@@ -1194,7 +1205,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
   start, 10.7× faster to cold start, 7.6× smaller in memory and ~18× smaller
   installed. **Corrected after release:** an earlier run set only pi's `PI_*`
   isolation variables, so ki read the real `~/.ki/agent` and loaded the
-  machine's global plugins (reported 103.6 ms / 1.7×); a second bug started the
+  machine's global extensions (reported 103.6 ms / 1.7×); a second bug started the
   cold-start stopwatch after `spawn()`. With both fixed, ki's `--version` (17.5 ms) and
   a cold start (17.7 ms) are effectively equal — the cost is process creation.
 - `crates/kiqi-cli/embedded-docs/` — the documentation snapshot compiled into the
@@ -1206,10 +1217,10 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 
 ### Changed
 
-- **Breaking:** the plugin ABI is unified on a single `kiqi_plugin_register`
-  entrypoint (`KI_PLUGIN_ABI_VERSION_UNIFIED`), with the version carried inside
-  the `PluginApi` struct instead of the symbol name. `kiqi-extensions` still
-  resolves `kiqi_plugin_register_v3` and then `kiqi_plugin_register_v2`, so plugins
+- **Breaking:** the extension ABI is unified on a single `kiqi_extension_register`
+  entrypoint (`KI_EXTENSION_ABI_VERSION_UNIFIED`), with the version carried inside
+  the `ExtensionApi` struct instead of the symbol name. `kiqi-extensions` still
+  resolves `kiqi_extension_register_v3` and then `kiqi_extension_register_v2`, so extensions
   built against an older ABI keep loading; extension authors should rebuild
   against the current SDK when convenient.
 - Workspace dependencies (`kiqi-*` internal crates) bumped to `0.2.0`, then to
@@ -1229,7 +1240,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 
 ### Changed
 
-- **Breaking:** plugin ABI unified — see 0.3.0 for the entrypoint negotiation
+- **Breaking:** extension ABI unified — see 0.3.0 for the entrypoint negotiation
   order.
 
 ## [0.1.28] - 2026-09-25
@@ -1284,7 +1295,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 
 - Anthropic request failures no longer write to stderr, which previously
   corrupted fullscreen TUI rendering.
-- Extensions: a plugin panic is now isolated instead of taking down the host
+- Extensions: an extension panic is now isolated instead of taking down the host
   process.
 - `kiqi-ai`: corrected a `constrained.rs` doc example that referenced a
   non-existent `ToolDefinition`.
@@ -1328,7 +1339,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 - **Extension lifecycle events (P0–P5) with veto support** — a handler can
   refuse startup by returning `EVENT_HANDLER_ABORT` (new `BeforeTuiStart` hook,
   exit code `3`).
-- **ABI v3** (`PluginApiVt3Ext.declare`) adds priority and platform declarations.
+- **ABI v3** (`ExtensionApiVt3Ext.declare`) adds priority and platform declarations.
 - Optional JSONL event journal (`KI_EVENT_LOG=1`) with `ki events tail` and
   `ki events path`.
 
@@ -1344,7 +1355,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 
 ### Fixed
 
-- `register_entrypoint` is now marked `unsafe fn`, making the host/plugin safety
+- `register_entrypoint` is now marked `unsafe fn`, making the host/extension safety
   boundary explicit (breaking change for extension authors).
 - Restored the render scheduler and reload error reporting.
 
@@ -1581,7 +1592,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 - First public crate family: async streaming agent runtime; Anthropic Messages,
   OpenAI-compatible Chat Completions and faux providers; `read`, `write`, `edit`,
   `bash`, `grep`, `find`, `ls` tools; JSONL sessions, context compaction, hooks,
-  queues and prompt templates; `kiqi-plugin-sdk` with a stable ABI.
+  queues and prompt templates; `kiqi-extension-sdk` with a stable ABI.
 
 ## [0.1.0] – [0.1.5]
 

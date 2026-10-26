@@ -48,8 +48,8 @@
 按仓库 `AGENTS.md` 的裁决：
 
 - **宿主持有进程级能力**：ACP、MCP、permissions（策略存宿主、在工具门求值）。
-- **插件全部是 wasm guest**（契约 `plugins/kiqi-plugin.wit`，跑 wasmtime 沙箱，按授权拿能力）。
-- Rust 的编译期 `kiqi_plugin::Plugin` trait **只是 Rust 侧的扩展面**，不是要在 Zig 里
+- **插件全部是 wasm guest**（契约 `extensions/kiqi-extension.wit`，跑 wasmtime 沙箱，按授权拿能力）。
+- Rust 的编译期 `kiqi_extension::Extension` trait **只是 Rust 侧的扩展面**，不是要在 Zig 里
   复刻的第三层级；默认构建已不编入任何编译期插件。
 
 ## 5. 语义真源（别在本目录里猜行为）
@@ -58,8 +58,8 @@
 |---|---|
 | ACP 宿主级服务的取舍与批次记录 | [`../ki-acp-serve.md`](../ki-acp-serve.md) |
 | MCP：传输、订阅、通知边界、信任 | [`../ki-mcp-builtin.md`](../ki-mcp-builtin.md) |
-| wasm 契约与能力模型（唯一真源，§7 是待定项） | [`../plugin-abi.md`](../plugin-abi.md) |
-| 插件层现状/能力表/已知限制 | [`../plugin-abi-handover.md`](../plugin-abi-handover.md) |
+| wasm 契约与能力模型（唯一真源，§7 是待定项） | [`../extension-abi.md`](../extension-abi.md) |
+| 插件层现状/能力表/已知限制 | [`../extension-abi-handover.md`](../extension-abi-handover.md) |
 
 权限策略的两条硬约束别漏：规则语义是 glob + deny 优先 + 无 allow 列表即全放行；
 **策略文件本身不可被 agent 写**（否则 agent 能改自己受审的规则）。

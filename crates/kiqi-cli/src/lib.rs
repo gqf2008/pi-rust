@@ -24,7 +24,7 @@
 //! - **`app`** ([`app`]) — argument dispatch, model resolution, harness build,
 //!   mode dispatch, exit codes.
 //!
-//! Resources load from `.ki/` and `~/.ki/agent/`; plugins are wasm guests
+//! Resources load from `.ki/` and `~/.ki/agent/`; extensions are wasm guests
 //! installed with `ki insmod` (the cdylib channel and its `ki install` /
 //! `ki dev` commands were retired on 2026-10-26).
 
@@ -45,6 +45,8 @@ pub mod events;
 pub mod experimental;
 pub mod export;
 pub mod extension_api;
+pub mod extension_cli;
+pub mod extensions;
 pub mod extensions_actions;
 pub mod extras;
 pub mod fs_watch;
@@ -55,8 +57,6 @@ pub mod llama_command;
 pub mod model_registry;
 pub mod modes;
 pub mod permissions;
-pub mod plugin_cli;
-pub mod plugins;
 pub mod provider;
 pub mod provider_config;
 pub mod remote;
@@ -77,7 +77,7 @@ pub mod trust;
 pub mod tui_hangup;
 pub mod tui_shell;
 pub mod updates;
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 pub mod wasm_oauth;
 pub mod wasm_provider;
 
@@ -85,7 +85,7 @@ pub mod wasm_provider;
 /// (sourced from `package.json`; here from `env!("CARGO_PKG_VERSION")`).
 ///
 /// Aliases [`kiqi_host::HOST_VERSION`] so the version the CLI prints and
-/// the version handed to plugins (and, through it, the version extensions stamp
+/// the version handed to extensions (and, through it, the version extensions stamp
 /// on their own telemetry) can never disagree.
 pub const VERSION: &str = kiqi_host::HOST_VERSION;
 
@@ -93,7 +93,7 @@ pub const VERSION: &str = kiqi_host::HOST_VERSION;
 /// (the TS bin is `"pi"`; the Rust crate publishes under the `kiqi-` namespace,
 /// so the binary + displayed name is `"ki"` to match).
 ///
-/// Aliases [`kiqi_host::HOST_NAME`] — the plugin contract owns the
+/// Aliases [`kiqi_host::HOST_NAME`] — the extension contract owns the
 /// identity, so an extension can label its output (a trace name, a tag) without
 /// hardcoding a brand that a rename would silently invalidate.
 pub const APP_NAME: &str = kiqi_host::HOST_NAME;

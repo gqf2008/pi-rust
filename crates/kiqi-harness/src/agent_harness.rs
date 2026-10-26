@@ -1731,7 +1731,7 @@ impl AgentHarness {
     /// defensive clone of the composed base system prompt the harness was built
     /// with (base + append + context; the `<available_skills>` listing is added
     /// at run time from the resource skills, so this returns the *base* prompt
-    /// the plugin's `runtime_action(GetSystemPrompt)` sees). B5a: backs the
+    /// the extension's `runtime_action(GetSystemPrompt)` sees). B5a: backs the
     /// [`kiqi_host::RuntimeActionHost::get_system_prompt`] action.
     pub async fn get_system_prompt(&self) -> HarnessResult<Option<String>> {
         let inner = self.inner.lock().unwrap();
@@ -1780,7 +1780,7 @@ impl AgentHarness {
         Ok(())
     }
     /// `setAgentEmitter(emitter)`. Replace the emitter override (B3a's
-    /// `ExtensionEmitter` fans `AgentEvent`s to plugin `on()` handlers). On
+    /// `ExtensionEmitter` fans `AgentEvent`s to extension `on()` handlers). On
     /// `/reload` the old emitter is dropped (unsubscribing from the broadcast)
     /// and a fresh one over the reloaded registry takes its place.
     pub async fn set_agent_emitter(
@@ -1797,7 +1797,7 @@ impl AgentHarness {
 
     /// `setModels(models)`. Replace the provider registry. B5d `/reload`
     /// rebuilds `vec![gateway] + PluggableProvider::from_session(&new_session)`
-    /// and installs it here so the next run resolves provider plugins from the
+    /// and installs it here so the next run resolves provider extensions from the
     /// reloaded registry (the old `ActionBridge`/`ExtensionSession` are
     /// invalidated; their `PluggableProvider`s reject calls via the staleness
     /// guard).
@@ -2650,7 +2650,7 @@ impl AgentHarness {
                         if let Some(hooks) = &provider_hooks {
                             // pi's `transform_context`: the last chance to change
                             // what the model reads. Applied to `ctx` before the
-                            // request, so a plugin's forced prompt is what this
+                            // request, so an extension's forced prompt is what this
                             // request carries — and only this one, since `ctx` is
                             // rebuilt per call from the loop's context.
                             if let Some(patch) = hooks.transform_context(&model, &ctx) {

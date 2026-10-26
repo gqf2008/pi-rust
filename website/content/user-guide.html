@@ -9,7 +9,7 @@ cargo install --path crates/kiqi-cli --force
 ki --version
 ki --help
 </code></pre>
-<p><code>cargo install</code> 安装的是可执行文件；它不等同于 <code>ki install</code>。后者用于安装由 <code>kiqi-plugin-sdk</code> 构建的 Rust 动态库扩展。</p>
+<p><code>cargo install</code> 安装的是可执行文件；它不等同于 <code>ki install</code>。后者用于安装由 <code>kiqi-extension-sdk</code> 构建的 Rust 动态库扩展。</p>
 <h3 id="_1">从源码启动与构建</h3>
 <p>本项目是 Rust Cargo workspace，不是 Node/npm 项目，根目录没有 <code>package.json</code>。在仓库根目录执行：</p>
 <pre><code class="language-bash"># 直接启动 CLI
@@ -214,11 +214,11 @@ ki --project-only
 </code></pre>
 <p>会话默认保存到 agent 配置目录下的 sessions；<code>--no-session</code> 可使用临时会话。</p>
 <h2 id="6-rust">6. Rust 插件</h2>
-<p>Rust 原生插件是 <code>cdylib</code>，只依赖 <code>kiqi-plugin-sdk</code>，由 <code>kiqi-extensions</code> 动态加载：</p>
-<pre><code class="language-bash">cargo build -p plugin-stub
+<p>Rust 原生插件是 <code>cdylib</code>，只依赖 <code>kiqi-extension-sdk</code>，由 <code>kiqi-extensions</code> 动态加载：</p>
+<pre><code class="language-bash">cargo build -p extension-stub
 ki --extensions-dir target/debug -p 'echo &quot;hi&quot;'
 </code></pre>
-<p>本仓库的 crate 全部 <code>publish = false</code>，crates.io 上没有可解析的同名包：<code>ki install &lt;name&gt;</code>（不带 <code>--path</code>）必然失败，第三方扩展要从源码路径安装。一方能力不走 cdylib 通道——它们是 wasm 组件，用 <code>ki insmod --build plugins/wasm/kiqi-&lt;name&gt;-guest</code> 安装，可用清单见 <code>website/data/packages.json</code>。</p>
+<p>本仓库的 crate 全部 <code>publish = false</code>，crates.io 上没有可解析的同名包：<code>ki install &lt;name&gt;</code>（不带 <code>--path</code>）必然失败，扩展一律是 wasm 组件，用 <code>ki insmod --build extensions/wasm/kiqi-&lt;name&gt;</code> 安装，可用清单见 <code>website/data/packages.json</code>。</p>
 <p>本地开发：</p>
 <pre><code class="language-bash">ki install my-extension --path ../my-kiqi-extension --force
 </code></pre>
@@ -283,7 +283,7 @@ cargo test --workspace
 </code></pre>
 <p>发布 crate 时按依赖顺序：</p>
 <pre><code class="language-text">kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness →
-kiqi-plugin-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
+kiqi-extension-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
 </code></pre>
 <p>发布前更新版本号和 <code>docs/release-vX.Y.Z.md</code>，确认 README、官网 <code>website/data/docs.json</code> 和本手册中的命令一致。官网是静态站点，文档文件提交到仓库后仍需按项目部署流程重新部署。</p>
 <h2 id="10">10. 文档查询入口</h2>
@@ -291,7 +291,7 @@ kiqi-plugin-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
 <li>在线文档：<a href="https://ki.laofu.online/docs.html">https://ki.laofu.online/docs.html</a></li>
 <li>源码仓库：<a href="https://github.com/gqf2008/pi-rust">https://github.com/gqf2008/pi-rust</a></li>
 <li>
-<p>Rust API：<a href="https://docs.rs/kiqi-agent">https://docs.rs/kiqi-agent</a>、<a href="https://docs.rs/kiqi-plugin-sdk">https://docs.rs/kiqi-plugin-sdk</a></p>
+<p>Rust API：<a href="https://docs.rs/kiqi-agent">https://docs.rs/kiqi-agent</a>、<a href="https://docs.rs/kiqi-extension-sdk">https://docs.rs/kiqi-extension-sdk</a></p>
 </li>
 <li>
 <p>Package 与扩展作者指南：<a href="https://ki.laofu.online/extension-authoring.md">https://ki.laofu.online/extension-authoring.md</a></p>

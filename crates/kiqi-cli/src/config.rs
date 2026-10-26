@@ -302,7 +302,7 @@ pub enum Credential {
         /// Unix epoch seconds. `0` means no known expiry.
         #[serde(default)]
         expires: i64,
-        /// Set only for plugin credentials: the IdP profile that issued them.
+        /// Set only for extension credentials: the IdP profile that issued them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile_fingerprint: Option<String>,
     },
@@ -323,7 +323,7 @@ pub fn read_auth() -> Result<AuthStore, ConfigError> {
 }
 
 /// [`read_auth`] against an explicit agent directory (the test/CLI seam used by
-/// `ki plugin revoke`/`uninstall`, which already resolve their root).
+/// `ki extension revoke`/`uninstall`, which already resolve their root).
 pub fn read_auth_at(root: &Path) -> Result<AuthStore, ConfigError> {
     let path = root.join("auth.json");
     match read_text_with_fallback(path, None)? {
@@ -407,7 +407,7 @@ pub fn upsert_credential(provider_id: &str, cred: Credential) -> Result<(), Conf
     })
 }
 
-/// The [`ConfigError`] for a provider id that uses the reserved `plugin:`
+/// The [`ConfigError`] for a provider id that uses the reserved `extension:`
 /// credential namespace.
 fn reserved_prefix_error(provider_id: &str) -> ConfigError {
     let path = agent_dir()
@@ -417,7 +417,9 @@ fn reserved_prefix_error(provider_id: &str) -> ConfigError {
         path,
         source: std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("provider id `{provider_id}` uses the reserved `{PLUGIN_KEY_PREFIX}` prefix"),
+            format!(
+                "provider id `{provider_id}` uses the reserved `{EXTENSION_KEY_PREFIX}` prefix"
+            ),
         ),
     }
 }
@@ -425,8 +427,8 @@ fn reserved_prefix_error(provider_id: &str) -> ConfigError {
 /// Store an OAuth token under exactly one provider id using the atomic auth
 /// store writer. Token values never enter the event or session layer.
 ///
-/// Provider ids starting with `plugin:` are refused: that prefix is the plugin
-/// credential namespace (see [`plugin_credential_key`]), and a generic OAuth
+/// Provider ids starting with `extension:` are refused: that prefix is the extension
+/// credential namespace (see [`extension_credential_key`]), and a generic OAuth
 /// login must never place a user-owned credential inside it.
 pub fn upsert_oauth_token(
     provider_id: &str,
@@ -434,7 +436,7 @@ pub fn upsert_oauth_token(
     refresh: String,
     expires: i64,
 ) -> Result<(), ConfigError> {
-    if provider_id.starts_with(PLUGIN_KEY_PREFIX) {
+    if provider_id.starts_with(EXTENSION_KEY_PREFIX) {
         return Err(reserved_prefix_error(provider_id));
     }
     upsert_credential(
@@ -466,17 +468,17 @@ pub fn read_oauth_token(provider_id: &str) -> Result<Option<Credential>, ConfigE
     })
 }
 
-/// The auth-store key namespace reserved for plugin credentials. Generic
+/// The auth-store key namespace reserved for extension credentials. Generic
 /// writers refuse it ([`upsert_oauth_token`], the `ki auth` login paths), and
-/// the plugin paths overwrite or delete only entries that carry a plugin
-/// fingerprint (see [`is_plugin_owned_credential`]).
-const PLUGIN_KEY_PREFIX: &str = "plugin:";
+/// the extension paths overwrite or delete only entries that carry an extension
+/// fingerprint (see [`is_extension_owned_credential`]).
+const EXTENSION_KEY_PREFIX: &str = "extension:";
 
-/// Whether a stored credential was written by the plugin channel. Only such
-/// entries may be replaced or removed through the plugin paths; anything else
+/// Whether a stored credential was written by the extension channel. Only such
+/// entries may be replaced or removed through the extension paths; anything else
 /// at a namespaced key (a bare `ApiKey`, a generic OAuth login) did not come
 /// from this channel and must be left untouched.
-fn is_plugin_owned_credential(credential: &Credential) -> bool {
+fn is_extension_owned_credential(credential: &Credential) -> bool {
     matches!(
         credential,
         Credential::Oauth {
@@ -486,27 +488,27 @@ fn is_plugin_owned_credential(credential: &Credential) -> bool {
     )
 }
 
-/// The auth-store key one plugin's OAuth credential lives under.
+/// The auth-store key one extension's OAuth credential lives under.
 ///
-/// The `plugin:` prefix *is* the isolation: a plugin provider id can never be a
-/// bare provider id (`anthropic`), so a plugin can never replace a
+/// The `extension:` prefix *is* the isolation: an extension provider id can never be a
+/// bare provider id (`anthropic`), so an extension can never replace a
 /// user-owned credential, while re-login of the same namespaced key overwrites
-/// exactly that plugin's entry. The prefix is reserved — the generic writers
-/// refuse it, so a `plugin:` key in `auth.json` can only have been created by
-/// [`upsert_plugin_oauth_token`].
-pub fn plugin_credential_key(install_id: &str, provider_id: &str) -> String {
-    format!("{PLUGIN_KEY_PREFIX}{install_id}:{provider_id}")
+/// exactly that extension's entry. The prefix is reserved — the generic writers
+/// refuse it, so a `extension:` key in `auth.json` can only have been created by
+/// [`upsert_extension_oauth_token`].
+pub fn extension_credential_key(install_id: &str, provider_id: &str) -> String {
+    format!("{EXTENSION_KEY_PREFIX}{install_id}:{provider_id}")
 }
 
-/// Store a plugin's OAuth token under `plugin:<install-id>:<provider-id>`.
+/// Store an extension's OAuth token under `extension:<install-id>:<provider-id>`.
 ///
 /// This is the only write path for a guest-originated token. It deliberately
 /// does more than [`upsert_credential`]: an existing entry at the namespaced
-/// key that the plugin channel did not write — a bare `ApiKey`, or a generic
+/// key that the extension channel did not write — a bare `ApiKey`, or a generic
 /// OAuth login (no profile fingerprint) — is refused, while an existing
-/// plugin-written OAuth value is overwritten, which is what re-login of the
-/// same plugin provider needs.
-pub fn upsert_plugin_oauth_token(
+/// extension-written OAuth value is overwritten, which is what re-login of the
+/// same extension provider needs.
+pub fn upsert_extension_oauth_token(
     install_id: &str,
     provider_id: &str,
     access: String,
@@ -514,18 +516,18 @@ pub fn upsert_plugin_oauth_token(
     expires: i64,
     profile_fingerprint: String,
 ) -> Result<(), ConfigError> {
-    let key = plugin_credential_key(install_id, provider_id);
+    let key = extension_credential_key(install_id, provider_id);
     let root = agent_dir()?;
     with_auth_mutation_lock(&root, || {
         let mut store = read_auth_at(&root)?;
         if let Some(existing) = store.get(&key) {
-            if !is_plugin_owned_credential(existing) {
+            if !is_extension_owned_credential(existing) {
                 return Err(ConfigError::Write {
                     path: root.join("auth.json"),
                     source: std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
                         format!(
-                            "refusing to replace the credential at `{key}`: it was not written by the plugin channel"
+                            "refusing to replace the credential at `{key}`: it was not written by the extension channel"
                         ),
                     ),
                 });
@@ -544,12 +546,12 @@ pub fn upsert_plugin_oauth_token(
     })
 }
 
-/// Read one plugin's namespaced OAuth credential.
-pub fn read_plugin_oauth_token(
+/// Read one extension's namespaced OAuth credential.
+pub fn read_extension_oauth_token(
     install_id: &str,
     provider_id: &str,
 ) -> Result<Option<Credential>, ConfigError> {
-    let key = plugin_credential_key(install_id, provider_id);
+    let key = extension_credential_key(install_id, provider_id);
     Ok(match read_auth()?.get(&key) {
         Some(Credential::Oauth {
             access,
@@ -566,36 +568,39 @@ pub fn read_plugin_oauth_token(
     })
 }
 
-/// Read one plugin's namespaced OAuth credential from an explicit agent
+/// Read one extension's namespaced OAuth credential from an explicit agent
 /// directory.
-pub fn read_plugin_oauth_token_at(
+pub fn read_extension_oauth_token_at(
     root: &Path,
     install_id: &str,
     provider_id: &str,
 ) -> Result<Option<Credential>, ConfigError> {
     Ok(read_auth_at(root)?
-        .get(&plugin_credential_key(install_id, provider_id))
+        .get(&extension_credential_key(install_id, provider_id))
         .cloned())
 }
 
-/// Remove one plugin's namespaced OAuth credential, leaving every bare
-/// provider entry (and every other plugin's entry) untouched. A generic
-/// OAuth entry at the namespaced key (no plugin fingerprint) is left alone
-/// too: the plugin channel may only remove what it wrote.
-pub fn delete_plugin_oauth_token(install_id: &str, provider_id: &str) -> Result<bool, ConfigError> {
-    delete_plugin_oauth_token_at(&agent_dir()?, install_id, provider_id)
+/// Remove one extension's namespaced OAuth credential, leaving every bare
+/// provider entry (and every other extension's entry) untouched. A generic
+/// OAuth entry at the namespaced key (no extension fingerprint) is left alone
+/// too: the extension channel may only remove what it wrote.
+pub fn delete_extension_oauth_token(
+    install_id: &str,
+    provider_id: &str,
+) -> Result<bool, ConfigError> {
+    delete_extension_oauth_token_at(&agent_dir()?, install_id, provider_id)
 }
 
-/// [`delete_plugin_oauth_token`] against an explicit agent directory.
-pub fn delete_plugin_oauth_token_at(
+/// [`delete_extension_oauth_token`] against an explicit agent directory.
+pub fn delete_extension_oauth_token_at(
     root: &Path,
     install_id: &str,
     provider_id: &str,
 ) -> Result<bool, ConfigError> {
-    let key = plugin_credential_key(install_id, provider_id);
+    let key = extension_credential_key(install_id, provider_id);
     with_auth_mutation_lock(root, || {
         let mut store = read_auth_at(root)?;
-        if !matches!(store.get(&key), Some(cred) if is_plugin_owned_credential(cred)) {
+        if !matches!(store.get(&key), Some(cred) if is_extension_owned_credential(cred)) {
             return Ok(false);
         }
         store.remove(&key);
@@ -604,18 +609,22 @@ pub fn delete_plugin_oauth_token_at(
     })
 }
 
-/// Remove every plugin-written OAuth credential under `plugin:<install-id>:*`,
+/// Remove every extension-written OAuth credential under `extension:<install-id>:*`,
 /// returning how many entries went away. Non-OAuth entries, generic OAuth
-/// entries (no plugin fingerprint), bare provider keys, and other plugins'
+/// entries (no extension fingerprint), bare provider keys, and other extensions'
 /// entries are preserved.
-pub fn delete_plugin_credentials_at(root: &Path, install_id: &str) -> Result<usize, ConfigError> {
-    let prefix = format!("plugin:{install_id}:");
+pub fn delete_extension_credentials_at(
+    root: &Path,
+    install_id: &str,
+) -> Result<usize, ConfigError> {
+    let prefix = format!("extension:{install_id}:");
     with_auth_mutation_lock(root, || {
         let mut store = read_auth_at(root)?;
         let keys: Vec<String> = store
             .keys()
             .filter(|key| {
-                key.starts_with(&prefix) && store.get(*key).is_some_and(is_plugin_owned_credential)
+                key.starts_with(&prefix)
+                    && store.get(*key).is_some_and(is_extension_owned_credential)
             })
             .cloned()
             .collect();
@@ -1494,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_oauth_tokens_are_namespaced_and_never_clobber_bare_entries() {
+    fn extension_oauth_tokens_are_namespaced_and_never_clobber_bare_entries() {
         let _cfg = TempConfig::new();
         upsert_credential(
             "anthropic",
@@ -1505,7 +1514,7 @@ mod tests {
         )
         .unwrap();
 
-        upsert_plugin_oauth_token(
+        upsert_extension_oauth_token(
             "install-1",
             "anthropic",
             "at".into(),
@@ -1517,11 +1526,11 @@ mod tests {
 
         let store = read_auth().unwrap();
         assert_eq!(
-            plugin_credential_key("install-1", "anthropic"),
-            "plugin:install-1:anthropic"
+            extension_credential_key("install-1", "anthropic"),
+            "extension:install-1:anthropic"
         );
         assert!(matches!(
-            store.get("plugin:install-1:anthropic"),
+            store.get("extension:install-1:anthropic"),
             Some(Credential::Oauth { access, refresh, expires, .. })
                 if access == "at" && refresh == "rt" && *expires == 99
         ));
@@ -1531,9 +1540,9 @@ mod tests {
             Some(Credential::ApiKey { key, .. }) if key.as_deref() == Some("sk-user")
         ));
 
-        // Re-login of the SAME plugin provider overwrites only its namespaced
+        // Re-login of the SAME extension provider overwrites only its namespaced
         // entry, and a bare re-key still works through the ordinary path.
-        upsert_plugin_oauth_token(
+        upsert_extension_oauth_token(
             "install-1",
             "anthropic",
             "at2".into(),
@@ -1543,7 +1552,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            read_plugin_oauth_token("install-1", "anthropic").unwrap(),
+            read_extension_oauth_token("install-1", "anthropic").unwrap(),
             Some(Credential::Oauth { access, refresh, expires, profile_fingerprint })
                 if access == "at2" && refresh == "rt2" && expires == 100
                     && profile_fingerprint.as_deref() == Some("fingerprint-1")
@@ -1562,24 +1571,24 @@ mod tests {
             Some(Credential::ApiKey { key, .. }) if key.as_deref() == Some("sk-user-2")
         ));
 
-        assert!(delete_plugin_oauth_token("install-1", "anthropic").unwrap());
+        assert!(delete_extension_oauth_token("install-1", "anthropic").unwrap());
         let store = read_auth().unwrap();
-        assert!(store.get("plugin:install-1:anthropic").is_none());
+        assert!(store.get("extension:install-1:anthropic").is_none());
         assert!(store.get("anthropic").is_some(), "bare entry survives");
     }
 
     #[test]
-    fn a_plugin_oauth_write_refuses_a_non_oauth_entry_at_its_namespaced_key() {
+    fn a_extension_oauth_write_refuses_a_non_oauth_entry_at_its_namespaced_key() {
         let _cfg = TempConfig::new();
         upsert_credential(
-            "plugin:install-1:anthropic",
+            "extension:install-1:anthropic",
             Credential::ApiKey {
                 key: Some("not-an-oauth-token".into()),
                 env: None,
             },
         )
         .unwrap();
-        let error = upsert_plugin_oauth_token(
+        let error = upsert_extension_oauth_token(
             "install-1",
             "anthropic",
             "at".into(),
@@ -1590,15 +1599,15 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("refusing to replace"), "{error}");
         assert!(matches!(
-            read_auth().unwrap().get("plugin:install-1:anthropic"),
+            read_auth().unwrap().get("extension:install-1:anthropic"),
             Some(Credential::ApiKey { key, .. }) if key.as_deref() == Some("not-an-oauth-token")
         ));
     }
 
     #[test]
-    fn plugin_oauth_delete_preserves_a_non_oauth_namespaced_entry() {
+    fn extension_oauth_delete_preserves_a_non_oauth_namespaced_entry() {
         let _cfg = TempConfig::new();
-        let key = plugin_credential_key("install-1", "anthropic");
+        let key = extension_credential_key("install-1", "anthropic");
         upsert_credential(
             &key,
             Credential::ApiKey {
@@ -1608,7 +1617,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!delete_plugin_oauth_token("install-1", "anthropic").unwrap());
+        assert!(!delete_extension_oauth_token("install-1", "anthropic").unwrap());
         assert!(matches!(
             read_auth().unwrap().get(&key),
             Some(Credential::ApiKey { key, .. }) if key.as_deref() == Some("sk-user")
@@ -1616,12 +1625,12 @@ mod tests {
     }
 
     /// A generic OAuth credential (no profile fingerprint) sitting at a
-    /// plugin-namespaced key must be untouchable by the plugin paths: the
+    /// extension-namespaced key must be untouchable by the extension paths: the
     /// guest write refuses, and both delete shapes leave it in place.
     #[test]
-    fn a_generic_oauth_entry_at_a_namespaced_key_blocks_the_plugin_write() {
+    fn a_generic_oauth_entry_at_a_namespaced_key_blocks_the_extension_write() {
         let _cfg = TempConfig::new();
-        let key = plugin_credential_key("install-1", "anthropic");
+        let key = extension_credential_key("install-1", "anthropic");
         upsert_credential(
             &key,
             Credential::Oauth {
@@ -1633,7 +1642,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = upsert_plugin_oauth_token(
+        let error = upsert_extension_oauth_token(
             "install-1",
             "anthropic",
             "at".into(),
@@ -1651,9 +1660,9 @@ mod tests {
     }
 
     #[test]
-    fn plugin_deletes_leave_a_generic_oauth_namespaced_entry_alone() {
+    fn extension_deletes_leave_a_generic_oauth_namespaced_entry_alone() {
         let _cfg = TempConfig::new();
-        let key = plugin_credential_key("install-1", "anthropic");
+        let key = extension_credential_key("install-1", "anthropic");
         upsert_credential(
             &key,
             Credential::Oauth {
@@ -1665,12 +1674,12 @@ mod tests {
         )
         .unwrap();
 
-        // Per-provider delete (`ki plugin revoke` shape) preserves it.
-        assert!(!delete_plugin_oauth_token("install-1", "anthropic").unwrap());
+        // Per-provider delete (`ki extension revoke` shape) preserves it.
+        assert!(!delete_extension_oauth_token("install-1", "anthropic").unwrap());
         assert!(read_auth().unwrap().get(&key).is_some());
 
-        // A plugin-written entry in the same namespace goes the normal way...
-        upsert_plugin_oauth_token(
+        // An extension-written entry in the same namespace goes the normal way...
+        upsert_extension_oauth_token(
             "install-1",
             "blocked",
             "at".into(),
@@ -1683,7 +1692,7 @@ mod tests {
         // ...so the uninstall sweep removes exactly that one and keeps the
         // generic entry.
         let removed =
-            delete_plugin_credentials_at(&crate::config::agent_dir().unwrap(), "install-1")
+            delete_extension_credentials_at(&crate::config::agent_dir().unwrap(), "install-1")
                 .unwrap();
         assert_eq!(removed, 1);
         assert!(
@@ -1692,18 +1701,18 @@ mod tests {
         );
         assert!(read_auth()
             .unwrap()
-            .get(&plugin_credential_key("install-1", "blocked"))
+            .get(&extension_credential_key("install-1", "blocked"))
             .is_none());
     }
 
     /// `ki auth login`/`refresh` (the generic OAuth writers) must refuse the
-    /// reserved `plugin:` prefix outright, so a user credential can never be
-    /// filed inside the plugin namespace in the first place.
+    /// reserved `extension:` prefix outright, so a user credential can never be
+    /// filed inside the extension namespace in the first place.
     #[test]
-    fn generic_oauth_writer_refuses_the_reserved_plugin_prefix() {
+    fn generic_oauth_writer_refuses_the_reserved_extension_prefix() {
         let _cfg = TempConfig::new();
         let error = upsert_oauth_token(
-            "plugin:install-1:anthropic",
+            "extension:install-1:anthropic",
             "access".into(),
             "refresh".into(),
             0,
@@ -1714,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_plugin_oauth_writes_both_survive() {
+    fn concurrent_extension_oauth_writes_both_survive() {
         let _cfg = TempConfig::new();
         for round in 0..64 {
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
@@ -1724,7 +1733,7 @@ mod tests {
                 let provider = format!("{provider}-{round}");
                 writers.push(std::thread::spawn(move || {
                     barrier.wait();
-                    upsert_plugin_oauth_token(
+                    upsert_extension_oauth_token(
                         "install-1",
                         &provider,
                         format!("at-{provider}"),
@@ -1743,7 +1752,7 @@ mod tests {
             let store = read_auth().unwrap();
             for provider in ["first", "second"] {
                 let provider = format!("{provider}-{round}");
-                let key = plugin_credential_key("install-1", &provider);
+                let key = extension_credential_key("install-1", &provider);
                 assert!(
                     matches!(store.get(&key), Some(Credential::Oauth { .. })),
                     "concurrent write lost `{key}` in round {round}: {store:?}"

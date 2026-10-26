@@ -6,19 +6,19 @@
 //!   sees a PKCE `code_challenge` and returns an interaction/status;
 //! * the host owns the IdP endpoints (from the grant), performs every HTTP
 //!   request, parses the standard token response and writes the credential to
-//!   `plugin:<install-id>:<provider-id>`;
+//!   `extension:<install-id>:<provider-id>`;
 //! * device authorization and polling are entirely host-side, so the device
 //!   code never enters the sandbox;
 //! * `ki auth refresh` and `ki auth logout` never call a guest at all.
 //!
 //! Deny-by-default is enforced in two places: [`find_provider`] only sees a
-//! provider a `grants.json` names, and [`kiqi_host::wasm::WasmPlugin::oauth_action`]
+//! provider a `grants.json` names, and [`kiqi_host::wasm::WasmExtension::oauth_action`]
 //! refuses before touching the guest when the grant is absent.
 
 use std::path::{Path, PathBuf};
 
 use kiqi_host::grants::{
-    installed_plugins_at, plugin_dir_at, Grants, OAuthFlow, OAuthGrant, OAuthProviderProfile,
+    extension_dir_at, installed_extensions_at, Grants, OAuthFlow, OAuthGrant, OAuthProviderProfile,
 };
 use kiqi_host::wasm::{
     ensure_oauth_profile_matches, exchange_authorization_code, oauth_profile_fingerprint,
@@ -37,14 +37,14 @@ use crate::config::Credential;
 /// same value goes into both the authorization URL and the token exchange.
 pub const OOB_REDIRECT_URI: &str = "urn:ietf:wg:oauth:2.0:oob";
 
-/// One installed plugin that the grants let drive `provider_id`.
+/// One installed extension that the grants let drive `provider_id`.
 #[derive(Debug, Clone)]
 pub struct FoundProvider {
     pub install_id: String,
     pub profile: OAuthProviderProfile,
     /// The whole `oauth` policy: it carries the flow budget the driver needs.
     pub grant: OAuthGrant,
-    /// The plugin's full authorization, read once at discovery. Loading from
+    /// The extension's full authorization, read once at discovery. Loading from
     /// this (rather than re-reading the file) keeps the bytes and the grants
     /// the same snapshot.
     pub grants: Grants,
@@ -57,9 +57,9 @@ pub trait OAuthGuest {
     fn action(&self, provider_id: &str, action: OAuthAction) -> Result<OAuthResponse, String>;
 }
 
-impl OAuthGuest for kiqi_host::wasm::WasmPlugin {
+impl OAuthGuest for kiqi_host::wasm::WasmExtension {
     fn action(&self, provider_id: &str, action: OAuthAction) -> Result<OAuthResponse, String> {
-        <kiqi_host::wasm::WasmPlugin as kiqi_host::Extension>::oauth_action(
+        <kiqi_host::wasm::WasmExtension as kiqi_host::Extension>::oauth_action(
             self,
             provider_id,
             action,
@@ -74,12 +74,12 @@ pub trait OAuthUi {
     fn ask(&mut self, prompt: &str) -> Result<String, String>;
 }
 
-/// Discover which installed plugin a grant lets drive `provider_id`.
+/// Discover which installed extension a grant lets drive `provider_id`.
 ///
 /// Two rules matter:
-/// * a provider granted by more than one plugin is ambiguous, so it is an
+/// * a provider granted by more than one extension is ambiguous, so it is an
 ///   error with the candidate list rather than a silent first match;
-/// * a plugin whose digest sidecar disagrees is refused before its bytes run.
+/// * an extension whose digest sidecar disagrees is refused before its bytes run.
 pub fn find_provider(provider_id: &str) -> Result<Option<FoundProvider>, String> {
     let root = kiqi_host::grants::agent_dir()
         .ok_or_else(|| "cannot resolve the agent directory".to_string())?;
@@ -89,7 +89,7 @@ pub fn find_provider(provider_id: &str) -> Result<Option<FoundProvider>, String>
 /// [`find_provider`] against an explicit agent root (the test seam).
 pub fn find_provider_at(root: &Path, provider_id: &str) -> Result<Option<FoundProvider>, String> {
     let mut found = Vec::new();
-    for install_id in installed_plugins_at(root) {
+    for install_id in installed_extensions_at(root) {
         let grants = Grants::load_for_at(root, &install_id);
         let Some(oauth) = grants.oauth.clone() else {
             continue;
@@ -102,14 +102,14 @@ pub fn find_provider_at(root: &Path, provider_id: &str) -> Result<Option<FoundPr
         else {
             continue;
         };
-        let wasm = plugin_dir_at(root, &install_id).join("plugin.wasm");
+        let wasm = extension_dir_at(root, &install_id).join("extension.wasm");
         if !wasm.is_file() {
             continue;
         }
         // The same gate the session loader uses: a mismatched sidecar means the
         // bytes on disk are not the ones the user authorized.
-        if let Err(error) = crate::plugins::digest_gate(&wasm) {
-            return Err(format!("plugin `{install_id}`: {error}"));
+        if let Err(error) = crate::extensions::digest_gate(&wasm) {
+            return Err(format!("extension `{install_id}`: {error}"));
         }
         found.push(FoundProvider {
             install_id,
@@ -123,7 +123,7 @@ pub fn find_provider_at(root: &Path, provider_id: &str) -> Result<Option<FoundPr
         0 => Ok(None),
         1 => Ok(found.pop()),
         _ => Err(format!(
-            "oauth provider `{provider_id}` is granted by more than one plugin: {}",
+            "oauth provider `{provider_id}` is granted by more than one extension: {}",
             found
                 .iter()
                 .map(|entry| entry.install_id.as_str())
@@ -133,14 +133,14 @@ pub fn find_provider_at(root: &Path, provider_id: &str) -> Result<Option<FoundPr
     }
 }
 
-/// Load the plugin a [`FoundProvider`] names, with the namespaced credential
+/// Load the extension a [`FoundProvider`] names, with the namespaced credential
 /// sink installed (the guest-facing `oauth-http` path has one route to disk).
-pub fn load_guest(found: &FoundProvider) -> Result<kiqi_host::wasm::WasmPlugin, String> {
+pub fn load_guest(found: &FoundProvider) -> Result<kiqi_host::wasm::WasmExtension, String> {
     let options = kiqi_host::wasm::Options {
-        credential_sink: Some(std::sync::Arc::new(crate::plugins::ConfigCredentialSink)),
+        credential_sink: Some(std::sync::Arc::new(crate::extensions::ConfigCredentialSink)),
         ..Default::default()
     };
-    kiqi_host::wasm::WasmPlugin::load_with_options(
+    kiqi_host::wasm::WasmExtension::load_with_options(
         &found.install_id,
         &found.wasm,
         found.grants.clone(),
@@ -228,7 +228,7 @@ pub fn login(
     } else {
         tokens.refresh.clone()
     };
-    crate::config::upsert_plugin_oauth_token(
+    crate::config::upsert_extension_oauth_token(
         install_id,
         &profile.id,
         tokens.access,
@@ -262,7 +262,7 @@ pub fn refresh(
     } else {
         tokens.refresh
     };
-    crate::config::upsert_plugin_oauth_token(
+    crate::config::upsert_extension_oauth_token(
         install_id,
         &profile.id,
         tokens.access,
@@ -299,7 +299,7 @@ pub fn logout(
                 profile.id
             ));
         }
-        return crate::config::delete_plugin_oauth_token(install_id, &profile.id)
+        return crate::config::delete_extension_oauth_token(install_id, &profile.id)
             .map_err(|delete_error| format!("could not remove credentials: {delete_error}"));
     }
     if profile.revocation_endpoint.is_some() {
@@ -307,13 +307,13 @@ pub fn logout(
         revoke_stored_token(profile, &stored, &mut budget, transport)
             .map_err(|error| format!("revoke failed; local credentials were kept: {error}"))?;
     }
-    crate::config::delete_plugin_oauth_token(install_id, &profile.id)
+    crate::config::delete_extension_oauth_token(install_id, &profile.id)
         .map_err(|error| format!("could not remove credentials: {error}"))
 }
 
-/// Read the namespaced credential for one plugin provider.
+/// Read the namespaced credential for one extension provider.
 fn read_stored(install_id: &str, provider_id: &str) -> Result<Option<StoredOAuthToken>, String> {
-    match crate::config::read_plugin_oauth_token(install_id, provider_id)
+    match crate::config::read_extension_oauth_token(install_id, provider_id)
         .map_err(|error| format!("could not read credentials: {error}"))?
     {
         Some(Credential::Oauth {
@@ -328,7 +328,7 @@ fn read_stored(install_id: &str, provider_id: &str) -> Result<Option<StoredOAuth
             profile_fingerprint,
         })),
         Some(_) => Err(format!(
-            "the entry at `plugin:{install_id}:{provider_id}` is not an OAuth credential"
+            "the entry at `extension:{install_id}:{provider_id}` is not an OAuth credential"
         )),
         None => Ok(None),
     }
@@ -670,7 +670,7 @@ mod tests {
     }
 
     fn stored(install_id: &str, provider_id: &str) -> Option<(String, String, i64)> {
-        match crate::config::read_plugin_oauth_token(install_id, provider_id).unwrap() {
+        match crate::config::read_extension_oauth_token(install_id, provider_id).unwrap() {
             Some(Credential::Oauth {
                 access,
                 refresh,
@@ -695,7 +695,7 @@ mod tests {
     #[test]
     fn device_login_stores_the_namespaced_token_and_ignores_the_guest_url() {
         let _agent = TempAgent::new();
-        // A bare credential the plugin must never clobber.
+        // A bare credential the extension must never clobber.
         crate::config::upsert_credential(
             "anthropic",
             Credential::ApiKey {
@@ -838,7 +838,7 @@ mod tests {
         let profile = profile(server.addr.port(), vec![OAuthFlow::DeviceCode]);
         let grant = grant(profile.clone());
         let transport = LocalTransport { addr: server.addr };
-        crate::config::upsert_plugin_oauth_token(
+        crate::config::upsert_extension_oauth_token(
             "install-1",
             "acme",
             "at-1".to_string(),
@@ -866,7 +866,7 @@ mod tests {
     fn refresh_refuses_a_changed_profile_without_sending_the_old_token() {
         let _agent = TempAgent::new();
         let original = profile(1, vec![OAuthFlow::DeviceCode]);
-        crate::config::upsert_plugin_oauth_token(
+        crate::config::upsert_extension_oauth_token(
             "install-1",
             "acme",
             "at-secret".to_string(),
@@ -895,7 +895,7 @@ mod tests {
     fn logout_profile_mismatch_requires_explicit_local_delete_confirmation() {
         let _agent = TempAgent::new();
         let original = profile(1, vec![OAuthFlow::DeviceCode]);
-        crate::config::upsert_plugin_oauth_token(
+        crate::config::upsert_extension_oauth_token(
             "install-1",
             "acme",
             "at-secret".to_string(),
@@ -939,7 +939,7 @@ mod tests {
         let profile = profile(server.addr.port(), vec![OAuthFlow::DeviceCode]);
         let grant = grant(profile.clone());
         let transport = LocalTransport { addr: server.addr };
-        crate::config::upsert_plugin_oauth_token(
+        crate::config::upsert_extension_oauth_token(
             "install-1",
             "acme",
             "at-1".to_string(),
@@ -1056,9 +1056,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn grants_file(root: &Path, install_id: &str, provider_id: &str) {
-        let dir = plugin_dir_at(root, install_id);
+        let dir = extension_dir_at(root, install_id);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("plugin.wasm"), b"\0asm").unwrap();
+        std::fs::write(dir.join("extension.wasm"), b"\0asm").unwrap();
         let mut grants = Grants::default();
         grants
             .grant_oauth(OAuthGrant {
@@ -1082,13 +1082,13 @@ mod tests {
     }
 
     #[test]
-    fn find_provider_reads_the_grant_and_ignores_ungranted_plugins() {
+    fn find_provider_reads_the_grant_and_ignores_ungranted_extensions() {
         let root = tempfile::tempdir().unwrap();
         grants_file(root.path(), "with-oauth", "acme");
-        // A plugin directory with a wasm file but no oauth grant.
-        let other = plugin_dir_at(root.path(), "no-oauth");
+        // An extension directory with a wasm file but no oauth grant.
+        let other = extension_dir_at(root.path(), "no-oauth");
         std::fs::create_dir_all(&other).unwrap();
-        std::fs::write(other.join("plugin.wasm"), b"\0asm").unwrap();
+        std::fs::write(other.join("extension.wasm"), b"\0asm").unwrap();
 
         let found = find_provider_at(root.path(), "acme")
             .expect("discovery")
@@ -1101,12 +1101,12 @@ mod tests {
     }
 
     #[test]
-    fn find_provider_refuses_two_plugins_granting_the_same_id() {
+    fn find_provider_refuses_two_extensions_granting_the_same_id() {
         let root = tempfile::tempdir().unwrap();
         grants_file(root.path(), "one", "acme");
         grants_file(root.path(), "two", "acme");
         let error = find_provider_at(root.path(), "acme").unwrap_err();
-        assert!(error.contains("more than one plugin"), "{error}");
+        assert!(error.contains("more than one extension"), "{error}");
         assert!(error.contains("one"), "{error}");
         assert!(error.contains("two"), "{error}");
     }

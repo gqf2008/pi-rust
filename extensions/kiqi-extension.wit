@@ -1,0 +1,648 @@
+/// kiqi extension ABI — wasm component model (WASI Preview 2 / WIT).
+///
+/// **0.8.0.** The 0.1.0 draft never parsed: `other(kind: string,
+/// payload: string)` used named variant fields, which WIT does not allow. Every
+/// version is checked with `wasm-tools component wit`.
+///
+/// Shape decisions this version encodes:
+///   * the exported surface is exactly `kiqi_extension::Extension`'s: `id`, `shutdown`,
+///     `list-tools`/`call-tool`, `list-commands`/`run-command`/`continue-command`,
+///     `list-flags`, `list-shortcuts`, `on-event`, `before-agent-start`,
+///     `list-probe-points`/`probe`, plus the 0.8.0 contribution exports
+///     `oauth-api`, `provider-api` and `render-api`. Nothing the trait has is
+///     missing, and nothing the trait lacks is invented here;
+///   * capability calls are fallible (`result<_, capability-error>`) so an extension still
+///     loads when a capability is not granted and can degrade at call time;
+///   * every capability is its own interface, so a deny stub, audit and future
+///     tightening stay minimal and independent;
+///   * progress is an **imported sink**, not a return value — one tool call can
+///     emit many blocks (16/18 real extensions need stepwise output);
+///   * a tool returns a **structured `tool-result`** (blocks + is-error +
+///     `details` JSON), not a bare string — `details` is how an extension carries
+///     state that must survive fork/switch (`kiqi-todo`'s task list);
+///   * `on-event` returns an **`event-action`** (`continue`/`claimed`) so a wasm
+///     extension can claim an event like a native handler's `CLAIMED`; `patch`
+///     carries a rewritten payload, but is honored ONLY for
+///     `before-provider-request` during a provider gate and is ignored for every
+///     other tag.
+///
+/// The component model requires every import a component declares to be
+/// satisfied at instantiation, so the host always provides all interfaces:
+/// granted ones with real implementations, ungranted ones refuse at call time
+/// with `denied`. (A built component prunes the interfaces it does not use,
+/// so an extension that never touches `exec` never asks for it.) The gate is the
+/// runtime grant check inside each implementation — there is no
+/// instantiation-time manifest rejection; `ki extension install` is what lists
+/// declared capabilities and asks the user.
+package kiqi:extension@0.9.0;
+
+/// Types shared across the host <-> extension boundary.
+interface types {
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    record session-info {
+        session-id: string,
+        run-id: string,
+        cwd: string,
+    }
+
+    /// Why a capability call failed.
+    ///
+    /// `denied` is the authorization answer (not granted / out of scope);
+    /// `failed` is a granted capability whose operation failed (a network
+    /// error, a bad path). Keeping them apart matters: a flush that times out
+    /// is not a denied capability.
+    variant capability-error {
+        denied(string),
+        failed(string),
+    }
+
+    record tool-spec {
+        name: string,
+        description: string,
+        /// JSON Schema, serialized; kept as a string so the ABI does not have to
+        /// model every JSON Schema construct.
+        parameters-schema: string,
+    }
+
+    variant extension-error {
+        /// No tool with this name was declared by `list-tools`.
+        unknown-tool(string),
+        /// The arguments did not match `parameters-schema`.
+        invalid-arguments(string),
+        /// The extension wanted a capability the host refused.
+        denied(string),
+        /// Anything else.
+        failed(string),
+    }
+
+    /// One block of partial output pushed while a tool is still running.
+    variant progress-block {
+        text(string),
+        json(string),
+    }
+
+    /// One block of a tool's final output, mirroring the host's `Block`.
+    variant content-block {
+        text(string),
+        json(string),
+    }
+
+    /// A tool's terminal result.
+    ///
+    /// `details` is JSON and is how an extension carries state that must survive
+    /// fork/switch — `kiqi-todo` keeps its whole task list there, so a bare
+    /// string result is not enough.
+    record tool-result {
+        blocks: list<content-block>,
+        is-error: bool,
+        details: string,
+    }
+
+    record tool-call {
+        tool: string,
+        arguments: string,
+    }
+
+    record tool-result-event {
+        call: tool-call,
+        output: string,
+        is-error: bool,
+    }
+
+    /// Escape hatch for a tag this ABI version does not type: a new host event
+    /// kind reaches old extensions without breaking them.
+    record other-event {
+        kind: string,
+        payload: string,
+    }
+
+    record command-spec {
+        name: string,
+        description: string,
+    }
+
+    record flag-spec {
+        name: string,
+        description: string,
+    }
+
+    record shortcut-spec {
+        key: string,
+        description: string,
+    }
+
+    /// Runtime events. The tags an extension actually needs are typed; anything else
+    /// arrives through `other` so a new host event cannot break it.
+    variant event {
+        session-start,
+        session-shutdown,
+        session-tree,
+        agent-settled,
+        before-agent-start(string),
+        before-provider-request(string),
+        message-update(string),
+        message-end(string),
+        tool-execution-start(tool-call),
+        tool-execution-end(tool-result-event),
+        /// A raw keyboard input. `key` is the host's key name (letters as
+        /// lowercase ASCII, e.g. `a`, `enter`, `esc`).
+        input(input-event),
+        other(other-event),
+    }
+
+    /// A permission gate's verdict.
+    variant verdict {
+        continue,
+        replace(string),
+        block(string),
+    }
+
+    /// What an extension decided to do about an event.
+    ///
+    /// `patch` carries a rewritten payload (JSON). It is honored ONLY for
+    /// `before-provider-request` during a provider gate; every other tag ignores
+    /// it. The host validates the patch and, when it violates the grant's
+    /// limits, rejects the WHOLE patch and proceeds unpatched.
+    variant event-action {
+        continue,
+        claimed,
+        patch(string),
+    }
+
+    // ---- OAuth (0.8.0) ------------------------------------------------------
+
+    /// Which OAuth flow the grant profile enables for a provider.
+    enum oauth-flow {
+        authorization-code,
+        device-code,
+    }
+
+    /// A provider this guest declares it can drive. Endpoints, client id and
+    /// secrets stay host-side; the guest only sees this metadata.
+    record oauth-provider {
+        id: string,
+        display-name: string,
+        scopes: list<string>,
+        flows: list<oauth-flow>,
+        supports-pkce: bool,
+    }
+
+    /// What the user must do (or what the host already did) to continue the
+    /// flow. `url` is built by the host from the grant profile -- the guest
+    /// never supplies one.
+    record oauth-interaction {
+        title: string,
+        url: option<string>,
+        instructions: list<string>,
+        user-code: option<string>,
+    }
+
+    /// The credential the host stored for the granted provider. No token
+    /// material ever crosses this boundary. `expires-at` is a Unix timestamp in
+    /// seconds; `0` means no known expiry.
+    record oauth-credential-status {
+        expires-at: s64,
+    }
+
+    /// One step of an OAuth flow.
+    ///
+    /// `begin` carries the PKCE `code_challenge` (43 base64url characters) for
+    /// authorization-code, and an empty string for device-code.
+    variant oauth-action {
+        begin(string),
+        poll,
+        exchange(string),
+        cancel,
+    }
+
+    /// The guest-visible result of one flow step.
+    variant oauth-response {
+        interaction(oauth-interaction),
+        stored(oauth-credential-status),
+        authorization-pending,
+        slow-down,
+        denied(string),
+        error(string),
+    }
+
+    /// The result of an authorization-code exchange performed by the host.
+    variant oauth-token-outcome {
+        stored(oauth-credential-status),
+        failed(string),
+    }
+
+    // ---- Model providers (0.8.0) -------------------------------------------
+
+    /// One model a provider exposes.
+    record model-spec {
+        id: string,
+        name: string,
+        /// A typed `Api` variant name; `other` and `faux` are rejected by the
+        /// host at grant validation.
+        api: string,
+        base-url: string,
+        reasoning: bool,
+        input: list<string>,
+        context-window: u64,
+        max-tokens: u64,
+    }
+
+    /// A provider this guest offers. The `provider` grant is the sole catalog
+    /// authority; this list can only narrow it.
+    record provider-spec {
+        provider-id: string,
+        display-name: string,
+        models: list<model-spec>,
+    }
+
+    /// Which part of a model response a delta belongs to.
+    enum delta-kind {
+        text,
+        thinking,
+        tool-call,
+    }
+
+    enum delta-phase {
+        start,
+        delta,
+        end,
+    }
+
+    /// One streamed delta of a provider response. `content-index` keeps two
+    /// concurrent tool calls and two thinking/text streams apart. On `end` of a
+    /// `tool-call`, `text` is the complete `{id, name, arguments}` JSON.
+    record provider-delta {
+        kind: delta-kind,
+        phase: delta-phase,
+        content-index: u32,
+        text: string,
+    }
+
+    // ---- Input events (0.8.0) ----------------------------------------------
+
+    enum input-kind {
+        press,
+        repeat,
+        release,
+    }
+
+    /// A raw keyboard input forwarded to `on-event`.
+    record input-event {
+        key: string,
+        kind: input-kind,
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+    }
+
+    // ---- Command results and continuations (0.8.0) -------------------------
+
+    record selector-spec {
+        title: string,
+        items: list<string>,
+    }
+
+    record editor-spec {
+        initial-text: string,
+    }
+
+    record prompt-spec {
+        title: string,
+        placeholder: string,
+    }
+
+    /// What a command wants the host to do after it returns.
+    variant command-result-body {
+        message(string),
+        selector(selector-spec),
+        editor(editor-spec),
+        prompt(prompt-spec),
+    }
+
+    /// A command's outcome, tagged with the flow it belongs to so a stale
+    /// selector/editor/prompt reply cannot be delivered to a later flow.
+    record command-result {
+        flow-id: string,
+        body: command-result-body,
+    }
+
+    /// The user's answer to a selector/editor/prompt flow.
+    variant command-reply {
+        selected(string),
+        submitted(string),
+        cancelled,
+    }
+
+    /// A CLI flag as the calling extension declared it. `bare` is a boolean flag
+    /// present without a value; `text` carries the value.
+    variant flag-value {
+        bare,
+        text(string),
+    }
+}
+
+/// Structured logging. Always granted; the host prefixes every line with the
+/// extension id.
+interface log {
+    use types.{log-level};
+    write: func(level: log-level, message: string);
+}
+
+/// Read-only session state.
+interface session-read {
+    use types.{flag-value, session-info};
+    info: func() -> session-info;
+    active-tools: func() -> list<string>;
+    system-prompt: func() -> string;
+    thinking-level: func() -> string;
+    cli-flag: func(name: string) -> option<flag-value>;
+    session-branch: func() -> string;
+}
+
+/// Session mutations.
+interface session-control {
+    use types.{capability-error};
+    set-session-name: func(name: string) -> result<_, capability-error>;
+    set-active-tools: func(tools: list<string>) -> result<_, capability-error>;
+    set-model: func(model: string) -> result<_, capability-error>;
+    set-thinking-level: func(level: string) -> result<_, capability-error>;
+    compact: func() -> result<_, capability-error>;
+    new-session: func() -> result<_, capability-error>;
+    fork: func() -> result<_, capability-error>;
+    navigate-tree: func(target: string) -> result<_, capability-error>;
+    switch-session: func(id: string) -> result<_, capability-error>;
+    reload: func() -> result<_, capability-error>;
+}
+
+/// Inject content into the run.
+interface inject {
+    use types.{capability-error};
+    send-message: func(message: string) -> result<_, capability-error>;
+    send-user-message: func(text: string) -> result<_, capability-error>;
+    append-entry: func(entry: string) -> result<_, capability-error>;
+    /// Append a custom-typed entry (`{"customType": ..., "data": ...}` on the
+    /// wire). Distinct from `append-entry`, which appends a message entry — the
+    /// compile-time `InjectApi` has both, and plan mode persists its state
+    /// through this one.
+    append-custom-entry: func(custom-type: string, data: string) -> result<_, capability-error>;
+}
+
+/// The user-facing UI surface.
+interface ui {
+    use types.{capability-error};
+    dialog: func(request: string) -> result<string, capability-error>;
+    set-status: func(key: string, value: string) -> result<_, capability-error>;
+    set-editor-text: func(text: string) -> result<_, capability-error>;
+    /// Write to a registered UI component (native runtime action 22).
+    component: func(name: string, payload: string) -> result<string, capability-error>;
+}
+
+/// Partial output for a running tool call. An import, not a return value, so a
+/// call can stream.
+interface progress {
+    use types.{progress-block};
+    emit: func(block: progress-block);
+}
+
+/// Host-mediated HTTP (wraps `wasi:http` plus an allow-list); not raw sockets.
+interface net-http {
+    use types.{capability-error};
+    /// Host-mediated HTTP. The host checks the request's host against the
+    /// grant's allow-list before sending anything.
+    ///
+    /// `request` is JSON: `{url, method?, headers?: {name: value}, body?}`.
+    /// The response is JSON: `{status, headers: {name: value}, body}`.
+    fetch: func(request: string) -> result<string, capability-error>;
+}
+
+/// Filesystem operations, scoped to a sandbox root the host chooses.
+/// Extension filesystem, jailed to the extension's own data directory
+/// (`extensions/<id>/data/`). The jail *is* the policy, so `fs` is a boolean grant;
+/// the host refuses absolute paths and any `..` component.
+interface fs {
+    use types.{capability-error};
+    read: func(rel-path: string) -> result<list<u8>, capability-error>;
+    write: func(rel-path: string, contents: list<u8>) -> result<_, capability-error>;
+    read-dir: func(rel-dir: string) -> result<list<string>, capability-error>;
+}
+
+/// Raw TCP sockets. Separate from `net-http` so it can be tightened alone.
+interface net-sockets {
+    use types.{capability-error};
+    connect: func(address: string) -> result<u32, capability-error>;
+    send: func(handle: u32, bytes: list<u8>) -> result<u64, capability-error>;
+    recv: func(handle: u32, max-bytes: u64) -> result<list<u8>, capability-error>;
+    close: func(handle: u32) -> result<_, capability-error>;
+}
+
+/// Run a child process. WASI has no process interface; the host implements this
+/// with a command allow-list, a cwd jail, a scrubbed env and quotas.
+interface exec {
+    use types.{capability-error};
+    run: func(cmd: string, args: list<string>, cwd: option<string>) -> result<string, capability-error>;
+}
+
+/// A child process the guest may *talk to* — spawn, write its stdin, read a
+/// line of its stdout, wait, kill. Same enforcement as `exec` (bare command
+/// name against the grant's allow-list, the same cwd scope, a scrubbed env,
+/// the child in its own process group), plus one hard rule:
+///
+/// **A handle lives for the duration of one tool call.** When the call
+/// returns — normally, with an error, trapped, or cancelled — the host closes
+/// every handle and kills each child's whole process group. There is no
+/// cross-call lifetime: an extension that wants a resident subprocess is out of
+/// this interface's scope, deliberately (see docs/design/extension-process-capability.md).
+interface proc {
+    use types.{capability-error};
+
+    /// Start a child. `cwd` follows the grant's scope exactly as `exec` does.
+    /// Refused when the grant is missing, the command is not allow-listed, or
+    /// the call already holds the grant's maximum number of handles.
+    spawn: func(cmd: string, args: list<string>, cwd: option<string>) -> result<u32, capability-error>;
+
+    /// Write to the child's stdin. Returns the number of bytes accepted; the
+    /// host bounds the buffer and short writes are reported, not swallowed.
+    write: func(handle: u32, bytes: list<u8>) -> result<u64, capability-error>;
+
+    /// Read one line of the child's stdout (line ending stripped). `none` means
+    /// the stream ended. Waits up to `timeout-ms` for it (`0` = until the
+    /// child's budget); a timeout is `failed`, so an extension can enforce its own
+    /// deadline — and report one — instead of being pinned for the whole
+    /// budget. A line longer than `max-bytes` is truncated.
+    read-line: func(handle: u32, max-bytes: u64, timeout-ms: u64) -> result<option<string>, capability-error>;
+
+    /// Whatever the child has written to stderr so far (never blocks).
+    read-stderr: func(handle: u32, max-bytes: u64) -> result<list<u8>, capability-error>;
+
+    /// Wait up to `timeout-ms` for the child to exit. `none` means still running.
+    wait: func(handle: u32, timeout-ms: u64) -> result<option<s32>, capability-error>;
+
+    /// Whether the current tool call has been cancelled by the host (Esc /
+    /// abort). Long-running guests should poll this and wind down; the host
+    /// still reaps every child when the call returns, so this is advisory.
+    /// Additive host function: guests compiled before it existed keep working.
+    cancel-requested: func() -> bool;
+
+    /// Close the child's stdin: the child observes EOF and a "task on stdin,
+    /// then done" protocol can signal it is time to answer. Idempotent.
+    close-stdin: func(handle: u32) -> result<_, capability-error>;
+
+    /// Kill the child's process group and close the handle. Idempotent.
+    kill: func(handle: u32) -> result<_, capability-error>;
+}
+
+
+// ---- 0.8.0 interfaces -----------------------------------------------------
+
+/// OAuth login this guest can drive. An export: the guest is the flow
+/// controller (PKCE verifier, device polling quirks); the host owns endpoints,
+/// HTTP, credential storage and display. Grant key `oauth`, deny-by-default.
+interface oauth-api {
+    use types.{oauth-action, oauth-provider, oauth-response, extension-error};
+
+    /// Which providers this guest declares it can drive. Used for install-time
+    /// discovery and as a load-time cross-check; the grant is the sole catalog
+    /// authority and may only narrow this list.
+    list-providers: func() -> list<oauth-provider>;
+
+    /// Advance one begin/poll/exchange/cancel step of the flow.
+    action: func(provider-id: string, action: oauth-action) -> result<oauth-response, extension-error>;
+}
+
+/// Host-attributed OAuth endpoints, reachable ONLY for a provider named in the
+/// `oauth` grant; deny-by-default. Device authorization and polling are
+/// performed entirely host-side, so the device code never enters the sandbox
+/// and no token crosses the ABI.
+interface oauth-http {
+    use types.{capability-error, oauth-token-outcome};
+
+    /// Exchange an authorization code (or poll a device code the host issued).
+    /// The host performs the token-endpoint POST. `form` is a JSON object of
+    /// string values; the only accepted keys are `grant_type`, `code`,
+    /// `code_verifier`, `redirect_uri`, `scope` and `device_code`. The client id
+    /// comes from the grant and `client_id`/`client_secret` in `form` are
+    /// refused. The normalized grant type must be enabled by the profile's
+    /// flows. Requested scopes must be a subset of the profile's scopes; an
+    /// omitted scope uses exactly that granted set. Violations are refused
+    /// before HTTP. The host parses the standard OAuth response and stores
+    /// access+refresh under `extension:<install-id>:<provider-id>`. The raw token
+    /// body is never returned.
+    token-request: func(provider-id: string, form: string) -> result<oauth-token-outcome, capability-error>;
+
+    /// Revoke the token the host stored for this provider. Host-only.
+    revoke: func(provider-id: string) -> result<_, capability-error>;
+}
+
+/// Model providers this guest offers. An export: `list-providers` is static
+/// metadata (install-time discovery and load-time cross-check; the `provider`
+/// grant is the sole catalog authority), `request` serves one synchronous
+/// model request. Grant key `provider`, deny-by-default.
+interface provider-api {
+    use types.{extension-error, provider-spec};
+
+    list-providers: func() -> list<provider-spec>;
+    request: func(request: string) -> result<string, extension-error>;
+}
+
+/// Guest-to-host delta sink for a provider request, modeled on `progress`.
+/// Not separately grantable: valid only while a provider `request` call is on
+/// the stack.
+interface provider-stream {
+    use types.{provider-delta};
+
+    emit: func(delta: provider-delta);
+    emit-batch: func(deltas: list<provider-delta>);
+}
+
+/// Host-attributed streaming HTTP for provider requests. Strictly not a general
+/// HTTP client: it refuses any request that does not match the `provider`
+/// grant's exact scheme+host+path-prefix+method, injects a host-held credential
+/// only for such a request, strips guest-supplied auth/Host/framing headers,
+/// refuses redirects, enforces the grant's timeout and byte caps, and is scoped
+/// to the provider call (per-call handle table). Deny-by-default.
+interface provider-http {
+    use types.{capability-error};
+
+    open: func(request: string) -> result<u32, capability-error>;
+    /// `none` means EOF.
+    read: func(handle: u32, max-bytes: u64) -> result<option<list<u8>>, capability-error>;
+    close: func(handle: u32) -> result<_, capability-error>;
+}
+
+/// One pure text-to-text transformation of markdown. An export; the host owns
+/// theming, sanitization, scheduling, caching and the deny-all instance.
+/// Grant key `render`, deny-by-default.
+interface render-api {
+    use types.{extension-error};
+
+    transform-markdown: func(markdown: string) -> result<string, extension-error>;
+}
+
+/// What an extension contributes to the runtime.
+interface extension-api {
+    use types.{command-reply, command-result, command-spec, event, event-action, flag-spec, extension-error, shortcut-spec, tool-result, tool-spec, verdict};
+
+    /// Stable identity: log prefix, config key, root of tool names. Mirrors
+    /// `kiqi_extension::Extension::id`. The host cross-checks it against the directory
+    /// the component was installed under (grants are keyed by directory).
+    id: func() -> string;
+
+    /// Called on shutdown. Best effort; the host does not wait forever.
+    shutdown: func();
+
+    list-tools: func() -> list<tool-spec>;
+    call-tool: func(name: string, arguments: string) -> result<tool-result, extension-error>;
+
+    list-commands: func() -> list<command-spec>;
+    run-command: func(name: string, arguments: string) -> result<command-result, extension-error>;
+
+    /// Continue a selector/editor/prompt flow started by `run-command`.
+    ///
+    /// `flow-id` is the id the earlier `command-result` carried; the host
+    /// rejects a stale or unknown id before the guest is called.
+    continue-command: func(name: string, flow-id: string, reply: command-reply) -> result<command-result, extension-error>;
+    list-flags: func() -> list<flag-spec>;
+    list-shortcuts: func() -> list<shortcut-spec>;
+
+    on-event: func(event: event) -> event-action;
+
+    /// Return a replacement system prompt, or none to leave it unchanged.
+    before-agent-start: func(prompt: string) -> option<string>;
+
+    /// Gate points this extension wants to intervene at (e.g. `before-tool-call`).
+    list-probe-points: func() -> list<string>;
+    probe: func(point: string, payload: string) -> verdict;
+}
+
+/// An extension imports the capabilities it declares — the host satisfies all of
+/// them, with deny stubs where not granted — and exports `extension`.
+world extension {
+    import log;
+    import session-read;
+    import session-control;
+    import inject;
+    import ui;
+    import progress;
+    import net-http;
+    import fs;
+    import net-sockets;
+    import exec;
+    import proc;
+    // 0.8.0 capabilities: every one is deny-by-default, so the host always
+    // links a stub and the grant decides at call time.
+    import oauth-http;
+    import provider-stream;
+    import provider-http;
+
+    export extension-api;
+    export oauth-api;
+    export provider-api;
+    export render-api;
+}

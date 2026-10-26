@@ -32,7 +32,7 @@ cargo test  -p kiqi-ai -p kiqi-tools --lib --locked --all-features
 cargo test  --workspace --locked
 
 # wasm guest 的纯逻辑单测（宿主目标）：
-cargo test --manifest-path plugins/wasm/Cargo.toml -p kiqi-plan-mode-guest --locked
+cargo test --manifest-path extensions/wasm/Cargo.toml -p kiqi-plan-mode --locked
 
 # 脚本门禁（改到对应文件后必须重跑）：
 sh scripts/check-offline-lock.sh          # Cargo.lock 覆盖全部 feature
@@ -41,7 +41,7 @@ sh scripts/tests/install-sh.sh            # install.sh（离线可测）
 sh scripts/tests/release-sh.sh            # release.sh 与工作流一致
 sh scripts/check-release-targets.sh       # 发布矩阵三处消费清单一致
 sh scripts/sync-embedded-docs.sh          # 改了 CHANGELOG.md / README.md 后必须跑
-sh scripts/check-abi-sections.sh          # 改了 docs/design/plugin-abi.md 后必须跑
+sh scripts/check-abi-sections.sh          # 改了 docs/design/extension-abi.md 后必须跑
 sh scripts/tests/docs-install-path.sh     # 文档安装指令与清单一致（禁 crates.io 指令）
 sh scripts/tests/collab-entry-retry.sh    # walgit collab entry 只重试瞬态（本地-only，CI 不跑）
 sh scripts/tests/setup-collab-agents.sh   # 协作身份：一个 agent 一个 worktree + principal
@@ -69,7 +69,7 @@ MSRV 1.96（由 wasmtime 49 拉高，见根 `Cargo.toml` 的注释）。全部 c
 
 `ki` 是终端编码代理，`kiqi-*` 是拆开的 SDK；同一套实现既能嵌入自己的进程
 （`examples/minimal`、`examples/tools`），也能作为 wasm 插件扩展每个会话
-（`plugins/wasm/kiqi-*-guest`）。架构总览：`docs/architecture/overview.md`。
+（`extensions/wasm/kiqi-*`）。架构总览：`docs/architecture/overview.md`。
 
 ### crate 分层（依赖边自各 Cargo.toml 实核）
 
@@ -87,7 +87,7 @@ kiqi-cli                  # 组合以上（kiqi-acp 除外）：配置、认证�
 ```
 
 feature 门：`kiqi-ai` 的真实 HTTP provider 在 `cfg(feature = "providers")` 后，默认关
-（faux provider 让全部测试离线可跑）；`kiqi-cli` 默认开 `plugin-wasm` + `clipboard`。
+（faux provider 让全部测试离线可跑）；`kiqi-cli` 默认开 `extension-wasm` + `clipboard`。
 
 ### 一次请求的路径
 
@@ -106,27 +106,27 @@ TUI Enter → `interactive_tui/run.rs::run_prompt_streaming` →
 
 ### 插件通道（改动前先分清）
 
-- **一方插件只走 wasm**：`plugins/wasm/kiqi-*-guest`（组件模型，跑 wasmtime 沙箱），
-  契约 `plugins/kiqi-plugin.wit`（当前 `kiqi:plugin@0.7.1`）。授权文件
-  `$KI_AGENT_DIR/plugins/<id>/grants.json`，缺失 = 什么都不授予。
-  安装：`ki insmod --build plugins/wasm/kiqi-<name>-guest`。
-  **改能力时 trait 面（`kiqi_plugin`）与 WIT 面必须一起改**，
+- **一方插件只走 wasm**：`extensions/wasm/kiqi-*`（组件模型，跑 wasmtime 沙箱），
+  契约 `extensions/kiqi-extension.wit`（当前 `kiqi:extension@0.7.1`）。授权文件
+  `$KI_AGENT_DIR/extensions/<id>/grants.json`，缺失 = 什么都不授予。
+  安装：`ki insmod --build extensions/wasm/kiqi-<name>`。
+  **改能力时 trait 面（`kiqi_extension`）与 WIT 面必须一起改**，
   差异写进 guest README。
-- 编译期一方插件通道已于 2026-10-21 退役；**cdylib 通道（`kiqi-plugin-sdk` /
+- 编译期一方插件通道已于 2026-10-21 退役；**cdylib 通道（`kiqi-extension-sdk` /
   `ki dev` / `ki install` / `ki package` / `libloading` 装载）已于 2026-10-26 整体退役**——
   wasm 是唯一插件通道。三个宿主侧 crate 已合并为 **`kiqi-host`**（契约 + 派发脊柱
-  + `wasm` 子模块；trait 由 `Plugin` 改名为 `Extension`）：registry/translate/
+  + `wasm` 子模块；trait 由 `Extension` 改名为 `Extension`）：registry/translate/
   compiled sink/mailboxes 恒编译，wasmtime 只在 `wasm` feature 后；
   `src/abi.rs` 是内部事件总线的线格式。
 - **wasm guest 的单测**：guest 的**纯逻辑**可以带原生 `#[cfg(test)]` 单测，在
-  `plugins/wasm` 工作区里 `cargo test -p kiqi-<x>-guest` 就能在宿主目标上跑
+  `extensions/wasm` 工作区里 `cargo test -p kiqi-<x>` 就能在宿主目标上跑
   （实测可行：wit-bindgen 会为宿主目标生成桩）。**跨 WIT 边界的行为**（import
   调用、宿主侧效果）一律由 `crates/kiqi-host/tests/e2e.rs` 从宿主侧验证
   （`--features wasm`）。
 
 ### 设计文档
 
-- `docs/design/plugin-abi-handover.md` — **接手 wasm 插件层先读这个**
-- `docs/design/plugin-abi.md` — wasm 契约唯一真源，每轮改动加一节 `### 6.x`
-- `docs/design/plugin-trait.md` — 编译期 trait 契约（历史存档）
+- `docs/design/extension-abi-handover.md` — **接手 wasm 插件层先读这个**
+- `docs/design/extension-abi.md` — wasm 契约唯一真源，每轮改动加一节 `### 6.x`
+- `docs/design/extension-trait.md` — 编译期 trait 契约（历史存档）
 - 其余方案文件在 `docs/design/`；已发布内容看 `CHANGELOG.md`，方向看 `ROADMAP.md`

@@ -39,7 +39,7 @@ explanatory:
 
 The article that fits is
 [`02-rust-agent-runtime-architecture.md`](02-rust-agent-runtime-architecture.md)
-— specifically the sections on why the plugin ABI is a hand-written `#[repr(C)]`
+— specifically the sections on why the extension ABI is a hand-written `#[repr(C)]`
 contract and why crash recovery records frames rather than turns. Those are
 Rust design explanations, not product announcements.
 
@@ -134,7 +134,7 @@ Exact template, from their CONTRIBUTING.md:
 Entry to paste (with the CI badge, which they also ask for):
 
 ```markdown
-* [gqf2008/pi-rust](https://github.com/gqf2008/pi-rust) [[kiqi-agent](https://crates.io/crates/kiqi-agent)] - Library-first coding-agent runtime: composable provider, agent-loop, tool and session crates, plus a terminal agent and a stable `#[repr(C)]` plugin ABI. [![CI](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml)
+* [gqf2008/pi-rust](https://github.com/gqf2008/pi-rust) [[kiqi-agent](https://crates.io/crates/kiqi-agent)] - Library-first coding-agent runtime: composable provider, agent-loop, tool and session crates, plus a terminal agent and a stable `#[repr(C)]` extension ABI. [![CI](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml)
 ```
 
 **Where it goes:** `README.md` → `### Artificial Intelligence`. That section has

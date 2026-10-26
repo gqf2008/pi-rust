@@ -25,7 +25,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-# 1.96, not 1.78: `wasmtime = 49` (crates/kiqi-plugin-host) pulls
+# 1.96, not 1.78: `wasmtime = 49` (crates/kiqi-extension-host) pulls
 # cranelift-assembler-x64 0.136.2, which declares `rust-version = "1.96.0"`;
 # cargo refuses to resolve the workspace below that. Verified by building the
 # whole workspace on 1.94 (fails: "not supported by the following packages"),

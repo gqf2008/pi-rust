@@ -1,6 +1,6 @@
 # 扩展生命周期事件
 
-本文描述当前实现，替代旧的生命周期事件总线设计稿。事件标签与 trait 契约见 [kiqi-plugin](../../crates/kiqi-plugin/src/lib.rs)，C-ABI 线格式见 [abi.rs](../../crates/kiqi-extensions/src/abi.rs)，分发实现见 [translate.rs](../../crates/kiqi-extensions/src/translate.rs)。（cdylib 通道已于 2026-10-26 退役；下文提到「扩展」时，权威路径是 wasm guest。）
+本文描述当前实现，替代旧的生命周期事件总线设计稿。事件标签与 trait 契约见 [kiqi-extension](../../crates/kiqi-extension/src/lib.rs)，C-ABI 线格式见 [abi.rs](../../crates/kiqi-extensions/src/abi.rs)，分发实现见 [translate.rs](../../crates/kiqi-extensions/src/translate.rs)。（cdylib 通道已于 2026-10-26 退役；下文提到「扩展」时，权威路径是 wasm guest。）
 
 `BeforeTuiStart` 是 ki 特有的启动事件，在 TUI 初始化前调用。扩展可通过返回值否决启动。`SessionStart` 和 `SessionShutdown` 处理会话启动与关闭。生命周期事件使用无 payload 的 `EventEmpty`，不是旧设计稿中的 Rust 资源注入总线。
 

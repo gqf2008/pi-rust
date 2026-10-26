@@ -30,7 +30,7 @@ struct EventLogEntry<'a> {
     /// The event tag (`Debug` form, e.g. `BeforeTuiStart`, `MessageEnd`).
     event: String,
     /// The owning extension's display name.
-    plugin: &'a str,
+    extension: &'a str,
     /// `Continue` | `Error` | `Abort` | `Timeout` | `Panic` | `JoinFailed`.
     result: &'a str,
     duration_ms: u64,
@@ -89,7 +89,7 @@ impl EventLogger {
     fn record(
         &self,
         event: &str,
-        plugin: &str,
+        extension: &str,
         result: &'static str,
         duration_ms: u64,
         detail: Option<String>,
@@ -100,7 +100,7 @@ impl EventLogger {
         let entry = EventLogEntry {
             ts_ms: now_ms(),
             event: event.to_string(),
-            plugin,
+            extension,
             result,
             duration_ms,
             detail,
@@ -159,7 +159,7 @@ fn global() -> &'static RwLock<Option<EventLogger>> {
 /// disabled (the common case).
 pub fn log_handler_invocation(
     tag: crate::EventTag,
-    plugin: &str,
+    extension: &str,
     result: &'static str,
     duration_ms: u64,
     detail: Option<String>,
@@ -170,7 +170,7 @@ pub fn log_handler_invocation(
     };
     if let Some(logger) = guard.as_ref() {
         if logger.enabled() {
-            logger.record(&format!("{tag:?}"), plugin, result, duration_ms, detail);
+            logger.record(&format!("{tag:?}"), extension, result, duration_ms, detail);
         }
     }
 }
@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(lines.len(), 2);
         let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(first["event"], "BeforeTuiStart");
-        assert_eq!(first["plugin"], "rpc-ext");
+        assert_eq!(first["extension"], "rpc-ext");
         assert_eq!(first["result"], "Abort");
         assert_eq!(first["duration_ms"], 42);
         assert_eq!(first["detail"], "connect failed");

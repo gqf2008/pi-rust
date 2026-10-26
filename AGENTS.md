@@ -14,7 +14,7 @@
 ## 命名（改名已完成，勿回退）
 
 命令行是 **`ki`**，项目名是 **`kiqi`**。2026-10 的改名把 crate / 插件 / wasm guest
-目录、package 名、feature（`plugin-kiqi-*`）、Rust 路径（`kiqi_*`）、插件 id、
+目录、package 名、feature（`extension-kiqi-*`）、Rust 路径（`kiqi_*`）、插件 id、
 文件名、运行时目录（`.ki/`）与资源（`.ki/skills/`）统一到了 `kiqi-`。
 
 `git grep -i rpi` 只应命中这三类，**不要**「顺手清干净」：
@@ -31,6 +31,20 @@
 `website/data/packages.json` 里的 `"author"` 标签、包名、`install` 命令与
 `repository` 路径已统一为 `kiqi-`（main 里这一组本来就是全统一的 `rpi-`），
 只有仓库名 `pi-rust/rpi-package` 作为外部标识保留。
+
+## 术语：只用 extension（2026-10-26 用户裁定）
+
+代码、文档、CLI、安装目录、WIT 包里**不再出现 "plugin" 一词**。统一词汇：
+
+| 概念 | 用词 | 位置 |
+|---|---|---|
+| 可安装单位（用户面） | extension | `ki extension …`、`$KI_AGENT_DIR/extensions/<id>/`、`extension.wasm` |
+| 宿主侧实现契约（Rust） | `Extension` trait | `crates/kiqi-host` |
+| 组件模型产物 | guest | `extensions/wasm/kiqi-*` |
+| 契约身份（WIT） | `kiqi:extension@0.9.0` | `extensions/kiqi-extension.wit` |
+
+改名前的名字（`kiqi:plugin`、`plugins/`、`ki plugin`）**不再兼容**；已安装的 guest
+需要重新 `ki insmod`。历史提交信息与旧文档正文里的旧词是历史记录，不回改。
 
 ## 上游已分叉，与本项目无关（**重要，勿误判**）
 
@@ -65,7 +79,7 @@ cargo check --workspace --all-targets --all-features --locked
 # 测试被非默认 feature 挡住的 crate：`cargo test -p kiqi-ai` 只编译 47 条而不是 206 条
 # （整个 anthropic provider 在 `cfg(feature = "providers")` 下），单跑该包会静默跳过。
 # 上面的 `--all-features` 那一步只 `check` 整仓，编译不过或跑挂的 feature 门测试
-# 在那一步是隐形的。（`kiqi-plugin-sdk` 的同类提示随 cdylib 通道退役删除。）
+# 在那一步是隐形的。（`kiqi-extension-sdk` 的同类提示随 cdylib 通道退役删除。）
 cargo test  -p kiqi-ai -p kiqi-tools --lib --locked --all-features
 cargo test  --workspace --locked
 # Cargo.lock 必须覆盖全部 feature 的依赖（离线可解析）；CI 在线跑，
@@ -85,7 +99,7 @@ sh scripts/tests/setup-collab-agents.sh
 sh scripts/tests/docs-install-path.sh
 # 文档快照（改了 CHANGELOG.md / README.md 等必须重跑，CI 会比对）
 sh scripts/sync-embedded-docs.sh
-# `plugin-abi.md` 的 §6.x 编号连续性，以及全仓 `§6.N` 引用是否都能落到真实小节
+# `extension-abi.md` 的 §6.x 编号连续性，以及全仓 `§6.N` 引用是否都能落到真实小节
 # （曾经的缺陷：四处引用 §6.34，而它从未被写过）
 sh scripts/check-abi-sections.sh
 # CI 里每一条 cargo build/check/test 都必须带 --locked（曾经的缺陷：
@@ -103,8 +117,8 @@ sh scripts/check-install-version-hints.sh
 
 注意：goal 测试已用子进程 + tempdir 隔离，跑 `cargo test -p kiqi-cli` 不再改写源码树
 （`crates/kiqi-cli/.ki/` 已移出索引并被 `.gitignore` 的 `**/.ki/*` 忽略）。
-wasm guest 的**纯逻辑**可带原生单测（`plugins/wasm` 工作区内
-`cargo test -p kiqi-<x>-guest`，跑在宿主目标上）；**跨 WIT 边界的行为**一律由
+wasm guest 的**纯逻辑**可带原生单测（`extensions/wasm` 工作区内
+`cargo test -p kiqi-<x>`，跑在宿主目标上）；**跨 WIT 边界的行为**一律由
 `crates/kiqi-host/tests/e2e.rs` 从宿主侧验证（需 `--features wasm`）。
 
 ### 在 worktree 里跑门禁要先隔离 target
@@ -138,26 +152,26 @@ CARGO_TARGET_DIR=/tmp/ki-base-target cargo test -p kiqi-cli --lib --locked   # �
 
 ## 插件通道（改动前先分清）
 
-一方插件**只走 wasm**：`plugins/wasm/kiqi-*-guest`，组件模型 + `plugins/kiqi-plugin.wit`
+一方插件**只走 wasm**：`extensions/wasm/kiqi-*`，组件模型 + `extensions/kiqi-extension.wit`
 契约，跑在 wasmtime 沙箱里，按授权拿能力；契约版本见 WIT 的 `package` 行。
 
-**编译期一方插件通道已于 2026-10-21 退役**：`plugins/kiqi-*` crate、`plugin-kiqi-*`
+**编译期一方插件通道已于 2026-10-21 退役**：`extensions/kiqi-*` crate、`extension-kiqi-*`
 feature、CI 的 opt-in feature 测试与 cdylib 构建都已删除。**cdylib 通道已于 2026-10-26
-整体退役**（`kiqi-plugin-sdk`、`ki dev`、`ki install`、`ki package`、`libloading` 装载与
-`kiqi_voice`/plugin-stub 的 e2e 随之下线）——wasm 是唯一插件通道。
+整体退役**（`kiqi-extension-sdk`、`ki dev`、`ki install`、`ki package`、`libloading` 装载与
+`kiqi_voice`/extension-stub 的 e2e 随之下线）——wasm 是唯一插件通道。
 权限策略由宿主拥有（`crates/kiqi-cli/src/permissions.rs`）。
 
-安装 wasm 版：`ki insmod --build plugins/wasm/kiqi-<name>-guest`。**新增/改插件能力时，
-trait 面（`kiqi_plugin`）与 WIT 面必须一起改**，差异要写进 guest README。
+安装 wasm 版：`ki insmod --build extensions/wasm/kiqi-<name>`。**新增/改插件能力时，
+trait 面（`kiqi_extension`）与 WIT 面必须一起改**，差异要写进 guest README。
 
 ## 设计文档在哪
 
-- `docs/design/plugin-abi.md`：wasm 契约与能力模型的**唯一真源**；每轮改动加一节 `### 6.x`，
+- `docs/design/extension-abi.md`：wasm 契约与能力模型的**唯一真源**；每轮改动加一节 `### 6.x`，
   §7 是待定项。
-- `docs/design/plugin-trait.md`：编译期 trait 契约（**历史存档**；编译期与 cdylib
+- `docs/design/extension-trait.md`：编译期 trait 契约（**历史存档**；编译期与 cdylib
   通道均已退役）。
-- `docs/design/plugin-abi-handover.md`：**接手先读这个**（现状/能力表/上手命令/已知限制/提交轨迹）。
-- 未落地的大改走单独方案文件（如 `docs/design/plugin-process-capability.md`）。
+- `docs/design/extension-abi-handover.md`：**接手先读这个**（现状/能力表/上手命令/已知限制/提交轨迹）。
+- 未落地的大改走单独方案文件（如 `docs/design/extension-process-capability.md`）。
 
 ## 硬规矩
 

@@ -102,7 +102,7 @@ async fn build_session(
                 ));
             }
         };
-    // Plugins read the process cwd at call time, so the session's cwd must
+    // Extensions read the process cwd at call time, so the session's cwd must
     // become the process cwd. A chdir that cannot land (missing directory, no
     // search permission) would silently re-root every relative path the
     // session touches — fail the session/new loudly instead of running
@@ -129,7 +129,7 @@ async fn build_session(
     )
     .await
     .map_err(|error| format!("harness build failed: {error}"))?;
-    // A plugin declaring `{"ownsStdio": true}` owns this process's stdio (it
+    // An extension declaring `{"ownsStdio": true}` owns this process's stdio (it
     // is an ACP/MCP stdio server itself). The TUI/RPC arms detect this after
     // load and yield the streams (`app.rs` post-load stdin claim); an ACP
     // server cannot — stdout IS the JSON-RPC wire — so the only honest move

@@ -38,7 +38,7 @@ Rule, quoted from its contributing guide:
 > more people aware of those projects.
 
 Measured: **32 stars**, forks 4, subscribers 0. Peak crate downloads **1112**
-(`kiqi-telemetry`), then `kiqi-ai` 1032, `kiqi-agent` 913, `kiqi-plugin-sdk` 837,
+(`kiqi-telemetry`), then `kiqi-ai` 1032, `kiqi-agent` 913, `kiqi-extension-sdk` 837,
 `kiqi-tools` 710, `kiqi-harness` 628, `kiqi-tui` 531, `kiqi-extensions` 523,
 `kiqi-cli` 469.
 

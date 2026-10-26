@@ -1,4 +1,4 @@
-//! Generic passive plugin panels. No plugin names or domain metrics live here.
+//! Generic passive extension panels. No extension names or domain metrics live here.
 use super::*;
 use kiqi_host::{ExtensionPanel, PanelAnchor, PanelLayout};
 use kiqi_tui::ansi::visible_width;
@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Panel(Mutex<ExtensionPanel>);
-/// Generic plugin rows below the built-in usage footer, in both terminal modes.
+/// Generic extension rows below the built-in usage footer, in both terminal modes.
 pub(super) struct FooterPanels(pub kiqi_host::ExtensionStatusMailbox);
 impl Component for FooterPanels {
     fn render(&self, width: usize) -> Vec<String> {
@@ -331,7 +331,7 @@ impl Panels {
         specs.retain(|_, spec| {
             spec.layout == PanelLayout::Overlay && viewport.0 >= spec.min_screen_width
         });
-        // Passive plugin panels belong to the transcript. Leave the editor,
+        // Passive extension panels belong to the transcript. Leave the editor,
         // footer and active input dialogs visible even for bottom anchors.
         let bottom_margin = if self.dock.is_some() {
             screen_height.saturating_sub(viewport.1)
@@ -600,7 +600,7 @@ mod tests {
         assert!(Arc::ptr_eq(&tui.get_focus().unwrap(), &editor));
     }
     #[test]
-    fn arbitrary_plugin_content_is_sanitized_and_fits_unicode_and_height_limits() {
+    fn arbitrary_extension_content_is_sanitized_and_fits_unicode_and_height_limits() {
         let spec:ExtensionPanel=serde_json::from_value(serde_json::json!({"version":1,"width":44,"maxHeight":4,
             "title":"插件\u{1b}[31m标题\u{1b}[0m","lines":["1 轮 87 步 252 tok/s","中文宽度测试".repeat(30),"truncated"]})).unwrap();
         let panel = Panel(Mutex::new(spec));

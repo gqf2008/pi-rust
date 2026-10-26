@@ -10,7 +10,7 @@ Current release: **0.3.0**. Install with `cargo install kiqi-cli`.
 
 `ki` is a Rust-native, library-first coding-agent runtime: the core chain
 (`kiqi-telemetry` → `kiqi-ai` → `kiqi-agent` → `kiqi-tools` → `kiqi-harness` →
-`kiqi-cli`) plus `kiqi-tui` and `kiqi-host`, and a terminal CLI built on them. Plugins are wasm guests
+`kiqi-cli`) plus `kiqi-tui` and `kiqi-host`, and a terminal CLI built on them. Extensions are wasm guests
 (the cdylib channel was retired on 2026-10-26).
 
 What is solid today:
@@ -20,7 +20,7 @@ What is solid today:
 - Anthropic Messages and OpenAI-compatible providers, plus custom gateways via
   `models.json`.
 - Durable JSONL sessions with branching, compaction and crash recovery.
-- A sandboxed wasm plugin channel (`plugins/kiqi-plugin.wit`) with grants,
+- A sandboxed wasm extension channel (`extensions/kiqi-extension.wit`) with grants,
   lifecycle events and veto support.
 - Remote mode: a headless `--server` and a zero-local-resource `--connect`
   client.
@@ -72,25 +72,25 @@ at **17.7 ms** from spawn to cold start (native Pi: 189.5 ms). Core startup is
 essentially just process creation — config, session store, tool registry and the
 harness are negligible (ki's `--version` and its cold start differ by 0.2 ms).
 
-The one real startup cost is **plugin loading**, and it scales with what the user
+The one real startup cost is **extension loading**, and it scales with what the user
 installed: the same measurement reads ~100 ms on a machine whose
-`~/.ki/agent/extensions` holds 25 plugin DLLs. So the work here is:
+`~/.ki/agent/extensions` holds 25 extension DLLs. So the work here is:
 
 - make extension discovery and loading lazy (or parallel) so startup does not
-  scale with the number of installed plugins;
+  scale with the number of installed extensions;
 - keep the RPC `ready` marker honest — it must keep meaning "commands are being
   accepted", not "the work was deferred somewhere later".
 
 Reproduce with `node scripts/bench-vs-pi.mjs`. Set **both** tools' isolation
 variables (`KI_*` for ki, `PI_*` for pi) or the ki number will include your
-global plugins.
+global extensions.
 
 Still unmeasured and worth adding: tool-loop throughput, memory growth over a
 long session, compaction cost, and interactive TUI frame cost.
 
 ## Later
 
-- **Sandboxing.** Plugin code and `bash` currently run with the user's full
+- **Sandboxing.** Extension code and `bash` currently run with the user's full
   privileges by design. A documented sandbox profile (seccomp/AppContainer or
   a container runner) would make the agent safer to point at untrusted
   repositories. This is a design problem, not a patch.

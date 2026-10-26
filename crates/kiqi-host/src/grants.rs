@@ -1,9 +1,9 @@
-//! Per-plugin capability grants — the **user's** authorization.
+//! Per-extension capability grants — the **user's** authorization.
 //!
-//! The host never authorizes on a plugin's behalf: a plugin gets exactly what
+//! The host never authorizes on an extension's behalf: an extension gets exactly what
 //! the user recorded here, and a missing file grants nothing. The file lives at
-//! `$KI_AGENT_DIR/plugins/<id>/grants.json` (default
-//! `~/.ki/agent/plugins/<id>/grants.json`), so both the wasm host (which
+//! `$KI_AGENT_DIR/extensions/<id>/grants.json` (default
+//! `~/.ki/agent/extensions/<id>/grants.json`), so both the wasm host (which
 //! enforces it) and the CLI (which edits it) share this one type without either
 //! depending on the other.
 
@@ -16,7 +16,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// What the user authorized for one plugin.
+/// What the user authorized for one extension.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Grants {
@@ -69,7 +69,7 @@ pub struct Grants {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NetHttpGrant {
-    /// Hosts the plugin may reach; `*` allows any.
+    /// Hosts the extension may reach; `*` allows any.
     pub hosts: Vec<String>,
 }
 
@@ -87,29 +87,29 @@ pub const EXEC_TIMEOUT_MAX_SECONDS: u64 = 300;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExecCwd {
-    /// Inside `plugins/<id>/data/` — the default, and the same jail `fs` uses.
+    /// Inside `extensions/<id>/data/` — the default, and the same jail `fs` uses.
     #[default]
-    PluginData,
+    ExtensionData,
     /// The project directory the session runs in (the host process's working
-    /// directory). Needed by diagnostic plugins that run `cargo`/`clippy`
+    /// directory). Needed by diagnostic extensions that run `cargo`/`clippy`
     /// against the user's tree.
     Project,
 }
 
 impl ExecCwd {
-    /// The CLI spelling (`--cwd plugin-data|project`).
+    /// The CLI spelling (`--cwd extension-data|project`).
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
-            "plugin-data" => Ok(ExecCwd::PluginData),
+            "extension-data" => Ok(ExecCwd::ExtensionData),
             "project" => Ok(ExecCwd::Project),
             other => Err(format!(
-                "exec cwd must be `plugin-data` or `project`, got `{other}`"
+                "exec cwd must be `extension-data` or `project`, got `{other}`"
             )),
         }
     }
 
-    fn is_plugin_data(&self) -> bool {
-        matches!(self, ExecCwd::PluginData)
+    fn is_extension_data(&self) -> bool {
+        matches!(self, ExecCwd::ExtensionData)
     }
 }
 
@@ -124,11 +124,11 @@ fn is_default_exec_timeout(value: &u64) -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ExecGrant {
-    /// Command names (no path, no shell) the plugin may run; `*` allows any.
+    /// Command names (no path, no shell) the extension may run; `*` allows any.
     pub commands: Vec<String>,
-    /// Where the child may start. Absent in older grant files = `plugin-data`,
+    /// Where the child may start. Absent in older grant files = `extension-data`,
     /// so an existing grant keeps its old meaning unchanged.
-    #[serde(default, skip_serializing_if = "ExecCwd::is_plugin_data")]
+    #[serde(default, skip_serializing_if = "ExecCwd::is_extension_data")]
     pub cwd: ExecCwd,
     /// Wall-clock budget in seconds for one call; absent = the default,
     /// capped at [`EXEC_TIMEOUT_MAX_SECONDS`].
@@ -154,7 +154,7 @@ pub const PROC_TIMEOUT_MAX_SECONDS: u64 = 1800;
 pub const PROC_MAX_OPEN_DEFAULT: u32 = 100;
 
 /// The hard ceiling on `max-open` — the resource is the machine's process
-/// table, not something the sandbox can carry for the plugin.
+/// table, not something the sandbox can carry for the extension.
 pub const PROC_MAX_OPEN_MAX: u32 = 256;
 
 fn default_proc_timeout() -> u64 {
@@ -220,8 +220,8 @@ where
 /// The `proc` policy: which commands, in which scope, for how long, and how
 /// many at once. Same shape as [`ExecGrant`] plus the concurrency bound.
 /// The `fs` policy: which root file access is jailed to. Legacy files carry
-/// the bare `true` = the plugin's own data directory (the historical default);
-/// `--cwd project` opts a plugin into the project tree, the same scope
+/// the bare `true` = the extension's own data directory (the historical default);
+/// `--cwd project` opts an extension into the project tree, the same scope
 /// `exec`/`proc` use.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -240,7 +240,7 @@ where
     Ok(match value {
         None | Some(Value::Bool(false)) | Some(Value::Null) => None,
         Some(Value::Bool(true)) => Some(FsGrant {
-            cwd: ExecCwd::PluginData,
+            cwd: ExecCwd::ExtensionData,
         }),
         Some(other) => {
             Some(serde_json::from_value::<FsGrant>(other).map_err(serde::de::Error::custom)?)
@@ -292,10 +292,10 @@ where
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ProcGrant {
-    /// Command names (no path, no shell) the plugin may spawn; `*` allows any.
+    /// Command names (no path, no shell) the extension may spawn; `*` allows any.
     pub commands: Vec<String>,
     /// Where a child may start — same scope rule as `exec`.
-    #[serde(default, skip_serializing_if = "ExecCwd::is_plugin_data")]
+    #[serde(default, skip_serializing_if = "ExecCwd::is_extension_data")]
     pub cwd: ExecCwd,
     /// Wall-clock budget for one child; absent = the default, capped at
     /// [`PROC_TIMEOUT_MAX_SECONDS`].
@@ -337,7 +337,7 @@ impl Default for ExecGrant {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NetSocketsGrant {
-    /// Hosts the plugin may open a TCP connection to; `*` allows any.
+    /// Hosts the extension may open a TCP connection to; `*` allows any.
     pub hosts: Vec<String>,
 }
 
@@ -415,7 +415,7 @@ pub struct OAuthProviderProfile {
     pub supports_pkce: bool,
 }
 
-/// The `oauth` policy: the profiles a plugin may drive, plus the flow budget.
+/// The `oauth` policy: the profiles an extension may drive, plus the flow budget.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct OAuthGrant {
@@ -610,7 +610,7 @@ fn is_default_https_scheme(value: &String) -> bool {
 /// deliberately keeps zero internal dependencies, so the list is spelled here
 /// instead of importing the type; `faux` and any unknown spelling are rejected
 /// the same way `Api::Faux`/`Api::Other(_)` would be — a grant must name a real
-/// wire API a plugin can speak.
+/// wire API an extension can speak.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderApi {
     OpenaiCompletions,
@@ -707,7 +707,7 @@ pub struct ProviderEndpoint {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ProviderProfile {
-    /// The provider id (= the plugin's install-dir id, checked by the host).
+    /// The provider id (= the extension's install-dir id, checked by the host).
     pub id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub display_name: String,
@@ -1104,11 +1104,11 @@ pub const RESOURCES_KIND_SKILLS: &str = "skills";
 /// See [`RESOURCES_KIND_SKILLS`].
 pub const RESOURCES_KIND_PROMPTS: &str = "prompts";
 
-/// Default number of resources one plugin may contribute.
+/// Default number of resources one extension may contribute.
 pub const RESOURCES_MAX_ITEMS_DEFAULT: u32 = 64;
 /// The hard ceiling on `max-items`.
 pub const RESOURCES_MAX_ITEMS_MAX: u32 = 256;
-/// Default total bytes of resources one plugin may contribute.
+/// Default total bytes of resources one extension may contribute.
 pub const RESOURCES_MAX_BYTES_DEFAULT: u64 = 1024 * 1024;
 /// The hard ceiling on `max-bytes`.
 pub const RESOURCES_MAX_BYTES_MAX: u64 = 16 * 1024 * 1024;
@@ -1342,7 +1342,7 @@ pub struct ProviderRequestPolicy {
     pub patch_timeout: std::time::Duration,
 }
 
-/// Resolve the enforcement snapshot for one plugin's `provider-request` grant.
+/// Resolve the enforcement snapshot for one extension's `provider-request` grant.
 ///
 /// `None` means neither observation nor patching is authorized: the guest is
 /// never called for a provider request at all. The snapshot is computed once at
@@ -1427,9 +1427,11 @@ fn validate_exact_host(field: &str, host: &str) -> Result<(), String> {
 /// two faces of `oauth`; the `render-api` export maps to `render`, the package
 /// `resources` convention to `resources`, and the provider-request hook to
 /// `provider-request`. The bare interface name and the
-/// `kiqi:plugin/<name>@<version>` form are both accepted.
+/// `kiqi:extension/<name>@<version>` form are both accepted.
 pub fn grant_key_for_interface(interface: &str) -> Option<&'static str> {
-    let name = interface.strip_prefix("kiqi:plugin/").unwrap_or(interface);
+    let name = interface
+        .strip_prefix("kiqi:extension/")
+        .unwrap_or(interface);
     let name = name.split('@').next().unwrap_or(name);
     match name {
         "provider-http" | "provider-stream" | "provider-api" => Some("provider"),
@@ -1446,7 +1448,7 @@ pub fn grant_key_for_interface(interface: &str) -> Option<&'static str> {
 /// key) gets an error, not a silently dropped flag.
 #[derive(Debug, Clone, Default)]
 pub struct GrantOptions {
-    /// `--cwd plugin-data|project` (fs, exec and proc).
+    /// `--cwd extension-data|project` (fs, exec and proc).
     pub cwd: Option<ExecCwd>,
     /// `--timeout <seconds>` (exec and proc; each has its own bounds).
     pub timeout_seconds: Option<u64>,
@@ -1455,11 +1457,11 @@ pub struct GrantOptions {
 }
 
 impl Grants {
-    /// Read the user's grants for `plugin_id`; a missing (or unreadable, or
+    /// Read the user's grants for `extension_id`; a missing (or unreadable, or
     /// malformed) file means nothing is granted.
-    pub fn load_for(plugin_id: &str) -> Self {
+    pub fn load_for(extension_id: &str) -> Self {
         match agent_dir() {
-            Some(root) => Self::load_for_at(&root, plugin_id),
+            Some(root) => Self::load_for_at(&root, extension_id),
             None => Self::default(),
         }
     }
@@ -1467,8 +1469,8 @@ impl Grants {
     /// [`Self::load_for`] against an explicit agent root, so a caller (a test, or
     /// a CLI that was handed a directory) never has to write a process-global
     /// environment variable to redirect it.
-    pub fn load_for_at(root: &std::path::Path, plugin_id: &str) -> Self {
-        let path = grants_path_at(root, plugin_id);
+    pub fn load_for_at(root: &std::path::Path, extension_id: &str) -> Self {
+        let path = grants_path_at(root, extension_id);
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
@@ -1481,19 +1483,19 @@ impl Grants {
         grants.validated()
     }
 
-    /// Write the grants, creating `plugins/<id>/` as needed.
-    pub fn save_for(plugin_id: &str, grants: &Grants) -> Result<(), String> {
+    /// Write the grants, creating `extensions/<id>/` as needed.
+    pub fn save_for(extension_id: &str, grants: &Grants) -> Result<(), String> {
         let root = agent_dir().ok_or("cannot resolve the agent directory")?;
-        Self::save_for_at(&root, plugin_id, grants)
+        Self::save_for_at(&root, extension_id, grants)
     }
 
     /// [`Self::save_for`] against an explicit agent root.
     pub fn save_for_at(
         root: &std::path::Path,
-        plugin_id: &str,
+        extension_id: &str,
         grants: &Grants,
     ) -> Result<(), String> {
-        let path = grants_path_at(root, plugin_id);
+        let path = grants_path_at(root, extension_id);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("create {}: {error}", parent.display()))?;
@@ -1611,7 +1613,7 @@ impl Grants {
                 // The default stays the data-dir jail; `--cwd project` opts
                 // into the project tree.
                 self.fs = Some(FsGrant {
-                    cwd: options.cwd.unwrap_or(ExecCwd::PluginData),
+                    cwd: options.cwd.unwrap_or(ExecCwd::ExtensionData),
                 });
             }
             "exec" => {
@@ -1872,7 +1874,7 @@ pub fn allows(list: &[String], value: &str) -> bool {
 ///
 /// Reading only `KI_AGENT_DIR` — a name nothing in the tree sets — meant an
 /// isolated run (`KI_CODING_AGENT_DIR=/tmp/profile ki`) still discovered, and
-/// granted, the plugins installed in the default profile.
+/// granted, the extensions installed in the default profile.
 pub fn agent_dir() -> Option<PathBuf> {
     for var in ["KI_AGENT_DIR", "KI_CODING_AGENT_DIR"] {
         if let Some(dir) = std::env::var_os(var) {
@@ -1882,49 +1884,49 @@ pub fn agent_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ki").join("agent"))
 }
 
-/// Where a plugin's grants live.
-pub fn grants_path(plugin_id: &str) -> Option<PathBuf> {
-    agent_dir().map(|root| grants_path_at(&root, plugin_id))
+/// Where an extension's grants live.
+pub fn grants_path(extension_id: &str) -> Option<PathBuf> {
+    agent_dir().map(|root| grants_path_at(&root, extension_id))
 }
 
-/// Where a plugin's grants live under an explicit agent root.
-pub fn grants_path_at(root: &std::path::Path, plugin_id: &str) -> PathBuf {
-    plugin_dir_at(root, plugin_id).join("grants.json")
+/// Where an extension's grants live under an explicit agent root.
+pub fn grants_path_at(root: &std::path::Path, extension_id: &str) -> PathBuf {
+    extension_dir_at(root, extension_id).join("grants.json")
 }
 
-/// A plugin's own directory (`plugins/<id>/`), which holds its `plugin.wasm`
+/// An extension's own directory (`extensions/<id>/`), which holds its `extension.wasm`
 /// and `grants.json`.
-pub fn plugin_dir(plugin_id: &str) -> Option<PathBuf> {
-    agent_dir().map(|root| plugin_dir_at(&root, plugin_id))
+pub fn extension_dir(extension_id: &str) -> Option<PathBuf> {
+    agent_dir().map(|root| extension_dir_at(&root, extension_id))
 }
 
-/// A plugin's own directory under an explicit agent root.
-pub fn plugin_dir_at(root: &std::path::Path, plugin_id: &str) -> PathBuf {
-    root.join("plugins").join(plugin_id)
+/// An extension's own directory under an explicit agent root.
+pub fn extension_dir_at(root: &std::path::Path, extension_id: &str) -> PathBuf {
+    root.join("extensions").join(extension_id)
 }
 
-/// The infix `ki plugin uninstall` renames a plugin directory with.
+/// The infix `ki extension uninstall` renames an extension directory with.
 pub const UNINSTALLED_INFIX: &str = ".removed-";
 
-/// True when a directory under `plugins/` is one `uninstall` moved aside.
+/// True when a directory under `extensions/` is one `uninstall` moved aside.
 ///
 /// The loader and the installer must agree: a moved-aside directory still
-/// holds its `plugin.wasm` and `grants.json`, so treating it as installed
-/// would keep loading (and granting) a plugin the user asked to remove.
+/// holds its `extension.wasm` and `grants.json`, so treating it as installed
+/// would keep loading (and granting) an extension the user asked to remove.
 pub fn is_uninstalled_dir_name(name: &str) -> bool {
     name.contains(UNINSTALLED_INFIX)
 }
 
-/// Plugin ids that have a directory under `plugins/`.
-pub fn installed_plugins() -> Vec<String> {
+/// Extension ids that have a directory under `extensions/`.
+pub fn installed_extensions() -> Vec<String> {
     agent_dir()
-        .map(|root| installed_plugins_at(&root))
+        .map(|root| installed_extensions_at(&root))
         .unwrap_or_default()
 }
 
-/// Plugin ids with a directory under `root/plugins/`.
-pub fn installed_plugins_at(root: &std::path::Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(root.join("plugins")) else {
+/// Extension ids with a directory under `root/extensions/`.
+pub fn installed_extensions_at(root: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root.join("extensions")) else {
         return Vec::new();
     };
     let mut ids: Vec<String> = entries
@@ -1943,7 +1945,7 @@ mod tests {
 
     #[test]
     fn missing_file_grants_nothing() {
-        let grants = Grants::load_for("no-such-plugin-here");
+        let grants = Grants::load_for("no-such-extension-here");
         assert_eq!(grants, Grants::default());
         assert!(grants.granted().is_empty());
         assert!(!grants.allows_host("example.com"));
@@ -2024,7 +2026,7 @@ mod tests {
         assert!(!grants.granted().contains(&"exec"));
     }
 
-    /// The exec policy: defaults preserve the pre-scope meaning (plugin data
+    /// The exec policy: defaults preserve the pre-scope meaning (extension data
     /// dir, 30s), and only `exec` accepts the scope/budget options.
     #[test]
     fn exec_grant_carries_cwd_scope_and_time_budget() {
@@ -2049,7 +2051,7 @@ mod tests {
             .grant("exec", vec!["echo".to_string()], GrantOptions::default())
             .unwrap();
         let grant = grants.exec.as_ref().unwrap();
-        assert_eq!(grant.cwd, ExecCwd::PluginData);
+        assert_eq!(grant.cwd, ExecCwd::ExtensionData);
         assert_eq!(grant.timeout_seconds, EXEC_TIMEOUT_DEFAULT_SECONDS);
 
         // Validation: the budget is bounded, and only exec takes the options.
@@ -2088,7 +2090,7 @@ mod tests {
             .is_err());
     }
 
-    /// The `proc` policy: its own defaults (600s / 100 open / plugin-data), its
+    /// The `proc` policy: its own defaults (600s / 100 open / extension-data), its
     /// own bounds, and options that belong to the other capabilities are
     /// rejected rather than ignored.
     #[test]
@@ -2102,7 +2104,7 @@ mod tests {
             )
             .unwrap();
         let grant = grants.proc.as_ref().unwrap();
-        assert_eq!(grant.cwd, ExecCwd::PluginData);
+        assert_eq!(grant.cwd, ExecCwd::ExtensionData);
         assert_eq!(grant.timeout_seconds, PROC_TIMEOUT_DEFAULT_SECONDS);
         assert_eq!(grant.max_open, PROC_MAX_OPEN_DEFAULT);
         assert!(grants.allows_proc_command("codegraph"));
@@ -2199,7 +2201,11 @@ mod tests {
         let mut grants = Grants::default();
         grants.grant("fs", vec![], GrantOptions::default()).unwrap();
         let grant = grants.fs.as_ref().unwrap();
-        assert_eq!(grant.cwd, ExecCwd::PluginData, "default is the data jail");
+        assert_eq!(
+            grant.cwd,
+            ExecCwd::ExtensionData,
+            "default is the data jail"
+        );
 
         grants
             .grant(
@@ -2224,7 +2230,7 @@ mod tests {
         let legacy: Grants = serde_json::from_value(serde_json::json!({"fs": true})).unwrap();
         assert_eq!(
             legacy.fs.as_ref().unwrap().cwd,
-            ExecCwd::PluginData,
+            ExecCwd::ExtensionData,
             "an old \"fs\": true keeps its historical meaning"
         );
         assert!(legacy.allows_host("anything") == false || true); // fs grants no hosts
@@ -2265,7 +2271,7 @@ mod tests {
         let grants: Grants = serde_json::from_value(old).unwrap();
         let grant = grants.exec.as_ref().unwrap();
         assert_eq!(grant.commands, vec!["cargo", "git"]);
-        assert_eq!(grant.cwd, ExecCwd::PluginData);
+        assert_eq!(grant.cwd, ExecCwd::ExtensionData);
         assert_eq!(grant.timeout_seconds, EXEC_TIMEOUT_DEFAULT_SECONDS);
 
         // The default fields stay out of the file (minimal grants.json), and
@@ -2299,7 +2305,10 @@ mod tests {
         assert_eq!(reparsed, grants);
 
         assert_eq!(ExecCwd::parse("project").unwrap(), ExecCwd::Project);
-        assert_eq!(ExecCwd::parse("plugin-data").unwrap(), ExecCwd::PluginData);
+        assert_eq!(
+            ExecCwd::parse("extension-data").unwrap(),
+            ExecCwd::ExtensionData
+        );
         assert!(ExecCwd::parse("/abs/path").is_err());
     }
 
@@ -2358,7 +2367,7 @@ mod tests {
     #[test]
     fn a_zero_budget_file_grants_nothing() {
         let root = std::env::temp_dir().join(format!("kiqi-zero-grants-{}", std::process::id()));
-        let dir = plugin_dir_at(&root, "zero");
+        let dir = extension_dir_at(&root, "zero");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("grants.json"),
@@ -2859,7 +2868,7 @@ mod tests {
     #[test]
     fn a_hand_edited_invalid_policy_is_treated_as_absent() {
         let root = std::env::temp_dir().join(format!("kiqi-invalid-grants-{}", std::process::id()));
-        let dir = plugin_dir_at(&root, "invalid");
+        let dir = extension_dir_at(&root, "invalid");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("grants.json"),
@@ -2896,13 +2905,13 @@ mod tests {
     fn interfaces_map_to_their_grant_keys() {
         assert_eq!(grant_key_for_interface("provider-http"), Some("provider"));
         assert_eq!(
-            grant_key_for_interface("kiqi:plugin/provider-stream@0.8.0"),
+            grant_key_for_interface("kiqi:extension/provider-stream@0.8.0"),
             Some("provider")
         );
         assert_eq!(grant_key_for_interface("oauth-http"), Some("oauth"));
         assert_eq!(grant_key_for_interface("oauth-api"), Some("oauth"));
         assert_eq!(
-            grant_key_for_interface("kiqi:plugin/provider-api@0.8.0"),
+            grant_key_for_interface("kiqi:extension/provider-api@0.8.0"),
             Some("provider")
         );
         assert_eq!(grant_key_for_interface("render-api"), Some("render"));

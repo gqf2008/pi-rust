@@ -238,7 +238,7 @@ impl ToolExecutionComponent {
         self.bump();
     }
 
-    /// Install plain task rows; the host owns plugin snapshot parsing.
+    /// Install plain task rows; the host owns extension snapshot parsing.
     pub fn set_todo_state(&self, rows: Vec<(String, String)>) {
         *self.todo_state.lock().unwrap() = Some(rows);
         self.bump();
@@ -1473,7 +1473,7 @@ mod tests {
     }
 
     /// Unknown tools fall back to the first string-valued arg field rather
-    /// than showing nothing — keeps the header useful for plugin tools whose
+    /// than showing nothing — keeps the header useful for extension tools whose
     /// arg shapes the render crate doesn't know.
     #[test]
     fn test_tool_header_unknown_tool_falls_back() {

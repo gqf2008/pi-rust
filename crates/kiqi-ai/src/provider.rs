@@ -245,7 +245,7 @@ pub trait ProviderHooks: Send + Sync {
     /// This is the seam pi calls `transform_context`
     /// (`harness/execution/assistant.ts:142`), and it fires on **every** provider
     /// request of a run — the same cadence as [`Self::before_request`], and the
-    /// reason a plugin can change the prompt for one turn without the change
+    /// reason an extension can change the prompt for one turn without the change
     /// sticking to the session. It runs before `before_request` so a prompt the
     /// hook installs is what that request carries.
     ///
@@ -302,7 +302,7 @@ impl ProviderHooks for NoopProviderHooks {}
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextPatch {
     /// Replacement system prompt for this request. `Some` installs it verbatim
-    /// (**replacement, not append** — a plugin that wants to append reads
+    /// (**replacement, not append** — an extension that wants to append reads
     /// `ctx.system_prompt` and concatenates, exactly as pi requires).
     pub system_prompt: Option<String>,
 }

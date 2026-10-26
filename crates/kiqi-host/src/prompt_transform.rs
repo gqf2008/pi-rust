@@ -1,4 +1,4 @@
-//! `before_agent_start` system-prompt transform — a plugin's one chance to
+//! `before_agent_start` system-prompt transform — an extension's one chance to
 //! change what the model reads for a run.
 //!
 //! ## Why this exists (and why it is not an event)
@@ -6,14 +6,14 @@
 //! pi fires `before_agent_start` and lets a handler **return** `systemPrompt`,
 //! which becomes the run's `forceSystemPrompt` (`agent-session.ts:1436`). ki
 //! already broadcasts [`EventTag::BeforeAgentStart`] to observers, but the event
-//! handler signature is fire-and-forget (`i32` only), so an ki plugin could
+//! handler signature is fire-and-forget (`i32` only), so an ki extension could
 //! watch the turn start and not influence it. This module carries the return
 //! channel the broadcast cannot: an out-param handler, the same shape
 //! `resources_discover` uses and for the same reason.
 //!
 //! ## Semantics (mirrors pi)
 //!
-//! - **Replacement, not append.** The returned text becomes the prompt. A plugin
+//! - **Replacement, not append.** The returned text becomes the prompt. An extension
 //!   that wants to append reads the `"systemPrompt"` field of its input envelope
 //!   and returns the concatenation — exactly the burden pi puts on extensions.
 //! - **Chained in registration order.** Each handler receives the prompt the
@@ -40,7 +40,7 @@ use crate::registry::{assert_active, BeforeAgentStartHandler, RegistrySnapshot};
 /// handler and return the prompt the request should carry.
 ///
 /// `current_prompt` is the composed prompt the run would otherwise use (the
-/// value a plugin sees as `systemPrompt` in its envelope). `event_json` is the
+/// value an extension sees as `systemPrompt` in its envelope). `event_json` is the
 /// same envelope the [`EventTag::BeforeAgentStart`] broadcast carries, so a
 /// handler sees one consistent description of the turn regardless of which
 /// channel it reads.
@@ -123,13 +123,13 @@ fn with_system_prompt(event_json: &str, prompt: &str) -> String {
 ///
 /// `Ok(None)` means "no change" (an empty `out`, an empty object, or a missing
 /// `systemPrompt` key) — the same as pi reading
-/// `result?.systemPrompt !== undefined`. `Err(rc)` is a handled plugin error.
+/// `result?.systemPrompt !== undefined`. `Err(rc)` is a handled extension error.
 fn call_one_handler(
     h: BeforeAgentStartHandler,
     event_ref: StbStringRef,
 ) -> Result<Option<String>, i32> {
     // The uninitialized `out` slot the handler writes into on success. Contract
-    // matches `resources_discover`: `rc==0` ⇒ `out` is a plugin-owned JSON string
+    // matches `resources_discover`: `rc==0` ⇒ `out` is an extension-owned JSON string
     // the host frees; `rc!=0` ⇒ the handler wrote nothing. Zeroed so a `rc==0`
     // handler that forgets to write yields an empty parse rather than UB.
     let mut out = StbString::empty();
@@ -137,14 +137,14 @@ fn call_one_handler(
     if rc != 0 {
         // Defensively free a non-empty `out` (a misbehaving handler that wrote
         // then returned nonzero would otherwise leak). No-op on empty.
-        out.free_with(Some(h.plugin_free_string));
+        out.free_with(Some(h.extension_free_string));
         return Err(rc);
     }
 
-    // Copy the plugin-owned bytes into a safe String, THEN free the plugin
+    // Copy the extension-owned bytes into a safe String, THEN free the extension
     // allocation — we must not keep a reference past the free.
     let json = out.to_string_lossy();
-    out.free_with(Some(h.plugin_free_string));
+    out.free_with(Some(h.extension_free_string));
 
     Ok(parse_prompt_payload(&json))
 }
@@ -154,7 +154,7 @@ fn call_one_handler(
 /// Anything else — empty, malformed, a non-object, a missing or non-string
 /// `systemPrompt` — means "no change", so a handler that only wants to observe
 /// can return an empty string and be correct. An explicit empty *string* is
-/// honored as a change (a plugin can legitimately clear the prompt), which is
+/// honored as a change (an extension can legitimately clear the prompt), which is
 /// why the presence of the key is checked rather than its emptiness.
 fn parse_prompt_payload(json: &str) -> Option<String> {
     let trimmed = json.trim();
@@ -175,7 +175,7 @@ mod tests {
             parse_prompt_payload(r#"{"systemPrompt":"hi"}"#),
             Some("hi".to_string())
         );
-        // An explicitly empty prompt IS a change (a plugin may clear it).
+        // An explicitly empty prompt IS a change (an extension may clear it).
         assert_eq!(
             parse_prompt_payload(r#"{"systemPrompt":""}"#),
             Some(String::new())

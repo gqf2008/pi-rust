@@ -3,7 +3,7 @@
 //! Two families of variables are in scope, and both are answered by the same
 //! exclusion:
 //!
-//! * `KI_SESSION_ID` — the host writes it so plugins can name the session they
+//! * `KI_SESSION_ID` — the host writes it so extensions can name the session they
 //!   observe. A bash/powershell child inherits the environment by default, so
 //!   without an exclusion it reaches *everything* the shell runs, including a
 //!   nested `ki`, which would then report an ancestor's session.

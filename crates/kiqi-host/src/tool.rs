@@ -1,9 +1,9 @@
-//! [`PluginToolHandle`] — the plugin's 4-function lifecycle bundle held per
-//! registered tool — and [`PluginToolAdapter`], the `AgentTool` impl that drives
+//! [`ExtensionToolHandle`] — the extension's 4-function lifecycle bundle held per
+//! registered tool — and [`ExtensionToolAdapter`], the `AgentTool` impl that drives
 //! it across the async/FFI boundary via the corrected spawn_blocking bridge.
 //!
 //! See the crate-level docs for the load-bearing soundness rationale. The short
-//! version: a plugin tool is driven by **four** plugin fns (`execute`→handle,
+//! version: an extension tool is driven by **four** extension fns (`execute`→handle,
 //! `poll`, `cancel`, `destroy`). The adapter spawns a **blocking** driver that
 //! loops `poll`, forwards `Pending` partials through an mpsc, sends the terminal
 //! result through a oneshot, and calls `destroy` **exactly once**. Cancel sets
@@ -33,25 +33,25 @@ use tokio_util::sync::CancellationToken;
 use crate::host_free_string;
 
 // ---------------------------------------------------------------------------
-// PluginToolHandle — the 4-fn bundle + the plugin's free_string
+// ExtensionToolHandle — the 4-fn bundle + the extension's free_string
 // ---------------------------------------------------------------------------
 
-/// The plugin's per-tool lifecycle bundle the host holds after a successful
+/// The extension's per-tool lifecycle bundle the host holds after a successful
 /// `register_tool`. All fields are fn pointers (Copy), so the handle is `Copy`:
 /// cloning duplicates the pointers, not any allocation. A registered tool is
-/// driven by at most one [`PluginToolAdapter`] at a time, but the handle is
+/// driven by at most one [`ExtensionToolAdapter`] at a time, but the handle is
 /// copied through the registry snapshot path, hence `Copy`.
 ///
-/// `plugin_free_string` is the fn the **plugin** exports to free the
+/// `extension_free_string` is the fn the **extension** exports to free the
 /// [`StbString`]s it *produces* (schema strings, terminal result, pending
 /// progress). The host calls it for each such string it receives.
 #[derive(Clone, Copy)]
-pub struct PluginToolHandle {
+pub struct ExtensionToolHandle {
     pub(crate) execute_fn: ToolExecuteFn,
     pub(crate) poll_fn: ToolPollFn,
     pub(crate) cancel_fn: ToolCancelFn,
     pub(crate) destroy_fn: ToolDestroyFn,
-    pub(crate) plugin_free_string: FreeStringFn,
+    pub(crate) extension_free_string: FreeStringFn,
 }
 
 // ---------------------------------------------------------------------------
@@ -59,8 +59,8 @@ pub struct PluginToolHandle {
 // ---------------------------------------------------------------------------
 
 /// Serialize an `AgentToolResult` to a JSON string. Used for partials the host
-/// hands to the plugin's partial callback (host-produced → plugin frees via
-/// host `free_string`) and is also the shape the plugin returns for `Done`.
+/// hands to the extension's partial callback (host-produced → extension frees via
+/// host `free_string`) and is also the shape the extension returns for `Done`.
 #[allow(dead_code)]
 fn result_to_json(result: &AgentToolResult) -> String {
     let mut txt = String::new();
@@ -96,16 +96,16 @@ fn result_to_json(result: &AgentToolResult) -> String {
     txt.push_str(if result.terminate { "true" } else { "false" });
     txt.push_str(",\"addedToolNames\":");
     txt.push_str(&serde_json::to_string(&result.added_tool_names).unwrap_or_else(|_| "[]".into()));
-    // usage omitted from the wire shape (Option<Usage> is not in every plugin's
+    // usage omitted from the wire shape (Option<Usage> is not in every extension's
     // contract; the model-visible content/details are what matter). Documented
-    // v1 limit: usage does not cross to the plugin.
+    // v1 limit: usage does not cross to the extension.
     txt.push('}');
     txt
 }
 
-/// Parse a plugin-produced JSON `AgentToolResult` back into the native struct.
+/// Parse an extension-produced JSON `AgentToolResult` back into the native struct.
 /// Lenient: missing fields default. The caller frees the input `StbString` via
-/// the plugin's `free_string` (plugin produced it).
+/// the extension's `free_string` (extension produced it).
 fn stb_to_result(s: &StbString) -> AgentToolResult {
     let text = s.to_string_lossy();
     let val: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
@@ -172,15 +172,15 @@ fn stb_to_result(s: &StbString) -> AgentToolResult {
 }
 
 // ---------------------------------------------------------------------------
-// ToolCallContext — the per-session context a plugin tool is handed
+// ToolCallContext — the per-session context an extension tool is handed
 // ---------------------------------------------------------------------------
 
-/// Per-session context the host injects into plugin tool arguments under
+/// Per-session context the host injects into extension tool arguments under
 /// [`crate::HOST_CONTEXT_KEY`].
 ///
 /// A built-in tool gets an `ExecutionToolContext` from the harness and can
-/// resolve the working directory from it; a plugin tool has no such channel.
-/// Without this, a plugin that needs project (or session) identity has to ask
+/// resolve the working directory from it; an extension tool has no such channel.
+/// Without this, an extension that needs project (or session) identity has to ask
 /// the model for it — and the model does not know the session id, while any
 /// `cwd` it guesses is a silent way to split one store into two.
 ///
@@ -238,7 +238,7 @@ impl ToolCallContext {
 
     /// The object to inject, or `None` when nothing is known yet — in which
     /// case arguments are passed through untouched rather than gaining an empty
-    /// `{}` that a plugin would have to special-case.
+    /// `{}` that an extension would have to special-case.
     pub fn to_json(&self) -> Option<Value> {
         let state = self.inner.read().ok()?;
         if state.cwd.is_none() && state.session_id.is_none() {
@@ -255,14 +255,14 @@ impl ToolCallContext {
     }
 }
 
-/// Add the host context to one plugin tool call's arguments.
+/// Add the host context to one extension tool call's arguments.
 ///
 /// Injected here — inside the adapter, on a copy — rather than in the agent loop
-/// or in `AgentTool::prepare_arguments`, so the field reaches the plugin and
+/// or in `AgentTool::prepare_arguments`, so the field reaches the extension and
 /// nothing else: not the model, not `ToolExecutionStart`/`Update` events, not
 /// the session log. It also means a model cannot forge it.
 ///
-/// Only object-shaped arguments can carry the key. A plugin whose schema takes
+/// Only object-shaped arguments can carry the key. An extension whose schema takes
 /// an array or a scalar gets its arguments untouched; `null` (the shape a
 /// no-parameter tool call arrives in) is promoted to an object so such a tool
 /// still receives the context.
@@ -285,22 +285,22 @@ fn inject_tool_context(params: Value, context: &ToolCallContext) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// PluginToolAdapter — AgentTool impl driving the 4-fn handle
+// ExtensionToolAdapter — AgentTool impl driving the 4-fn handle
 // ---------------------------------------------------------------------------
 
-/// An [`AgentTool`] backed by a plugin's 4-function handle. One adapter is built
+/// An [`AgentTool`] backed by an extension's 4-function handle. One adapter is built
 /// per registered tool (`schema` copied from the registration) and inserted into
 /// the session's tool set in B2.
 ///
 /// P6: the cdylib loader is retired, so the host no longer builds these
 /// adapters; the type is kept with the rest of the C-ABI spine (see
-/// `docs/design/plugin-abi.md` §6.45). It used to hold the session's
-/// `PluginKeepalive` so the owning library stayed mapped while `handle`'s fn
+/// `docs/design/extension-abi.md` §6.45). It used to hold the session's
+/// `ExtensionKeepalive` so the owning library stayed mapped while `handle`'s fn
 /// pointers were callable.
-pub struct PluginToolAdapter {
+pub struct ExtensionToolAdapter {
     schema: Tool,
     label: String,
-    handle: PluginToolHandle,
+    handle: ExtensionToolHandle,
     /// Injected into every call's arguments under
     /// [`crate::HOST_CONTEXT_KEY`]. `Default` (nothing known) until the
     /// CLI attaches the session's context, so an adapter built without one — as
@@ -313,11 +313,11 @@ pub struct PluginToolAdapter {
     // mid-call), this is belt-and-suspenders.
 }
 
-impl PluginToolAdapter {
+impl ExtensionToolAdapter {
     /// Build an adapter from the registered schema + handle + the session's
     /// keepalive. `label` defaults to the tool name. The keepalive clone keeps
     /// the owning cdylib mapped for the adapter's lifetime.
-    pub fn new(schema: Tool, handle: PluginToolHandle) -> Self {
+    pub fn new(schema: Tool, handle: ExtensionToolHandle) -> Self {
         let label = schema.name.clone();
         Self {
             schema,
@@ -328,7 +328,7 @@ impl PluginToolAdapter {
     }
 
     /// Attach the session's context, so each call carries `cwd` + `sessionId`.
-    /// Builder-style so the three-argument [`PluginToolAdapter::new`] keeps
+    /// Builder-style so the three-argument [`ExtensionToolAdapter::new`] keeps
     /// working for callers that have no session (tests, the SDK smoke test).
     pub fn with_context(mut self, context: ToolCallContext) -> Self {
         self.context = context;
@@ -338,15 +338,15 @@ impl PluginToolAdapter {
 
 /// The partial-callback trampoline passed to `poll`. `user_data` is a
 /// `*const mpsc::UnboundedSender<AgentToolResult>` valid for the drive (the
-/// blocking driver owns the sender in its closure env). The plugin invokes this
-/// synchronously inside `poll()`; it parses the partial, frees the plugin-
+/// blocking driver owns the sender in its closure env). The extension invokes this
+/// synchronously inside `poll()`; it parses the partial, frees the extension-
 /// produced `StbString` via the host's `free_string`, and pushes the result
 /// through the mpsc. Wrapped in `catch_unwind` so a poisoned sender / panic
 /// cannot unwind across FFI (abort-on-unwind).
 extern "C" fn partial_cb_trampoline(partial: StbString, user_data: *mut c_void) {
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         if user_data.is_null() {
-            // Still must free the partial (plugin produced it; host owns
+            // Still must free the partial (extension produced it; host owns
             // cleanup when no handler runs — here "no handler" means no sender).
             host_free_string(partial);
             return;
@@ -355,8 +355,8 @@ extern "C" fn partial_cb_trampoline(partial: StbString, user_data: *mut c_void) 
         // `&mpsc::UnboundedSender<AgentToolResult>` for the duration of poll().
         let sender = unsafe { &*(user_data as *const mpsc::UnboundedSender<AgentToolResult>) };
         let result = stb_to_result(&partial);
-        // The partial StbString was plugin-produced inside poll(); the host is
-        // the receiver and owns the free (plugin allocated with the global
+        // The partial StbString was extension-produced inside poll(); the host is
+        // the receiver and owns the free (extension allocated with the global
         // allocator, which host_free_string reclaims — documented v1 contract).
         host_free_string(partial);
         let _ = sender.send(result);
@@ -366,12 +366,12 @@ extern "C" fn partial_cb_trampoline(partial: StbString, user_data: *mut c_void) 
         // made `stb_to_result` panic) was caught above. Do NOT abort the
         // process: log it and move on. The partial StbString may leak on this
         // rare path, which is preferable to taking the host down.
-        tracing::error!("plugin partial callback panicked — dropped (host continues)");
+        tracing::error!("extension partial callback panicked — dropped (host continues)");
     }
 }
 
 #[async_trait]
-impl AgentTool for PluginToolAdapter {
+impl AgentTool for ExtensionToolAdapter {
     fn schema(&self) -> &Tool {
         &self.schema
     }
@@ -381,7 +381,7 @@ impl AgentTool for PluginToolAdapter {
     }
 
     fn execution_mode(&self) -> ToolExecutionMode {
-        // Plugin tools default to Parallel (the AgentTool default). A plugin
+        // Extension tools default to Parallel (the AgentTool default). An extension
         // could declare Sequential via a future schema field; v1 keeps Parallel.
         ToolExecutionMode::Parallel
     }
@@ -397,7 +397,7 @@ impl AgentTool for PluginToolAdapter {
         //    loop's runtime). Do NOT own a runtime.
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             AgentError::State(format!(
-                "plugin tool '{}' executed off-runtime: {e}",
+                "extension tool '{}' executed off-runtime: {e}",
                 self.schema.name
             ))
         })?;
@@ -411,16 +411,16 @@ impl AgentTool for PluginToolAdapter {
         // visibility with the blocking driver.
         let cancel_flag = Arc::new(AtomicBool::new(false));
 
-        // 3. Prepare plugin execute() inputs. `params` is an owning JSON string
-        //    the host produced → the plugin frees it via the host's free_string.
+        // 3. Prepare extension execute() inputs. `params` is an owning JSON string
+        //    the host produced → the extension frees it via the host's free_string.
         //    `tool_call_id` is borrowed for the call. The host context is merged
         //    into the arguments here — after the model's arguments were parsed,
-        //    before the plugin sees them, and never into the events or the log.
+        //    before the extension sees them, and never into the events or the log.
         let params = inject_tool_context(params, &self.context);
         let params_json = serde_json::to_string(&params).unwrap_or_else(|_| "null".to_string());
         let params_stb = StbString::from_string(params_json);
         let id_ref = StbStringRef::from_str(tool_call_id);
-        let plugin_free = self.handle.plugin_free_string;
+        let extension_free = self.handle.extension_free_string;
 
         let execute_fn = self.handle.execute_fn;
         let poll_fn = self.handle.poll_fn;
@@ -438,8 +438,8 @@ impl AgentTool for PluginToolAdapter {
         let cancel_flag_drive = Arc::clone(&cancel_flag);
         let sender_for_cb = partial_tx.clone();
         runtime.spawn_blocking(move || {
-            // Drive: execute → poll loop → destroy exactly once. Every plugin
-            // call is extern "C"; wrap in catch_unwind so a plugin panic cannot
+            // Drive: execute → poll loop → destroy exactly once. Every extension
+            // call is extern "C"; wrap in catch_unwind so an extension panic cannot
             // unwind across FFI (abort-on-unwind).
             let step_handle: StepHandle = {
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -450,18 +450,18 @@ impl AgentTool for PluginToolAdapter {
                     Ok(_) => {
                         // null handle — allocation failure / refused.
                         let _ = done_tx.send(Err(AgentError::Tool(format!(
-                            "plugin execute returned null handle for '{schema_name}'"
+                            "extension execute returned null handle for '{schema_name}'"
                         ))));
                         return;
                     }
                     Err(_) => {
                         // Reached only when the panic unwound into the host
-                        // (plugin `extern "C"` panics abort at the plugin frame
+                        // (extension `extern "C"` panics abort at the extension frame
                         // before we get here). Report a tool error instead of
                         // aborting the process.
-                        tracing::error!("plugin execute panicked — reporting tool error");
+                        tracing::error!("extension execute panicked — reporting tool error");
                         let _ = done_tx.send(Err(AgentError::Tool(format!(
-                            "plugin tool '{schema_name}' panicked during execute"
+                            "extension tool '{schema_name}' panicked during execute"
                         ))));
                         return;
                     }
@@ -475,18 +475,18 @@ impl AgentTool for PluginToolAdapter {
             // poll loop
             let terminal: Result<AgentToolResult, AgentError> = loop {
                 if cancel_flag_drive.load(Ordering::SeqCst) {
-                    // Observe cancel: tell the plugin, then break with an abort.
+                    // Observe cancel: tell the extension, then break with an abort.
                     let _ = catch_unwind(AssertUnwindSafe(|| (cancel_fn)(step_handle)));
-                    break Err(AgentError::Tool("plugin tool cancelled".into()));
+                    break Err(AgentError::Tool("extension tool cancelled".into()));
                 }
                 let step_result = match catch_unwind(AssertUnwindSafe(|| {
                     (poll_fn)(step_handle, Some(partial_cb_trampoline), sender_ptr)
                 })) {
                     Ok(r) => r,
                     Err(_) => {
-                        tracing::error!("plugin poll panicked — reporting tool error");
+                        tracing::error!("extension poll panicked — reporting tool error");
                         break Err(AgentError::Tool(format!(
-                            "plugin tool '{schema_name}' panicked during poll"
+                            "extension tool '{schema_name}' panicked during poll"
                         )));
                     }
                 };
@@ -495,12 +495,12 @@ impl AgentTool for PluginToolAdapter {
                         // SAFETY: tag == Pending.
                         let progress = unsafe { step_result.pending_payload().progress };
                         if !progress.is_empty() {
-                            // The plugin may also have pushed via the partial cb;
+                            // The extension may also have pushed via the partial cb;
                             // both paths land in partial_rx. Forward this one too.
                             let pr = stb_to_result(&progress);
-                            // progress was plugin-produced inside poll → free via
-                            // the plugin's free_string.
-                            (plugin_free)(progress);
+                            // progress was extension-produced inside poll → free via
+                            // the extension's free_string.
+                            (extension_free)(progress);
                             let _ = partial_tx.send(pr);
                         }
                         continue;
@@ -509,14 +509,14 @@ impl AgentTool for PluginToolAdapter {
                         // SAFETY: tag == Done.
                         let done = unsafe { step_result.done_payload().result };
                         let result = stb_to_result(&done);
-                        (plugin_free)(done);
+                        (extension_free)(done);
                         break Ok(result);
                     }
                     StepResultTag::Err => {
                         // SAFETY: tag == Err.
                         let msg = unsafe { step_result.err_payload().message };
                         let message = msg.to_string_lossy();
-                        (plugin_free)(msg);
+                        (extension_free)(msg);
                         break Err(AgentError::Tool(message));
                     }
                 }
@@ -544,7 +544,7 @@ impl AgentTool for PluginToolAdapter {
                         Ok(Ok(r)) => Ok(r),
                         Ok(Err(e)) => Err(e),
                         Err(_) => Err(AgentError::State(format!(
-                            "plugin tool '{schema_name_err}' driver dropped done_tx"
+                            "extension tool '{schema_name_err}' driver dropped done_tx"
                         ))),
                     };
                 }
@@ -571,7 +571,7 @@ impl AgentTool for PluginToolAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — the ABI bridge against an in-process stub plugin
+// Tests — the ABI bridge against an in-process stub extension
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -677,24 +677,24 @@ mod tests {
         }
     }
 
-    fn stub_handle() -> PluginToolHandle {
-        PluginToolHandle {
+    fn stub_handle() -> ExtensionToolHandle {
+        ExtensionToolHandle {
             execute_fn: stub_execute,
             poll_fn: stub_poll,
             cancel_fn: stub_cancel,
             destroy_fn: stub_destroy,
-            plugin_free_string: stub_free,
+            extension_free_string: stub_free,
         }
     }
 
-    fn echo_adapter() -> PluginToolAdapter {
+    fn echo_adapter() -> ExtensionToolAdapter {
         let tool = Tool {
             name: "echo".to_string(),
             description: "echoes".to_string(),
             parameters: kiqi_ai::types::Schema::new(serde_json::json!({})),
             constrained_sampling: None,
         };
-        PluginToolAdapter::new(tool, stub_handle())
+        ExtensionToolAdapter::new(tool, stub_handle())
     }
 
     fn reset_counters() {
@@ -804,14 +804,14 @@ mod tests {
             parameters: kiqi_ai::types::Schema::new(serde_json::json!({})),
             constrained_sampling: None,
         };
-        let handle = PluginToolHandle {
+        let handle = ExtensionToolHandle {
             execute_fn: slow_execute,
             poll_fn: slow_poll,
             cancel_fn: slow_cancel,
             destroy_fn: slow_destroy,
-            plugin_free_string: stub_free,
+            extension_free_string: stub_free,
         };
-        let adapter = PluginToolAdapter::new(tool, handle);
+        let adapter = ExtensionToolAdapter::new(tool, handle);
         let on_update: Arc<dyn Fn(ToolResultPartial) + Send + Sync> = Arc::new(|_| {});
         let signal = CancellationToken::new();
         let signal_clone = signal.clone();
@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn injected_context_carries_cwd_and_session_only_when_known() {
         // Nothing known yet → no key at all, rather than an empty object a
-        // plugin would have to special-case.
+        // extension would have to special-case.
         assert!(ToolCallContext::default().to_json().is_none());
         assert!(ToolCallContext::new("").to_json().is_none());
 
@@ -890,7 +890,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plugin_receives_the_host_context_across_the_ffi_boundary() {
+    async fn extension_receives_the_host_context_across_the_ffi_boundary() {
         let _guard = TEST_LOCK.lock().unwrap();
         reset_counters();
         *LAST_PARAMS.lock().unwrap() = None;

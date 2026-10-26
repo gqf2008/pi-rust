@@ -2,7 +2,7 @@
 //!
 //! The schema is the server's `inputSchema`, passed through untouched; the name
 //! is namespaced `{server}__{tool}` so an MCP tool can never silently shadow a
-//! built-in or plugin tool (a residual collision is dropped by the caller with a
+//! built-in or extension tool (a residual collision is dropped by the caller with a
 //! warning — see `kiqi-cli`'s session build).
 //!
 //! Result mapping follows the retired adapter:

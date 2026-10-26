@@ -147,7 +147,7 @@
       "action.crates": "Releases",
       "action.examples": "Browse examples",
       "action.github": "GitHub repository",
-      "action.learnExtensions": "Explore the plugin system",
+      "action.learnExtensions": "Explore the extension system",
       "action.readArchitecture": "Read the architecture",
       "blog.empty": "No posts yet. Stay tuned.",
       "blog.intro": "Release notes, technical insights and project updates. Track every step of ki's evolution.",
@@ -168,7 +168,7 @@
       "compare.ki.license": "MIT",
       "compare.ki.dist": "cargo / prebuilt binaries",
       "compare.ki.embed": "✅ It is the library; the CLI is one layer on top",
-      "compare.ki.extend": "cdylib plugins (stable ABI)",
+      "compare.ki.extend": "cdylib extensions (stable ABI)",
       "compare.claude.impl": "TypeScript / Node",
       "compare.claude.license": "Proprietary (repo declares no licence)",
       "compare.claude.dist": "npm",
@@ -188,7 +188,7 @@
       "compare.openhands.license": "MIT",
       "compare.openhands.dist": "Docker",
       "compare.openhands.embed": "✖",
-      "compare.openhands.extend": "In-framework plugins",
+      "compare.openhands.extend": "In-framework extensions",
       "compare.whenEyebrow": "PICK KI WHEN",
       "compare.whenTitle": "When to choose ki",
       "compare.when.0": "You want the agent loop inside your own Rust program, not driving someone else's CLI.",
@@ -210,9 +210,9 @@
       "copy.commandSuccess": "Command copied",
       "copy.failed": "Copy failed; select the text manually",
       "docs.copyCode": "Copy code",
-      "docs.intro": "Guides and SDK references to take you from your first faux Agent to tools, sessions and plugins.",
+      "docs.intro": "Guides and SDK references to take you from your first faux Agent to tools, sessions and extensions.",
       "docs.modes": "Documentation modes",
-      "docs.noResults": "No matching sections. Try `Agent`, `Provider` or `plugin`.",
+      "docs.noResults": "No matching sections. Try `Agent`, `Provider` or `extension`.",
       "docs.onThisPage": "ON THIS PAGE",
       "docs.openGithub": "Open the repository on GitHub ↗",
       "docs.search": "Search chapters, APIs or crates",
@@ -262,11 +262,11 @@
       "packages.type.skill": "skill",
       "section.architectureBody": "One-way dependencies keep the core library light and give every extension a clear place to land.",
       "section.architectureTitle": "Every layer has a boundary.",
-      "section.extensionBody": "Rust cdylib plugins use a stable ABI to add tools, providers, slash commands, events and resources. Node/TypeScript extensions and TUI skill rendering are compatibility beta features for local evaluation, not recommended for production.",
+      "section.extensionBody": "Rust cdylib extensions use a stable ABI to add tools, providers, slash commands, events and resources. Node/TypeScript extensions and TUI skill rendering are compatibility beta features for local evaluation, not recommended for production.",
       "section.extensionTitle": "Plug your capability<br /><em>into the Agent.</em>",
       "section.installBinary": "Or install a prebuilt binary (no Rust toolchain)",
       "section.installCli": "Build the CLI from source",
-      "section.releaseBody": "Stabilize core capabilities first, then hand more providers, plugin ecosystem and CLI experience to the community.",
+      "section.releaseBody": "Stabilize core capabilities first, then hand more providers, extension ecosystem and CLI experience to the community.",
       "section.releaseTitle": "Ship in small steps, keep moving.",
       "section.runExample": "Run the example from source",
       "section.startBody": "The two examples cover the essential path: run an Agent with a faux provider, then connect a real filesystem and tools to the loop.",
@@ -354,7 +354,7 @@
         {
           "name": "kiqi-cli",
           "label": "Your interface",
-          "description": "CLI, TUI, configuration and plugins",
+          "description": "CLI, TUI, configuration and extensions",
           "tone": "cream"
         }
       ],
@@ -376,8 +376,8 @@
         {
           "version": "0.4.1",
           "status": "current",
-          "title": "Compile-time plugins receive events, Langfuse built in",
-          "description": "Compiled-in plugins now receive SessionStart, message and tool-call events, so a ki with no dynamic libraries still traces a run. kiqi-langfuse is compiled in by default with OTLP tracing and three langfuse tools."
+          "title": "Compile-time extensions receive events, Langfuse built in",
+          "description": "Compiled-in extensions now receive SessionStart, message and tool-call events, so a ki with no dynamic libraries still traces a run. kiqi-langfuse is compiled in by default with OTLP tracing and three langfuse tools."
         },
         {
           "version": "next",
@@ -394,11 +394,11 @@
       ]
     },
     "packages": {
-      "kiqi-cli": "Terminal coding-agent CLI with the ki command, interactive TUI, configuration and plugin loading.",
+      "kiqi-cli": "Terminal coding-agent CLI with the ki command, interactive TUI, configuration and extension loading.",
       "kiqi-agent": "Async Agent runtime and loop with AgentTool, events, hooks and message queues.",
       "kiqi-tools": "Pi-compatible read, write, edit and bash tools with ExecutionEnv.",
-      "kiqi-plugin-sdk": "Stable #[repr(C)] ABI contract for Rust cdylib plugins; plugins depend only on this boundary.",
-      "kiqi-extensions": "Host-side dynamic plugin loader that adapts ABI plugins into AgentTool and manages lifecycle.",
+      "kiqi-extension-sdk": "Stable #[repr(C)] ABI contract for Rust cdylib extensions; extensions depend only on this boundary.",
+      "kiqi-extensions": "Host-side dynamic extension loader that adapts ABI extensions into AgentTool and manages lifecycle.",
       "kiqi-harness": "Session trees, JSONL persistence, context compaction and the AgentHarness run loop.",
       "kiqi-mcp-adapter": "HTTP JSON-RPC MCP transport adapter for ki Agents with bounded, credential-safe requests.",
       "kiqi-web-access": "Constrained public web fetching with redirect, credential, private-address and response-size limits.",
@@ -423,7 +423,7 @@
     },
     "docs": {
       "title": "Documentation",
-      "intro": "Guides and SDK references to take you from your first faux Agent to tools, sessions and plugins.",
+      "intro": "Guides and SDK references to take you from your first faux Agent to tools, sessions and extensions.",
       "modes": {
         "guide": {
           "label": "User guide",
@@ -433,9 +433,9 @@
             "complete-guide": {
               "kicker": "00 / COMPLETE GUIDE",
               "title": "Complete user guide",
-              "summary": "The full path from install, model config, .ki resources and Rust plugins to SDK integration, troubleshooting and release.",
+              "summary": "The full path from install, model config, .ki resources and Rust extensions to SDK integration, troubleshooting and release.",
               "body": [
-                "The website docs stay in sync with /user-guide.md in the repository. A fresh ki install ships the core tools by default and adds more through Rust cdylib extensions built with kiqi-plugin-sdk.",
+                "The website docs stay in sync with /user-guide.md in the repository. A fresh ki install ships the core tools by default and adds more through Rust cdylib extensions built with kiqi-extension-sdk.",
                 "Start with install and first run, then move on to Provider setup, Rust extensions, Agent project structure or SDK integration as needed."
               ],
               "links": [
@@ -521,15 +521,15 @@
             },
             "extensions": {
               "kicker": "07 / EXTENSIONS",
-              "title": "Plugins and extensions",
-              "summary": "Use stable-ABI cdylib plugins to register tools, Providers, commands and resources.",
+              "title": "Extensions and extensions",
+              "summary": "Use stable-ABI cdylib extensions to register tools, Providers, commands and resources.",
               "body": [
-                "Plugin crates depend on kiqi-plugin-sdk and export kiqi_plugin_register to receive PluginApiVt. kiqi-extensions discovers, loads, registers and manages their lifecycle.",
-                "Keep cross-boundary data inside SDK serializable types; plugins should not depend on private host modules."
+                "Extension crates depend on kiqi-extension-sdk and export kiqi_extension_register to receive ExtensionApiVt. kiqi-extensions discovers, loads, registers and manages their lifecycle.",
+                "Keep cross-boundary data inside SDK serializable types; extensions should not depend on private host modules."
               ],
               "links": [
-                "Plugin stub",
-                "Plugin loader"
+                "Extension stub",
+                "Extension loader"
               ]
             },
             "testing": {
@@ -549,7 +549,7 @@
         "sdk": {
           "label": "SDK reference",
           "eyebrow": "KI / SDK REFERENCE",
-          "description": "Find API boundaries by crate and core trait when implementing a custom Provider, tool, Harness or plugin.",
+          "description": "Find API boundaries by crate and core trait when implementing a custom Provider, tool, Harness or extension.",
           "sections": {
             "crate-overview": {
               "kicker": "01 / WORKSPACE",
@@ -635,13 +635,13 @@
                 "AI event types"
               ]
             },
-            "plugin-abi": {
-              "kicker": "08 / PLUGIN ABI",
-              "title": "Plugin ABI",
-              "summary": "kiqi-plugin-sdk is the only boundary plugins and hosts should depend on.",
+            "extension-abi": {
+              "kicker": "08 / EXTENSION ABI",
+              "title": "Extension ABI",
+              "summary": "kiqi-extension-sdk is the only boundary extensions and hosts should depend on.",
               "body": [
-                "Plugins compile as cdylib and are discovered by kiqi-extensions. The registry stores tools, Providers, events and resource handlers while the host owns unloading and isolation.",
-                "Bump the ABI version for breaking changes and update plugin-stub plus smoke tests together. Do not link plugins to private kiqi-cli modules."
+                "Extensions compile as cdylib and are discovered by kiqi-extensions. The registry stores tools, Providers, events and resource handlers while the host owns unloading and isolation.",
+                "Bump the ABI version for breaking changes and update extension-stub plus smoke tests together. Do not link extensions to private kiqi-cli modules."
               ],
               "links": [
                 "SDK crate",

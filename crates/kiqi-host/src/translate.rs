@@ -1,19 +1,19 @@
-//! `AgentEvent → StablePluginEvent` translation, plus the [`ExtensionEmitter`]
+//! `AgentEvent → StableExtensionEvent` translation, plus the [`ExtensionEmitter`]
 //! that impls [`AgentEmitter`] by subscribing to the host's
 //! `broadcast::Sender<AgentEvent>`, folding each event into a stable event, and
 //! fan-out dispatching to every registered handler for the event's tag — all
-//! dispatch wrapped in `catch_unwind` (a panicky plugin handler must not unwind
+//! dispatch wrapped in `catch_unwind` (a panicky extension handler must not unwind
 //! across FFI).
 //!
 //! The 10 stable lifecycle `AgentEvent` variants fold into their matching
-//! `StablePluginEvent` tags. Internal host events such as retry scheduling are
-//! intentionally not projected onto the fixed 33-tag plugin ABI.
+//! `StableExtensionEvent` tags. Internal host events such as retry scheduling are
+//! intentionally not projected onto the fixed 33-tag extension ABI.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use crate::EventTag;
-use crate::{StablePluginEvent, StbString};
+use crate::{StableExtensionEvent, StbString};
 use futures::future::BoxFuture;
 use kiqi_agent::events::{AgentEmitter, AgentEvent};
 use serde_json::Value;
@@ -44,7 +44,7 @@ pub fn event_tag_for(event: &AgentEvent) -> Option<EventTag> {
 
 /// Serialize an [`AgentMessage`](kiqi_agent::message::AgentMessage) to an owning
 /// `StbString` for a message-payload event. The host produced this string, so
-/// the **handler** (plugin side) frees it via the host's `free_string`.
+/// the **handler** (extension side) frees it via the host's `free_string`.
 fn message_to_stb(message: &kiqi_agent::message::AgentMessage) -> StbString {
     // AgentMessage is Serialize (#[serde(tag="kind")]); use serde_json round-trip.
     let text = serde_json::to_string(message).unwrap_or_else(|_| "null".to_string());
@@ -55,12 +55,12 @@ fn message_to_stb(message: &kiqi_agent::message::AgentMessage) -> StbString {
 /// no payload that maps onto a stable variant (always maps today, but kept as
 /// `Option` for forward-compat with unmapped future variants). Ownership of any
 /// `StbString` in the returned event passes to the handler.
-pub fn translate(event: &AgentEvent) -> Option<StablePluginEvent> {
+pub fn translate(event: &AgentEvent) -> Option<StableExtensionEvent> {
     let tag = event_tag_for(event)?;
     match event {
         AgentEvent::MessageStart { message } | AgentEvent::MessageEnd { message } => {
             let stb = message_to_stb(message);
-            Some(StablePluginEvent::message(tag, stb))
+            Some(StableExtensionEvent::message(tag, stb))
         }
         AgentEvent::MessageUpdate {
             assistant_message_event,
@@ -70,7 +70,7 @@ pub fn translate(event: &AgentEvent) -> Option<StablePluginEvent> {
             // provider event, not a growing message snapshot. Consumers that
             // need live text read assistantMessageEvent.delta directly.
             let payload = assistant_message_event_to_json(assistant_message_event);
-            Some(StablePluginEvent::message(
+            Some(StableExtensionEvent::message(
                 tag,
                 StbString::from_string(payload),
             ))
@@ -86,7 +86,7 @@ pub fn translate(event: &AgentEvent) -> Option<StablePluginEvent> {
             tool_name,
             args,
             ..
-        } => Some(StablePluginEvent::tool_call(
+        } => Some(StableExtensionEvent::tool_call(
             tag,
             StbString::from_string(tool_call_id.clone()),
             StbString::from_string(tool_name.clone()),
@@ -101,7 +101,7 @@ pub fn translate(event: &AgentEvent) -> Option<StablePluginEvent> {
         } => {
             // Serialize the AgentToolResult to JSON for the result payload.
             let result_json = agent_tool_result_to_json(result);
-            Some(StablePluginEvent::tool_result(
+            Some(StableExtensionEvent::tool_result(
                 tag,
                 StbString::from_string(tool_call_id.clone()),
                 StbString::from_string(tool_name.clone()),
@@ -114,7 +114,7 @@ pub fn translate(event: &AgentEvent) -> Option<StablePluginEvent> {
         AgentEvent::AgentStart
         | AgentEvent::TurnStart
         | AgentEvent::AgentEnd { .. }
-        | AgentEvent::TurnEnd { .. } => Some(StablePluginEvent::empty(tag)),
+        | AgentEvent::TurnEnd { .. } => Some(StableExtensionEvent::empty(tag)),
 
         AgentEvent::RetryScheduled { .. } => None,
     }
@@ -263,42 +263,42 @@ fn agent_tool_result_to_json(result: &kiqi_agent::types::AgentToolResult) -> Str
     txt
 }
 
-/// Free every `StbString` owned by a dispatched [[`StablePluginEvent`]] via the
+/// Free every `StbString` owned by a dispatched [[`StableExtensionEvent`]] via the
 /// host's `free_string`. Called after dispatch completes (the handler SHOULD
-/// have freed them, but the host keeps ownership-of-cleanup so a buggy plugin
+/// have freed them, but the host keeps ownership-of-cleanup so a buggy extension
 /// that retains/leaks can't double-free the host's allocation — the host never
-/// trusts the plugin to free, per the SDK's "receiver owns" contract: here the
-/// host is the producer → receiver is the plugin; if the plugin failed to free,
+/// trusts the extension to free, per the SDK's "receiver owns" contract: here the
+/// host is the producer → receiver is the extension; if the extension failed to free,
 /// the host's free is a leak fix, not a double-free, because `StbString` is
 /// `Copy` and the host's `host_free_string` reconstructs the `Box<[u8]>` and
 /// drops it — a second free of the same bytes would be UB, so this must run
-/// EXACTLY ONCE per event. The contract is: the plugin frees what it receives.
-/// To honor that, we do NOT free here; the plugin owns the free. This fn is
+/// EXACTLY ONCE per event. The contract is: the extension frees what it receives.
+/// To honor that, we do NOT free here; the extension owns the free. This fn is
 /// therefore a no-op kept for documentation + future audit).
 ///
-/// **In practice:** the plugin handler is contractually required to free every
+/// **In practice:** the extension handler is contractually required to free every
 /// `StbString` it receives via the host `free_string`. The host does not
-/// double-free. If a plugin leaks, that is a plugin bug.
+/// double-free. If an extension leaks, that is an extension bug.
 #[allow(dead_code)]
-fn free_event_strings(_event: &StablePluginEvent) {
+fn free_event_strings(_event: &StableExtensionEvent) {
     // intentionally empty — see doc comment.
 }
 
 // ===========================================================================
-// ExtensionEmitter — AgentEmitter impl fanning out to plugin handlers
+// ExtensionEmitter — AgentEmitter impl fanning out to extension handlers
 // ===========================================================================
 
-/// An [`AgentEmitter`] that fans each [`AgentEvent`] out to every plugin handler
+/// An [`AgentEmitter`] that fans each [`AgentEvent`] out to every extension handler
 /// registered for the event's tag. Built from a [`RegistrySnapshot`] (so it
 /// shares the registry's staleness flag) and installed into
 /// `AgentHarnessOptions.agent_emitter` **alongside** the host's
 /// [`BroadcastEmitter`] — events flow to BOTH the TUI (which drains the
-/// broadcast receiver) and the plugin handlers (which receive translated
-/// `StablePluginEvent`s). The host composes the two via
+/// broadcast receiver) and the extension handlers (which receive translated
+/// `StableExtensionEvent`s). The host composes the two via
 /// [`TeeEmitter`](super::TeeEmitter); this emitter alone only dispatches to
-/// plugins.
+/// extensions.
 ///
-/// Dispatch is `catch_unwind`-wrapped: a panicking plugin handler is logged and
+/// Dispatch is `catch_unwind`-wrapped: a panicking extension handler is logged and
 /// skipped (abort-on-unwind policy would be too aggressive for event dispatch
 /// where one bad handler shouldn't kill the session; we log + continue, unlike
 /// tool-partial dispatch which aborts because it cannot unwind across FFI from
@@ -319,7 +319,7 @@ impl ExtensionEmitter {
     /// is `catch_unwind`-wrapped; errors (nonzero return) are logged but do not
     /// abort the fan-out (one handler's failure doesn't block the others — mir-
     /// rors pi's per-handler try/catch).
-    fn dispatch(&self, event: &StablePluginEvent) {
+    fn dispatch(&self, event: &StableExtensionEvent) {
         dispatch_to_handlers(&self.snapshot, event);
     }
 }
@@ -328,8 +328,8 @@ impl ExtensionEmitter {
 /// handler subscribes). Shared by [`ExtensionEmitter`] and the provider-hook
 /// dispatcher ([`crate::provider_hooks`]). Handlers MUST NOT free the event
 /// strings; the host frees exactly once after the fan-out.
-pub fn dispatch_to_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEvent) {
-    // Compiled plugins observe the same event stream as cdylib handlers, whether
+pub fn dispatch_to_handlers(snapshot: &RegistrySnapshot, event: &StableExtensionEvent) {
+    // Compiled extensions observe the same event stream as cdylib handlers, whether
     // or not any native handler subscribes (a `ki` with no dylibs still traces).
     // The verdict is ignored here on purpose: this is the observe fan-out, and
     // the native path does not act on `CLAIMED` either (only the routing
@@ -340,7 +340,7 @@ pub fn dispatch_to_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEve
 
 /// Native (cdylib) half of [`dispatch_to_handlers`], including the one free of
 /// the event's strings.
-fn dispatch_native_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEvent) {
+fn dispatch_native_handlers(snapshot: &RegistrySnapshot, event: &StableExtensionEvent) {
     // Staleness guard: a stale registry (swapped-out session) does nothing.
     if !crate::registry::assert_active(snapshot.active_flag()) {
         return;
@@ -353,18 +353,18 @@ fn dispatch_native_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEve
         return;
     }
     for h in handlers {
-        // P2: skip a handler whose plugin declared platforms excluding this host.
+        // P2: skip a handler whose extension declared platforms excluding this host.
         if !crate::registry::platform_allows(&h.platforms) {
             crate::event_log::log_handler_invocation(
                 event.tag,
-                &h.plugin,
+                &h.extension,
                 "PlatformSkip",
                 0,
                 Some(format!("host={}", crate::registry::current_platform())),
             );
             continue;
         }
-        // SAFETY: the plugin warrants `handler` + `user_data` are safe to
+        // SAFETY: the extension warrants `handler` + `user_data` are safe to
         // call from this thread. catch_unwind so a panic cannot cross FFI.
         let started = std::time::Instant::now();
         let outcome = catch_unwind(AssertUnwindSafe(|| (h.handler)(*event, h.user_data)));
@@ -376,7 +376,7 @@ fn dispatch_native_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEve
             Ok(rc) if rc == crate::EVENT_HANDLER_CLAIMED => {
                 crate::event_log::log_handler_invocation(
                     event.tag,
-                    &h.plugin,
+                    &h.extension,
                     "Claimed",
                     duration_ms,
                     None,
@@ -386,7 +386,7 @@ fn dispatch_native_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEve
                 tracing::warn!(tag = ?event.tag, rc, "extension event handler returned nonzero");
                 crate::event_log::log_handler_invocation(
                     event.tag,
-                    &h.plugin,
+                    &h.extension,
                     "Error",
                     duration_ms,
                     Some(format!("rc={rc}")),
@@ -395,7 +395,7 @@ fn dispatch_native_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEve
             Ok(_) => {
                 crate::event_log::log_handler_invocation(
                     event.tag,
-                    &h.plugin,
+                    &h.extension,
                     "Continue",
                     duration_ms,
                     None,
@@ -405,7 +405,7 @@ fn dispatch_native_handlers(snapshot: &RegistrySnapshot, event: &StablePluginEve
                 tracing::error!(tag = ?event.tag, "extension event handler panicked — skipped");
                 crate::event_log::log_handler_invocation(
                     event.tag,
-                    &h.plugin,
+                    &h.extension,
                     "Panic",
                     duration_ms,
                     None,
@@ -437,20 +437,20 @@ pub fn dispatch_before_provider_request(
     redacted: &str,
     rich: &str,
 ) -> Option<Value> {
-    let observed = StablePluginEvent::data(
+    let observed = StableExtensionEvent::data(
         EventTag::BeforeProviderRequest,
         StbString::from_string(rich.to_string()),
     );
     let _ = crate::compiled::dispatch_observe(&observed);
     free_dispatched_event(&observed);
 
-    let native = StablePluginEvent::data(
+    let native = StableExtensionEvent::data(
         EventTag::BeforeProviderRequest,
         StbString::from_string(redacted.to_string()),
     );
     dispatch_native_handlers(snapshot, &native);
 
-    let gate = StablePluginEvent::data(
+    let gate = StableExtensionEvent::data(
         EventTag::BeforeProviderRequest,
         StbString::from_string(rich.to_string()),
     );
@@ -464,10 +464,10 @@ pub fn dispatch_before_provider_request(
 /// provider-hook observer path ([`crate::provider_hooks`]) which has no
 /// matching `AgentEvent` to translate.
 pub fn dispatch_data_event(snapshot: &RegistrySnapshot, tag: EventTag, data: &str) -> bool {
-    // `dispatch_to_handlers` fans the event to the compiled plugins even when no
+    // `dispatch_to_handlers` fans the event to the compiled extensions even when no
     // cdylib handler subscribes, so it must always be reached.
     let invoked = !snapshot.handlers_for(tag).is_empty();
-    let event = StablePluginEvent::data(tag, StbString::from_string(data.to_string()));
+    let event = StableExtensionEvent::data(tag, StbString::from_string(data.to_string()));
     dispatch_to_handlers(snapshot, &event);
     invoked
 }
@@ -479,7 +479,7 @@ pub fn dispatch_data_event(snapshot: &RegistrySnapshot, tag: EventTag, data: &st
 /// event with an empty payload.
 pub fn dispatch_empty_event(snapshot: &RegistrySnapshot, tag: EventTag) -> bool {
     let invoked = !snapshot.handlers_for(tag).is_empty();
-    let event = StablePluginEvent::empty(tag);
+    let event = StableExtensionEvent::empty(tag);
     dispatch_to_handlers(snapshot, &event);
     invoked
 }
@@ -490,7 +490,7 @@ pub const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 
 /// Dispatch a tool approval against a live session. Only a successful continue
 /// permits execution; stale sessions, cancellation, timeout and handler errors
-/// block it. Blocking callbacks retain the plugin libraries until they return,
+/// block it. Blocking callbacks retain the extension libraries until they return,
 /// even when the async caller has already stopped waiting.
 pub async fn dispatch_tool_call_event(
     session: &crate::ExtensionSession,
@@ -540,7 +540,7 @@ async fn dispatch_tool_call_event_with_timeout(
                 "tool `{tool_name}` approval session is stale; retry after reload"
             ));
         }
-        let plugin_name = h.plugin.clone();
+        let extension_name = h.extension.clone();
         let id = tool_call_id.to_string();
         let name = tool_name.to_string();
         let payload = params.to_string();
@@ -554,7 +554,7 @@ async fn dispatch_tool_call_event_with_timeout(
                 task.abort(); // Prevent a queued callback from starting.
                 ui_dialog.cancel_tool_call(tool_call_id);
                 crate::event_log::log_handler_invocation(
-                    EventTag::ToolCall, &plugin_name, "Cancelled",
+                    EventTag::ToolCall, &extension_name, "Cancelled",
                     started.elapsed().as_millis() as u64, None,
                 );
                 return Some(format!("tool `{tool_name}` approval cancelled"));
@@ -567,25 +567,25 @@ async fn dispatch_tool_call_event_with_timeout(
             Ok(Ok(Ok(rc))) if rc == crate::EVENT_HANDLER_ABORT => (
                 "Abort",
                 Some(format!(
-                    "extension `{plugin_name}` blocked tool `{tool_name}`"
+                    "extension `{extension_name}` blocked tool `{tool_name}`"
                 )),
             ),
             Ok(Ok(Ok(rc))) => (
                 "Error",
                 Some(format!(
-                    "extension `{plugin_name}` tool `{tool_name}` approval failed: rc={rc}"
+                    "extension `{extension_name}` tool `{tool_name}` approval failed: rc={rc}"
                 )),
             ),
             Ok(Ok(Err(_))) => (
                 "Panic",
                 Some(format!(
-                    "extension `{plugin_name}` tool `{tool_name}` approval panicked"
+                    "extension `{extension_name}` tool `{tool_name}` approval panicked"
                 )),
             ),
             Ok(Err(error)) => (
                 "JoinFailed",
                 Some(format!(
-                    "extension `{plugin_name}` tool `{tool_name}` approval task failed: {error}"
+                    "extension `{extension_name}` tool `{tool_name}` approval task failed: {error}"
                 )),
             ),
             Err(_) => {
@@ -593,14 +593,14 @@ async fn dispatch_tool_call_event_with_timeout(
                 (
                     "Timeout",
                     Some(format!(
-                        "extension `{plugin_name}` tool `{tool_name}` approval timed out"
+                        "extension `{extension_name}` tool `{tool_name}` approval timed out"
                     )),
                 )
             }
         };
         crate::event_log::log_handler_invocation(
             EventTag::ToolCall,
-            &plugin_name,
+            &extension_name,
             status,
             duration_ms,
             error.clone(),
@@ -633,7 +633,7 @@ async fn dispatch_tool_call_event_with_timeout(
 /// handler can disagree; the event is considered claimed if **any** returned
 /// [`EVENT_HANDLER_CLAIMED`].
 /// Dispatch a data event and report whether it was **claimed**: a native handler
-/// returning `CLAIMED`, or a compiled plugin returning anything other than
+/// returning `CLAIMED`, or a compiled extension returning anything other than
 /// `EventAction::Continue`.
 ///
 /// `snapshot` is optional so a compiled-only session (no cdylibs loaded) still
@@ -643,8 +643,8 @@ pub fn dispatch_data_event_claiming(
     tag: EventTag,
     data: &str,
 ) -> bool {
-    let event = StablePluginEvent::data(tag, StbString::from_string(data.to_string()));
-    // Compiled plugins are asked first and unconditionally: they are not gated on
+    let event = StableExtensionEvent::data(tag, StbString::from_string(data.to_string()));
+    // Compiled extensions are asked first and unconditionally: they are not gated on
     // a native subscription, and a claim stands on its own.
     let compiled_claimed =
         crate::compiled::dispatch_claiming(&event) == crate::compiled::CompiledVerdict::Claimed;
@@ -666,7 +666,7 @@ pub fn dispatch_data_event_claiming(
         if !crate::registry::platform_allows(&h.platforms) {
             continue;
         }
-        // SAFETY: as in `dispatch_to_handlers` — the plugin warrants the handler
+        // SAFETY: as in `dispatch_to_handlers` — the extension warrants the handler
         // and its user_data are safe to call from this thread.
         let outcome = catch_unwind(AssertUnwindSafe(|| (h.handler)(event, h.user_data)));
         match outcome {
@@ -709,8 +709,8 @@ fn call_lifecycle_handler(
     h: crate::registry::RegisteredHandler,
     tag: EventTag,
 ) -> std::thread::Result<i32> {
-    let event = StablePluginEvent::empty(tag);
-    // SAFETY: the plugin warrants `h.handler` + `h.user_data` are safe to call
+    let event = StableExtensionEvent::empty(tag);
+    // SAFETY: the extension warrants `h.handler` + `h.user_data` are safe to call
     // from any thread; catch_unwind so a panic cannot cross FFI.
     catch_unwind(AssertUnwindSafe(|| (h.handler)(event, h.user_data)))
 }
@@ -719,20 +719,20 @@ fn call_lifecycle_handler(
 /// [`RegisteredHandler`](crate::registry::RegisteredHandler) **by value** for the
 /// same `Send` reason as [`call_lifecycle_handler`]: the closure must capture the
 /// `Send` struct whole, not its non-`Send` `user_data` field. Builds and frees
-/// the tool-call event on this thread (a `StablePluginEvent` holds raw pointers).
+/// the tool-call event on this thread (a `StableExtensionEvent` holds raw pointers).
 fn call_tool_call_handler(
     h: crate::registry::RegisteredHandler,
     tool_call_id: String,
     tool_name: String,
     params: String,
 ) -> std::thread::Result<i32> {
-    let event = StablePluginEvent::tool_call(
+    let event = StableExtensionEvent::tool_call(
         EventTag::ToolCall,
         StbString::from_string(tool_call_id),
         StbString::from_string(tool_name),
         StbString::from_string(params),
     );
-    // SAFETY: the plugin warrants `h.handler` + `h.user_data` are safe to call
+    // SAFETY: the extension warrants `h.handler` + `h.user_data` are safe to call
     // from any thread; catch_unwind so a panic cannot cross FFI.
     let rc = catch_unwind(AssertUnwindSafe(|| (h.handler)(event, h.user_data)));
     free_dispatched_event(&event);
@@ -758,12 +758,12 @@ pub async fn dispatch_lifecycle_event(
     snapshot: &RegistrySnapshot,
     tag: EventTag,
 ) -> Option<String> {
-    // Compiled plugins subscribe to these no-payload lifecycle events too; fan
+    // Compiled extensions subscribe to these no-payload lifecycle events too; fan
     // them out before the native-handler early return (a `ki` with no dylibs
     // would otherwise never deliver `SessionStart`/`SessionShutdown`). The
-    // verdict has no lifecycle meaning here — a compiled plugin cannot veto (the
+    // verdict has no lifecycle meaning here — a compiled extension cannot veto (the
     // contract's `EventAction` has no abort, unlike the native `ABORT` code).
-    let _ = crate::compiled::dispatch_observe(&StablePluginEvent::empty(tag));
+    let _ = crate::compiled::dispatch_observe(&StableExtensionEvent::empty(tag));
     // Staleness guard: a stale registry (swapped-out session) does nothing.
     if !crate::registry::assert_active(snapshot.active_flag()) {
         return None;
@@ -777,11 +777,11 @@ pub async fn dispatch_lifecycle_event(
     // Send values.
     let timeout = lifecycle_timeout_for(tag);
     for h in handlers {
-        // P2: skip a handler whose plugin declared platforms excluding this host.
+        // P2: skip a handler whose extension declared platforms excluding this host.
         if !crate::registry::platform_allows(&h.platforms) {
             crate::event_log::log_handler_invocation(
                 tag,
-                &h.plugin,
+                &h.extension,
                 "PlatformSkip",
                 0,
                 Some(format!("host={}", crate::registry::current_platform())),
@@ -790,7 +790,7 @@ pub async fn dispatch_lifecycle_event(
         }
         // Capture the owning extension's display name for the veto message
         // before the handler is moved into the blocking closure.
-        let plugin_name = h.plugin.clone();
+        let extension_name = h.extension.clone();
         let h_task = h;
         let tag_task = tag;
         let started = std::time::Instant::now();
@@ -804,23 +804,23 @@ pub async fn dispatch_lifecycle_event(
             Ok(Ok(Ok(rc))) if rc == crate::EVENT_HANDLER_ABORT => {
                 tracing::warn!(
                     tag = ?tag,
-                    plugin = %plugin_name,
+                    extension = %extension_name,
                     "extension handler vetoed lifecycle event"
                 );
                 crate::event_log::log_handler_invocation(
                     tag,
-                    &plugin_name,
+                    &extension_name,
                     "Abort",
                     duration_ms,
                     None,
                 );
-                return Some(format!("extension `{plugin_name}` vetoed {tag:?}"));
+                return Some(format!("extension `{extension_name}` vetoed {tag:?}"));
             }
             Ok(Ok(Ok(rc))) => {
                 let result = if rc == 0 { "Continue" } else { "Error" };
                 crate::event_log::log_handler_invocation(
                     tag,
-                    &plugin_name,
+                    &extension_name,
                     result,
                     duration_ms,
                     if rc == 0 {
@@ -834,7 +834,7 @@ pub async fn dispatch_lifecycle_event(
                 tracing::error!(tag = ?tag, "extension handler panicked — skipped");
                 crate::event_log::log_handler_invocation(
                     tag,
-                    &plugin_name,
+                    &extension_name,
                     "Panic",
                     duration_ms,
                     None,
@@ -848,7 +848,7 @@ pub async fn dispatch_lifecycle_event(
                 );
                 crate::event_log::log_handler_invocation(
                     tag,
-                    &plugin_name,
+                    &extension_name,
                     "JoinFailed",
                     duration_ms,
                     Some(join_err.to_string()),
@@ -862,7 +862,7 @@ pub async fn dispatch_lifecycle_event(
                 );
                 crate::event_log::log_handler_invocation(
                     tag,
-                    &plugin_name,
+                    &extension_name,
                     "Timeout",
                     duration_ms,
                     Some(format!("budget_ms={}", timeout.as_millis())),
@@ -892,15 +892,15 @@ impl AgentEmitter for ExtensionEmitter {
 }
 
 // ===========================================================================
-// TeeEmitter — fan an AgentEvent out to N AgentEmitters (host + plugins)
+// TeeEmitter — fan an AgentEvent out to N AgentEmitters (host + extensions)
 // ===========================================================================
 
 /// An [`AgentEmitter`] that forwards every event to each of its children, in
 /// registration order. The host builds one around `[BroadcastEmitter (→ TUI),
-/// ExtensionEmitter (→ plugin handlers)]` so a single `AgentHarnessOptions
+/// ExtensionEmitter (→ extension handlers)]` so a single `AgentHarnessOptions
 /// .agent_emitter` slot feeds both consumers: the TUI keeps rendering from its
-/// broadcast receiver, and plugin `on()` handlers receive translated
-/// `StablePluginEvent`s.
+/// broadcast receiver, and extension `on()` handlers receive translated
+/// `StableExtensionEvent`s.
 ///
 /// `emit` awaits each child in turn (the loop awaits `emit`, so order matches
 /// registration); `try_emit` calls each child's `try_emit` (the tool
@@ -948,7 +948,7 @@ impl AgentEmitter for TeeEmitter {
 /// Free every owning `StbString` in a dispatched event exactly once via the
 /// host's `free_string`. Called by [`ExtensionEmitter::dispatch`] after the
 /// fan-out completes. Handlers MUST NOT free event strings (host owns cleanup).
-fn free_dispatched_event(event: &StablePluginEvent) {
+fn free_dispatched_event(event: &StableExtensionEvent) {
     use crate::EventTag as T;
     match event.tag {
         T::MessageStart | T::MessageUpdate | T::MessageEnd => {
@@ -1192,7 +1192,7 @@ mod tests {
 
     static HANDLER_HITS: AtomicUsize = AtomicUsize::new(0);
 
-    extern "C" fn counting_handler(_ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
+    extern "C" fn counting_handler(_ev: StableExtensionEvent, _ud: *mut std::ffi::c_void) -> i32 {
         HANDLER_HITS.fetch_add(1, Ordering::SeqCst);
         0
     }
@@ -1203,7 +1203,7 @@ mod tests {
         HANDLER_HITS.store(0, Ordering::SeqCst);
         let mut reg = crate::registry::ExtensionRegistry::new();
         reg.register_event_handler(
-            "test-plugin".to_string(),
+            "test-extension".to_string(),
             EventTag::MessageEnd,
             counting_handler,
             std::ptr::null_mut(),
@@ -1264,13 +1264,13 @@ mod tests {
         let _guard = HANDLER_TEST_LOCK.lock().unwrap();
         use kiqi_agent::events::{AgentEmitter, CollectorEmitter};
 
-        // Two collector emitters + record how many plugin handler hits land.
+        // Two collector emitters + record how many extension handler hits land.
         let (collector_a, events_a) = CollectorEmitter::new();
         let (collector_b, events_b) = CollectorEmitter::new();
         HANDLER_HITS.store(0, Ordering::SeqCst);
         let mut reg = crate::registry::ExtensionRegistry::new();
         reg.register_event_handler(
-            "test-plugin".to_string(),
+            "test-extension".to_string(),
             EventTag::MessageEnd,
             counting_handler,
             std::ptr::null_mut(),
@@ -1316,7 +1316,7 @@ mod tests {
         assert_eq!(
             HANDLER_HITS.load(Ordering::SeqCst),
             1,
-            "plugin handler fired once"
+            "extension handler fired once"
         );
     }
 
@@ -1331,13 +1331,13 @@ mod tests {
         HANDLER_HITS.store(0, Ordering::SeqCst);
         let mut reg = crate::registry::ExtensionRegistry::new();
         reg.register_event_handler(
-            "test-plugin".to_string(),
+            "test-extension".to_string(),
             EventTag::SessionStart,
             counting_handler,
             std::ptr::null_mut(),
         );
         reg.register_event_handler(
-            "test-plugin".to_string(),
+            "test-extension".to_string(),
             EventTag::BeforeTuiStart,
             counting_handler,
             std::ptr::null_mut(),
@@ -1365,17 +1365,17 @@ mod tests {
     // --- dispatch_lifecycle_event: veto + timeout (P1) ---
 
     /// A lifecycle handler that vetoes (returns the SDK abort code).
-    extern "C" fn aborting_handler(_ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
+    extern "C" fn aborting_handler(_ev: StableExtensionEvent, _ud: *mut std::ffi::c_void) -> i32 {
         crate::EVENT_HANDLER_ABORT
     }
 
     /// A lifecycle handler that returns success (`0`) — no veto.
-    extern "C" fn continue_handler(_ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
+    extern "C" fn continue_handler(_ev: StableExtensionEvent, _ud: *mut std::ffi::c_void) -> i32 {
         crate::EVENT_HANDLER_CONTINUE
     }
 
     /// A lifecycle handler that returns a generic handled error — no veto.
-    extern "C" fn error_handler(_ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
+    extern "C" fn error_handler(_ev: StableExtensionEvent, _ud: *mut std::ffi::c_void) -> i32 {
         crate::EVENT_HANDLER_ERROR
     }
 
@@ -1473,7 +1473,10 @@ mod tests {
         release: std::sync::atomic::AtomicBool,
     }
 
-    extern "C" fn waiting_approval(event: StablePluginEvent, data: *mut std::ffi::c_void) -> i32 {
+    extern "C" fn waiting_approval(
+        event: StableExtensionEvent,
+        data: *mut std::ffi::c_void,
+    ) -> i32 {
         // The test owns this context until the worker reports completion.
         let state = unsafe { Arc::from_raw(data as *const WaitingApproval) };
         let call_id = unsafe { event.payload.tool_call.tool_call_id.to_string_lossy() };
@@ -1695,7 +1698,7 @@ mod tests {
             std::ptr::null_mut(),
         );
         let snap = Arc::new(reg.snapshot());
-        let event = StablePluginEvent::message(
+        let event = StableExtensionEvent::message(
             EventTag::MessageEnd,
             StbString::from_string("m".to_string()),
         );
@@ -1707,7 +1710,7 @@ mod tests {
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains(r#""event":"MessageEnd""#), "log: {text}");
-        assert!(text.contains(r#""plugin":"log-ext""#), "log: {text}");
+        assert!(text.contains(r#""extension":"log-ext""#), "log: {text}");
         assert!(text.contains(r#""result":"Continue""#), "log: {text}");
         assert_eq!(HANDLER_HITS.load(Ordering::SeqCst), 1);
     }
@@ -1718,7 +1721,7 @@ mod tests {
     /// `CLAIM_ROUTING` is global because an `extern "C" fn` cannot capture.
     static CLAIM_ROUTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-    extern "C" fn claiming_handler(ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
+    extern "C" fn claiming_handler(ev: StableExtensionEvent, _ud: *mut std::ffi::c_void) -> i32 {
         // The payload must be readable as a data event (this is also what
         // exercises the `Input` free path not leaking/aliasing).
         let seen = unsafe { ev.payload.data.data.to_string_lossy() };
@@ -1809,7 +1812,10 @@ mod tests {
     static EDITOR_CHANGE_SEEN: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
 
-    extern "C" fn editor_change_handler(ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
+    extern "C" fn editor_change_handler(
+        ev: StableExtensionEvent,
+        _ud: *mut std::ffi::c_void,
+    ) -> i32 {
         // Reading the data payload here also exercises the `EditorChange` free
         // path (a wrong arm in `free_dispatched_event` would corrupt/leak).
         let seen = unsafe { ev.payload.data.data.to_string_lossy() };

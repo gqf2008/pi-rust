@@ -18,7 +18,7 @@
 ```
 kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli
                   ↑                                        ↑
-            kiqi-tui                          kiqi-plugin-sdk → kiqi-extensions
+            kiqi-tui                          kiqi-extension-sdk → kiqi-extensions
 ```
 
 每一层只解决一件事：
@@ -30,7 +30,7 @@ kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → ki
 | `kiqi-tools` | `read`/`write`/`edit`/`bash` + `ExecutionEnv` 抽象 | 工具只依赖 `ExecutionEnv`，不依赖真实文件系统 |
 | `kiqi-harness` | 会话树、JSONL 持久化、压缩、崩溃恢复 | 唯一负责"状态活过进程"的层 |
 | `kiqi-cli` | TUI、配置、插件加载 | 只做编排，不含领域逻辑 |
-| `kiqi-plugin-sdk` | 稳定 `#[repr(C)]` ABI | **零依赖叶子**，插件不该拖进整个 runtime |
+| `kiqi-extension-sdk` | 稳定 `#[repr(C)]` ABI | **零依赖叶子**，插件不该拖进整个 runtime |
 
 两条约束是硬性的，代码评审会直接拒：
 

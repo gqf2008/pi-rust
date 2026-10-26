@@ -1,14 +1,14 @@
 # ki Rust 扩展开发最佳实践
 
 > **P6 状态（2026-10-26）：cdylib 通道已整体退役。** 本文保留为历史规范，
-> 其中 `kiqi-plugin-sdk`、`ki install`、`ki dev`、`ki dev-local`、`--extensions-dir`
-> 与 `examples/plugin-stub` 均已删除，照做会失败。当前唯一插件通道是 wasm 组件：
-> 契约见 `plugins/kiqi-plugin.wit`，模板见 `plugins/wasm/kiqi-todo-guest`，
-> 安装用 `ki insmod --build plugins/wasm/kiqi-<name>-guest`。
+> 其中 `kiqi-extension-sdk`、`ki install`、`ki dev`、`ki dev-local`、`--extensions-dir`
+> 与 `examples/extension-stub` 均已删除，照做会失败。当前唯一插件通道是 wasm 组件：
+> 契约见 `extensions/kiqi-extension.wit`，模板见 `extensions/wasm/kiqi-todo`，
+> 安装用 `ki insmod --build extensions/wasm/kiqi-<name>`。
 
 
 本文是 ki 创建 Rust `cdylib` 扩展的模型可读规范。扩展是 Rust 原生动态库，
-通过稳定 C ABI（`kiqi-plugin-sdk`）注册工具、事件处理器、资源发现、Provider
+通过稳定 C ABI（`kiqi-extension-sdk`）注册工具、事件处理器、资源发现、Provider
 与渲染器，宿主（`ki` CLI）负责加载与生命周期。创建完整 Agent 项目的默认结构见
 `docs` 的 `agent` 主题；本指南聚焦扩展本身的 ABI 与生命周期。
 
@@ -17,13 +17,13 @@
 | 项目 | Rust 原生扩展 |
 | --- | --- |
 | 安装 | `ki install crate-name`（crates.io 或 `--path`） |
-| 入口 | `kiqi_plugin_register` C ABI 符号 |
+| 入口 | `kiqi_extension_register` C ABI 符号 |
 | 开发反馈 | `ki dev` watch + 热重载；`ki dev-local` 隔离调试 |
 | 静态资源 | `resources_discover` 或随项目放入 `.ki`（wasm 插件改用 `resources.json` 包约定，见 §12.4） |
 | 运行环境 | 本机动态库，当前用户权限 |
 | 适用场景 | 本地工具、系统集成、性能敏感或纯 Rust 项目 |
 
-扩展应遵循能力检测：只调用宿主明确提供的 capability，检查 `PluginApi`
+扩展应遵循能力检测：只调用宿主明确提供的 capability，检查 `ExtensionApi`
 对应注册槽位是否为 `Some`。缺少能力时返回清晰错误并优雅降级，不要 panic、
 空指针或依赖 `undefined` 语义。
 
@@ -55,24 +55,24 @@ repository = "https://github.com/example/my-kiqi-extension"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-kiqi-plugin-sdk = "0.1"
+kiqi-extension-sdk = "0.1"
 serde_json = "1"
 ```
 
 `cdylib` 是宿主加载的产物；同时保留 `rlib` 便于 Rust 集成测试。扩展边界只依赖
-`kiqi-plugin-sdk`，不要依赖 `kiqi-cli`、`kiqi-extensions` 或 harness 内部模块，
+`kiqi-extension-sdk`，不要依赖 `kiqi-cli`、`kiqi-extensions` 或 harness 内部模块，
 否则插件会和宿主实现耦合。
 
 ## 3. ABI 入口
 
-宿主只加载统一 C ABI 符号 `kiqi_plugin_register`。扩展使用 `export_plugin!`，
-通过同一个 `PluginApi` 注册能力并调用 `api.declare` 声明优先级/平台。
+宿主只加载统一 C ABI 符号 `kiqi_extension_register`。扩展使用 `export_extension!`，
+通过同一个 `ExtensionApi` 注册能力并调用 `api.declare` 声明优先级/平台。
 SDK 在注册前检查 `abi_version` 和 `struct_size`；不兼容时返回非零状态，宿主报告加载失败。
 
 ```rust
-kiqi_plugin_sdk::export_plugin!(|api| {
+kiqi_extension_sdk::export_extension!(|api| {
     if let Some(declare) = api.declare {
-        let status = declare(kiqi_plugin_sdk::StbStringRef::from_str(
+        let status = declare(kiqi_extension_sdk::StbStringRef::from_str(
             r#"{"priority":60,"platforms":["linux"]}"#,
         ));
         if status != 0 {
@@ -83,7 +83,7 @@ kiqi_plugin_sdk::export_plugin!(|api| {
         return -1;
     };
     // 构建 StableToolSchema 和 execute/poll/cancel/destroy 函数表，
-    // 然后调用 register_tool。完整实现参考 examples/plugin-stub。
+    // 然后调用 register_tool。完整实现参考 examples/extension-stub。
     let _ = register_tool;
     0
 });
@@ -115,16 +115,16 @@ kiqi_plugin_sdk::export_plugin!(|api| {
 - 宿主产生的 `StbString`（execute 的 params、事件 payload）由插件通过宿主的
   `free_string` 释放。
 - 插件产生的 `StbString`（done 结果、partial 进度、resources_discover 的 out）
-  由宿主通过插件注册时提供的 `plugin_free_string` 释放。
+  由宿主通过插件注册时提供的 `extension_free_string` 释放。
 - 每个 `extern "C"` 边界都不能 unwind；插件内部捕获 panic 并转换为错误结果。
 
-完整、可运行的 ABI 模板位于 `examples/plugin-stub/src/lib.rs`。创建新工具时先
+完整、可运行的 ABI 模板位于 `examples/extension-stub/src/lib.rs`。创建新工具时先
 复制生命周期骨架，再替换参数 schema 和领域逻辑，不要重新设计所有权协议。
 
 ### 注入到工具参数里的宿主上下文
 
 宿主在把参数交给插件**之前**，会往这次调用的 JSON 参数里加一个保留键
-`__ki`（`kiqi_plugin_sdk::HOST_CONTEXT_KEY`）：
+`__ki`（`kiqi_extension_sdk::HOST_CONTEXT_KEY`）：
 
 ```json
 { "action": "add", "text": "…",
@@ -158,7 +158,7 @@ kiqi_plugin_sdk::export_plugin!(|api| {
   `ToolExecutionStart`/`Update`/`End`、`ToolCall`、`ToolResult`、`UserBash`、`Input`。
 - **ki 特有 / UI**：`BeforeTuiStart`（TUI 初始化前）、`UiPromptStart`/`UiPromptEnd`。
 
-处理器收到 `StablePluginEvent`，不得释放事件里的字符串（宿主 fan-out 后统一释放）。
+处理器收到 `StableExtensionEvent`，不得释放事件里的字符串（宿主 fan-out 后统一释放）。
 返回 `0` 成功；返回 `EVENT_HANDLER_ABORT` 表示 veto。
 
 ### 生命周期 veto
@@ -173,7 +173,7 @@ kiqi_plugin_sdk::export_plugin!(|api| {
 `api.register_resources_discover` 注册 handler，宿主在 `startup`/`reload` 时
 fan-out 到所有已注册 handler，合并返回的 `{skillPaths, promptPaths, themePaths}`。
 单个 handler 报错不中止 fan-out。`out` 是插件拥有的 `StbString`，宿主通过插件
-注册时给的 `plugin_free_string` 回收。
+注册时给的 `extension_free_string` 回收。
 
 ### Provider 与渲染器（cdylib 槽位，已被 wasm 取代）
 
@@ -184,7 +184,7 @@ fan-out 到所有已注册 handler，合并返回的 `{skillPaths, promptPaths, 
 > **0.8.0 起这两类能力的权威路径是 wasm**：provider 走 `provider-api` 导出 +
 > `provider-http`/`provider-stream` 导入，渲染走 `render-api`（只支持 markdown 定稿转换）。
 > 上面的 cdylib 槽位已被取代（P6 删除代码），新插件不要再依赖它们。细节见
-> [plugin-abi.md §6.41/§6.42](../design/plugin-abi.md) 与本文 §12。
+> [extension-abi.md §6.41/§6.42](../design/extension-abi.md) 与本文 §12。
 
 ## 6. Rust 工具设计最佳实践
 
@@ -318,9 +318,9 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 ## 9. 发布检查清单
 
 - `cargo fmt --check`、`cargo clippy --all-targets`、`cargo test` 通过。
-- `crate-type` 包含 `cdylib`，使用 `export_plugin!` 导出
-  `kiqi_plugin_register`。
-- 依赖已发布的 `kiqi-plugin-sdk` 兼容版本，不链接宿主私有 crate。
+- `crate-type` 包含 `cdylib`，使用 `export_extension!` 导出
+  `kiqi_extension_register`。
+- 依赖已发布的 `kiqi-extension-sdk` 兼容版本，不链接宿主私有 crate。
 - `ki dev --no-watch` 能编译、加载并注册预期工具。
 - `ki install <crate> --force` 的干净安装路径通过。
 - Linux/macOS/Windows 构建由 CI 验证，README 标明支持矩阵。
@@ -331,14 +331,14 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 
 1. 先调用 `docs` 查询 `authoring`（扩展开发）或 `debugging`（调试）。
 2. 阅读当前仓库现有 manifest、SDK 版本和相邻扩展约定，不猜 API。
-3. 优先复制 `examples/plugin-stub` 的最小骨架。
+3. 优先复制 `examples/extension-stub` 的最小骨架。
 4. 实现领域逻辑与边界测试，再连接 loader/ABI。
 5. 使用 `ki dev --no-watch` 与 `ki install <crate> --force` 做真实 smoke test。
 6. 不声称未验证的 Pi capability 已完全兼容；明确记录降级行为。
 
 ## 11. OAuth 扩展接口（cdylib，已被 wasm 取代）
 
-> **已被取代（0.8.0）。** 权威实现见 [plugin-abi.md §6.40](../design/plugin-abi.md)：
+> **已被取代（0.8.0）。** 权威实现见 [extension-abi.md §6.40](../design/extension-abi.md)：
 > `oauth-api` 导出 + `oauth-http` 导入，**token 由宿主持有，永不进入 guest 内存**。
 > 本节保留 cdylib 的旧契约，直到 P6 删除代码；新插件请直接看 §12。
 >
@@ -347,7 +347,7 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 
 ki 的 OAuth 方向是“轻量核心 + 平台插件”：平台差异由扩展实现，宿主负责统一
 发现、生命周期和后续的凭证存储。cdylib 通道当前仍提供可选的
-`register_oauth_provider` 槽位（`crates/kiqi-plugin-sdk/src/lib.rs:1265`）；旧插件不需要
+`register_oauth_provider` 槽位（`crates/kiqi-extension-sdk/src/lib.rs:1265`）；旧插件不需要
 重新编译即可继续加载，但该槽位已无宿主侧消费者。
 
 插件注册一个 JSON manifest 和一个 action callback：
@@ -365,7 +365,7 @@ ki 的 OAuth 方向是“轻量核心 + 平台插件”：平台差异由扩展�
 OAuth callback 使用版本化 JSON action envelope。支持的动作是 `begin`、`exchange`、
 `refresh` 和 `revoke`，但 action input 和平台流程完全由扩展定义。OAuth token 属于
 敏感信息：不得写入普通事件、模型消息、工具结果、调试日志或错误文本。插件拥有
-自己产生的输出字符串，宿主通过注册时提供的 `plugin_free_string` 回收。插件应使用
+自己产生的输出字符串，宿主通过注册时提供的 `extension_free_string` 回收。插件应使用
 KI 的 provider-scoped credential bridge，而不是自行把 token 写入项目目录。
 
 宿主只实现标准 interaction/credential/success/error response；浏览器、device-code、
@@ -406,7 +406,7 @@ transcript、普通插件事件或日志。
 
 `kiqi-extensions` 提供 `list_oauth_providers` 和 `request_oauth` 两个宿主侧入口。
 它们只允许调用已经注册且 manifest `id` 匹配的 provider，并在读取插件输出后立即
-调用插件提供的 `plugin_free_string`。宿主只做 opaque input 转发和标准 response
+调用插件提供的 `extension_free_string`。宿主只做 opaque input 转发和标准 response
 校验，不包含任何平台 provider 特判。
 
 已接入通用 CLI 流程：
@@ -427,20 +427,20 @@ ki auth login --provider <id>
 
 wasm 插件不注册槽位，改为**导出接口 + 授权 key**：能力是否存在只看 `grants.json`
 （缺失 = 拒绝），策略随授权一起存。下面五个 key 都**不会被 `--yes` 自动授予**——它们的
-策略无法从 import 名推导，必须显式执行 `ki plugin grant`（`AUTO_GRANT_EXEMPT`，
-`crates/kiqi-cli/src/plugin_cli.rs:1272-1278`；无 tty 且无 `--yes` 时什么都不授）。
+策略无法从 import 名推导，必须显式执行 `ki extension grant`（`AUTO_GRANT_EXEMPT`，
+`crates/kiqi-cli/src/extension_cli.rs:1272-1278`；无 tty 且无 `--yes` 时什么都不授）。
 接口 → grant key 的唯一映射是 `grant_key_for_interface`
-（`crates/kiqi-plugin/src/grants.rs:1224-1243`）。
+（`crates/kiqi-extension/src/grants.rs:1224-1243`）。
 
 | 能力 | 导出 / 导入面 | grant key | 授权命令 |
 |---|---|---|---|
-| OAuth | `oauth-api`（导出）+ `oauth-http`（导入） | `oauth` | `ki plugin grant <id> oauth --provider <pid> --profile <file.json>`（可重复成对） |
-| Provider | `provider-api`（导出）+ `provider-http`/`provider-stream`（导入） | `provider` | `ki plugin grant <id> provider --model-json <file.json> --endpoint <scheme://host/prefix> [--method GET\|POST] --credential-from auth-json:<pid> [--timeout <s>]` |
-| Render | `render-api`（导出） | `render` | `ki plugin grant <id> render --kind markdown` |
-| Resources | 包约定（无 WIT 面） | `resources` | `ki plugin grant <id> resources --kind skills\|prompts` |
-| 请求观察 / 补丁 | `on-event` 的 `before-provider-request` + `event-action.patch` | `provider-request` | `ki plugin grant <id> provider-request --observe [--headers names\|values] [--messages none\|full] [--patch]` |
+| OAuth | `oauth-api`（导出）+ `oauth-http`（导入） | `oauth` | `ki extension grant <id> oauth --provider <pid> --profile <file.json>`（可重复成对） |
+| Provider | `provider-api`（导出）+ `provider-http`/`provider-stream`（导入） | `provider` | `ki extension grant <id> provider --model-json <file.json> --endpoint <scheme://host/prefix> [--method GET\|POST] --credential-from auth-json:<pid> [--timeout <s>]` |
+| Render | `render-api`（导出） | `render` | `ki extension grant <id> render --kind markdown` |
+| Resources | 包约定（无 WIT 面） | `resources` | `ki extension grant <id> resources --kind skills\|prompts` |
+| 请求观察 / 补丁 | `on-event` 的 `before-provider-request` + `event-action.patch` | `provider-request` | `ki extension grant <id> provider-request --observe [--headers names\|values] [--messages none\|full] [--patch]` |
 
-拼写以 `ki plugin grant` 的用法文本为准（`crates/kiqi-cli/src/plugin_cli.rs:1227-1240`）。
+拼写以 `ki extension grant` 的用法文本为准（`crates/kiqi-cli/src/extension_cli.rs:1227-1240`）。
 
 ### 12.1 OAuth：guest 是流程控制器，宿主做 HTTP 与存储
 
@@ -450,7 +450,7 @@ wasm 插件不注册槽位，改为**导出接口 + 授权 key**：能力是否�
   `stored(status) | failed(string)`，原始 token 响应体从不回传；
 - 端点、`client-id`、scope 全部来自 grant；`action.begin(string)` 只携带 PKCE
   `code_challenge`（设备码流传空串），授权 URL 由宿主构造，guest 返回的 `url` 被忽略；
-- token 存到命名空间 key `plugin:<install-id>:<provider-id>`；`ki auth refresh` /
+- token 存到命名空间 key `extension:<install-id>:<provider-id>`；`ki auth refresh` /
   `ki auth logout` 是纯宿主操作（refresh token 直达 IdP，logout 先 revoke 再删 key）；
 - 凭据绑定签发 profile 指纹（provider-id、client-id、各端点 origin）；指纹缺失或不匹配时
   refresh/logout/revoke 拒绝把旧 token 发往新 IdP。logout 只有显式 `--force-local` 才在不发
@@ -474,14 +474,14 @@ wasm 插件不注册槽位，改为**导出接口 + 授权 key**：能力是否�
   dot segment 与重复 `/` 都拒绝，重定向拒绝，guest 的认证/框架头被剥离，凭据只由宿主注入；
   句柄按调用回收；
 - 凭据在 grant 里只是不透明句柄：`--credential-from auth-json:<pid>` 由宿主解析，
-  `{source, provider, display, fingerprint}` 写入 `plugins/<id>/credentials.json`（0600，
-  在 fs jail 之外），`ki plugin show` 只展示指纹前缀；每次请求重新读取值并校验指纹，改变即拒绝；
+  `{source, provider, display, fingerprint}` 写入 `extensions/<id>/credentials.json`（0600，
+  在 fs jail 之外），`ki extension show` 只展示指纹前缀；每次请求重新读取值并校验指纹，改变即拒绝；
 - 宿主墙钟覆盖 WASI 阻塞，CLI 用 `select!` 同时等宿主结果与 delta；超时后不再等遗留 guest
   sender 关闭，立即以错误终止流。
 
 ### 12.3 Render：只做 markdown 定稿转换
 
-- `render-api.transform-markdown(markdown) -> result<string, plugin-error>` 是唯一函数，
+- `render-api.transform-markdown(markdown) -> result<string, extension-error>` 是唯一函数，
   纯文本到文本；没有消息 / entry renderer 的 wasm 等价物；
 - 跑在 deny-all 实例上（独立 Engine/Store，没有 session/ui/exec），流式期间不调用，
   每条定稿消息恰好调用一次；
@@ -491,7 +491,7 @@ wasm 插件不注册槽位，改为**导出接口 + 授权 key**：能力是否�
 
 ### 12.4 Resources：包约定，不是注册
 
-- guest crate 在 `plugin.wasm` 旁放 `resources.json` 与 `resources/<kind>/`；
+- guest crate 在 `extension.wasm` 旁放 `resources.json` 与 `resources/<kind>/`；
   `ki insmod` 复制它们并写 `resources.sha256`（manifest 自己也在摘要内，安装后手改会失败）；
 - manifest 是包声明，grant 是用户授权，加载取两者交集；插件目录追加在最后并按名字
   first-wins，内建/项目资源永远赢过插件；

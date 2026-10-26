@@ -39,7 +39,7 @@ pub(super) enum SelectorKind {
     Extension,
 }
 
-/// What kind of user interaction a plugin command asked for.
+/// What kind of user interaction an extension command asked for.
 ///
 /// Mirrors the `command-result-body` variant that started the flow. The slot
 /// records it so a reply cannot be delivered as a different interaction (an
@@ -52,13 +52,13 @@ pub(super) enum CommandFlowKind {
     Prompt,
 }
 
-/// The single pending plugin command flow.
+/// The single pending extension command flow.
 ///
 /// Exactly one flow may be pending at a time. A second invocation replaces the
 /// slot (and thereby invalidates the earlier flow: its reply will fail the id
 /// match); Esc takes it and sends `Cancelled`.
 pub(super) struct PendingCommandFlow {
-    pub(super) host: Arc<crate::plugins::PluginHost>,
+    pub(super) host: Arc<crate::extensions::ExtensionHost>,
     pub(super) name: String,
     pub(super) flow_id: String,
     pub(super) kind: CommandFlowKind,
@@ -196,7 +196,7 @@ pub(super) struct TuiState {
     /// Revision of `ext_status` as of the last footer write.
     pub(super) ext_status_revision: std::sync::atomic::AtomicU64,
     /// Session editor-text queue (`SetEditorText`, runtime action 19). The
-    /// render tick drains it into the prompt editor; a voice plugin drops a
+    /// render tick drains it into the prompt editor; a voice extension drops a
     /// transcription in as an editable draft rather than sending it.
     pub(super) editor_text: kiqi_host::EditorTextMailbox,
     /// Pending auto-send for an injected draft (see [`AutoSendPending`]).
@@ -208,7 +208,7 @@ pub(super) struct TuiState {
     /// Set by the TUI itself right before it writes the editor (an extension
     /// draft injection, the auto-send clear). The next `EditorChange` is then
     /// attributed to `extension` rather than to the user — without this a
-    /// plugin could not tell its own text from a human typing.
+    /// extension could not tell its own text from a human typing.
     pub(super) programmatic_editor_write: std::sync::atomic::AtomicBool,
     /// Cancellation signal for the short phase that starts the persistent JS
     /// host and runs `before_agent_start`. The key thread can trigger this
@@ -247,7 +247,7 @@ pub(super) struct TuiState {
     pub(super) active_extension_input: std::sync::Mutex<Option<Arc<Input>>>,
     /// Callback used to resolve an extension dialog with a cancellation action.
     pub(super) active_extension_cancel: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// The one pending plugin command flow (selector/editor/prompt), if any.
+    /// The one pending extension command flow (selector/editor/prompt), if any.
     /// A second command invocation replaces it; Esc cancels it.
     pub(super) pending_command_flow: std::sync::Mutex<Option<PendingCommandFlow>>,
     /// The autocomplete manager (slash + @file providers) consulted on every
@@ -302,14 +302,14 @@ pub(super) struct TuiState {
     /// when no markdown transformers are registered (identity render path).
     /// Swapped on `/reload` (a fresh snapshot ⇒ a fresh closure; the old
     /// closure no-ops once its snapshot's `active` flag flips false) and
-    /// re-installed on the in-flight `current_assistant` so a reloaded plugin's
+    /// re-installed on the in-flight `current_assistant` so a reloaded extension's
     /// transform takes effect on the visible streaming message immediately.
     /// New assistant components pick up whatever closure is current at
     /// construction time via [`install_markdown_transformer`].
     pub(super) markdown_transformer: Arc<std::sync::Mutex<Option<MarkdownTransformer>>>,
     /// Live extension registry used by message/entry renderer dispatch.
     pub(super) extension_session: crate::session::ExtensionSessionCell,
-    /// Releases for already-claimed presses must reach the plugin even if a
+    /// Releases for already-claimed presses must reach the extension even if a
     /// draft or modal appears while the key is held (e.g. push-to-talk).
     pub(super) extension_claimed_keys: Mutex<std::collections::HashSet<KeyCode>>,
     /// Transcript search handler (Ctrl+Shift+F).
@@ -1225,7 +1225,7 @@ impl TuiState {
     /// can stop reading the previous answer aloud (barge-in) — the draft text
     /// itself is not shipped, only `chars`/`empty`/`source`.
     ///
-    /// `source` separates a human edit from one the TUI made on a plugin's
+    /// `source` separates a human edit from one the TUI made on an extension's
     /// behalf (`SetEditorText`, or clearing the draft after an auto-send). A
     /// hands-free extension needs that distinction: its own injected
     /// transcription must not be mistaken for the user taking over the
@@ -1242,7 +1242,7 @@ impl TuiState {
             return;
         };
         // Cheap pre-check so the common (no subscriber) case never touches a
-        // plugin: session lock + snapshot read only.
+        // extension: session lock + snapshot read only.
         let Ok(session) = self.extension_session.lock() else {
             return;
         };
@@ -1335,7 +1335,7 @@ impl TuiState {
         self.extension_editor_open() || self.extension_input_open()
     }
 
-    /// Install a pending plugin command flow, returning the one it replaced.
+    /// Install a pending extension command flow, returning the one it replaced.
     ///
     /// Replacing is deliberate: a command invoked again while its earlier flow
     /// is still up takes over the slot, and the stale flow's reply is then
@@ -1409,7 +1409,7 @@ impl TuiState {
 
     /// B5e: read a clone of the current assistant-markdown transformer (if any).
     /// New assistant components call this at construction so they render with
-    /// whatever plugin `register_markdown_transformer` handlers are live.
+    /// whatever extension `register_markdown_transformer` handlers are live.
     pub(super) fn markdown_transformer(&self) -> Option<MarkdownTransformer> {
         self.markdown_transformer.lock().unwrap().clone()
     }
@@ -1434,7 +1434,7 @@ impl TuiState {
 
     /// B5e: swap the live transformer. Used at startup (install the first
     /// closure built from the initial `RegistrySnapshot`) and on `/reload`
-    /// (rebuild from the fresh snapshot). On a reload the reloaded plugin's
+    /// (rebuild from the fresh snapshot). On a reload the reloaded extension's
     /// transform should take effect on the VISIBLE streaming message too, so
     /// this re-installs on the in-flight `current_assistant` component — its
     /// `set_markdown_transformer` rebuilds the last blocks immediately. A

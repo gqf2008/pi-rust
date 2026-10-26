@@ -1,9 +1,9 @@
-//! B5c — `PluggableProvider`: the host-side `Provider` impl wrapping a plugin's
+//! B5c — `PluggableProvider`: the host-side `Provider` impl wrapping an extension's
 //! `ProviderRequestFn`.
 //!
-//! A plugin's [`ProviderRequestFn`](crate::ProviderRequestFn) is a
+//! An extension's [`ProviderRequestFn`](crate::ProviderRequestFn) is a
 //! **synchronous one-shot**: given a borrowed JSON request envelope it writes a
-//! **plugin-owned** `out` [`StbString`] (a full assistant-message JSON). It
+//! **extension-owned** `out` [`StbString`] (a full assistant-message JSON). It
 //! cannot drive a chunked `stream_simple` without blocking, so the v1
 //! `PluggableProvider` emits the full response as a **single terminal `Done`
 //! chunk** — a documented divergence from pi's async `streamSimple`
@@ -20,9 +20,9 @@
 //!   and `options` is a hand-built JSON of the [`SimpleStreamOptions`] fields
 //!   (that type is not `Serialize`; we mirror the field set
 //!   [`ExtensionProviderHooks`](crate::ExtensionProviderHooks) dispatches).
-//! - **Response** (the plugin-owned `out` `StbString`): an
-//!   [`AssistantMessage`] JSON. The host reclaims `out` via the plugin's
-//!   `plugin_free_string` (traveled with the registration), parses the JSON, and
+//! - **Response** (the extension-owned `out` `StbString`): an
+//!   [`AssistantMessage`] JSON. The host reclaims `out` via the extension's
+//!   `extension_free_string` (traveled with the registration), parses the JSON, and
 //!   pushes it as one `Done` (or `Error` on nonzero rc / parse failure).
 //!
 //! ## Lifetime + staleness
@@ -46,7 +46,7 @@ use tokio::runtime::Handle;
 use crate::loader::ExtensionSession;
 use crate::registry::{RegisteredProvider, RegistrySnapshot};
 
-/// A `Provider` backed by a plugin's sync `ProviderRequestFn`.
+/// A `Provider` backed by an extension's sync `ProviderRequestFn`.
 ///
 /// See the module docs for the v1 one-shot streaming model + the request/response
 /// envelope. Built from a loaded [`ExtensionSession`]; one `PluggableProvider`
@@ -76,8 +76,8 @@ impl PluggableProvider {
     }
 
     /// Build one [`PluggableProvider`] per registered provider in the session's
-    /// snapshot, as `Arc<dyn Provider>`. Returns an empty vec when no plugin
-    /// registered a provider (so a session without provider plugins injects
+    /// snapshot, as `Arc<dyn Provider>`. Returns an empty vec when no extension
+    /// registered a provider (so a session without provider extensions injects
     /// nothing). The `Handle` MUST be captured from a thread running the target
     /// runtime (pi-cli builds providers on the async main thread, same as the
     /// `ActionBridge`).
@@ -104,7 +104,7 @@ impl Provider for PluggableProvider {
 
     fn models(&self) -> &[Model] {
         // v1: the registrar carries no model list (the SDK `ProviderRequestFn`
-        // signature has no models channel — a plugin resolves models itself).
+        // signature has no models channel — an extension resolves models itself).
         // The host injects this provider into `AgentHarnessOptions.models`, so
         // the harness finds it by id when a catalog model's `provider` field
         // matches; whether such a model exists is a catalog/config concern.
@@ -122,7 +122,7 @@ impl Provider for PluggableProvider {
         let (mut prod, stream) = create_assistant_message_event_stream();
         let snapshot = Arc::clone(&self.snapshot);
         // into_owned_record copies the fn pointers + owned strings; the
-        // `user_data` raw pointer is carried (plugin-owned, valid for the
+        // `user_data` raw pointer is carried (extension-owned, valid for the
         // keepalive lifetime).
         let record = self.record.clone();
         let runtime = self.runtime.clone();
@@ -137,10 +137,10 @@ impl Provider for PluggableProvider {
         // `spawn` (not `spawn_blocking`) for the producer task — the producer
         // must be async so it can `await` the blocking ffi call. Inside, we
         // `spawn_blocking` the sync `request_fn` (the ffi call is blocking by
-        // contract). This keeps the runtime worker free while the plugin runs.
+        // contract). This keeps the runtime worker free while the extension runs.
         tokio::spawn(async move {
             let message =
-                drive_plugin_provider(&snapshot, &record, runtime, &model, &ctx, &opts).await;
+                drive_extension_provider(&snapshot, &record, runtime, &model, &ctx, &opts).await;
             push_terminal(&mut prod, message);
             // `prod` drops here, closing the mpsc sender so the consumer's
             // `next()` returns `None` after the terminal event.
@@ -150,11 +150,11 @@ impl Provider for PluggableProvider {
     }
 }
 
-/// Run the sync `ProviderRequestFn` on `spawn_blocking`, read its plugin-owned
-/// `out` JSON, reclaim it via `plugin_free_string`, parse to an
+/// Run the sync `ProviderRequestFn` on `spawn_blocking`, read its extension-owned
+/// `out` JSON, reclaim it via `extension_free_string`, parse to an
 /// [`AssistantMessage`]. Returns an error terminal message on any failure
 /// (staleness, nonzero rc, parse error, runtime shutdown).
-async fn drive_plugin_provider(
+async fn drive_extension_provider(
     snapshot: &Arc<RegistrySnapshot>,
     record: &RegisteredProvider,
     runtime: Handle,
@@ -192,21 +192,21 @@ async fn drive_plugin_provider(
     let model_id = model.id.clone();
 
     // `spawn_blocking` the sync ffi call — `request_fn` is blocking by contract.
-    // The join handle is awaited so a panic in the plugin (caught by
+    // The join handle is awaited so a panic in the extension (caught by
     // `catch_unwind` below) surfaces as an error, not a silent hang.
     let join = runtime.spawn_blocking(move || run_provider_request(&record, &request_json));
     let outcome = match join.await {
         Ok(inner) => inner,
         Err(join_err) => {
             // The blocking task panicked before returning (catch_unwind inside
-            // caught a plugin panic and aborted, OR tokio cancelled). Either way
+            // caught an extension panic and aborted, OR tokio cancelled). Either way
             // no response.
             return AssistantMessage::terminal(
                 api,
                 provider_id,
                 model_id,
                 kiqi_ai::types::StopReason::Error,
-                format!("plugin provider task failed: {join_err}"),
+                format!("extension provider task failed: {join_err}"),
                 0,
             );
         }
@@ -233,9 +233,9 @@ enum ProviderOutcome {
 }
 
 /// The inner sync driver (runs on the blocking pool). Calls `request_fn`,
-/// recovers the plugin-owned `out` `StbString`, reclaims it via
-/// `plugin_free_string`, parses to an [`AssistantMessage`]. Wrapped in
-/// `catch_unwind` so a plugin panic cannot unwind across FFI (⇒ error outcome).
+/// recovers the extension-owned `out` `StbString`, reclaims it via
+/// `extension_free_string`, parses to an [`AssistantMessage`]. Wrapped in
+/// `catch_unwind` so an extension panic cannot unwind across FFI (⇒ error outcome).
 fn run_provider_request(record: &RegisteredProvider, request_json: &str) -> ProviderOutcome {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_provider_request_inner(record, request_json)
@@ -244,11 +244,11 @@ fn run_provider_request(record: &RegisteredProvider, request_json: &str) -> Prov
         Ok(inner) => inner,
         Err(_) => {
             tracing::error!(
-                "plugin provider {} panicked — refusing to unwind across FFI",
+                "extension provider {} panicked — refusing to unwind across FFI",
                 record.provider_id
             );
             ProviderOutcome::Err(format!(
-                "plugin provider {} panicked during request",
+                "extension provider {} panicked during request",
                 record.provider_id
             ))
         }
@@ -256,36 +256,36 @@ fn run_provider_request(record: &RegisteredProvider, request_json: &str) -> Prov
 }
 
 fn run_provider_request_inner(record: &RegisteredProvider, request_json: &str) -> ProviderOutcome {
-    // Borrowed request envelope: the plugin must NOT free it (StbStringRef is a
+    // Borrowed request envelope: the extension must NOT free it (StbStringRef is a
     // borrow — the SDK contract).
     let req_ref = StbStringRef::from_str(request_json);
 
-    // Plugin-owned `out` — `request_fn` writes a StbString into `*out` (plugin
-    // allocation, reclaimed via `plugin_free_string`). Start empty.
+    // Extension-owned `out` — `request_fn` writes a StbString into `*out` (extension
+    // allocation, reclaimed via `extension_free_string`). Start empty.
     let mut out = StbString::empty();
     let rc = (record.request_fn)(req_ref, &mut out as *mut StbString, record.user_data);
     if rc != 0 {
-        // Nonzero rc: the plugin signaled failure. Reclaim whatever it wrote
+        // Nonzero rc: the extension signaled failure. Reclaim whatever it wrote
         // (may be empty) before returning.
-        out.free_with(Some(record.plugin_free_string));
+        out.free_with(Some(record.extension_free_string));
         return ProviderOutcome::Err(format!(
-            "plugin provider {} returned error code {rc}",
+            "extension provider {} returned error code {rc}",
             record.provider_id
         ));
     }
 
-    // Read the plugin-owned JSON (borrow `out` for the parse) then reclaim it.
+    // Read the extension-owned JSON (borrow `out` for the parse) then reclaim it.
     let response_text = out.to_string_lossy();
-    out.free_with(Some(record.plugin_free_string));
+    out.free_with(Some(record.extension_free_string));
 
-    // Parse the response as an AssistantMessage. A plugin that returns a partial
+    // Parse the response as an AssistantMessage. An extension that returns a partial
     // or malformed message surfaces a parse error (not a crash) — the host
     // emits it as an `Error` terminal so the run terminates cleanly.
     match serde_json::from_str::<AssistantMessage>(&response_text) {
         Ok(message) => {
-            // Stamp the provider/model identity the host expects if the plugin
-            // omitted them (a plugin may return only `content`/`stopReason`).
-            // We do NOT overwrite fields the plugin set — only fill defaults on
+            // Stamp the provider/model identity the host expects if the extension
+            // omitted them (an extension may return only `content`/`stopReason`).
+            // We do NOT overwrite fields the extension set — only fill defaults on
             // a message whose provider/model don't match this provider.
             let mut message = message;
             if message.provider.is_empty() {
@@ -297,7 +297,7 @@ fn run_provider_request_inner(record: &RegisteredProvider, request_json: &str) -
             ProviderOutcome::Ok(message)
         }
         Err(err) => ProviderOutcome::Err(format!(
-            "plugin provider {} returned unparseable response: {err}",
+            "extension provider {} returned unparseable response: {err}",
             record.provider_id
         )),
     }
@@ -321,7 +321,7 @@ fn push_terminal(prod: &mut AssistantMessageEventStreamProducer, message: Assist
                 StopReason::Length => DoneReason::Length,
                 StopReason::ToolUse => DoneReason::ToolUse,
                 StopReason::Deferred => DoneReason::Deferred,
-                // Pending/unknown settle to Stop (the plugin should have set a
+                // Pending/unknown settle to Stop (the extension should have set a
                 // terminal reason; if not, the response is still complete).
                 _ => DoneReason::Stop,
             };
@@ -333,9 +333,9 @@ fn push_terminal(prod: &mut AssistantMessageEventStreamProducer, message: Assist
 /// Build the `options` JSON for the request envelope. `SimpleStreamOptions` is
 /// not `Serialize`, so we hand-build the field set (mirrors
 /// `ExtensionProviderHooks::before_request`). Sensitive fields (`api_key`) are
-/// included — the plugin is trusted host-side code (a cdylib the user installed
+/// included — the extension is trusted host-side code (a cdylib the user installed
 /// under `--extensions-dir`); this matches pi's `registerProvider` handing the
-/// full options to the plugin's `streamSimple`.
+/// full options to the extension's `streamSimple`.
 fn options_json(opts: &SimpleStreamOptions) -> serde_json::Value {
     serde_json::json!({
         "apiKey": opts.api_key,
@@ -360,7 +360,7 @@ mod tests {
     use crate::registry::ExtensionRegistry;
 
     /// A stub `ProviderRequestFn` that writes a minimal assistant-message JSON
-    /// into `out`. Mirrors the shape a real plugin's request fn returns.
+    /// into `out`. Mirrors the shape a real extension's request fn returns.
     extern "C" fn ok_request_fn(
         _req: StbStringRef,
         out: *mut StbString,
@@ -385,9 +385,9 @@ mod tests {
         }
     }
 
-    /// `run_provider_request_inner` round-trips a nonzero-rc plugin response to
+    /// `run_provider_request_inner` round-trips a nonzero-rc extension response to
     /// `Err`, and a valid-message response to `Ok` (with provider stamped from
-    /// the record when the plugin omits it).
+    /// the record when the extension omits it).
     #[test]
     fn request_fn_round_trip_ok_and_err() {
         let mut registry = ExtensionRegistry::new();
@@ -396,7 +396,7 @@ mod tests {
             base_url: "https://example".to_string(),
             api_style: "anthropic-messages".to_string(),
             request_fn: ok_request_fn,
-            plugin_free_string: stub_free,
+            extension_free_string: stub_free,
             user_data: std::ptr::null_mut(),
         });
         let snap = Arc::new(registry.snapshot());
@@ -426,7 +426,7 @@ mod tests {
             base_url: "https://example".to_string(),
             api_style: "anthropic-messages".to_string(),
             request_fn: err_request_fn,
-            plugin_free_string: stub_free,
+            extension_free_string: stub_free,
             user_data: std::ptr::null_mut(),
         };
         let outcome = run_provider_request(&err_record, r#"{"model":"m"}"#);

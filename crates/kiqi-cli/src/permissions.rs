@@ -1,10 +1,10 @@
 //! Host-owned permission policy for tool calls.
 //!
-//! Storage and editing used to live in the compiled `kiqi-permissions` plugin,
+//! Storage and editing used to live in the compiled `kiqi-permissions` extension,
 //! which exposed only a `permissions` tool and no gate: the rules were stored
 //! but nothing blocked a denied call. The host now loads, evaluates and
 //! enforces the same files with the same semantics (a deny rule now blocks the
-//! tool call); the plugin crate stays available as an opt-in feature for one
+//! tool call); the extension crate stays available as an opt-in feature for one
 //! release.
 //!
 //! The effective file is re-read on every evaluation. The policy files are
@@ -67,7 +67,7 @@ pub fn global_path() -> PathBuf {
     home.join(".ki").join("agent").join("permissions.json")
 }
 
-/// Project rules win over global rules (the plugin's precedence): an existing
+/// Project rules win over global rules (the extension's precedence): an existing
 /// project file is the whole effective policy, not a merge.
 fn pick(local: PathBuf, global: PathBuf) -> PathBuf {
     if local.exists() {
@@ -288,7 +288,7 @@ pub enum Decision {
 /// Evaluate `tool`/`target` against `rules`.
 ///
 /// Deny wins over allow. With no allow rule whose tool part matches, unmatched
-/// calls are permitted (the plugin's default); once one exists, the call must
+/// calls are permitted (the extension's default); once one exists, the call must
 /// match an allow rule.
 pub fn decide(rules: &Rules, tool: &str, target: &str) -> Decision {
     if let Some(rule) = rules
@@ -1555,7 +1555,7 @@ fn project_root(default_cwd: &Path, params: &Value) -> PathBuf {
         .unwrap_or_else(|| default_cwd.to_path_buf())
 }
 
-/// The `permissions` tool's actions, shared with the compiled plugin's
+/// The `permissions` tool's actions, shared with the compiled extension's
 /// semantics: `check`, `grant`, `revoke`, `list`.
 pub fn permissions(default_cwd: &Path, p: &Value) -> Result<String, String> {
     let _rules_guard = RULES_LOCK
@@ -1638,10 +1638,10 @@ const SCHEMA: &str = r#"{"type":"object","properties":{"action":{"type":"string"
 
 /// Host-built-in `permissions` tool.
 ///
-/// It has the same name and semantics as the compiled plugin's tool. Both can
+/// It has the same name and semantics as the compiled extension's tool. Both can
 /// be present: `build_tools` installs this one as a built-in and the compiled
-/// plugin's registry merge replaces a same-named trusted tool, so the compiled
-/// plugin keeps taking precedence when its feature is enabled.
+/// extension's registry merge replaces a same-named trusted tool, so the compiled
+/// extension keeps taking precedence when its feature is enabled.
 pub struct PermissionsTool {
     schema: Tool,
     cwd: PathBuf,
@@ -2221,7 +2221,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_and_rule_semantics_match_the_plugin() {
+    fn glob_and_rule_semantics_match_the_extension() {
         assert!(glob_matches("git *", "git push origin main"));
         assert!(glob_matches("*", ""));
         assert!(glob_matches("src/*.rs", "src/main.rs"));

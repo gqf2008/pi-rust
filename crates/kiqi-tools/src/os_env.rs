@@ -96,7 +96,7 @@ pub const HOST_PRIVATE_ENV: &[&str] = &[kiqi_host::SESSION_ID_ENV];
 ///
 /// The extension family is consulted **as the SDK's slice**, never as names
 /// restated here. Restating them is what the previous version did, and it is
-/// how the channel re-leaked when the plugin renamed them: the list went on
+/// how the channel re-leaked when the extension renamed them: the list went on
 /// matching a name nobody set. Going through the constant means a rename is a
 /// compile error, and a newly added family member is excluded automatically.
 pub fn is_host_private_env(name: &str) -> bool {

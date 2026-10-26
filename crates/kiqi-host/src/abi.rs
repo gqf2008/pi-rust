@@ -1,8 +1,8 @@
 //! The C-ABI bus types ki's extension layer speaks.
 //!
 //! P6 note: the **loading** half of this ABI (libloading discovery, the
-//! `kiqi_plugin_register` entrypoint contract, `ki install`/`ki dev`) is
-//! retired — plugins ship as wasm guests. What survives here is the wire
+//! `kiqi_extension_register` entrypoint contract, `ki install`/`ki dev`) is
+//! retired — extensions ship as wasm guests. What survives here is the wire
 //! format the host's event funnels (`translate`, `compiled` sink, registry
 //! tier) use internally, kept `#[repr(C)]`-shaped so a future re-plumbing to
 //! plain serde events stays a purely internal refactor.
@@ -70,7 +70,7 @@ impl StbString {
 // Allocating constructors + safe reader need `std` (Box/Vec/String). The ABI
 // type itself (`StbString { ptr, len }`) is POD with no `Drop` — that is what
 // makes the boundary sound. These helpers are available whenever `std` is (the
-// crate is std-using). When the `json` feature is off a plugin still gets these
+// crate is std-using). When the `json` feature is off an extension still gets these
 // because the crate links std; the gate here keeps `serde_json` truly optional.
 impl StbString {
     /// Wrap an allocation the caller already boxed. The `StbString` takes
@@ -169,11 +169,11 @@ impl StbStringRef {
     }
 }
 
-/// Function pointer a plugin exports to free a [`StbString`] it produced.
+/// Function pointer an extension exports to free a [`StbString`] it produced.
 /// Idempotent: freeing an already-freed or empty `StbString` is a no-op.
 ///
-/// The host calls this for every [`StbString`] it receives from the plugin; the
-/// plugin calls the **host's** `free_string` (from [`PluginApi`]) for every
+/// The host calls this for every [`StbString`] it receives from the extension; the
+/// extension calls the **host's** `free_string` (from [`ExtensionApi`]) for every
 /// [`StbString`] it receives from the host.
 pub type FreeStringFn = extern "C" fn(s: StbString);
 
@@ -200,8 +200,8 @@ impl StbString {
 /// raw strings; `parameters` is a JSON Schema serialized to a JSON string (the
 /// host parses it into its native `schemars::Schema`).
 ///
-/// All three are owning [`StbString`]s the **plugin** produced; the **host**
-/// frees them via the plugin's `free_string` (passed to [`ToolExecuteFn`] /
+/// All three are owning [`StbString`]s the **extension** produced; the **host**
+/// frees them via the extension's `free_string` (passed to [`ToolExecuteFn`] /
 /// `register_tool`).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -216,18 +216,18 @@ unsafe impl Send for StableToolSchema {}
 unsafe impl Sync for StableToolSchema {}
 
 // ---------------------------------------------------------------------------
-// Host context injected into plugin tool arguments
+// Host context injected into extension tool arguments
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // StepResult — the poll() return: Pending | Done | Err (explicit tag + union)
 // ---------------------------------------------------------------------------
 
-/// Opaque, plugin-allocated handle for one tool execution drive. Produced by
+/// Opaque, extension-allocated handle for one tool execution drive. Produced by
 /// [`ToolExecuteFn`], polled by [`ToolPollFn`], cancelled by [`ToolCancelFn`],
 /// freed by [`ToolDestroyFn`] (exactly once, idempotent).
 ///
-/// The handle's interior layout is entirely plugin-private; the host treats it
+/// The handle's interior layout is entirely extension-private; the host treats it
 /// as an opaque pointer.
 pub type StepHandle = *mut c_void;
 
@@ -349,7 +349,7 @@ impl StepResult {
 // ---------------------------------------------------------------------------
 
 /// Partial-result callback the **blocking driver** passes to `poll`, wrapped in
-/// `catch_unwind` on the host side. The plugin invokes it **synchronously
+/// `catch_unwind` on the host side. The extension invokes it **synchronously
 /// inside `poll()`** when it has a `Pending` partial — never retained, never
 /// invoked after `Done`/`Err`.
 ///
@@ -357,10 +357,10 @@ impl StepResult {
 /// host frees it via the host's `free_string`).
 pub type ToolPartialCb = extern "C" fn(partial: StbString, user_data: *mut c_void);
 
-/// `execute(tool_call_id, params) -> StepHandle`. Plugin-allocates a drive
+/// `execute(tool_call_id, params) -> StepHandle`. Extension-allocates a drive
 /// handle and begins the work (non-blocking — the real progress comes via
 /// `poll`). `tool_call_id` is a borrowed [`StbStringRef`] (valid for the call);
-/// `params` is an owning JSON string of the tool-call arguments (the plugin
+/// `params` is an owning JSON string of the tool-call arguments (the extension
 /// frees it via the host's `free_string`). Returns null on allocation failure.
 pub type ToolExecuteFn = extern "C" fn(
     tool_call_id: StbStringRef,
@@ -387,10 +387,10 @@ pub type ToolCancelFn = extern "C" fn(handle: StepHandle);
 pub type ToolDestroyFn = extern "C" fn(handle: StepHandle);
 
 // ---------------------------------------------------------------------------
-// StablePluginEvent — 33 on() categories (explicit tag + union)
+// StableExtensionEvent — 33 on() categories (explicit tag + union)
 // ---------------------------------------------------------------------------
 
-// The canonical tag enum lives in `kiqi-plugin` (the wasm contract crate);
+// The canonical tag enum lives in `kiqi-extension` (the wasm contract crate);
 // the ABI layer borrows it so the two faces cannot drift. This crate is
 // scheduled for deletion (P6, cdylib channel retirement).
 pub use crate::EventTag;
@@ -454,7 +454,7 @@ pub struct EventError {
 
 /// A generic JSON-data payload for the long-tail events whose structured shape
 /// the host serializes wholesale (`context`, `before_provider_request`, model
-/// select, resources_discover response, etc.). The plugin reads the fields it
+/// select, resources_discover response, etc.). The extension reads the fields it
 /// needs.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -462,9 +462,9 @@ pub struct EventData {
     pub data: StbString,
 }
 
-/// Payload union for [`StablePluginEvent`]. All variants are `#[repr(C)]` structs
+/// Payload union for [`StableExtensionEvent`]. All variants are `#[repr(C)]` structs
 /// of [`StbString`] / primitives (Copy), so the union is Copy. Discriminate by
-/// [`StablePluginEvent::tag`] before reading.
+/// [`StableExtensionEvent::tag`] before reading.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union EventPayload {
@@ -476,19 +476,19 @@ pub union EventPayload {
     pub data: EventData,
 }
 
-/// One event dispatched to a plugin handler. The host translates its native
+/// One event dispatched to an extension handler. The host translates its native
 /// `AgentEvent` / `HarnessEvent` into this and calls every registered handler
 /// for the `tag`. Event buffers are borrowed during fan-out: handlers must not
 /// free them or retain their pointers. The host frees them after all handlers
 /// return. Use `events::EventView` to retain owned payload copies.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct StablePluginEvent {
+pub struct StableExtensionEvent {
     pub tag: EventTag,
     pub payload: EventPayload,
 }
 
-impl StablePluginEvent {
+impl StableExtensionEvent {
     /// Build a no-payload event.
     ///
     /// The union is initialized through its **largest** arm
@@ -628,20 +628,20 @@ pub const EVENT_HANDLER_ABORT: i32 = 2;
 pub const EVENT_HANDLER_CLAIMED: i32 = 3;
 
 /// Handler fn pointer registered via `register_event_handler(tag, handler)`.
-/// `user_data` is the plugin's opaque context. Return `0` on success; nonzero
+/// `user_data` is the extension's opaque context. Return `0` on success; nonzero
 /// signals a handled error (the host logs it; dispatch continues to other
 /// handlers — one handler's error does not abort the fan-out). The one
 /// exception: when the host dispatches a **lifecycle** event through its
 /// veto-aware path, returning [`EVENT_HANDLER_ABORT`] stops the fan-out and
 /// aborts that phase (see the constants above).
-pub type EventHandlerFn = extern "C" fn(event: StablePluginEvent, user_data: *mut c_void) -> i32;
+pub type EventHandlerFn = extern "C" fn(event: StableExtensionEvent, user_data: *mut c_void) -> i32;
 
 /// `resources_discover` handler signature (B5b). Unlike [`EventHandlerFn`]
-/// (fire-and-forget, `i32` only), this carries an owning `out` so the plugin
+/// (fire-and-forget, `i32` only), this carries an owning `out` so the extension
 /// can hand `{skillPaths, promptPaths, themePaths}` back to the host. `cwd` and
-/// `reason` are borrowed inputs ([`StbStringRef`]); `out` is plugin-produced
-/// and reclaimed via the `plugin_free_string` the host stored alongside the
-/// handler at registration. `user_data` is the plugin's opaque context. Returns
+/// `reason` are borrowed inputs ([`StbStringRef`]); `out` is extension-produced
+/// and reclaimed via the `extension_free_string` the host stored alongside the
+/// handler at registration. `user_data` is the extension's opaque context. Returns
 /// `0` on success (host reads `out`); nonzero on a handled error (host logs +
 /// skips this handler, fan-out continues — mirrors pi `runner.ts:1179-1188`).
 pub type ResourcesDiscoverFn = extern "C" fn(
@@ -652,7 +652,7 @@ pub type ResourcesDiscoverFn = extern "C" fn(
 ) -> i32;
 
 /// `before_agent_start` handler signature. Unlike [`EventHandlerFn`]
-/// (fire-and-forget, `i32` only), this carries an owning `out` so the plugin can
+/// (fire-and-forget, `i32` only), this carries an owning `out` so the extension can
 /// hand back a system prompt to install for the run — pi's
 /// `BeforeAgentStartEventResult` (`extensions/types.ts:1394`), whose
 /// `systemPrompt` becomes `forceSystemPrompt` (`runner.ts:1347`).
@@ -660,18 +660,18 @@ pub type ResourcesDiscoverFn = extern "C" fn(
 /// `event_json` is a borrowed envelope with the same fields the
 /// [`EventTag::BeforeAgentStart`] broadcast carries (`prompt`, `imageCount`,
 /// `sessionId`, `host`) plus the live `systemPrompt` the run would otherwise
-/// use. `out` is plugin-produced JSON `{"systemPrompt": "..."}` (or an empty
-/// object for "no change"), reclaimed via the `plugin_free_string` the host
+/// use. `out` is extension-produced JSON `{"systemPrompt": "..."}` (or an empty
+/// object for "no change"), reclaimed via the `extension_free_string` the host
 /// stored at registration.
 ///
 /// Returns `0` on success (host reads `out`); nonzero on a handled error (host
-/// logs the plugin's message and leaves the prompt untouched, then continues the
+/// logs the extension's message and leaves the prompt untouched, then continues the
 /// fan-out — mirrors pi, which isolates a throwing handler).
 ///
 /// **Replacement, not append**: the returned text becomes the system prompt. A
-/// plugin that wants to append reads `event_json.systemPrompt` and returns the
+/// extension that wants to append reads `event_json.systemPrompt` and returns the
 /// two concatenated, which is what pi requires of its extensions too.
-/// SAFETY: the plugin warrants `user_data` is valid for the registry's lifetime
+/// SAFETY: the extension warrants `user_data` is valid for the registry's lifetime
 /// and the handler is callable from any thread.
 pub type BeforeAgentStartFn =
     extern "C" fn(event_json: StbStringRef, out: *mut StbString, user_data: *mut c_void) -> i32;
@@ -680,8 +680,8 @@ pub type BeforeAgentStartFn =
 // Runtime actions — uniform JSON-RPC dispatch by RuntimeActionId
 // ---------------------------------------------------------------------------
 
-/// Identifier for a host runtime action the plugin may invoke via
-/// `PluginApi::runtime_action`. One slot dispatches all actions; the numeric
+/// Identifier for a host runtime action the extension may invoke via
+/// `ExtensionApi::runtime_action`. One slot dispatches all actions; the numeric
 /// id crosses the FFI boundary as a `u32` and the host validates it with
 /// [`TryFrom<u32>`] before constructing this enum. Args/results cross as JSON
 /// strings.
@@ -726,15 +726,15 @@ pub enum RuntimeActionId {
     /// Return the current session branch entries oldest-first as JSON.
     /// Args: `{}`; result: `{"entries":[...]}`.
     GetSessionBranch = 20,
-    /// Inspect or finish a plugin-owned stdio server lifecycle. Args:
+    /// Inspect or finish an extension-owned stdio server lifecycle. Args:
     /// `{"op":"status"}` or `{"op":"finish","exitCode":0}`. Only the
     /// declaring owner may finish; the host performs normal session shutdown.
     StdioLifecycle = 21,
-    /// Plugin-owned text component lifecycle and content updates.
+    /// Extension-owned text component lifecycle and content updates.
     UiComponent = 22,
 }
 
-/// Error returned when a plugin passes a numeric runtime-action id that this
+/// Error returned when an extension passes a numeric runtime-action id that this
 /// ABI does not define.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownRuntimeActionId(pub u32);
@@ -788,7 +788,7 @@ impl From<RuntimeActionId> for u32 {
 
 /// Runtime-action signature: `runtime_action(action_id, args_json, out,
 /// user_data) -> i32`. `args_json` is a borrowed input ([`StbStringRef`]); `out`
-/// is an owning output ([`StbString`]) the host produces and the plugin frees
+/// is an owning output ([`StbString`]) the host produces and the extension frees
 /// via the host's `free_string`. `action_id` is deliberately a raw `u32`, not a
 /// Rust enum: an unknown value must be rejected as a normal protocol error
 /// rather than materializing an invalid enum discriminant. Returns `0` on
@@ -801,7 +801,7 @@ pub type RuntimeActionFn = extern "C" fn(
 ) -> i32;
 
 // ---------------------------------------------------------------------------
-// PluginApi — host-provided API struct the plugin calls
+// ExtensionApi — host-provided API struct the extension calls
 // ---------------------------------------------------------------------------
 
 /// A generic command-handler fn (for `register_command`). `args_json` is a
@@ -815,21 +815,21 @@ pub type CommandHandlerFn =
     extern "C" fn(args_json: StbStringRef, out: *mut StbString, user_data: *mut c_void) -> i32;
 
 /// A render/transform fn (for the renderer registrars). `input_json` is borrowed;
-/// `out` is owning output the plugin frees via host `free_string`. Markdown
+/// `out` is owning output the extension frees via host `free_string`. Markdown
 /// handlers return `{markdown:"..."}`; message/entry handlers return
 /// `{text:"...",markdown?:true}` or `{lines:["..."]}` for terminal UI.
 pub type RenderFn =
     extern "C" fn(input_json: StbStringRef, out: *mut StbString, user_data: *mut c_void) -> i32;
 
 /// A provider-injection factory fn (for `register_provider`). `req_json` is a
-/// borrowed request envelope; `out` is an owning response the plugin frees.
+/// borrowed request envelope; `out` is an owning response the extension frees.
 /// The host wraps this into a `Provider` impl (B4/B5).
 pub type ProviderRequestFn =
     extern "C" fn(req_json: StbStringRef, out: *mut StbString, user_data: *mut c_void) -> i32;
 
 /// OAuth provider callback. The host sends a JSON action envelope and the
-/// plugin returns a JSON response. Actions are `begin`, `exchange`,
-/// `refresh`, and `revoke`; token material remains plugin-owned and is never
+/// extension returns a JSON response. Actions are `begin`, `exchange`,
+/// `refresh`, and `revoke`; token material remains extension-owned and is never
 /// placed in normal agent events.
 pub type OAuthRequestFn =
     extern "C" fn(req_json: StbStringRef, out: *mut StbString, user_data: *mut c_void) -> i32;
@@ -844,35 +844,35 @@ pub type OAuthRegisterFn = OAuthRequestFn;
 // ---------------------------------------------------------------------------
 
 /// The unified ABI version.
-pub const KI_PLUGIN_ABI_VERSION_UNIFIED: u32 = 4;
+pub const KI_EXTENSION_ABI_VERSION_UNIFIED: u32 = 4;
 
 /// The unversioned symbol for the unified ABI.
-pub const REGISTER_SYMBOL_UNIFIED: &[u8] = b"kiqi_plugin_register\0";
+pub const REGISTER_SYMBOL_UNIFIED: &[u8] = b"kiqi_extension_register\0";
 
 /// The host-provided API struct. The first two fields (`abi_version`
 /// and `struct_size`) are contract-identity markers that survive future
-/// signature changes: a plugin reads them from the pointer before anything
+/// signature changes: an extension reads them from the pointer before anything
 /// else, so even if the entrypoint arity changes, the version check remains
 /// robust.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct PluginApi {
-    /// Contract identity. First field so a plugin can validate before reading
+pub struct ExtensionApi {
+    /// Contract identity. First field so an extension can validate before reading
     /// anything else, independent of the entrypoint arity.
     pub abi_version: u32,
-    /// `sizeof(PluginApi)` as the host built it. Lets a plugin detect a host
-    /// that predates slots it wants (host_struct_size < plugin's expected
-    /// offset). Future hosts may grow this struct; old plugins check
+    /// `sizeof(ExtensionApi)` as the host built it. Lets an extension detect a host
+    /// that predates slots it wants (host_struct_size < extension's expected
+    /// offset). Future hosts may grow this struct; old extensions check
     /// `struct_size` before accessing new fields.
     pub struct_size: u32,
 
     // --- Host API ---
-    /// Host's `free_string` — the plugin calls this for every [`StbString`] it
+    /// Host's `free_string` — the extension calls this for every [`StbString`] it
     /// *receives* from the host (outputs of actions, event payloads, inputs to
     /// execute). Never null.
     pub free_string: FreeStringFn,
 
-    // --- registrars (plugin → host "register X into the host") ---
+    // --- registrars (extension → host "register X into the host") ---
     pub register_tool: Option<
         extern "C" fn(
             schema: *const StableToolSchema,
@@ -880,7 +880,7 @@ pub struct PluginApi {
             poll_fn: ToolPollFn,
             cancel_fn: ToolCancelFn,
             destroy_fn: ToolDestroyFn,
-            plugin_free_string: FreeStringFn,
+            extension_free_string: FreeStringFn,
         ) -> i32,
     >,
     pub register_command: Option<
@@ -899,7 +899,7 @@ pub struct PluginApi {
             base_url: StbStringRef,
             api_style: StbStringRef,
             request_fn: ProviderRequestFn,
-            plugin_free_string: FreeStringFn,
+            extension_free_string: FreeStringFn,
             user_data: *mut c_void,
         ) -> i32,
     >,
@@ -907,7 +907,7 @@ pub struct PluginApi {
         extern "C" fn(
             name: StbStringRef,
             render_fn: RenderFn,
-            plugin_free_string: FreeStringFn,
+            extension_free_string: FreeStringFn,
             user_data: *mut c_void,
         ) -> i32,
     >,
@@ -915,7 +915,7 @@ pub struct PluginApi {
         extern "C" fn(
             name: StbStringRef,
             render_fn: RenderFn,
-            plugin_free_string: FreeStringFn,
+            extension_free_string: FreeStringFn,
             user_data: *mut c_void,
         ) -> i32,
     >,
@@ -923,7 +923,7 @@ pub struct PluginApi {
         extern "C" fn(
             name: StbStringRef,
             render_fn: RenderFn,
-            plugin_free_string: FreeStringFn,
+            extension_free_string: FreeStringFn,
             user_data: *mut c_void,
         ) -> i32,
     >,
@@ -933,77 +933,77 @@ pub struct PluginApi {
     pub register_resources_discover: Option<
         extern "C" fn(
             handler: ResourcesDiscoverFn,
-            plugin_free_string: FreeStringFn,
+            extension_free_string: FreeStringFn,
             user_data: *mut c_void,
         ) -> i32,
     >,
     pub runtime_action: RuntimeActionFn,
     pub dispatch_event:
-        Option<extern "C" fn(event: StablePluginEvent, user_data: *mut c_void) -> i32>,
+        Option<extern "C" fn(event: StableExtensionEvent, user_data: *mut c_void) -> i32>,
     pub user_data: *mut c_void,
 
     // --- declarations ---
-    /// Declare this plugin's host-side preferences as a JSON object, e.g.
+    /// Declare this extension's host-side preferences as a JSON object, e.g.
     /// `{"priority":60,"platforms":["linux","macos"]}`. Nullable: host does
-    /// not support declarations yet (plugin skips the call; host applies
+    /// not support declarations yet (extension skips the call; host applies
     /// defaults: priority `100`, all platforms).
     pub declare: Option<extern "C" fn(json: StbStringRef) -> i32>,
 
     /// Register a system-prompt transformer for the run (pi's
     /// `before_agent_start` returning `systemPrompt`).
     ///
-    /// **Appended last on purpose.** A plugin compiled against a shorter
-    /// `PluginApi` indexes every earlier field by offset, so a slot inserted in
-    /// the middle would make an old plugin read the new host's fields at the
+    /// **Appended last on purpose.** An extension compiled against a shorter
+    /// `ExtensionApi` indexes every earlier field by offset, so a slot inserted in
+    /// the middle would make an old extension read the new host's fields at the
     /// wrong offsets. Appending keeps every existing offset valid, which is what
-    /// lets this ship without an ABI version bump; a plugin checks
+    /// lets this ship without an ABI version bump; an extension checks
     /// `struct_size` (or the slot for `None`) before using it.
     ///
-    /// Nullable: a host that predates this slot leaves it `None`, the plugin
+    /// Nullable: a host that predates this slot leaves it `None`, the extension
     /// skips the call, and the prompt is left alone — exactly that host's
     /// behavior before this slot existed.
     pub register_before_agent_start: Option<
         extern "C" fn(
             handler: BeforeAgentStartFn,
-            plugin_free_string: FreeStringFn,
+            extension_free_string: FreeStringFn,
             user_data: *mut c_void,
         ) -> i32,
     >,
 
     /// Register a provider-owned OAuth flow. Appended for ABI compatibility;
-    /// older plugins compiled against a shorter struct remain valid.
+    /// older extensions compiled against a shorter struct remain valid.
     pub register_oauth_provider: Option<
         extern "C" fn(
             manifest_json: StbStringRef,
             request_fn: OAuthRequestFn,
-            plugin_free_string: FreeStringFn,
+            extension_free_string: FreeStringFn,
             user_data: *mut c_void,
         ) -> i32,
     >,
 }
-unsafe impl Send for PluginApi {}
-unsafe impl Sync for PluginApi {}
+unsafe impl Send for ExtensionApi {}
+unsafe impl Sync for ExtensionApi {}
 
-/// Unified ABI plugin entrypoint signature: `(api)`. The version is read from
+/// Unified ABI extension entrypoint signature: `(api)`. The version is read from
 /// `api->abi_version`.
-pub type KiPluginRegisterUnified = extern "C" fn(api: *const PluginApi) -> i32;
+pub type KiExtensionRegisterUnified = extern "C" fn(api: *const ExtensionApi) -> i32;
 
 // ===========================================================================
 // Panic containment
 // ===========================================================================
 
-/// Status code a plugin's register entrypoint returns when its body panicked.
+/// Status code an extension's register entrypoint returns when its body panicked.
 ///
-/// A panic must never unwind past the plugin's `extern "C"` entrypoint: Rust
+/// A panic must never unwind past the extension's `extern "C"` entrypoint: Rust
 /// turns such an unwind into a **process abort** (`panic in a function that
 /// cannot unwind`), which would take down the whole host. The SDK catches the
-/// panic and returns this code instead, so the host can skip the plugin with a
+/// panic and returns this code instead, so the host can skip the extension with a
 /// diagnostic.
 pub const REGISTER_PANIC_STATUS: i32 = 70;
 
 /// Run `body`, converting a panic into [`Err`] instead of letting it unwind.
 ///
-/// Plugin authors must wrap the body of **every** `extern "C"` entrypoint they
+/// Extension authors must wrap the body of **every** `extern "C"` entrypoint they
 /// export (tool `execute`/`poll`/`cancel`, event handlers, provider/render
 /// callbacks, runtime actions) with this (or an equivalent `catch_unwind`).
 /// Unwinding out of an `extern "C"` function aborts the process.
@@ -1017,16 +1017,16 @@ pub fn guard_or<R>(fallback: R, body: impl FnOnce() -> R) -> R {
     guard(body).unwrap_or(fallback)
 }
 
-/// Export a unified ABI plugin entrypoint under `kiqi_plugin_register`.
+/// Export a unified ABI extension entrypoint under `kiqi_extension_register`.
 ///
 /// The unified ABI has no version suffix in the symbol name; the version lives
-/// inside the [`PluginApi`] struct (first field `abi_version`).
+/// inside the [`ExtensionApi`] struct (first field `abi_version`).
 ///
-/// The expression receives `&PluginApi` and returns the plugin-defined
+/// The expression receives `&ExtensionApi` and returns the extension-defined
 /// registration status code.
 ///
 /// ```ignore
-/// kiqi_host::export_plugin!(|api| {
+/// kiqi_host::export_extension!(|api| {
 ///     if let Some(declare) = api.declare {
 ///         declare(kiqi_host::StbStringRef::from_str(
 ///             r#"{"priority":60,"platforms":["linux"]}"#,
@@ -1037,17 +1037,17 @@ pub fn guard_or<R>(fallback: R, body: impl FnOnce() -> R) -> R {
 /// });
 /// ```
 #[macro_export]
-macro_rules! export_plugin {
+macro_rules! export_extension {
     ($body:expr) => {
-        // The cdylib entrypoint is the one `#[no_mangle]` symbol a plugin crate
-        // emits. Every plugin compiled into the `ki` binary would define the
+        // The cdylib entrypoint is the one `#[no_mangle]` symbol an extension crate
+        // emits. Every extension compiled into the `ki` binary would define the
         // same symbol, and lld (Linux) refuses to link several of them into one
         // executable — so the host enables the invoking crate's `compile-time`
         // feature, which removes the cdylib export from that build while the
-        // standalone cdylib (`ki dev`, `cargo build -p <plugin>`) keeps it.
+        // standalone cdylib (`ki dev`, `cargo build -p <extension>`) keeps it.
         #[cfg(not(feature = "compile-time"))]
         #[no_mangle]
-        pub extern "C" fn kiqi_plugin_register(api: *const $crate::PluginApi) -> i32 {
+        pub extern "C" fn kiqi_extension_register(api: *const $crate::ExtensionApi) -> i32 {
             // SAFETY: host guarantees `api` is valid for this call.
             unsafe { $crate::register_entrypoint(api, $body) }
         }
@@ -1060,11 +1060,11 @@ macro_rules! export_plugin {
 ///
 /// # Safety
 ///
-/// `api` must be a valid, properly aligned pointer to a [`PluginApi`] that
+/// `api` must be a valid, properly aligned pointer to a [`ExtensionApi`] that
 /// remains valid for the duration of `body`.
 pub unsafe fn register_entrypoint(
-    api: *const PluginApi,
-    body: impl FnOnce(&PluginApi) -> i32,
+    api: *const ExtensionApi,
+    body: impl FnOnce(&ExtensionApi) -> i32,
 ) -> i32 {
     if api.is_null() {
         return 2;
@@ -1074,17 +1074,17 @@ pub unsafe fn register_entrypoint(
     // regardless of future struct growth.
     let abi_version = (*api).abi_version;
     let struct_size = (*api).struct_size;
-    if abi_version != KI_PLUGIN_ABI_VERSION_UNIFIED {
+    if abi_version != KI_EXTENSION_ABI_VERSION_UNIFIED {
         // Mismatch: refuse to register. The host logs "ABI version mismatch"
-        // and skips loading this plugin.
+        // and skips loading this extension.
         return 1;
     }
-    if (struct_size as usize) < core::mem::size_of::<PluginApi>() {
-        // Host predates a field the plugin expects; degrade gracefully.
+    if (struct_size as usize) < core::mem::size_of::<ExtensionApi>() {
+        // Host predates a field the extension expects; degrade gracefully.
         return 3;
     }
     let api = &*api;
-    // Contain panics: unwinding out of the plugin's `extern "C"` shim aborts
+    // Contain panics: unwinding out of the extension's `extern "C"` shim aborts
     // the process, so convert a panic into a status code the host can report.
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(api))) {
         Ok(code) => code,
@@ -1102,20 +1102,20 @@ mod tests {
 
     /// A panicking `register` body must NOT unwind out of the entrypoint shim;
     /// it must come back as `REGISTER_PANIC_STATUS` so the host can skip the
-    /// plugin instead of the process aborting.
+    /// extension instead of the process aborting.
     #[test]
     fn register_entrypoint_contains_panics() {
-        let mut api = std::mem::MaybeUninit::<PluginApi>::uninit();
+        let mut api = std::mem::MaybeUninit::<ExtensionApi>::uninit();
         let api_ptr = api.as_mut_ptr();
         // Set the version/size fields so the entrypoint gets past the checks
         // and into the body (which panics).
         unsafe {
-            (*api_ptr).abi_version = KI_PLUGIN_ABI_VERSION_UNIFIED;
-            (*api_ptr).struct_size = core::mem::size_of::<PluginApi>() as u32;
+            (*api_ptr).abi_version = KI_EXTENSION_ABI_VERSION_UNIFIED;
+            (*api_ptr).struct_size = core::mem::size_of::<ExtensionApi>() as u32;
         }
         let rc = unsafe {
             register_entrypoint(api_ptr, |_api| {
-                panic!("plugin register exploded");
+                panic!("extension register exploded");
             })
         };
         assert_eq!(rc, REGISTER_PANIC_STATUS);
@@ -1129,7 +1129,7 @@ mod tests {
     }
 
     // A test allocator + free fn so we can verify the own/free contract
-    // without a real plugin's free_string.
+    // without a real extension's free_string.
     std::thread_local! {
         static FREED: std::cell::Cell<usize> = std::cell::Cell::new(0);
     }
@@ -1189,7 +1189,7 @@ mod tests {
     #[test]
     fn empty_events_initialize_the_largest_payload_arm() {
         use std::mem::size_of;
-        // The initializer in `StablePluginEvent::empty` must name the largest
+        // The initializer in `StableExtensionEvent::empty` must name the largest
         // arm; if a bigger one is added, update `empty` with it.
         assert!(size_of::<EventToolResult>() >= size_of::<EventMessage>());
         assert!(size_of::<EventToolResult>() >= size_of::<EventToolCall>());
@@ -1206,7 +1206,7 @@ mod tests {
             EventTag::ToolExecutionEnd,
             EventTag::BeforeProviderRequest,
         ] {
-            let event = StablePluginEvent::empty(tag);
+            let event = StableExtensionEvent::empty(tag);
             // SAFETY: the event is live for the whole view.
             let view = unsafe { EventView::from_raw(&event) };
             assert_eq!(view.tag(), tag);
@@ -1310,7 +1310,7 @@ mod tests {
     #[test]
     fn event_payloads_construct_and_free() {
         let m = StbString::from_string("msg".to_string());
-        let ev = StablePluginEvent::message(EventTag::MessageEnd, m);
+        let ev = StableExtensionEvent::message(EventTag::MessageEnd, m);
         assert_eq!(ev.tag, EventTag::MessageEnd);
         // SAFETY: tag == MessageEnd (message variant).
         unsafe {
@@ -1318,7 +1318,7 @@ mod tests {
             ev.payload.message.message.free_with(Some(test_free));
         }
 
-        let tc = StablePluginEvent::tool_call(
+        let tc = StableExtensionEvent::tool_call(
             EventTag::ToolCall,
             StbString::from_string("call_1".to_string()),
             StbString::from_string("echo".to_string()),
@@ -1335,12 +1335,12 @@ mod tests {
     }
 
     #[test]
-    fn plugin_api_is_pod_and_sized() {
+    fn extension_api_is_pod_and_sized() {
         // The API struct is a plain old data struct: every fn pointer is
         // non-Drop, the struct has no Drop impl.
-        let api = PluginApi {
-            abi_version: KI_PLUGIN_ABI_VERSION_UNIFIED,
-            struct_size: core::mem::size_of::<PluginApi>() as u32,
+        let api = ExtensionApi {
+            abi_version: KI_EXTENSION_ABI_VERSION_UNIFIED,
+            struct_size: core::mem::size_of::<ExtensionApi>() as u32,
             free_string: test_free,
             register_tool: None,
             register_command: None,
@@ -1359,24 +1359,24 @@ mod tests {
             register_before_agent_start: None,
             register_oauth_provider: None,
         };
-        // All optional slots are null → plugin must degrade.
+        // All optional slots are null → extension must degrade.
         assert!(api.register_tool.is_none());
         assert!(api.register_event_handler.is_none());
         assert!(api.register_resources_discover.is_none());
         assert!(api.register_before_agent_start.is_none());
         // Copy (POD) — no UB from a plain copy.
         let _copy = api;
-        assert!(!core::mem::needs_drop::<PluginApi>());
+        assert!(!core::mem::needs_drop::<ExtensionApi>());
         assert!(!core::mem::needs_drop::<StbString>());
         assert!(!core::mem::needs_drop::<StepResult>());
-        assert!(!core::mem::needs_drop::<StablePluginEvent>());
+        assert!(!core::mem::needs_drop::<StableExtensionEvent>());
         assert!(!core::mem::needs_drop::<StableToolSchema>());
     }
 
     /// New vtable slots must be **appended**, never inserted.
     ///
-    /// A plugin compiled against a shorter `PluginApi` reads every field by
-    /// offset. Inserting a slot in the middle would make that plugin read the
+    /// An extension compiled against a shorter `ExtensionApi` reads every field by
+    /// offset. Inserting a slot in the middle would make that extension read the
     /// new host's fields at the wrong offsets — silently, since both sides just
     /// see pointers. Appending is what lets a slot ship without an ABI version
     /// bump. This pins the three fields at the end and the identity markers at
@@ -1385,26 +1385,26 @@ mod tests {
     fn vtable_grows_only_at_the_end() {
         use core::mem::{align_of, size_of};
 
-        // Identity markers stay first: a plugin reads these before anything
+        // Identity markers stay first: an extension reads these before anything
         // else, independent of the entrypoint arity.
-        assert_eq!(core::mem::offset_of!(PluginApi, abi_version), 0);
+        assert_eq!(core::mem::offset_of!(ExtensionApi, abi_version), 0);
         assert_eq!(
-            core::mem::offset_of!(PluginApi, struct_size),
+            core::mem::offset_of!(ExtensionApi, struct_size),
             size_of::<u32>()
         );
 
         // The most recently added slot is last, and the two before it are
         // adjacent — i.e. nothing was wedged in between them.
-        let declare = core::mem::offset_of!(PluginApi, declare);
-        let new_slot = core::mem::offset_of!(PluginApi, register_before_agent_start);
+        let declare = core::mem::offset_of!(ExtensionApi, declare);
+        let new_slot = core::mem::offset_of!(ExtensionApi, register_before_agent_start);
         assert_eq!(
             new_slot,
             declare + size_of::<Option<extern "C" fn(StbStringRef) -> i32>>(),
             "register_before_agent_start must be appended right after `declare`; \
              inserting a slot earlier shifts every later offset and breaks \
-             plugins built against the previous layout"
+             extensions built against the previous layout"
         );
-        assert_eq!(align_of::<PluginApi>(), align_of::<*const ()>());
+        assert_eq!(align_of::<ExtensionApi>(), align_of::<*const ()>());
     }
 
     #[test]
@@ -1453,9 +1453,9 @@ mod tests {
 
     #[test]
     fn register_entrypoint_version_mismatch_refuses() {
-        let api = PluginApi {
-            abi_version: KI_PLUGIN_ABI_VERSION_UNIFIED,
-            struct_size: core::mem::size_of::<PluginApi>() as u32,
+        let api = ExtensionApi {
+            abi_version: KI_EXTENSION_ABI_VERSION_UNIFIED,
+            struct_size: core::mem::size_of::<ExtensionApi>() as u32,
             free_string: test_free,
             register_tool: None,
             register_command: None,
@@ -1474,11 +1474,11 @@ mod tests {
             register_before_agent_start: None,
             register_oauth_provider: None,
         };
-        assert_eq!(KI_PLUGIN_ABI_VERSION_UNIFIED, 4);
+        assert_eq!(KI_EXTENSION_ABI_VERSION_UNIFIED, 4);
 
         // A future version is rejected by the pre-dereference check.
         let mut future_api = api;
-        future_api.abi_version = KI_PLUGIN_ABI_VERSION_UNIFIED + 1;
+        future_api.abi_version = KI_EXTENSION_ABI_VERSION_UNIFIED + 1;
         let rc = unsafe {
             register_entrypoint(&future_api, |_| {
                 panic!("body must not run on version mismatch");
@@ -1504,7 +1504,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 pub struct EventView<'a> {
-    raw: &'a StablePluginEvent,
+    raw: &'a StableExtensionEvent,
 }
 
 pub struct ToolCall {
@@ -1527,7 +1527,7 @@ impl<'a> EventView<'a> {
     /// The host must initialize the payload variant specified by `tag` and
     /// keep every payload buffer valid until the callback returns. The view
     /// borrows the event; accessors copy strings and never free host memory.
-    pub unsafe fn from_raw(raw: &'a StablePluginEvent) -> Self {
+    pub unsafe fn from_raw(raw: &'a StableExtensionEvent) -> Self {
         Self { raw }
     }
 
@@ -1621,7 +1621,7 @@ impl<'a> EventView<'a> {
 macro_rules! event_handler {
     ($(#[$attr:meta])* fn $name:ident($event:ident, $data:ident) $body:block) => {
         $(#[$attr])*
-        extern "C" fn $name(raw: $crate::StablePluginEvent, $data: *mut std::ffi::c_void) -> i32 {
+        extern "C" fn $name(raw: $crate::StableExtensionEvent, $data: *mut std::ffi::c_void) -> i32 {
             $crate::guard_or($crate::EVENT_HANDLER_ERROR, || {
                 // SAFETY: this is the host-owned ABI callback; its event and
                 // buffers remain valid for the duration of this invocation.
@@ -1649,7 +1649,7 @@ mod event_view_tests {
 
     #[test]
     fn wrong_accessors_do_not_read_inactive_union_arms() {
-        let raw = StablePluginEvent::empty(EventTag::AgentStart);
+        let raw = StableExtensionEvent::empty(EventTag::AgentStart);
         let view = unsafe { EventView::from_raw(&raw) };
         assert!(view.message_text().is_none());
         assert!(view.data_text().is_none());
@@ -1664,7 +1664,7 @@ mod event_view_tests {
     #[test]
     fn session_tree_is_no_payload_so_data_text_must_not_claim_it() {
         for tag in [EventTag::SessionTree, EventTag::SessionBeforeTree] {
-            let raw = StablePluginEvent::empty(tag);
+            let raw = StableExtensionEvent::empty(tag);
             let view = unsafe { EventView::from_raw(&raw) };
             assert!(
                 view.data_text().is_none(),
@@ -1677,7 +1677,7 @@ mod event_view_tests {
     fn copied_message_outlives_the_borrowed_event_buffer() {
         let copy = {
             let text = String::from("消息");
-            let raw = StablePluginEvent::message(EventTag::MessageEnd, borrowed_string(&text));
+            let raw = StableExtensionEvent::message(EventTag::MessageEnd, borrowed_string(&text));
             let view = unsafe { EventView::from_raw(&raw) };
             assert!(view.tool_result().is_none());
             view.message_text().unwrap()
@@ -1687,7 +1687,7 @@ mod event_view_tests {
 
     #[test]
     fn tool_payloads_are_copied_with_the_error_flag() {
-        let raw = StablePluginEvent::tool_result(
+        let raw = StableExtensionEvent::tool_result(
             EventTag::ToolExecutionEnd,
             borrowed_string("call"),
             borrowed_string("tool"),
@@ -1707,11 +1707,12 @@ mod event_view_tests {
 
     #[test]
     fn data_and_call_accessors_select_only_their_own_payloads() {
-        let raw = StablePluginEvent::data(EventTag::BeforeProviderRequest, borrowed_string("{}"));
+        let raw =
+            StableExtensionEvent::data(EventTag::BeforeProviderRequest, borrowed_string("{}"));
         let view = unsafe { EventView::from_raw(&raw) };
         assert_eq!(view.data_text().as_deref(), Some("{}"));
         assert!(view.message_text().is_none());
-        let raw = StablePluginEvent::tool_call(
+        let raw = StableExtensionEvent::tool_call(
             EventTag::ToolCall,
             borrowed_string("call"),
             borrowed_string("tool"),
@@ -1729,7 +1730,7 @@ mod event_view_tests {
     fn handler_panic_returns_error_without_crossing_abi() {
         assert_eq!(
             panicking(
-                StablePluginEvent::empty(EventTag::AgentStart),
+                StableExtensionEvent::empty(EventTag::AgentStart),
                 std::ptr::null_mut()
             ),
             crate::EVENT_HANDLER_ERROR

@@ -1,23 +1,23 @@
-//! Host-side view of the goal plugin's state.
+//! Host-side view of the goal extension's state.
 //!
-//! The goal plugin owns `.ki/goals.json` and injects the active goal into the
+//! The goal extension owns `.ki/goals.json` and injects the active goal into the
 //! model context on `TurnEnd`. That makes the agent goal-aware, but it cannot
 //! start a new run: if the model ends a run while the goal is still active, the
 //! session would sit idle. This module lets the TUI detect that state and
 //! continue the goal automatically.
 //!
-//! The file is read-only here; the plugin remains the writer. A missing or
+//! The file is read-only here; the extension remains the writer. A missing or
 //! malformed file means "no active goal", never an error.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Absolute path of the goal state file, relative to the session cwd (the same
-/// path the plugin uses).
+/// path the extension uses).
 pub(crate) const GOAL_FILE: &str = ".ki/goals.json";
 
 /// Safety net for an *unbounded* goal. A goal with `maxTurns`/`maxMinutes` is
-/// already bounded by the plugin; an unbounded one must not loop forever in the
+/// already bounded by the extension; an unbounded one must not loop forever in the
 /// host. User input or a new goal resets the chain.
 pub(crate) const MAX_GOAL_AUTO_RUNS: u32 = 20;
 
@@ -47,8 +47,8 @@ impl ActiveGoal {
         format!("{}@{}", self.title, self.started_at)
     }
 
-    /// Whether the goal still has budget left. The plugin enforces the same
-    /// limits at `TurnEnd`; checking here avoids starting a run that the plugin
+    /// Whether the goal still has budget left. The extension enforces the same
+    /// limits at `TurnEnd`; checking here avoids starting a run that the extension
     /// would immediately pause.
     pub(crate) fn can_continue(&self, now_ms: i64) -> bool {
         if self.max_turns.is_some_and(|max| self.turns_used >= max) {
@@ -61,7 +61,7 @@ impl ActiveGoal {
     }
 
     /// The synthetic input that asks the agent to keep working. The goal itself
-    /// is already in context (the plugin injected it); this is the trigger.
+    /// is already in context (the extension injected it); this is the trigger.
     pub(crate) fn continuation_prompt(&self) -> String {
         format!(
             "[goal continuation]\n\

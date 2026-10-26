@@ -218,7 +218,7 @@ async function loadPosts() {
   // Load deep-dive articles from blog-posts/
   const postFiles = [
     'architecture.json',
-    'plugin-abi.json',
+    'extension-abi.json',
     'agent-loop.json',
     'execution-env.json'
   ];

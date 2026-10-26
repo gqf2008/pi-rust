@@ -1,12 +1,12 @@
 //! The [`kiqi_ai::Provider`] adapter for a granted wasm provider.
 //!
-//! A granted plugin provider is a real provider as far as the harness is
+//! A granted extension provider is a real provider as far as the harness is
 //! concerned: it has an id, a model catalog, and it streams
 //! [`AssistantMessageEvent`]s. Two properties make it different from a built-in
 //! provider, and both live here rather than in the harness:
 //!
 //! * **The grant is the only authority.** The catalog entry comes from
-//!   `grants.json` (`crate::provider::granted_plugin_models`); this adapter
+//!   `grants.json` (`crate::provider::granted_extension_models`); this adapter
 //!   re-reads the grant on first use and [`kiqi_host::wasm::ProviderHost`]
 //!   refuses to instantiate the guest when no profile names this install id.
 //! * **Nothing is built until a request arrives.** The grant and the component
@@ -35,28 +35,28 @@ use kiqi_ai::{
     Provider, SimpleStreamOptions, StopReason, ToolCall, Usage,
 };
 
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 use std::collections::HashMap;
 
 /// Default live-delta queue capacity. The guest thread uses `try_send`; a full
 /// queue cancels and fails the call rather than buffering without a bound.
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 const PROVIDER_DELTA_CHANNEL_CAPACITY: usize = 256;
 
-/// The runtime handle for one granted plugin provider.
+/// The runtime handle for one granted extension provider.
 pub struct WasmProvider {
     id: String,
     models: Vec<Model>,
     /// The per-resolve state the request path needs. `None` outside the
-    /// `plugin-wasm` feature; such a build never surfaces a granted provider.
-    #[cfg(feature = "plugin-wasm")]
+    /// `extension-wasm` feature; such a build never surfaces a granted provider.
+    #[cfg(feature = "extension-wasm")]
     slot: Arc<ProviderSlot>,
 }
 
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 struct ProviderSlot {
     id: String,
-    /// `plugins/<id>/plugin.wasm`.
+    /// `extensions/<id>/extension.wasm`.
     wasm: PathBuf,
     /// The agent root the grant was read from, if the caller named one.
     agent_root: Option<PathBuf>,
@@ -74,7 +74,7 @@ impl WasmProvider {
         agent_root: Option<PathBuf>,
     ) -> Self {
         let id = id.into();
-        #[cfg(feature = "plugin-wasm")]
+        #[cfg(feature = "extension-wasm")]
         {
             let slot = Arc::new(ProviderSlot {
                 id: id.clone(),
@@ -84,7 +84,7 @@ impl WasmProvider {
             });
             Self { id, models, slot }
         }
-        #[cfg(not(feature = "plugin-wasm"))]
+        #[cfg(not(feature = "extension-wasm"))]
         {
             let _ = (wasm, agent_root);
             Self { id, models }
@@ -93,7 +93,7 @@ impl WasmProvider {
 
     /// Whether this adapter has built its host. Test-only observability for
     /// the lazy-compile contract.
-    #[cfg(all(test, feature = "plugin-wasm"))]
+    #[cfg(all(test, feature = "extension-wasm"))]
     pub(crate) fn host_loaded(&self) -> bool {
         self.slot
             .host
@@ -105,19 +105,19 @@ impl WasmProvider {
 
 /// Serializes tests that assert [`hosts_built`], because the counter is
 /// process-wide and the tests run in parallel.
-#[cfg(all(test, feature = "plugin-wasm"))]
+#[cfg(all(test, feature = "extension-wasm"))]
 pub(crate) static HOST_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[cfg(all(test, feature = "plugin-wasm"))]
+#[cfg(all(test, feature = "extension-wasm"))]
 static HOSTS_BUILT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Successful host constructions since [`reset_hosts_built`]. Test-only.
-#[cfg(all(test, feature = "plugin-wasm"))]
+#[cfg(all(test, feature = "extension-wasm"))]
 pub(crate) fn hosts_built() -> usize {
     HOSTS_BUILT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-#[cfg(all(test, feature = "plugin-wasm"))]
+#[cfg(all(test, feature = "extension-wasm"))]
 pub(crate) fn reset_hosts_built() {
     HOSTS_BUILT.store(0, std::sync::atomic::Ordering::SeqCst);
 }
@@ -155,7 +155,7 @@ impl Provider for WasmProvider {
             )),
         });
 
-        #[cfg(not(feature = "plugin-wasm"))]
+        #[cfg(not(feature = "extension-wasm"))]
         {
             push_error(
                 &mut producer,
@@ -163,14 +163,14 @@ impl Provider for WasmProvider {
                 &provider,
                 &model_id,
                 ErrorReason::Error,
-                "This build has no wasm plugin tier (`plugin-wasm` is disabled), so the granted \
+                "This build has no wasm extension tier (`extension-wasm` is disabled), so the granted \
                  provider could not run.",
                 timestamp,
             );
             return stream;
         }
 
-        #[cfg(feature = "plugin-wasm")]
+        #[cfg(feature = "extension-wasm")]
         {
             let request = match build_request(model, ctx, opts) {
                 Ok(request) => request,
@@ -212,7 +212,7 @@ impl Provider for WasmProvider {
     }
 }
 
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 struct SignalProbe {
     caller: tokio_util::sync::CancellationToken,
     /// Set locally when the consumer drops the stream, so a guest that polls
@@ -220,7 +220,7 @@ struct SignalProbe {
     local: tokio_util::sync::CancellationToken,
 }
 
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 impl kiqi_host::CancelProbe for SignalProbe {
     fn is_cancelled(&self) -> bool {
         self.caller.is_cancelled() || self.local.is_cancelled()
@@ -249,7 +249,7 @@ fn build_request(
     serde_json::to_string(&value).map_err(|error| format!("build provider request: {error}"))
 }
 
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 #[allow(clippy::too_many_arguments)]
 async fn run_request(
     producer: &mut AssistantMessageEventStreamProducer,
@@ -383,7 +383,7 @@ async fn run_request(
 
 /// Forward without blocking the guest thread. Queue overflow is a stream
 /// failure, not backpressure that an untrusted guest can use to stall the host.
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 fn forward_delta(
     tx: &tokio::sync::mpsc::Sender<kiqi_host::wasm::ProviderDeltaEvent>,
     local: &tokio_util::sync::CancellationToken,
@@ -409,7 +409,7 @@ fn forward_delta(
 /// naming this install id) — becomes an error: deny-by-default means the
 /// guest is never instantiated. The bytes are digest-gated here on every
 /// load/rebuild, not just at catalog construction.
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 fn ensure_host(slot: &ProviderSlot) -> Result<Arc<kiqi_host::wasm::ProviderHost>, String> {
     use kiqi_host::wasm::{ProviderHost, ProviderHostOptions};
 
@@ -440,11 +440,11 @@ fn ensure_host(slot: &ProviderSlot) -> Result<Arc<kiqi_host::wasm::ProviderHost>
     *guard = None;
     // The catalog gate checked bytes that may long since have been replaced;
     // re-hash exactly what will compile now and hand the loader those same
-    // bytes, so a plugin.wasm swapped after catalog resolution — or while a
+    // bytes, so an extension.wasm swapped after catalog resolution — or while a
     // disabled host is being rebuilt — cannot run under the old grant.
     let bytes = std::fs::read(&slot.wasm)
         .map_err(|error| format!("{}: read {}: {error}", slot.id, slot.wasm.display()))?;
-    if let Err(diagnostic) = crate::plugins::digest_gate_bytes(&slot.wasm, &bytes) {
+    if let Err(diagnostic) = crate::extensions::digest_gate_bytes(&slot.wasm, &bytes) {
         return Err(format!("{}: {diagnostic}", slot.id));
     }
     let host = ProviderHost::load_bytes_with_options(
@@ -460,8 +460,8 @@ fn ensure_host(slot: &ProviderSlot) -> Result<Arc<kiqi_host::wasm::ProviderHost>
     .map_err(|error| format!("{}: {error}", slot.id))?
     .ok_or_else(|| {
         format!(
-            "Plugin provider `{}` has no `provider` grant, so the request was not sent. \
-             Re-run `ki plugin grant {} provider …`.",
+            "Extension provider `{}` has no `provider` grant, so the request was not sent. \
+             Re-run `ki extension grant {} provider …`.",
             slot.id, slot.id
         )
     })?;
@@ -477,7 +477,7 @@ fn ensure_host(slot: &ProviderSlot) -> Result<Arc<kiqi_host::wasm::ProviderHost>
 /// Guest `content-index` values are global to the call; the event protocol
 /// wants the block's position in `message.content`, which is the order starts
 /// arrive (the same rule the built-in mappers use).
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 struct PartialBuilder {
     message: AssistantMessage,
     /// Guest content index → position in `message.content`.
@@ -486,7 +486,7 @@ struct PartialBuilder {
     tool_text: HashMap<usize, String>,
 }
 
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 impl PartialBuilder {
     fn new(api: Api, provider: String, model: String, timestamp: i64) -> Self {
         Self {
@@ -653,7 +653,7 @@ impl PartialBuilder {
 /// `arguments` is normally a JSON string (an SSE fragment); it is lifted into a
 /// JSON value when it parses, so the harness sees the same shape as a native
 /// provider.
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 fn parse_tool_call(raw: &str) -> Result<ToolCall, String> {
     let value: serde_json::Value = serde_json::from_str(raw)
         .map_err(|error| format!("provider stream: tool call is not JSON: {error}"))?;
@@ -687,7 +687,7 @@ fn parse_tool_call(raw: &str) -> Result<ToolCall, String> {
 
 /// Best-effort identity extraction from a tool-call object that may still be
 /// arriving. Returns `None` until `id` and `name` are both readable.
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 fn partial_tool_call(raw: &str) -> Option<ToolCall> {
     let value: serde_json::Value = serde_json::from_str(raw).ok()?;
     let object = value.as_object()?;
@@ -713,7 +713,7 @@ fn partial_tool_call(raw: &str) -> Option<ToolCall> {
 /// Validate the guest's final assistant message and fill the fields a
 /// provider-side fixture (or a terse guest) may omit. The host has already
 /// overwritten `provider`/`model`/`api` from the grant.
-#[cfg(feature = "plugin-wasm")]
+#[cfg(feature = "extension-wasm")]
 fn parse_terminal(
     raw: &str,
     api: &Api,
@@ -795,7 +795,7 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
-#[cfg(all(test, feature = "plugin-wasm"))]
+#[cfg(all(test, feature = "extension-wasm"))]
 mod tests {
     use super::*;
     use kiqi_ai::SimpleStreamOptions;
@@ -806,7 +806,7 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    /// Build the conformance guest and install it under `root/plugins/conformance`
+    /// Build the conformance guest and install it under `root/extensions/conformance`
     /// with a provider grant covering `models`.
     fn install_conformance_provider(root: &Path, models: &[&str]) -> PathBuf {
         install_conformance_provider_with_timeout(root, models, 30)
@@ -819,12 +819,12 @@ mod tests {
     ) -> PathBuf {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let built =
-            crate::plugin_cli::build_guest(&workspace.join("plugins/wasm/kiqi-conformance-guest"))
+            crate::extension_cli::build_guest(&workspace.join("extensions/wasm/kiqi-conformance"))
                 .expect("build the conformance guest");
-        let dir = root.join("plugins/conformance");
+        let dir = root.join("extensions/conformance");
         std::fs::create_dir_all(&dir).unwrap();
-        let wasm = dir.join("plugin.wasm");
-        std::fs::copy(&built, &wasm).expect("install plugin.wasm");
+        let wasm = dir.join("extension.wasm");
+        std::fs::copy(&built, &wasm).expect("install extension.wasm");
 
         let grant = ProviderGrant {
             providers: vec![ProviderProfile {
@@ -1138,14 +1138,14 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root = tempfile::tempdir().unwrap();
-        // plugin.wasm is present but there is no grants.json at all.
+        // extension.wasm is present but there is no grants.json at all.
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let built =
-            crate::plugin_cli::build_guest(&workspace.join("plugins/wasm/kiqi-conformance-guest"))
+            crate::extension_cli::build_guest(&workspace.join("extensions/wasm/kiqi-conformance"))
                 .expect("build the conformance guest");
-        let dir = root.path().join("plugins/conformance");
+        let dir = root.path().join("extensions/conformance");
         std::fs::create_dir_all(&dir).unwrap();
-        let wasm = dir.join("plugin.wasm");
+        let wasm = dir.join("extension.wasm");
         std::fs::copy(&built, &wasm).unwrap();
 
         let provider = WasmProvider::new(
@@ -1192,7 +1192,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            root.path().join("plugins/conformance/credentials.json"),
+            root.path().join("extensions/conformance/credentials.json"),
             serde_json::json!({
                 "pc-revocation": {
                     "source": "auth-json:anthropic",
@@ -1301,12 +1301,12 @@ mod tests {
     /// component (a loader without the digest gate compiles and runs it), but
     /// different bytes, so the stale sidecar no longer matches.
     fn replace_with_valid_but_different_bytes(wasm: &Path) {
-        let mut bytes = std::fs::read(wasm).expect("read plugin.wasm");
+        let mut bytes = std::fs::read(wasm).expect("read extension.wasm");
         // Custom section: id 0x00, size 0x05, name length 0x01, name "x",
         // three payload bytes. Custom sections are legal anywhere, last
         // included.
         bytes.extend([0x00, 0x05, 0x01, b'x', 0xde, 0xad, 0xbe]);
-        std::fs::write(wasm, &bytes).expect("replace plugin.wasm");
+        std::fs::write(wasm, &bytes).expect("replace extension.wasm");
     }
 
     async fn wait_terminal(stream: &mut AssistantMessageEventStream) -> AssistantMessageEvent {
@@ -1344,14 +1344,14 @@ mod tests {
         let wasm = install_conformance_provider(root.path(), &["conformance-stream"]);
         // Catalog construction digests these bytes and offers the model; the
         // sidecar is what makes any later replacement detectable.
-        crate::plugin_cli::write_digest_sidecar(&wasm).unwrap();
+        crate::extension_cli::write_digest_sidecar(&wasm).unwrap();
         let provider = WasmProvider::new(
             "conformance",
             vec![conformance_model("conformance-stream")],
             wasm.clone(),
             Some(root.path().to_path_buf()),
         );
-        // The plugin is swapped after catalog resolution, before first use.
+        // The extension is swapped after catalog resolution, before first use.
         replace_with_valid_but_different_bytes(&wasm);
         reset_hosts_built();
         let model = conformance_model("conformance-stream");
@@ -1376,7 +1376,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let wasm =
             install_conformance_provider_with_timeout(root.path(), &["conformance-model"], 1);
-        crate::plugin_cli::write_digest_sidecar(&wasm).unwrap();
+        crate::extension_cli::write_digest_sidecar(&wasm).unwrap();
         let slot = ProviderSlot {
             id: "conformance".to_string(),
             wasm: wasm.clone(),
@@ -1420,7 +1420,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root = tempfile::tempdir().unwrap();
         let wasm = install_conformance_provider_with_timeout(root.path(), &["conformance-park"], 1);
-        let plugin_dir = wasm.parent().expect("plugin dir").to_path_buf();
+        let extension_dir = wasm.parent().expect("extension dir").to_path_buf();
         let provider = WasmProvider::new(
             "conformance",
             vec![conformance_model("conformance-park")],
@@ -1449,7 +1449,7 @@ mod tests {
                 other => panic!("a parked guest must not succeed: {other:?}"),
             }
             assert_eq!(
-                kiqi_host::wasm::abandoned_worker_count("conformance", &plugin_dir),
+                kiqi_host::wasm::abandoned_worker_count("conformance", &extension_dir),
                 expected,
                 "the deadline must register its abandoned worker"
             );
