@@ -1,12 +1,17 @@
 #![forbid(unsafe_code)]
-//! Plan-mode logic, shared by the two channels that expose it.
+//! Plan-mode logic for the `kiqi-plan-mode` wasm guest.
 //!
-//! The compile-time plugin (`kiqi-plan-mode`) and the wasm guest
-//! (`kiqi-plan-mode-guest`) differ only in how they reach the session: a
-//! `HostCaps`, or the WIT `session-read`/`session-control`/`inject` imports. Both
-//! provide a [`PlanHost`] and this crate does the rest, so the mode's behaviour
-//! (which tools survive, what `/plan` prints, how a plan is persisted and
-//! restored) has exactly one implementation.
+//! The guest crate (`plugins/wasm/kiqi-plan-mode-guest`) is a thin shim: it
+//! implements [`PlanHost`] over the WIT `session-read` / `session-control` /
+//! `inject` imports and forwards events/commands here. Everything that decides
+//! behaviour (which tools survive, what `/plan` prints, how a plan is persisted
+//! and restored) lives in this crate for one reason: **guest crates link only
+//! for `wasm32-wasip2` and cannot carry unit tests**, so the logic would
+//! otherwise be untestable. (Before 2026-10-21 a compile-time plugin shared this
+//! code too; that channel is retired.)
+//!
+//! The state below is a process-global static by design: this crate is compiled
+//! *into* the guest, and each guest instance gets its own copy.
 
 use serde_json::{json, Value};
 use std::sync::{Mutex, OnceLock};

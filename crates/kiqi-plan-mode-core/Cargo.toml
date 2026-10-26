@@ -1,13 +1,13 @@
 [package]
 publish = false
 name = "kiqi-plan-mode-core"
-version = "0.1.5"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Plan-mode logic shared by the compile-time plugin and the wasm guest"
+description = "Plan-mode logic for the kiqi-plan-mode wasm guest (kept native-testable; guests cannot carry unit tests)"
 keywords = ["ki", "plan", "planning"]
 categories = ["development-tools"]
 
