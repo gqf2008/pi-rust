@@ -1051,7 +1051,10 @@ fn run_end_outcome_str(o: RunEndOutcome) -> &'static str {
 /// so the TUI's `/model` selector can display available models (read-only —
 /// v1 does not switch models mid-session; see the initial port notes (retired)).
 pub async fn interactive(
-    harness: &AgentHarness,
+    // `&Arc` (not `&AgentHarness`) so `/reload` can hand the same
+    // session-lifetime strong handle back to `reload_extension_resources`; the
+    // harness itself is only borrowed here.
+    harness: &Arc<AgentHarness>,
     event_rx: Option<tokio::sync::broadcast::Receiver<kiqi_agent::AgentEvent>>,
     args: &Args,
     model_catalog: Vec<kiqi_ai::Model>,

@@ -864,7 +864,10 @@ async fn drive_turn(
     responder: Responder<PromptResponse>,
     turn: Arc<TurnState>,
     guard: InFlightGuard,
-    harness: AgentHarness,
+    // The session owner's `Arc`; moving it with the spawned turn keeps the
+    // harness alive for the turn without creating a second strong handle the
+    // extension host could leak.
+    harness: Arc<AgentHarness>,
     mcp: Option<Arc<kiqi_mcp::McpManager>>,
     client_notices: bool,
 ) -> agent_client_protocol::Result<()> {
@@ -1324,7 +1327,7 @@ mod tests {
         };
         let harness = AgentHarness::create(options).await.expect("faux harness");
         sessions::SessionDeps {
-            harness,
+            harness: Arc::new(harness),
             event_rx,
             ui_dialog: None,
             mcp: None,
@@ -2655,7 +2658,7 @@ mod tests {
             .await
             .map_err(|error| error.to_string())?;
         Ok(sessions::SessionDeps {
-            harness,
+            harness: Arc::new(harness),
             event_rx,
             ui_dialog: None,
             mcp: None,

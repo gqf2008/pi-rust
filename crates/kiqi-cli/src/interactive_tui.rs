@@ -867,7 +867,10 @@ pub(crate) fn diagnostic_log(message: &str) {
 }
 
 pub async fn interactive_tui(
-    harness: &AgentHarness,
+    // Borrow the session owner's `Arc` (not `&AgentHarness`): `/reload` passes
+    // it straight to `reload_extension_resources`, which needs the strong handle
+    // only to refresh the action host's weak cell.
+    harness: &Arc<AgentHarness>,
     event_rx: Option<broadcast::Receiver<AgentEvent>>,
     args: &Args,
     model_catalog: Vec<kiqi_ai::Model>,
@@ -3412,7 +3415,7 @@ pub async fn interactive_tui(
                 add_note_message(&chat_container, "Reloading extensions + resources…");
                 tui.request_render(false);
                 let outcome =
-                    crate::session::reload_extension_resources(&harness, &reload_ctx).await;
+                    crate::session::reload_extension_resources(harness, &reload_ctx).await;
                 if !outcome.had_errors {
                     if let Ok(resources) = harness.get_resources().await {
                         update_resource_listing(

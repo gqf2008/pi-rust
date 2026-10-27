@@ -1460,9 +1460,10 @@ C ABI 线格式（`StbString`/`StableExtensionEvent`/`EventView`/handler consts�
   预检查短路、从未送达）；有意的行为变化，代价是每次变化一次 guest 观察调用。
 - **staleness 标志**：`RegistrySnapshot::invalidate` 保留但不再参与派发门控
   （`assert_active` 无调用者）；文档不再声称 `/reload` 靠它停止旧会话派发。
-- 已知遗留（非本批）：sink 经 caps 反向持有 action host，而 host 强持有 harness，
-  构成 `harness → … → snapshot → sink → caps → host → harness` 的 Arc 环；单会话无
-  影响，ACP 多会话下会话对象不释放，后续批次以 `Weak` 断开。
+- 遗留**已修复**（见 §6.52）：sink 经 caps 反向持有 action host，而 host 曾强持有
+  harness，构成 `harness → … → snapshot → sink → caps → host → harness` 的 Arc 环；
+  单会话无影响，ACP 多会话下每次开关会话都泄漏整个 `AgentHarness`。§6.52 把 host 的
+  harness 引用改为 `Weak`，环已断开。
 
 ### 6.51 会话级 caps：probe / 扩展命令 / prompt transform（2026-10-27）
 
@@ -1514,3 +1515,39 @@ snapshot 的 caps 随之 clone。
 **边界不变**：wasm host 实例仍进程级共享（§6.50 的诚实边界）；本节只保证“用哪份
 caps 调用”，不保证“哪个 guest 收到事件”。第三方插件在调用时读进程 cwd 的残余限制
 仍需单独的插件路由改造。
+
+### 6.52 断开 sink→caps→host→harness 的 Arc 环（2026-10-27）
+
+§6.50 记录了遗留：harness 经 `before_tool_call` 钩子持有会话 cell，cell 里的
+`RegistrySnapshot` 带 sink，sink 持有 `OwnedCaps`，caps 的 `ActionCaps` 持有
+`Arc<dyn RuntimeActionHost>`，而 `HarnessActionHost` 又强持有 `Arc<AgentHarness>`
+——闭合为 `harness → … → snapshot → sink → caps → host → harness`。单会话只泄漏到
+进程退出；ACP 多会话下每开/关一个会话就留下整个 harness（连同其 session/JSONL 句柄）。
+
+**修复**
+
+- `HarnessActionHost.harness` 由 `Arc<OnceLock<Arc<AgentHarness>>>` 改为
+  `Arc<OnceLock<Weak<AgentHarness>>>`；`harness()` 用 `Weak::upgrade()`，失败时仍是
+  原来的 `"runtime action invoked before harness was built"` 错误（绝不回退到另一个
+  会话的 harness）。
+- **强引用归会话所有者**：`session::build`/`build_with_selection` 在
+  `AgentHarness::create` 成功后立即 `Arc::new`，用**这个** Arc 调 `set_harness`（存
+  `Arc::downgrade`），并把 `Arc<AgentHarness>` 作为返回值交给调用方。若只把 cell 改成
+  `Weak` 却仍传 `Arc::new(h.clone())`，那个 Arc 没有别的持有者，会在 `build` 返回时即被
+  释放，令 Weak 永远 upgrade 失败——这是必须同时把 `build` 的返回类型改成
+  `Arc<AgentHarness>` 的唯一原因。
+- **生命周期**：TUI 路径由 `app.rs` 的局部 `Arc`（以及共享同一分配的
+  `AgentSession::harness`）持有；ACP 路径把同一 Arc 经 `SessionDeps.harness` 移入
+  `LiveSession.harness`，会话关闭时随之释放。`reload_extension_resources` 改用
+  `&Arc<AgentHarness>`：复用旧宿主的分支不重设（cell 指向的正是这个会话 Arc），
+  无旧 bridge 的分支用传入的 Arc 重新填 Weak。
+- **可观察断言**：`crates/kiqi-cli/src/extensions_actions.rs` 的
+  `dropping_the_session_releases_the_harness_despite_the_caps_chain` 按生产顺序装配
+  caps→host、sink→caps、snapshot→sink/caps，并让 harness 通过 `before_tool_call`
+  持有 snapshot；随后 drop 所有者 Arc，断言 `Weak<AgentHarness>` 与 session storage 的
+  `Weak` 都不再 upgrade（旧实现下 storage 仍被 host 的强 Arc 经 harness 克隆保活，
+  测试会红）。
+
+**验证**：`cargo fmt --all -- --check`；`cargo check --workspace --all-targets`
+（±`--all-features`）；lean；`cargo test -p kiqi-cli --lib`；
+`cargo test -p kiqi-host --features wasm --lib`；ACP e2e。

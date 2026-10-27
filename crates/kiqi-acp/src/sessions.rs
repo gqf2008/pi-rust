@@ -34,7 +34,11 @@ use super::dialogs::DialogPump;
 /// touch `session::build` (it writes session JSONL under cwd and installs
 /// global extension state).
 pub struct SessionDeps {
-    pub harness: AgentHarness,
+    /// The session owner's strong handle. `LiveSession` keeps this exact `Arc`
+    /// for its lifetime; the extension action host references it only weakly,
+    /// so dropping the session releases the harness instead of leaking it
+    /// through the sink → caps → host chain.
+    pub harness: Arc<AgentHarness>,
     pub event_rx: broadcast::Receiver<AgentEvent>,
     /// The extension UI-dialog mailbox (runtime action 17). Production wires
     /// the host-built reload context's mailbox; dialog tests inject a
@@ -121,7 +125,7 @@ pub fn match_session_id(
 /// 一个活跃的 ACP 会话；不同实例之间不共享 turn 或事件流。
 pub(crate) struct LiveSession {
     pub(crate) id: SessionId,
-    pub(crate) harness: AgentHarness,
+    pub(crate) harness: Arc<AgentHarness>,
     /// The master event receiver; turns subscribe their own clone so projected
     /// updates and the prompt response serialize in send order. Never `recv`ed
     /// itself — `resubscribe` needs only `&self`, so no lock wraps it.

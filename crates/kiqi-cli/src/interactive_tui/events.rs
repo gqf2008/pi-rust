@@ -419,7 +419,9 @@ pub(super) async fn drain_agent_events(
     state: Arc<TuiState>,
     chat: Arc<Container>,
     lane: Arc<dyn AgentLane>,
-    harness: AgentHarness,
+    // Kept as the session owner's `Arc` (not a value clone) so the drain task
+    // shares the exact allocation the extension action host references weakly.
+    harness: Arc<AgentHarness>,
     mcp: Arc<kiqi_mcp::McpManager>,
     tx: mpsc::UnboundedSender<TuiMessage>,
     wake_state: Arc<crate::signal_host::SignalHost>,

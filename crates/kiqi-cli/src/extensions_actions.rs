@@ -25,7 +25,7 @@
 //! tools the harness is built with), but the extension stores the
 //! `ActionBridge`'s `user_data` pointer during `register` and that pointer
 //! must remain valid for the whole session. So the host cannot hold the
-//! `AgentHarness` directly — it holds an [`Arc<OnceLock<Arc<AgentHarness>>>`]
+//! `AgentHarness` directly — it holds an [`Arc<OnceLock<Weak<AgentHarness>>>`]
 //! that is **empty at register time** and **filled once** by
 //! [`HarnessActionHost::set_harness`] immediately after `AgentHarness::create`
 //! succeeds. No extension can call a runtime action before the harness runs, so
@@ -33,13 +33,23 @@
 //! RuntimeActionHost>` (and thus the `ActionBridge` pointer) is stable from
 //! construction, satisfying the FFI lifetime requirement.
 //!
+//! The cell is **weak on purpose**: the sink the session's snapshot carries
+//! reaches these capabilities (`snapshot → sink → caps → ActionCaps → host`),
+//! and the harness reaches the snapshot through its `before_tool_call` hook. A
+//! strong harness reference here would close
+//! `harness → … → snapshot → sink → caps → host → harness`, leaking the whole
+//! harness per ACP session. The session owner keeps the strong `Arc` (see
+//! `session::build`), so `upgrade()` succeeds for the session's lifetime and
+//! fails loudly ("not ready") only before the harness was installed or after the
+//! session released it.
+//!
 //! The impl needs the model `catalog` for `set_model(id)` (the lane wants a
 //! `Model`, not an id) and the `cwd` for session create/fork/switch. Both are
 //! held by `kiqi-cli` at build time and moved into the host.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use kiqi_ai::types::ThinkingLevel;
 use kiqi_harness::agent_harness::{AgentHarness, HarnessRunOutcome, NavigationOutcome};
@@ -60,10 +70,13 @@ use crate::session::{default_session_dir, open_session_by_id};
 /// any thread; the impl's async methods run ON that runtime (they are spawned
 /// by the trampoline), so they may freely await.
 pub struct HarnessActionHost {
-    /// Filled by `set_harness` after the harness exists. `get()` is infallible
-    /// once set; before that (only possible mid-build, before any extension call)
-    /// methods return a "not ready" error.
-    harness: Arc<OnceLock<Arc<AgentHarness>>>,
+    /// Filled by `set_harness` after the harness exists. **Weak** so the
+    /// capability chain (`snapshot → sink → caps → host`) cannot keep the
+    /// harness alive: the session owner holds the strong `Arc` for as long as
+    /// the session lives. `upgrade()` fails only mid-build (before any extension
+    /// call) or once the session has released the harness; both surface the
+    /// existing "not ready" error.
+    harness: Arc<OnceLock<Weak<AgentHarness>>>,
     /// The auth-filtered catalog (the same list the TUI `/model` selector
     /// shows). `set_model(id)` resolves an id against this.
     catalog: Vec<kiqi_ai::Model>,
@@ -92,7 +105,7 @@ impl HarnessActionHost {
     /// direct-spawn needs; the trampoline already spawns on the bridge's
     /// runtime). Call [`set_harness`](Self::set_harness) once the harness is
     /// created. Returns `(host, harness_cell)` where `harness_cell` is the
-    /// shared `OnceLock` the caller fills.
+    /// shared weak cell the caller fills.
     pub(crate) fn new_empty(
         catalog: Vec<kiqi_ai::Model>,
         cwd: PathBuf,
@@ -100,7 +113,7 @@ impl HarnessActionHost {
         cli_flags: BTreeMap<String, serde_json::Value>,
         tool_context: kiqi_host::ToolCallContext,
         signal_host: Arc<crate::signal_host::SignalHost>,
-    ) -> (Self, Arc<OnceLock<Arc<AgentHarness>>>) {
+    ) -> (Self, Arc<OnceLock<Weak<AgentHarness>>>) {
         let harness = Arc::new(OnceLock::new());
         (
             Self {
@@ -116,23 +129,23 @@ impl HarnessActionHost {
         )
     }
 
-    /// Fill the harness cell. Call exactly once, immediately after
-    /// `AgentHarness::create` succeeds. Returns the host (for fluent chaining)
-    /// — the caller already holds the `Arc<dyn RuntimeActionHost>` from
-    /// construction; this just populates the cell that host reads.
-    pub fn set_harness(cell: &Arc<OnceLock<Arc<AgentHarness>>>, harness: Arc<AgentHarness>) {
+    /// Fill the harness cell with a weak handle. Call exactly once, immediately
+    /// after `AgentHarness::create` succeeds, with the **session-lifetime** Arc
+    /// the caller keeps (not a temporary one — a temporary would drop right
+    /// here and leave the cell permanently dead).
+    pub fn set_harness(cell: &Arc<OnceLock<Weak<AgentHarness>>>, harness: &Arc<AgentHarness>) {
         // `set` panics if already set; that's the right failure (double-build
         // is a programming error, not a runtime condition).
-        let _ = cell.set(harness);
+        let _ = cell.set(Arc::downgrade(harness));
     }
 
-    /// Borrow the harness, or return a "not ready" error. Only reachable
-    /// mid-build before `set_harness`; once the harness runs, extensions can fire
-    /// actions and the cell is set.
-    fn harness(&self) -> Result<&AgentHarness, String> {
+    /// Upgrade the weak handle, or return the "not ready" error. Fails only
+    /// mid-build (before `set_harness`) or after the session released the
+    /// harness — never silently substitutes another session's harness.
+    fn harness(&self) -> Result<Arc<AgentHarness>, String> {
         self.harness
             .get()
-            .map(|h| h.as_ref())
+            .and_then(Weak::upgrade)
             .ok_or_else(|| "runtime action invoked before harness was built".to_string())
     }
 
@@ -458,8 +471,12 @@ impl RuntimeActionHost for HarnessActionHost {
             .await
             .map_err(|e| format!("create session: {e}"))?;
         let id = session.storage().metadata().id.clone();
+        // Hold the upgraded handle across the await; `as_ref()` is the
+        // `&AgentHarness` the session setter wants (a temporary `&Arc` borrow
+        // does not outlive the call cleanly here).
+        let harness = self.harness()?;
         crate::session::set_active_session(
-            self.harness()?,
+            harness.as_ref(),
             session,
             Some(&self.tool_context),
             &self.signal_host,
@@ -470,12 +487,13 @@ impl RuntimeActionHost for HarnessActionHost {
 
     async fn fork(&self, _args: serde_json::Value) -> Result<serde_json::Value, String> {
         let cwd_str = self.cwd.to_string_lossy().to_string();
-        let new_session = crate::session::fork_session_storage(self.harness()?, &cwd_str)
+        let harness = self.harness()?;
+        let new_session = crate::session::fork_session_storage(harness.as_ref(), &cwd_str)
             .await
             .map_err(|e| format!("fork session: {e}"))?;
         let id = new_session.storage().metadata().id.clone();
         crate::session::set_active_session(
-            self.harness()?,
+            harness.as_ref(),
             new_session,
             Some(&self.tool_context),
             &self.signal_host,
@@ -515,8 +533,9 @@ impl RuntimeActionHost for HarnessActionHost {
             .await
             .map_err(|e| e.to_string())?;
         let new_id = new_session.storage().metadata().id.clone();
+        let harness = self.harness()?;
         crate::session::set_active_session(
-            self.harness()?,
+            harness.as_ref(),
             new_session,
             Some(&self.tool_context),
             &self.signal_host,
@@ -601,9 +620,11 @@ mod tests {
         let initial = crate::session::create_jsonl_session(&sessions, &cwd_str)
             .await
             .unwrap();
-        let harness = AgentHarness::create(harness_options(initial))
-            .await
-            .unwrap();
+        let harness = Arc::new(
+            AgentHarness::create(harness_options(initial))
+                .await
+                .unwrap(),
+        );
 
         let signal_host = Arc::new(crate::signal_host::SignalHost::new());
         let (host, cell) = HarnessActionHost::new_empty(
@@ -614,7 +635,7 @@ mod tests {
             kiqi_host::ToolCallContext::new(cwd_str.clone()),
             Arc::clone(&signal_host),
         );
-        HarnessActionHost::set_harness(&cell, Arc::new(harness));
+        HarnessActionHost::set_harness(&cell, &harness);
 
         // The harness starts in the initial session; A becomes the muted one.
         let a = session_id(host.new_session(serde_json::json!({})).await.unwrap());
@@ -656,7 +677,11 @@ mod tests {
         // `fork` goes through the same funnel. `fork_typed` forks at a message
         // entry, and the mute writes above are custom entries, so give the
         // branch a message tip first.
-        let harness = cell.get().expect("harness installed").clone();
+        let harness = cell
+            .get()
+            .expect("harness installed")
+            .upgrade()
+            .expect("the session owner still holds the harness");
         harness
             .session()
             .append_message(kiqi_agent::AgentMessage::User(
@@ -737,5 +762,106 @@ mod tests {
             Some(target_id.as_str()),
             "a session swap must republish KI_AGENT_ID, not leave the startup value"
         );
+    }
+
+    /// The capability chain must not keep the harness alive.
+    ///
+    /// The session's `RegistrySnapshot` carries the compiled sink, the sink
+    /// holds the owned caps, the caps hold the action host, and the harness
+    /// reaches the snapshot through its `before_tool_call` hook. While the host
+    /// held a **strong** `Arc<AgentHarness>`, that was the only back-edge of
+    /// `harness → … → snapshot → sink → caps → host → harness`: dropping the
+    /// session's handle leaked the whole harness (and its session) for every
+    /// ACP `session/new`. The host now stores a `Weak` and the session owner
+    /// keeps the strong handle. This test wires the exact chain and drops that
+    /// handle; the harness and its session storage must be released.
+    #[tokio::test]
+    async fn dropping_the_session_releases_the_harness_despite_the_caps_chain() {
+        use kiqi_harness::session::memory::{InMemorySessionStorage, SystemClock};
+        use kiqi_harness::session::session::DefaultIdGenerator;
+        use kiqi_harness::session::types::{SessionMetadata, SessionStorage};
+
+        let dir = tempfile::tempdir().unwrap();
+        let cwd_str = dir.path().to_string_lossy().to_string();
+
+        // 1. The action host is built first (extensions load before the harness).
+        let (host, cell) = HarnessActionHost::new_empty(
+            Vec::new(),
+            dir.path().to_path_buf(),
+            Handle::current(),
+            BTreeMap::new(),
+            kiqi_host::ToolCallContext::new(cwd_str),
+            Arc::new(crate::signal_host::SignalHost::new()),
+        );
+        let host_arc: Arc<dyn kiqi_host::RuntimeActionHost> = Arc::new(host);
+
+        // 2. caps → host, sink → caps, snapshot → sink/caps. The sink closure
+        //    mirrors the production one: it owns the caps (and thus the host).
+        let caps = Arc::new(crate::extensions::owned_caps(
+            Arc::clone(&host_arc),
+            Some(Handle::current()),
+            None,
+        ));
+        let sink_caps = Arc::clone(&caps);
+        let sink: kiqi_host::CompiledEventSink = Arc::new(move |_mode, _event| {
+            let _ = &sink_caps;
+            kiqi_host::CompiledVerdict::Continue
+        });
+        let extension_session = kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(
+            Some(sink),
+            Some(Arc::clone(&caps) as Arc<dyn kiqi_host::SessionCaps>),
+        );
+
+        // 3. The harness reaches the snapshot the same way `build` wires it.
+        let session_cell = Arc::new(std::sync::Mutex::new(extension_session));
+        let hook_cell = Arc::clone(&session_cell);
+        let before_tool_call: kiqi_agent::BeforeToolCall = Arc::new(move |_ctx, _signal| {
+            let _ = Arc::clone(&hook_cell);
+            Box::pin(async { None })
+        });
+
+        let storage = Arc::new(InMemorySessionStorage::new(
+            SessionMetadata {
+                id: "cycle-test".into(),
+                created_at: 0,
+                parent_session_id: None,
+            },
+            Arc::new(SystemClock),
+            Arc::new(DefaultIdGenerator::new()),
+        ));
+        let storage_weak = Arc::downgrade(&storage);
+        let session = Session::new(Arc::clone(&storage) as Arc<dyn SessionStorage>, None);
+        // Only the harness may keep the storage alive from here on.
+        drop(storage);
+
+        let options = AgentHarnessOptions {
+            before_tool_call: Some(before_tool_call),
+            ..harness_options(session)
+        };
+        let harness = Arc::new(AgentHarness::create(options).await.unwrap());
+        HarnessActionHost::set_harness(&cell, &harness);
+
+        // Preconditions: the cell upgrades to the live handle, and the harness
+        // still owns the session (the storage is not already gone).
+        assert!(cell.get().expect("cell set").upgrade().is_some());
+        assert!(storage_weak.upgrade().is_some());
+
+        // 4. Drop the session owner's only strong handle.
+        drop(harness);
+
+        assert!(
+            cell.get().expect("cell set").upgrade().is_none(),
+            "the sink/caps/host chain must not keep the harness alive"
+        );
+        assert!(
+            storage_weak.upgrade().is_none(),
+            "the harness (and its session storage) must be released once its owner drops the Arc"
+        );
+
+        // Keep the capability chain alive to the end so the release above is
+        // not merely the chain itself dropping early.
+        drop(session_cell);
+        drop(caps);
+        drop(host_arc);
     }
 }

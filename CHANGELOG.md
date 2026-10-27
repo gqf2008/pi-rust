@@ -270,6 +270,19 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **ACP sessions no longer leak the whole harness when they close.** The
+  compiled/wasm capabilities the session's `RegistrySnapshot` carries reach the
+  `HarnessActionHost` (`snapshot → sink → caps → host`), and the harness reaches
+  the snapshot through its `before_tool_call` hook; the host used to hold a
+  strong `Arc<AgentHarness>`, closing that chain into an `Arc` cycle. A single
+  session only leaked until process exit, but the ACP multi-session server leaked
+  one `AgentHarness` (and its session/storage handles) per opened-and-closed
+  session. The host now stores a `Weak` and the session owner (the TUI's
+  `AgentSession` / the ACP `LiveSession`) keeps the strong `Arc`, so runtime
+  actions still resolve the live harness for the session's lifetime and fail
+  loudly with the existing "not ready" error afterwards. Notes in
+  `docs/design/extension-abi.md` §6.52.
+
 - **A queued MCP notice no longer starves auto-wake.** While a run was active,
   an MCP resource notice was queued as a steering message; if the run ended
   before the loop consumed it, the notice stayed in the queue.

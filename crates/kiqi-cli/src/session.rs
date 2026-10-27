@@ -300,7 +300,9 @@ pub fn default_session_dir(cwd: &Path) -> PathBuf {
 /// live `AgentEvent` stream from every run (backed by a `BroadcastEmitter`
 /// installed on the harness). Interactive mode drains this to render streaming
 /// responses; the non-interactive modes simply drop it.
-/// Returns the harness, the live `AgentEvent` broadcast receiver, and a
+/// Returns the harness (`Arc` — the session owner's strong handle, which the
+/// extension action host only references weakly so the capability chain cannot
+/// keep the harness alive), the live `AgentEvent` broadcast receiver, and a
 /// [`ReloadContext`] the interactive TUI holds to drive `/reload` (and a
 /// extension's `runtime_action(Reload)` via the mailbox). Non-interactive modes
 /// drop the context (no `/reload` surface in print/json mode).
@@ -311,7 +313,7 @@ pub async fn build(
     project_trusted: bool,
 ) -> Result<
     (
-        AgentHarness,
+        Arc<AgentHarness>,
         tokio::sync::broadcast::Receiver<kiqi_agent::AgentEvent>,
         ReloadContext,
     ),
@@ -336,7 +338,7 @@ pub async fn build_with_selection(
     client_mcp_servers: &[kiqi_mcp::ServerConfig],
 ) -> Result<
     (
-        AgentHarness,
+        Arc<AgentHarness>,
         tokio::sync::broadcast::Receiver<kiqi_agent::AgentEvent>,
         ReloadContext,
     ),
@@ -372,8 +374,10 @@ pub async fn build_with_selection(
     //  3. Wrap it as `Arc<dyn RuntimeActionHost>` + `ActionBridge`, thread
     //     `Some(bridge)` into `load_extensions` so every extension's `user_data`
     //     points at this bridge.
-    //  4. After `AgentHarness::create` succeeds, call `set_harness(&cell, …)` to
-    //     fill the host cell the bridge recovers on the first action call.
+    //  4. After `AgentHarness::create` succeeds, call `set_harness(&cell, …)`
+    //     with the session owner's `Arc` so the host's **weak** cell upgrades
+    //     for the session's lifetime (a strong reference there would close
+    //     `harness → snapshot → sink → caps → host → harness`).
     let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
         BuildError::HarnessCreate(format!("no tokio runtime for action bridge: {e}"))
     })?;
@@ -991,18 +995,19 @@ pub async fn build_with_selection(
         )),
     };
 
+    // The `Arc` is the **session owner's** handle: it is returned to the
+    // caller (and, for ACP, moved into `LiveSession`), so the weak cell the
+    // action host reads stays live for exactly as long as the session does.
+    // Never seed the cell from a temporary clone-backed `Arc`: it would drop at
+    // the end of this block and every runtime action would answer "not ready".
     let harness = match AgentHarness::create(options).await {
-        Ok(h) => {
-            // Fill the extension action host now that the harness exists
-            // (extension runtime_action calls can then reach it).
-            crate::extensions_actions::HarnessActionHost::set_harness(
-                &harness_cell,
-                Arc::new(h.clone()),
-            );
-            h
-        }
+        Ok(h) => Arc::new(h),
         Err(e) => return Err(BuildError::HarnessCreate(e.to_string())),
     };
+    // Fill the extension action host now that the harness exists (extension
+    // runtime_action calls can then reach it). The host stores a Weak, so this
+    // does not close the harness → snapshot → sink → caps → host cycle.
+    crate::extensions_actions::HarnessActionHost::set_harness(&harness_cell, &harness);
 
     // ---- Durable operation recovery (runtime layer) ----
     // A previous process can die between `operation_started` and
@@ -1435,14 +1440,14 @@ fn append_reload_resource_paths(
 /// skip-on-error. A hard failure (e.g. the harness is closed) surfaces as an
 /// error summary.
 pub async fn reload_extension_resources(
-    harness: &AgentHarness,
+    harness: &Arc<AgentHarness>,
     ctx: &ReloadContext,
 ) -> ReloadOutcome {
     reload_extension_resources_inner(harness, ctx, || {}).await
 }
 
 async fn reload_extension_resources_inner<F>(
-    harness: &AgentHarness,
+    harness: &Arc<AgentHarness>,
     ctx: &ReloadContext,
     after_prepare: F,
 ) -> ReloadOutcome
@@ -1508,10 +1513,7 @@ where
                 ctx.tool_context.clone(),
                 ctx.signal_host.clone(),
             );
-            crate::extensions_actions::HarnessActionHost::set_harness(
-                &_cell,
-                Arc::new(harness.clone()),
-            );
+            crate::extensions_actions::HarnessActionHost::set_harness(&_cell, harness);
             Arc::new(action_host)
         }
     };

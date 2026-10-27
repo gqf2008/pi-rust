@@ -101,17 +101,20 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
-    /// Wrap an existing harness. `catalog` is the resolved model catalog the
-    /// session may switch within; `scoped_models` is the (possibly empty)
-    /// settings-driven subset used by Ctrl+P / `/model`.
+    /// Wrap an existing harness. `harness` may be the session owner's
+    /// `Arc<AgentHarness>` (the TUI passes it that way so the weak cell the
+    /// extension action host reads keeps pointing at the live allocation) or a
+    /// plain `AgentHarness` (tests); both convert into an `Arc`. `catalog` is
+    /// the resolved model catalog the session may switch within; `scoped_models`
+    /// is the (possibly empty) settings-driven subset used by Ctrl+P `/model`.
     pub fn new(
-        harness: AgentHarness,
+        harness: impl Into<Arc<AgentHarness>>,
         catalog: Vec<Model>,
         scoped_models: Vec<ScopedModel>,
         cwd: impl Into<PathBuf>,
     ) -> Self {
         Self {
-            harness: Arc::new(harness),
+            harness: harness.into(),
             catalog: Arc::new(catalog),
             scoped_models: Arc::new(scoped_models),
             cwd: cwd.into(),
