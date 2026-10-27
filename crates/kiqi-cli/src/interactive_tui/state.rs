@@ -1241,18 +1241,7 @@ impl TuiState {
         let Some(payload) = self.take_editor_change() else {
             return;
         };
-        // Cheap pre-check so the common (no subscriber) case never touches a
-        // extension: session lock + snapshot read only.
-        let Ok(session) = self.extension_session.lock() else {
-            return;
-        };
-        let Some(snapshot) = session.snapshot_arc() else {
-            return;
-        };
-        if snapshot.handlers_for(EventTag::EditorChange).is_empty() {
-            return;
-        }
-        kiqi_host::dispatch_data_event(&snapshot, EventTag::EditorChange, &payload.to_string());
+        kiqi_host::dispatch_data_event(EventTag::EditorChange, &payload.to_string());
     }
 
     /// Build the `EditorChange` payload when the draft changed since the last

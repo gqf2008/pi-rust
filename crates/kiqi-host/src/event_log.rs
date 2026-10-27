@@ -175,18 +175,6 @@ pub fn log_handler_invocation(
     }
 }
 
-/// Test-only: install an explicit logger (replacing the env-derived default).
-/// Callers must restore [`EventLogger::disabled`] when done to avoid leaking the
-/// sink into other tests.
-#[cfg(test)]
-pub(crate) fn set_event_logger_for_test(logger: EventLogger) {
-    let mut guard = match global().write() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    *guard = Some(logger);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

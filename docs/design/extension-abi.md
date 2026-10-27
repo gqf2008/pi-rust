@@ -1335,7 +1335,7 @@ C ABI 线格式（`StbString`/`StableExtensionEvent`/`EventView`/handler consts�
 
 未在本次完成、留作后续（现状为不可达的惰性代码）：registry 注册层的 C-ABI
 回调机器（`HostApi`/vtable/线程局部 `current_api`）仍随脊柱编译，但已无任何
-装载路径能喂给它；把它折叠为纯 serde 事件总线是独立的后续批次。
+装载路径能喂给它；把它折叠为纯 serde 事件总线是独立的后续批次（已于 §6.49 完成）。
 
 ### 6.46 `kiqi-host`：三 crate 合并 + `Extension → Extension`（2026-10-26）
 
@@ -1385,3 +1385,58 @@ C ABI 线格式（`StbString`/`StableExtensionEvent`/`EventView`/handler consts�
   组件文件 `extension.wasm`。**无向后兼容**——已装 guest 需重新 `ki insmod`。
 - 验证：全仓文本（含文档）中旧词出现次数为 **0**；workspace 2626 + guest 单测、
   wasm 目标构建、宿主侧 e2e（82 项）、fmt/check 与全部脚本门禁通过。
+
+### 6.49 纯 serde 事件总线：删除 C-ABI 注册机（2026-10-27）
+
+§6.45 留下的「不可达的惰性代码」本批删除。先按证据确认不可达：`HostApi`、
+`set_current_api`/`clear_current_api`、vtable 构造与全部 `trampoline_register_*`、
+`ExtensionToolAdapter`/`ExtensionToolHandle`/`ExtensionToolError`，以及
+`registry.rs` 里依赖函数指针的注册类型，除测试外没有任何生产调用者——唯一的
+装载路径（`load_one`）已在 §6.45 删除，wasm 后端走的是 `Extension` trait 与 WIT
+导入，不经过这些类型。
+
+删除面：
+
+- `kiqi-host/src/abi.rs` 整个模块：`StbString`/`StbStringRef`/`StableToolSchema`/
+  `StepResult*`/`StableExtensionEvent`/`EventView`/`EventPayload`/`ExtensionApi`/
+  `KI_EXTENSION_ABI_VERSION_UNIFIED`/`REGISTER_SYMBOL_UNIFIED`/`register_entrypoint`/
+  `guard*`/`EVENT_HANDLER_*` 以及所有 handler 函数指针别名。仓库内已无
+  `kiqi_host::abi` 引用；`EventTag` 仍在 crate 根（契约），无需迁移。
+- `lib.rs` 的 `HostApi`、线程局部 `CURRENT_HOST_API`、全部注册 trampoline、
+  `host_free_string`、`stub_runtime_action`；`ExtensionToolError`。
+- `tool.rs` 的 `ExtensionToolHandle`/`ExtensionToolAdapter`（`ToolCallContext` 保留，
+  wasm 侧仍通过 `SessionRead` 读取会话身份）。
+- `registry.rs` 的 `ExtensionRegistry`、`ExtensionTool`、`Registered*` 记录、
+  `RegistryEntry`、优先级/平台声明；只保留 `RegistrySnapshot`（共享的 active 标志，
+  `/reload` 用它让旧会话停止派发）与 `assert_active`。
+- `actions.rs` 的 `RuntimeActionId`/`dispatch`/`trampoline_runtime_action`/
+  `run_action`（`ActionBridge`、`RuntimeActionHost`、mailboxes、`ReloadMailbox`
+  保留：wasm 的 `SessionRead`/`SessionControl`/`InjectApi`/`UiApi` 与 CLI 的
+  stdio/reload 仍在使用）。
+- `prompt_transform.rs`、`provider.rs`（`PluggableProvider`）、`oauth.rs`
+  （native OAuth 注册）：wasm 的 prompt/provider/OAuth 走 §6.41/§6.44 的独立实现，
+  这几条 native 分支已无生产者。`resources.rs` 只保留 `DiscoveredResources` 与
+  空实现的 `emit_resources_discover`（资源来自包树 `resources.json`，见 §6.43）。
+- `kiqi-cli` 的 native 调用点同步移除：markdown/message/entry 渲染器、扩展命令、
+  tool-call 审批、OAuth 登录/刷新/撤销、provider 列表；`kiqi-acp` 无代码改动。
+
+事件总线改为纯 serde：
+
+- `compiled::CompiledEventSink` 的签名从 `(DispatchMode, u32, serde_json::Value)`
+  改为 `(DispatchMode, &Event)`；sink 不再反查 tag、不再解析字符串载荷。
+- `translate` 的漏斗直接构造 `Event { tag, payload }`：`MessageStart`/`MessageEnd`
+  用 `AgentMessage` 的 serde 值，`MessageUpdate` 用既有的 `assistantMessageEvent`
+  信封，tool 事件用 camelCase 对象（`toolCallId`/`toolName`/`params`/`result`/
+  `isError`），无载荷 tag 为 `Value::Null`。`dispatch_data_event` 对非法 JSON 仍退化为
+  `null`，不会丢事件。
+- 漏斗签名去掉不再需要的 snapshot 参数；`dispatch_lifecycle_event` 恒返回
+  `None`（`EventAction` 没有 abort），`dispatch_tool_call_event` 删除（wasm 的
+  tool gate 走 `probe_tool_call`）。`ExtensionProviderHooks` 只保留 provider 事件
+  观察与 gate；prompt transform 由 `compiled_prompt_hooks` 链式处理。
+- 公开行为不变：事件仍扇出到 wasm sink；`SessionStart`/`SessionTree`/
+  `SessionShutdown` 等 lifecycle 仍经 `dispatch_*` 送达；provider gate 的
+  `Patch` 语义与 observe 分区未变。
+
+验证：`cargo fmt --all -- --check`、`cargo check --workspace --all-targets`
+（±`--all-features`）、`cargo test --workspace`、`cargo test -p kiqi-host
+--features wasm`（含构建 guest 的 e2e）。

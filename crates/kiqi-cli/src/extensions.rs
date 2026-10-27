@@ -395,17 +395,14 @@ fn install_compiled_event_sink_locked(caps: OwnedCaps) {
         *guard = Some(caps.clone());
     }
     let hosts = compiled_extension_hosts();
-    let sink: kiqi_host::CompiledEventSink = std::sync::Arc::new(move |mode, tag, payload| {
-        let Some(tag) = kiqi_host::EventTag::from_u32(tag) else {
-            return kiqi_host::CompiledVerdict::Continue;
-        };
+    let sink: kiqi_host::CompiledEventSink = std::sync::Arc::new(move |mode, event| {
         if mode == kiqi_host::DispatchMode::ProviderGate {
-            return match dispatch_provider_gate(&hosts, &caps, tag, payload) {
+            return match dispatch_provider_gate_event(&hosts, &caps, event) {
                 Some(patch) => kiqi_host::CompiledVerdict::Patch(patch),
                 None => kiqi_host::CompiledVerdict::Continue,
             };
         }
-        dispatch_to_compiled(&hosts, &caps, tag, payload, mode)
+        dispatch_event_to_compiled(&hosts, &caps, event, mode)
     });
     kiqi_host::set_compiled_event_sink(sink);
 }
@@ -456,7 +453,7 @@ static TEST_SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// says nothing about the global, and the next test installs its own sink
 /// anyway.
 #[cfg(test)]
-fn lock_test_sink() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn lock_test_sink() -> std::sync::MutexGuard<'static, ()> {
     TEST_SINK_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -482,11 +479,8 @@ fn with_test_sink<R>(caps: OwnedCaps, f: impl FnOnce() -> R) -> R {
     result
 }
 
-/// Ask the extensions that should see `(tag, payload)` and fold their actions into
-/// one verdict.
-///
-/// Split from the closure in [`install_compiled_event_sink`] so the key filter
-/// and the claim fold can be exercised without the process-wide registry.
+/// Test-only wrapper: build an event from `(tag, payload)` and fan it out.
+#[cfg(test)]
 pub(crate) fn dispatch_to_compiled(
     hosts: &[std::sync::Arc<ExtensionHost>],
     caps: &OwnedCaps,
@@ -494,7 +488,32 @@ pub(crate) fn dispatch_to_compiled(
     payload: serde_json::Value,
     mode: kiqi_host::DispatchMode,
 ) -> kiqi_host::CompiledVerdict {
-    let event = kiqi_host::Event::new(tag, payload);
+    dispatch_event_to_compiled(hosts, caps, &kiqi_host::Event::new(tag, payload), mode)
+}
+
+/// Test-only wrapper: build an event from `(tag, payload)` and run the gate.
+#[cfg(test)]
+pub(crate) fn dispatch_provider_gate(
+    hosts: &[std::sync::Arc<ExtensionHost>],
+    caps: &OwnedCaps,
+    tag: kiqi_host::EventTag,
+    payload: serde_json::Value,
+) -> Option<serde_json::Value> {
+    dispatch_provider_gate_event(hosts, caps, &kiqi_host::Event::new(tag, payload))
+}
+
+/// Ask the extensions that should see `(tag, payload)` and fold their actions into
+/// one verdict.
+///
+/// Split from the closure in [`install_compiled_event_sink`] so the key filter
+/// and the claim fold can be exercised without the process-wide registry.
+pub(crate) fn dispatch_event_to_compiled(
+    hosts: &[std::sync::Arc<ExtensionHost>],
+    caps: &OwnedCaps,
+    event: &kiqi_host::Event,
+    mode: kiqi_host::DispatchMode,
+) -> kiqi_host::CompiledVerdict {
+    let tag = event.tag;
     let caps = caps.caps();
     // An `Input` event is a key: only the extensions that declared it are asked,
     // matching the native `has_shortcut` filter. Every other tag goes to all.
@@ -549,9 +568,9 @@ pub(crate) fn dispatch_to_compiled(
                         continue;
                     }
                 }
-                host.try_on_event(&event, &caps)
+                host.try_on_event(event, &caps)
             }
-            kiqi_host::DispatchMode::Claiming => host.on_event(&event, &caps),
+            kiqi_host::DispatchMode::Claiming => host.on_event(event, &caps),
             // The gate goes through `dispatch_provider_gate`, never this fold.
             kiqi_host::DispatchMode::ProviderGate => continue,
         };
@@ -578,16 +597,14 @@ pub(crate) fn dispatch_to_compiled(
 /// non-JSON patch) produces one diagnostic and the WHOLE request proceeds
 /// unpatched. A timeout is the same: the slow host has no say, and it is not
 /// retried.
-pub(crate) fn dispatch_provider_gate(
+pub(crate) fn dispatch_provider_gate_event(
     hosts: &[std::sync::Arc<ExtensionHost>],
     caps: &OwnedCaps,
-    tag: kiqi_host::EventTag,
-    payload: serde_json::Value,
+    event: &kiqi_host::Event,
 ) -> Option<serde_json::Value> {
-    if tag != kiqi_host::EventTag::BeforeProviderRequest {
+    if event.tag != kiqi_host::EventTag::BeforeProviderRequest {
         return None;
     }
-    let event = kiqi_host::Event::new(tag, payload);
     let mut merged: Option<serde_json::Value> = None;
     for host in hosts {
         let Some(policy) = host.provider_request_policy() else {
@@ -806,9 +823,8 @@ impl kiqi_host::Log for StderrLog {
 
 /// An extension tool exposed as a harness tool.
 ///
-/// The counterpart of `ExtensionToolAdapter` for compiled-in extensions: same
-/// `AgentTool` surface, but the call is a plain Rust method - no `ExtensionApi`,
-/// no handle, no `free_string`, no keepalive.
+/// A compiled-in extension tool exposed as a harness tool: the `AgentTool`
+/// surface over a plain Rust method — no FFI handle, no keepalive.
 /// Drive one extension call on a plain thread — with **no** tokio context — and
 /// hand the result back through a oneshot.
 ///
@@ -3085,9 +3101,7 @@ mod tests {
         };
         with_test_sink(owned, || {
             // A registry with no cdylib handlers still reaches the compiled extension.
-            let snapshot = kiqi_host::ExtensionRegistry::new().snapshot();
-            let native_handled =
-                kiqi_host::dispatch_empty_event(&snapshot, kiqi_host::EventTag::SessionStart);
+            let native_handled = kiqi_host::dispatch_empty_event(kiqi_host::EventTag::SessionStart);
             assert!(!native_handled, "no cdylib subscribed");
 
             // kiqi-todo restored the task list the host served on the branch —
@@ -3141,9 +3155,7 @@ mod tests {
         with_test_sink(owned, || {
             // A registry with no cdylib handlers still fans SessionTree out to the
             // compiled+wasm tier.
-            let snapshot = kiqi_host::ExtensionRegistry::new().snapshot();
-            let native_handled =
-                kiqi_host::dispatch_empty_event(&snapshot, kiqi_host::EventTag::SessionTree);
+            let native_handled = kiqi_host::dispatch_empty_event(kiqi_host::EventTag::SessionTree);
             assert!(!native_handled, "no cdylib subscribed");
 
             // kiqi-todo re-restored the task list the host served on the branch,
@@ -3233,7 +3245,7 @@ mod tests {
     #[test]
     fn a_sink_clear_cannot_land_inside_another_tests_window() {
         let gate = lock_test_sink();
-        kiqi_host::set_compiled_event_sink(std::sync::Arc::new(|_, _, _| {
+        kiqi_host::set_compiled_event_sink(std::sync::Arc::new(|_, _| {
             kiqi_host::CompiledVerdict::Continue
         }));
 

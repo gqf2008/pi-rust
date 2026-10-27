@@ -31,10 +31,10 @@ pub const EXIT_USAGE: i32 = 2;
 /// The exit code for a runtime failure (model-resolution, harness-build, or
 /// run failure). Mirrors TS `process.exitCode` set from `runPrintMode`.
 pub const EXIT_RUNTIME: i32 = 1;
-/// The exit code when an extension **vetoes** startup at a lifecycle event
-/// (e.g. a `BeforeTuiStart` handler returns [`kiqi_host::EVENT_HANDLER_ABORT`]).
-/// Distinct from [`EXIT_RUNTIME`] so scripts can tell "an extension refused to
-/// start" from "the run itself failed".
+/// The exit code for "an extension refused to start". Lifecycle events are
+/// observer-only since the C-ABI registration machine was removed
+/// (`docs/design/extension-abi.md` §6.49), so this is no longer produced; it is
+/// kept so scripts and the existing branches stay stable.
 pub const EXIT_VETOED: i32 = 3;
 
 /// Read a long-flag value from argv, supporting both `--flag <value>` and
@@ -128,13 +128,7 @@ async fn run_inner() -> i32 {
         Some("acp") => {
             return crate::acp::run(&argv[1..]).await;
         }
-        Some("auth") => {
-            // P6: the cdylib extension providers are gone; auth sees an empty
-            // registry (wasm extensions surface OAuth through the host instead).
-            let extension_session = kiqi_host::ExtensionSession::none();
-            return crate::auth::run_with_extensions(&argv[1..], extension_session.snapshot_arc())
-                .await;
-        }
+        Some("auth") => return crate::auth::run(&argv[1..]).await,
         Some("events") => return crate::events::run(&argv[1..]).await,
         Some("configure") => return crate::configure::run(&argv[1..]).await,
         Some("update") => return crate::updates::run_self_update(&argv[1..]),

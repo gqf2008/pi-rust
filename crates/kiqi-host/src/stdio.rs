@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use tokio::sync::Notify;
 
 #[derive(Default)]
+#[allow(dead_code)] // claim/handle are reachable through the CLI; the FFI entry is gone
 struct State {
     owner: Option<(u64, String)>,
     exit_code: Option<i32>,
@@ -18,6 +19,7 @@ pub struct StdioLifecycle {
 }
 
 impl StdioLifecycle {
+    #[allow(dead_code)]
     pub(crate) fn claim(&self, id: u64, name: &str) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         match &state.owner {
@@ -35,6 +37,7 @@ impl StdioLifecycle {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn release_failed_registration(&self, id: u64) {
         let mut state = self.state.lock().unwrap();
         if state.owner.as_ref().is_some_and(|(owner, _)| *owner == id) {
@@ -52,6 +55,7 @@ impl StdioLifecycle {
             .map_or(Ok(()), Err)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn handle(&self, id: u64, args: Value) -> Result<Value, String> {
         let mut state = self.state.lock().unwrap();
         match args.get("op").and_then(Value::as_str) {

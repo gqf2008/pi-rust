@@ -109,143 +109,30 @@ type MarkdownTransformer = Arc<dyn Fn(&str) -> String + Send + Sync>;
 /// A synchronous rendezvous between the Node runtime-request thread and the
 /// blocking TUI key loop. Node's `ctx.ui.*` methods are promises, so the host
 /// request must remain pending while the user interacts with the native
-/// B5e: build the `AssistantMessageComponent` markdown-transformer closure the
-/// render path applies to raw assistant text before styling. Wraps any extension
-/// `register_markdown_transformer` handlers registered in `snapshot` (chained
-/// in registration order: each handler's output feeds the next). `None` when
-/// no markdown transformers are registered (the component defaults to the
-/// identity transform + this avoids a closure allocation on the hot render
-/// path).
+/// Build the markdown-transformer closure the render path applies to raw
+/// assistant text before styling. `None` when no wasm package contributes a
+/// renderer (the component then uses the identity transform and avoids a
+/// closure allocation on the hot render path).
 ///
-/// The closure captures an `Arc<RegistrySnapshot>` clone so it outlives the
-/// borrow that built it (the snapshot's `active` flag guards dispatch in
-/// `emit_resources_discover`/event translation; a reloaded session's old
-/// snapshot flips false, so a stale closure no-ops rather than driving a
-/// half-swapped registry — the transformer falls back to the input unchanged
-/// on an inactive snapshot, matching the extension's per-handler skip-on-error).
-///
-/// This is the cycle-free seam: `kiqi-tui` takes a `Fn(&str) -> String` trait
-/// object (no `kiqi-extensions` dep); `kiqi-cli` (which already depends on
-/// `kiqi-extensions`) builds the closure from the live `RegistrySnapshot`. The
-/// calling pattern mirrors `extension_stub_smoke.rs`'s direct `RenderFn` round-
-/// trip (input `{"markdown":…}` → `render_fn` → reclaim `out` via the extension's
-/// `free_string` → parse `{"markdown":…}`).
+/// Native (cdylib) renderers were removed with the registration machine
+/// (`docs/design/extension-abi.md` §6.49); the `snapshot` parameter is kept so
+/// the reload path can rebuild the closure from the same place, but only the
+/// wasm renderer chain can produce a transform now.
 fn build_markdown_transformer(
-    snapshot: Option<std::sync::Arc<kiqi_host::RegistrySnapshot>>,
+    _snapshot: Option<Arc<kiqi_host::RegistrySnapshot>>,
 ) -> Option<MarkdownTransformer> {
-    // Pre-check: if nothing can transform, return None so the component uses
-    // the identity path (no closure allocation, no cache lookup). The renderers
-    // list is a per-call `renderers_of` clone; snapshotting it once here keeps
-    // the closure cheap on the hot path.
-    let cdylib = snapshot.and_then(|snapshot| {
-        let renderers = snapshot.renderers_of(kiqi_host::RegisteredRendererKind::Markdown);
-        (!renderers.is_empty()).then_some((snapshot, renderers))
-    });
-    // Wasm renderers hold a `render` grant. The chain runs them after the
-    // cdylib tier, in install-directory order. `None` means "no granted
-    // renderer", in which case the guest is never loaded or called.
     #[cfg(feature = "extension-wasm")]
-    let wasm = {
+    {
         let transformer = crate::extensions::WasmRenderTransformer::load();
-        (!transformer.is_empty()).then(|| std::sync::Arc::new(transformer))
-    };
+        if transformer.is_empty() {
+            return None;
+        }
+        return Some(Arc::new(move |raw: &str| transformer.transform(raw)));
+    }
     #[cfg(not(feature = "extension-wasm"))]
-    let wasm: Option<()> = None;
-
-    if cdylib.is_none() && wasm.is_none() {
-        return None;
+    {
+        None
     }
-    Some(Arc::new(move |raw: &str| -> String {
-        let mut current = raw.to_string();
-        if let Some((snapshot, renderers)) = &cdylib {
-            current = transform_markdown_chain(snapshot, renderers, &current);
-        }
-        #[cfg(feature = "extension-wasm")]
-        if let Some(wasm) = &wasm {
-            // Finalize-only by construction: the component never consults the
-            // transformer while streaming, so this is one call per finalized
-            // message (plus cache hits for unchanged rebuilds).
-            current = wasm.transform(&current);
-        }
-        current
-    }))
-}
-
-/// Drive the markdown-transformer chain for one input string. Each registered
-/// handler receives the previous handler's output (or the raw input for the
-/// first), as a `{"markdown": <text>}` JSON envelope; its `RenderFn` returns
-/// `{"markdown": <transformed>}` (rc=0) or an error (rc!=0). On any failure —
-/// nonzero rc, a panic across the FFI (caught), a missing `markdown` field, or
-/// an inactive snapshot — the chain short-circuits to the current text
-/// unchanged (per-handler skip-on-error, mirroring pi's `runner.ts` fan-out).
-fn transform_markdown_chain(
-    snapshot: &kiqi_host::RegistrySnapshot,
-    renderers: &[kiqi_host::RegisteredRenderer],
-    raw: &str,
-) -> String {
-    // A stale snapshot (post-/reload) must not drive a swapped-out registry.
-    // The renderers were captured from this snapshot; if it has gone inactive,
-    // fall back to the raw input so the UI never renders stale-transformed text
-    // from a dead extension.
-    if !snapshot.is_active() {
-        return raw.to_string();
-    }
-
-    let mut current = raw.to_string();
-    for renderer in renderers {
-        let input = match serde_json::to_string(&serde_json::json!({ "markdown": current })) {
-            Ok(s) => s,
-            Err(_) => return current, // serialize failure — keep current, stop chain
-        };
-        // SAFETY: `render_fn` is an extension-provided `extern "C" fn` over a
-        // borrowed `StbStringRef` + an out-param. The extension warrants
-        // `poll`/`render` are non-blocking + thread-safe (the same contract
-        // the tool adapter relies on). `user_data` is the extension's opaque
-        // pointer, stable for the registry lifetime (the keepalive keeps the
-        // cdylib mapped). We reclaim `out` via the extension's `free_string`
-        // exactly once. The whole call is `catch_unwind`-wrapped — an extension
-        // panic must not unwind across the FFI boundary (same policy as the
-        // tool partial cb + the runtime_action trampoline).
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut out = kiqi_host::StbString::empty();
-            let rc = (renderer.render_fn)(
-                kiqi_host::StbStringRef::from_str(&input),
-                &mut out as *mut kiqi_host::StbString,
-                renderer.user_data,
-            );
-            let text = if rc == 0 {
-                let s = out.to_string_lossy();
-                Some(s)
-            } else {
-                None
-            };
-            // Reclaim the extension-owned `out` regardless of rc (rc!=0 may still
-            // have written an error JSON the extension allocated). `free_with` is
-            // idempotent on an empty `StbString`.
-            out.free_with(Some(renderer.extension_free_string));
-            text
-        }));
-        let out_text = match outcome {
-            Ok(Some(s)) => s,
-            Ok(None) => return current, // rc != 0 — skip this handler, keep current
-            Err(_) => return current,   // panic — skip, keep current (do not abort: the
-                                         // render path is not the action trampoline; a panicking transformer
-                                         // degrades to identity rather than killing the process. Logged via
-                                         // the `tracing` crate's panic hook.)
-        };
-        // Parse `{"markdown": <text>}`; lenient — a missing/non-string field
-        // keeps the current text (skip this handler).
-        let next = serde_json::from_str::<serde_json::Value>(&out_text)
-            .ok()
-            .and_then(|v| {
-                v.get("markdown")
-                    .and_then(|m| m.as_str())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or(current);
-        current = next;
-    }
-    current
 }
 
 // ===========================================================================
@@ -393,25 +280,17 @@ impl CommandRegistry {
 }
 
 /// Dispatch a ui_prompt_start event to extensions.
-fn dispatch_ui_prompt_event(state: &TuiState) {
+fn dispatch_ui_prompt_event(_state: &TuiState) {
     use kiqi_host::EventTag;
 
-    if let Ok(session) = state.extension_session.lock() {
-        if let Some(snapshot) = session.snapshot_arc() {
-            kiqi_host::dispatch_empty_event(&snapshot, EventTag::UiPromptStart);
-        }
-    }
+    kiqi_host::dispatch_empty_event(EventTag::UiPromptStart);
 }
 
 /// Dispatch a ui_prompt_end event to extensions.
-fn dispatch_ui_prompt_event_end(state: &TuiState) {
+fn dispatch_ui_prompt_event_end(_state: &TuiState) {
     use kiqi_host::EventTag;
 
-    if let Ok(session) = state.extension_session.lock() {
-        if let Some(snapshot) = session.snapshot_arc() {
-            kiqi_host::dispatch_empty_event(&snapshot, EventTag::UiPromptEnd);
-        }
-    }
+    kiqi_host::dispatch_empty_event(EventTag::UiPromptEnd);
 }
 
 /// Canonical key name for a key event, matching the vocabulary
@@ -485,24 +364,16 @@ fn dispatch_key_event(state: &TuiState, key: &KeyEvent, editor: &Editor) -> bool
         return false;
     };
 
-    let snapshot = state
-        .extension_session
-        .lock()
-        .ok()
-        .and_then(|session| session.snapshot_arc());
-    let native_claims = snapshot.as_ref().is_some_and(|snapshot| {
-        snapshot.has_shortcut(&name) && !snapshot.handlers_for(EventTag::Input).is_empty()
-    });
-    // Compiled-in and wasm extensions declare their keys the same way; whether any
-    // of them declared this one decides if the key is ours at all. Delivery is a
-    // single pass through the dispatch funnel below, which asks exactly those
-    // extensions and reports their claim — dispatching here as well would hand a
-    // compiled extension the same key twice.
+    // Wasm extensions declare their keys; whether any of them declared this one
+    // decides if the key is ours at all. Delivery is a single pass through the
+    // dispatch funnel below, which asks exactly those extensions and reports
+    // their claim — dispatching here as well would hand a guest the same key
+    // twice.
     let compiled_declares_key =
         !crate::extensions::shortcut_hosts(&crate::extensions::compiled_extension_hosts(), &name)
             .is_empty();
     // Nothing claimed this key — not ours.
-    if !native_claims && !compiled_declares_key {
+    if !compiled_declares_key {
         return false;
     }
     // Function keys do not insert text. Other keys belong to the draft editor
@@ -529,11 +400,7 @@ fn dispatch_key_event(state: &TuiState, key: &KeyEvent, editor: &Editor) -> bool
     // registered-but-disabled shortcut (push-to-talk toggled off) still lets the
     // key reach the editor normally. Compiled extensions answer through the same
     // call — the funnel fans the event to them and folds in their verdict.
-    let claimed = kiqi_host::dispatch_data_event_claiming(
-        snapshot.as_deref(),
-        EventTag::Input,
-        &payload.to_string(),
-    );
+    let claimed = kiqi_host::dispatch_data_event_claiming(EventTag::Input, &payload.to_string());
     if claimed && key.kind == KeyEventKind::Press {
         state
             .extension_claimed_keys
@@ -2163,7 +2030,6 @@ pub async fn interactive_tui(
                 && !state_for_key.selector_open()
                 && pet::active(&state_for_key.ext_status)
             {
-                let _ = invoke_extension_command(&state_for_key.extension_session, "pet", "quiet");
                 tui_for_key.request_render(false);
                 if *state_for_key.status.lock().unwrap() == RunStatus::Idle
                     && editor_for_key.get_text().is_empty()

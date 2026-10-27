@@ -32,7 +32,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use kiqi_ai::Provider;
@@ -390,8 +389,7 @@ pub async fn build_with_selection(
     // Kept for the compiled-extension capability adapter: `host_arc` itself is
     // moved into the action bridge below.
     let extension_caps_host = Arc::clone(&host_arc);
-    // `runtime` is reused below (B5c: `PluggableProvider` needs a captured
-    // `Handle` to `spawn_blocking` the sync `ProviderRequestFn`), so clone here.
+    // `runtime` is reused below by the compiled capability adapter, so clone it.
     //
     // B5d: build the initial bridge WITH a reload callback backed by a session-
     // long `ReloadMailbox` (cloned into `ReloadContext` + handed to the TUI). A
@@ -866,20 +864,14 @@ pub async fn build_with_selection(
     let broadcast_for_context: Arc<dyn kiqi_agent::AgentEmitter> = Arc::clone(&broadcast_emitter);
 
     // ---- Extensions emitter (Part B3a) ----
-    // If extensions loaded + registered any `on()` handlers, wrap the
-    // broadcast emitter in a `TeeEmitter` so every `AgentEvent` flows to BOTH
-    // the TUI (via the broadcast receiver above) AND the extension handlers (via
-    // the `ExtensionEmitter`, which translates each `AgentEvent` →
-    // `StableExtensionEvent` and fans out to the handlers registered for its tag).
-    // With no extensions the tee degrades to the bare broadcast emitter (a
-    // one-child passthrough), so the TUI path is unchanged.
-    let emitter: Arc<dyn kiqi_agent::AgentEmitter> = match extension_session.snapshot_arc() {
-        Some(snapshot) => {
-            let ext = ExtensionEmitter::new(snapshot);
-            Arc::new(TeeEmitter::new(vec![broadcast_emitter, Arc::new(ext)]))
-        }
-        None => broadcast_emitter,
-    };
+    // Wrap the broadcast emitter in a `TeeEmitter` so every `AgentEvent` flows
+    // to BOTH the TUI (via the broadcast receiver above) AND the extensions (via
+    // the `ExtensionEmitter`, which translates each `AgentEvent` into the serde
+    // `Event` and fans it into the compiled/wasm sink).
+    let emitter: Arc<dyn kiqi_agent::AgentEmitter> = Arc::new(TeeEmitter::new(vec![
+        broadcast_emitter,
+        Arc::new(ExtensionEmitter::new()),
+    ]));
 
     // Saved user defaults. Best-effort: a missing or malformed file must not stop
     // a session from starting, and every accessor falls back to the harness
@@ -903,12 +895,9 @@ pub async fn build_with_selection(
     // discover the first permission gate.
     let extension_session_cell = Arc::new(Mutex::new(extension_session.clone()));
     let policy_guard = crate::permissions::PolicyGuard::new(cwd.to_path_buf());
-    let before_tool_call = Some(policy_guard.guarded_before(extension_tool_call_hook(
-        Arc::clone(&extension_session_cell),
-        ui_dialog_mailbox.clone(),
-        cwd.to_path_buf(),
-        project_trusted,
-    )));
+    let before_tool_call = Some(
+        policy_guard.guarded_before(extension_tool_call_hook(cwd.to_path_buf(), project_trusted)),
+    );
 
     let options = AgentHarnessOptions {
         model: resolved.model.clone(),
@@ -953,14 +942,9 @@ pub async fn build_with_selection(
         tool_execution: HarnessToolExecution::default(),
         drive: DrivingMode::default(),
         session,
-        // B5c: inject the resolved gateway provider PLUS one `Arc<dyn Provider>`
-        // per registered extension provider (`PluggableProvider` wraps an extension's
-        // sync `ProviderRequestFn`). The harness's `build_stream_fn` resolves a
-        // provider lazily per call by `models.iter().find(|p| p.id() == model.provider)`,
-        // so a catalog model whose `provider` matches an extension provider's id
-        // routes to it. Extension providers land AFTER the gateway so the gateway
-        // stays first-match for its own ids (first-wins on a `.find`).
-        models: build_models_with_extensions(resolved, &extension_session, runtime.clone()),
+        // The resolved providers. Wasm extension providers are hosted by the
+        // wasm backend's provider host, not injected here.
+        models: resolved.providers.clone(),
         to_provider_messages: None,
         entry_projectors: Default::default(),
         agent_emitter: Some(emitter),
@@ -1072,20 +1056,9 @@ pub async fn build_with_selection(
     Ok((harness, event_rx, reload_context))
 }
 
-/// Resolve the current extension session for each call rather than keeping a
-/// startup snapshot. A clone retains its libraries while approval is pending.
-fn extension_tool_call_hook(
-    sessions: ExtensionSessionCell,
-    ui_dialog: kiqi_host::UiDialogMailbox,
-    cwd: PathBuf,
-    project_trusted: bool,
-) -> kiqi_agent::BeforeToolCall {
-    Arc::new(move |ctx: kiqi_agent::BeforeToolCallContext<'_>, signal| {
-        let session = sessions
-            .lock()
-            .map(|session| session.clone())
-            .map_err(|_| ());
-        let ui_dialog = ui_dialog.clone();
+/// Host policy + the compiled/wasm extension gate for tool calls.
+fn extension_tool_call_hook(cwd: PathBuf, project_trusted: bool) -> kiqi_agent::BeforeToolCall {
+    Arc::new(move |ctx: kiqi_agent::BeforeToolCallContext<'_>, _signal| {
         let tool_call_id = ctx.tool_call.id.clone();
         let tool_name = ctx.tool_call.name.clone();
         let params = ctx.args.clone();
@@ -1146,28 +1119,6 @@ fn extension_tool_call_hook(
                         args: None,
                     });
                 }
-            }
-            let reason = match session {
-                Ok(session) => {
-                    kiqi_host::dispatch_tool_call_event(
-                        &session,
-                        &tool_call_id,
-                        &tool_name,
-                        &effective,
-                        &signal,
-                        &ui_dialog,
-                    )
-                    .await
-                }
-                Err(_) => Some("extension approval session is unavailable".to_string()),
-            };
-            if let Some(reason) = reason {
-                return Some(kiqi_agent::BeforeToolCallResult {
-                    block: true,
-                    reason: Some(reason),
-                    terminate: false,
-                    args: None,
-                });
             }
             // A rewrite with no veto still has to reach the runtime.
             replacement.map(|args| kiqi_agent::BeforeToolCallResult {
@@ -1265,12 +1216,11 @@ pub struct ReloadContext {
     /// the provider (auth/provider resolution is a startup concern; reloading
     /// extensions does not re-open auth).
     pub catalog: Vec<kiqi_ai::Model>,
-    /// The resolved provider runtimes (for rebuilding `models` =
-    /// `providers + PluggableProvider::from_session`). Cheap to clone (`Arc`).
+    /// The resolved provider runtimes (for rebuilding `models`). Cheap to
+    /// clone (`Arc`).
     pub providers: Vec<Arc<dyn Provider>>,
-    /// The ambient runtime handle (captured in `build`) — `PluggableProvider`
-    /// + the fresh `ActionBridge` need a captured `Handle` to spawn from any
-    /// thread.
+    /// The ambient runtime handle (captured in `build`) — `ActionCaps` and the
+    /// fresh `ActionBridge` need a captured `Handle` to spawn from any thread.
     pub runtime: tokio::runtime::Handle,
     /// The cwd (for static resource-dir resolution + context-file walk).
     pub cwd: PathBuf,
@@ -1318,45 +1268,25 @@ pub struct ReloadContext {
 }
 
 /// Dispatch a no-payload lifecycle event (e.g. `SessionStart`, `SessionShutdown`,
-/// the kiqi-specific `BeforeTuiStart`) to every extension handler subscribed to
-/// that tag, with **veto** + **timeout** semantics (P1).
+/// the kiqi-specific `BeforeTuiStart`, `SessionTree`) to the compiled/wasm sink.
 ///
-/// Resolves the **current** extension session from the reload cell so a
-/// `/reload`-swapped session is honored. Each handler runs on a blocking thread
-/// with a per-event timeout ([`kiqi_host::lifecycle_timeout_for`]); a
-/// handler returning [`kiqi_host::EVENT_HANDLER_ABORT`] vetoes the phase
-/// and this returns `Some(reason)`. No-op (`None`) when no extensions loaded, no
-/// handler subscribes, or the registry is stale.
-///
-/// The caller decides what a veto means: a `BeforeTuiStart` veto aborts startup
-/// (never enter the TUI); `SessionStart`/`SessionShutdown` vetoes are advisory
-/// (the session is already up or already closing).
+/// Lifecycle events are observer-only: the extension contract's `EventAction`
+/// has no veto, so this always returns `None`. The signature is kept because
+/// every run shape funnels its shutdown through here.
 pub async fn dispatch_session_event_async(
-    reload_context: &ReloadContext,
+    _reload_context: &ReloadContext,
     tag: kiqi_host::EventTag,
 ) -> Option<String> {
-    // Take the snapshot Arc, drop the session lock, then dispatch — we must
-    // not hold the session cell's mutex across the await (a handler could
-    // re-enter a reload path that locks it).
-    let snapshot = {
-        let session = reload_context.extension_session.lock().unwrap();
-        session.snapshot_arc()
-    };
-    match snapshot {
-        Some(snapshot) => kiqi_host::dispatch_lifecycle_event(&snapshot, tag).await,
-        None => None,
-    }
+    kiqi_host::dispatch_lifecycle_event(tag).await
 }
 
 /// Notify extensions the session moved to a different point of its tree — `/tree`
 /// navigation, `/session` switch, `/import`, `/fork`, `/clone`.
 ///
-/// **No payload**, and the veto is **advisory**: the move has already happened,
-/// so a handler returning `EVENT_HANDLER_ABORT` is logged and ignored (the
-/// caller must not undo the navigation). Delivery is the same funnel as every
-/// lifecycle event — native cdylib handlers, the compiled trait face, and wasm
-/// guests in one call — so a wasm todo/plan-mode guest restores from the
-/// swapped-in branch exactly as the compiled extensions do.
+/// **No payload**, observer-only: the move has already happened, so there is
+/// nothing an extension could veto. Delivery is the same funnel as every
+/// lifecycle event (the compiled/wasm sink), so a wasm todo/plan-mode guest
+/// restores from the swapped-in branch.
 ///
 /// Callers fire this only AFTER the move completed (`navigate_tree` /
 /// `set_active_session` returned), so a handler reading
@@ -1369,10 +1299,9 @@ pub(crate) async fn notify_session_tree(reload_context: &ReloadContext) {
     }
 }
 
-/// Dispatch `SessionShutdown` with **advisory** veto semantics: the session is
-/// already closing, so a handler returning `EVENT_HANDLER_ABORT` is warned about
-/// and ignored. Shared by every run shape that ends a session (interactive TUI/
-/// REPL, rpc, print, json) so the warn-and-continue contract lives in one place.
+/// Dispatch `SessionShutdown` (observer-only: the session is already closing).
+/// Shared by every run shape that ends a session (interactive TUI/REPL, rpc,
+/// print, json) so the last extension signal lives in one place.
 pub async fn dispatch_session_shutdown_advisory(reload_context: &ReloadContext) {
     // Take the raced notices BEFORE shutdown: `McpManager::shutdown` purges
     // every queued notice (`clear_subscriptions` runs before the connection
@@ -1395,17 +1324,12 @@ pub async fn dispatch_session_shutdown_advisory(reload_context: &ReloadContext) 
 
 /// Join extension teardown before unloading modules. A detached timed-out handler
 /// could still execute code in the old DLL, so it cannot safely permit a swap.
-async fn shutdown_extensions_for_reload(
-    snapshot: Option<Arc<kiqi_host::RegistrySnapshot>>,
-) -> Result<(), String> {
-    if let Some(snapshot) = snapshot {
-        tokio::task::spawn_blocking(move || {
-            kiqi_host::dispatch_empty_event(&snapshot, kiqi_host::EventTag::SessionShutdown);
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-    }
-    Ok(())
+async fn shutdown_extensions_for_reload() -> Result<(), String> {
+    tokio::task::spawn_blocking(|| {
+        kiqi_host::dispatch_empty_event(kiqi_host::EventTag::SessionShutdown);
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// The outcome of a reload: a human-readable status line for the transcript
@@ -1502,14 +1426,8 @@ where
     } = prepared;
     let mut warnings = false;
 
-    // Shutdown callbacks must finish before a replacement can unload old DLLs.
-    // Ordinary lifecycle dispatch can time out or stop on a veto; unload cleanup
-    // instead joins every handler while keeping its module mapped.
-    let shutdown_snapshot = {
-        let session = ctx.extension_session.lock().unwrap();
-        session.snapshot_arc()
-    };
-    if let Err(reason) = shutdown_extensions_for_reload(shutdown_snapshot).await {
+    // Tell extensions the session is going away before the reload swaps state.
+    if let Err(reason) = shutdown_extensions_for_reload().await {
         return ReloadOutcome {
             summary: "Reload failed during extension shutdown".into(),
             had_warnings: true,
@@ -1576,10 +1494,7 @@ where
         let mut session_guard = ctx.extension_session.lock().unwrap();
         let old_session = std::mem::replace(&mut *session_guard, extension_session.clone());
         if let Some(old_snap) = old_session.snapshot_arc() {
-            // `invalidate` is on the registry, but the snapshot shares the flag —
-            // flipping the snapshot's flag invalidates the registry too (same Arc).
-            // `RegistrySnapshot` exposes `active_flag()` for this.
-            old_snap.active_flag().store(false, Ordering::SeqCst);
+            old_snap.invalidate();
         }
         // `old_session` drops here; in-flight adapters/callbacks keep their
         // own library references until they return.
@@ -1718,13 +1633,10 @@ where
     let tool_ctx = kiqi_tools::ExecutionToolContext::new(env_dyn.clone(), Some(mut_env));
     let mut tools = build_tools(&tool_ctx, &effective_args, &ctx.cwd, &ctx.signal_host);
     // ---- Rebuild the emitter (TeeEmitter over fresh ExtensionEmitter) ----
-    let emitter: Arc<dyn kiqi_agent::AgentEmitter> = match extension_session.snapshot_arc() {
-        Some(snapshot) => {
-            let ext = ExtensionEmitter::new(snapshot);
-            Arc::new(TeeEmitter::new(vec![ctx.broadcast.clone(), Arc::new(ext)]))
-        }
-        None => ctx.broadcast.clone(),
-    };
+    let emitter: Arc<dyn kiqi_agent::AgentEmitter> = Arc::new(TeeEmitter::new(vec![
+        ctx.broadcast.clone(),
+        Arc::new(ExtensionEmitter::new()),
+    ]));
 
     // ---- 5. Push the rebuilt state into the live harness via the B5d setters ----
     let _ = harness.set_agent_emitter(Some(emitter)).await;
@@ -1998,26 +1910,6 @@ pub enum BuildError {
     SessionNotFound { requested: String, dir: String },
     #[error("Could not build the harness: {0}")]
     HarnessCreate(String),
-}
-
-/// B5c: build the `AgentHarnessOptions.models` vec — the resolved gateway
-/// provider first, then one `Arc<dyn Provider>` per registered extension
-/// provider (each a [`kiqi_host::PluggableProvider`] wrapping an extension's
-/// sync `ProviderRequestFn`). The harness resolves a provider lazily per call by
-/// `models.iter().find(|p| p.id() == model.provider)`, so the gateway stays
-/// first-match for its own ids and an extension provider serves a catalog model
-/// whose `provider` matches its id. `runtime` is the same `Handle` captured for
-/// the action bridge — `PluggableProvider` needs a captured `Handle` to
-/// `spawn_blocking` the sync ffi call from the async `stream_simple`.
-fn build_models_with_extensions(
-    resolved: &ResolvedModel,
-    extension_session: &ExtensionSession,
-    runtime: tokio::runtime::Handle,
-) -> Vec<Arc<dyn Provider>> {
-    let mut models: Vec<Arc<dyn Provider>> = resolved.providers.clone();
-    let pluggable = kiqi_host::PluggableProvider::from_session(extension_session, runtime);
-    models.extend(pluggable);
-    models
 }
 
 /// Resolve project resource loading without prompting. Explicit CLI overrides
@@ -3142,6 +3034,7 @@ fn read_prompt_source(path: &Path, sources: &mut Vec<String>) -> Option<String> 
 mod tests {
     use super::*;
     use crate::args::Args;
+    use std::sync::atomic::Ordering;
 
     /// End-to-end: `~/.agents/AGENTS.md` must reach the prompt that the CLI hands
     /// the harness, ahead of the ki-specific agent-dir file. No other test covers
@@ -3649,13 +3542,6 @@ mod tests {
         assert_eq!(sources, vec![file.to_string_lossy().into_owned()]);
     }
 
-    extern "C" fn deny_test_tool_call(
-        _event: kiqi_host::StableExtensionEvent,
-        _data: *mut std::ffi::c_void,
-    ) -> i32 {
-        kiqi_host::EVENT_HANDLER_ABORT
-    }
-
     async fn invoke_tool_hook(
         hook: &kiqi_agent::BeforeToolCall,
         tool: &str,
@@ -3682,12 +3568,6 @@ mod tests {
         .await
     }
 
-    async fn invoke_test_tool_hook(
-        hook: &kiqi_agent::BeforeToolCall,
-    ) -> Option<kiqi_agent::BeforeToolCallResult> {
-        invoke_tool_hook(hook, "read", serde_json::json!({"path": "x"})).await
-    }
-
     /// A project directory with an empty policy file, so a policy test never
     /// falls through to the developer's real global `permissions.json`.
     fn hook_project() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -3706,12 +3586,7 @@ mod tests {
             r#"{"permissions":{"allow":["Bash(git *)"],"deny":["Bash(git push *)"]}}"#,
         )
         .unwrap();
-        let hook = extension_tool_call_hook(
-            Arc::new(Mutex::new(ExtensionSession::none())),
-            kiqi_host::UiDialogMailbox::new(),
-            project.path().to_path_buf(),
-            true,
-        );
+        let hook = extension_tool_call_hook(project.path().to_path_buf(), true);
 
         // Deny wins, and the reason names both the rule and the tool.
         let result = invoke_tool_hook(
@@ -3777,12 +3652,7 @@ mod tests {
         let (project, policy) = hook_project();
         std::fs::write(&policy, r#"{"permissions":{"deny":["Bash(*)"]}}"#).unwrap();
         let make_hook = |project_trusted: bool| {
-            extension_tool_call_hook(
-                Arc::new(Mutex::new(ExtensionSession::none())),
-                kiqi_host::UiDialogMailbox::new(),
-                project.path().to_path_buf(),
-                project_trusted,
-            )
+            extension_tool_call_hook(project.path().to_path_buf(), project_trusted)
         };
 
         // An untrusted project's policy is project-controlled input: ignore it.
@@ -3806,41 +3676,6 @@ mod tests {
             Some(value) => std::env::set_var("KI_AGENT_DIR", value),
             None => std::env::remove_var("KI_AGENT_DIR"),
         }
-    }
-
-    #[tokio::test]
-    async fn tool_call_hook_uses_reloaded_session_and_newly_discovered_gate() {
-        let (project_guard, _policy) = hook_project();
-        let sessions = Arc::new(Mutex::new(ExtensionSession::none()));
-        let hook = extension_tool_call_hook(
-            sessions.clone(),
-            kiqi_host::UiDialogMailbox::new(),
-            project_guard.path().to_path_buf(),
-            true,
-        );
-        assert!(invoke_test_tool_hook(&hook).await.is_none());
-        for name in ["first-gate", "reloaded-gate"] {
-            let mut registry = kiqi_host::ExtensionRegistry::new();
-            registry.register_event_handler(
-                name.into(),
-                kiqi_host::EventTag::ToolCall,
-                deny_test_tool_call,
-                std::ptr::null_mut(),
-            );
-            let fresh = ExtensionSession::from_parts(Arc::new(registry.snapshot()), None);
-            {
-                let mut current = sessions.lock().unwrap();
-                if let Some(snapshot) = current.snapshot() {
-                    snapshot.active_flag().store(false, Ordering::SeqCst);
-                }
-                *current = fresh;
-            }
-            let result = invoke_test_tool_hook(&hook).await.unwrap();
-            assert!(result.block);
-            assert!(result.reason.unwrap().contains(name));
-        }
-        *sessions.lock().unwrap() = ExtensionSession::none();
-        assert!(invoke_test_tool_hook(&hook).await.is_none());
     }
 
     /// A unique scratch file for one summary test.
@@ -4805,33 +4640,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_shutdown_joins_all_handlers_even_after_veto() {
-        use kiqi_host::EventTag;
-        use kiqi_host::StableExtensionEvent;
+    async fn reload_shutdown_dispatches_session_shutdown_to_the_sink() {
         use std::sync::atomic::AtomicUsize;
-        extern "C" fn stop(_: StableExtensionEvent, data: *mut std::ffi::c_void) -> i32 {
-            let calls = unsafe { &*(data as *const AtomicUsize) };
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                kiqi_host::EVENT_HANDLER_ABORT
-            } else {
-                0
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        kiqi_host::set_compiled_event_sink(std::sync::Arc::new(move |_mode, event| {
+            if event.tag == kiqi_host::EventTag::SessionShutdown {
+                counter.fetch_add(1, Ordering::SeqCst);
             }
-        }
-        let calls = AtomicUsize::new(0);
-        let mut registry = kiqi_host::ExtensionRegistry::new();
-        for name in ["first", "second"] {
-            registry.register_event_handler(
-                name.into(),
-                EventTag::SessionShutdown,
-                stop,
-                &calls as *const _ as *mut std::ffi::c_void,
-            );
-        }
-        super::shutdown_extensions_for_reload(Some(Arc::new(registry.snapshot())))
-            .await
-            .unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+            kiqi_host::CompiledVerdict::Continue
+        }));
+        super::shutdown_extensions_for_reload().await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        kiqi_host::clear_compiled_event_sink();
     }
 
     /// `SessionTree` fires on `/tree` navigate, `/session` switch, `/import`,
@@ -4841,26 +4662,18 @@ mod tests {
     /// **advisory** — the tree move already happened, so the notification
     /// completes instead of propagating the veto.
     #[tokio::test]
-    async fn session_tree_notification_dispatches_and_veto_is_advisory() {
+    async fn session_tree_notification_reaches_the_compiled_sink() {
         use std::sync::atomic::AtomicUsize;
-        extern "C" fn veto(_: kiqi_host::StableExtensionEvent, data: *mut std::ffi::c_void) -> i32 {
-            unsafe { &*(data as *const AtomicUsize) }
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            kiqi_host::EVENT_HANDLER_ABORT
-        }
-        let calls = AtomicUsize::new(0);
-        let mut registry = kiqi_host::ExtensionRegistry::new();
-        registry.register_event_handler(
-            "vetoer".into(),
-            kiqi_host::EventTag::SessionTree,
-            veto,
-            &calls as *const _ as *mut std::ffi::c_void,
-        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        kiqi_host::set_compiled_event_sink(std::sync::Arc::new(move |_mode, event| {
+            if event.tag == kiqi_host::EventTag::SessionTree {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+            kiqi_host::CompiledVerdict::Continue
+        }));
         let reload_context = ReloadContext {
-            extension_session: Arc::new(Mutex::new(kiqi_host::ExtensionSession::from_parts(
-                Arc::new(registry.snapshot()),
-                None,
-            ))),
+            extension_session: Arc::new(Mutex::new(ExtensionSession::none())),
             tool_context: kiqi_host::ToolCallContext::default(),
             action_bridge: Arc::new(Mutex::new(None)),
             ext_status: kiqi_host::ExtensionStatusMailbox::default(),
@@ -4885,13 +4698,12 @@ mod tests {
             mcp: Arc::new(kiqi_mcp::McpManager::empty()),
         };
 
-        // Completes despite the ABORT (no panic / no veto propagation)...
         super::notify_session_tree(&reload_context).await;
-        // ...and the handler actually ran exactly once.
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
-            "SessionTree must reach a subscribed handler exactly once"
+            "SessionTree must reach the compiled sink exactly once"
         );
+        kiqi_host::clear_compiled_event_sink();
     }
 }

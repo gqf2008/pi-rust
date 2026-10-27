@@ -189,98 +189,6 @@ fn pasted_images_accept_multiple_quoted_paths_without_consuming_normal_text() {
     assert!(state.take_pending_images().is_empty());
 }
 
-#[test]
-fn modal_inputs_keep_registered_extension_shortcuts_until_closed() {
-    use kiqi_host::EventTag;
-    use kiqi_host::{ExtensionRegistry, ExtensionSession};
-    use kiqi_host::{StableExtensionEvent, EVENT_HANDLER_CLAIMED};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    extern "C" fn claim(_: StableExtensionEvent, user_data: *mut std::ffi::c_void) -> i32 {
-        // The counter outlives the session and all synchronous dispatch calls.
-        let calls = unsafe { &*user_data.cast::<AtomicUsize>() };
-        calls.fetch_add(1, Ordering::SeqCst);
-        EVENT_HANDLER_CLAIMED
-    }
-    let calls = AtomicUsize::new(0);
-    let state = test_tui_state();
-    let mut registry = ExtensionRegistry::new();
-    for name in ["space", "f8", "escape", "enter"] {
-        registry.register_shortcut("test".into(), name.into(), "test".into());
-    }
-    registry.register_event_handler(
-        "test".into(),
-        EventTag::Input,
-        claim,
-        (&calls as *const AtomicUsize).cast_mut().cast(),
-    );
-    *state.extension_session.lock().unwrap() =
-        ExtensionSession::from_parts(Arc::new(registry.snapshot()), None);
-    let keys = [KeyCode::Char(' '), KeyCode::F(8), KeyCode::Enter];
-    for code in keys {
-        assert!(dispatch_key_event(
-            &state,
-            &KeyEvent::new(code, KeyModifiers::NONE),
-            &state.editor
-        ));
-        assert!(dispatch_key_event(
-            &state,
-            &KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Release),
-            &state.editor
-        ));
-    }
-    let before = calls.load(Ordering::SeqCst);
-    for modal in 0..4 {
-        match modal {
-            0 => *state.active_extension_editor.lock().unwrap() = Some(Arc::new(Editor::simple())),
-            1 => *state.active_extension_input.lock().unwrap() = Some(Arc::new(Input::new())),
-            2 => {
-                *state.active_selector.lock().unwrap() = Some((
-                    SelectorView::List(Arc::new(SelectList::new(vec![], 5))),
-                    SelectorKind::Extension,
-                ))
-            }
-            _ => state.search.activate(),
-        }
-        for code in keys.into_iter().chain([KeyCode::Esc]) {
-            for kind in [
-                KeyEventKind::Press,
-                KeyEventKind::Repeat,
-                KeyEventKind::Release,
-            ] {
-                let key = KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind);
-                assert!(!dispatch_key_event(&state, &key, &state.editor));
-            }
-        }
-        assert_eq!(calls.load(Ordering::SeqCst), before);
-        state.active_extension_editor.lock().unwrap().take();
-        state.active_extension_input.lock().unwrap().take();
-        state.active_selector.lock().unwrap().take();
-        state.search.deactivate();
-    }
-    assert!(dispatch_key_event(
-        &state,
-        &KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE),
-        &state.editor
-    ));
-    assert_eq!(calls.load(Ordering::SeqCst), before + 1);
-    let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
-    assert!(dispatch_key_event(&state, &space, &state.editor));
-    state.editor.set_text("injected transcription");
-    *state.active_extension_input.lock().unwrap() = Some(Arc::new(Input::new()));
-    let held = calls.load(Ordering::SeqCst);
-    assert!(dispatch_key_event(
-        &state,
-        &KeyEvent::new_with_kind(space.code, space.modifiers, KeyEventKind::Release),
-        &state.editor
-    ));
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        held + 1,
-        "finish the already-owned hold"
-    );
-    assert!(!dispatch_key_event(&state, &space, &state.editor));
-}
-
 /// A draft injected from a voice transcription is submitted only when it is
 /// still exactly what we put in the editor and no run has started; any
 /// user edit (or a cleared editor) hands it back for editing instead.
@@ -488,30 +396,14 @@ fn editor_change_source_separates_tui_writes_from_typing() {
 fn programmatic_mark_is_consumed_even_with_no_subscriber() {
     use std::sync::atomic::Ordering;
     let state = test_tui_state();
-    // The precondition is "nobody subscribes", not "no snapshot": a dylib-free
-    // session carries an empty registry (which is also what keeps the event
-    // gates open for the compiled/wasm tiers). The guard is scoped: the drain
-    // below re-locks the session cell and std's mutex is not reentrant.
-    let nobody_subscribes = {
-        let session = state.extension_session.lock().unwrap();
-        let snapshot = session
-            .snapshot_arc()
-            .expect("a dylib-free session carries an empty registry");
-        snapshot
-            .handlers_for(kiqi_host::EventTag::SessionStart)
-            .is_empty()
-            && snapshot.before_agent_start().is_empty()
-            && snapshot.resources_discover().is_empty()
-    };
-    assert!(nobody_subscribes, "this test relies on nobody subscribing");
-
     state.editor_text.push(kiqi_host::EditorTextEdit {
         text: "draft".to_string(),
         mode: kiqi_host::EditorTextMode::Replace,
         auto_send_ms: None,
     });
     state.drain_editor_text();
-    // `sync_editor_change` bails out early (no subscriber)…
+    // `sync_editor_change` consumes the attribution mark even when no
+    // extension subscribes…
     state.sync_editor_change();
     // …but the mark is gone, so the next real edit is the user's.
     assert!(!state.programmatic_editor_write.load(Ordering::SeqCst));

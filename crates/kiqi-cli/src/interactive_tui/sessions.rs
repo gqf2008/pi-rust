@@ -488,36 +488,23 @@ pub(super) async fn render_session_history(
     }
 }
 
+/// Which render path a caller wants. Native renderers were removed with the
+/// registration machine (`docs/design/extension-abi.md` §6.49); the enum keeps
+/// the three call sites readable while the wasm tier grows its own surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RendererKind {
+    Message,
+    Entry,
+}
+
 pub(super) fn invoke_extension_renderer(
-    session: &crate::session::ExtensionSessionCell,
-    kind: kiqi_host::RegisteredRendererKind,
-    payload: &serde_json::Value,
+    _session: &crate::session::ExtensionSessionCell,
+    _kind: RendererKind,
+    _payload: &serde_json::Value,
 ) -> Option<serde_json::Value> {
-    let snapshot = session.lock().ok()?.snapshot_arc()?;
-    let input = serde_json::to_string(payload).ok()?;
-    for renderer in snapshot.renderers_of(kind) {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut out = kiqi_host::StbString::empty();
-            let rc = (renderer.render_fn)(
-                kiqi_host::StbStringRef::from_str(&input),
-                &mut out as *mut kiqi_host::StbString,
-                renderer.user_data,
-            );
-            let text = if rc == 0 {
-                Some(out.to_string_lossy())
-            } else {
-                None
-            };
-            out.free_with(Some(renderer.extension_free_string));
-            text
-        }))
-        .ok()
-        .flatten();
-        let Some(text) = outcome else { continue };
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-            return Some(value);
-        }
-    }
+    // Native (cdylib) renderers were removed with the registration machine
+    // (docs/design/extension-abi.md §6.49). Wasm renderers reach the TUI
+    // through their own typed path, not this snapshot lookup.
     None
 }
 
@@ -550,8 +537,7 @@ pub(super) fn extension_message_component(
     payload: &serde_json::Value,
     transformer: Option<MarkdownTransformer>,
 ) -> Option<Arc<dyn kiqi_tui::Component>> {
-    let value =
-        invoke_extension_renderer(session, kiqi_host::RegisteredRendererKind::Message, payload)?;
+    let value = invoke_extension_renderer(session, RendererKind::Message, payload)?;
     if value.get("markdown").and_then(|v| v.as_bool()) == Some(true) {
         let text = value.get("text").and_then(|v| v.as_str())?;
         let component = Arc::new(AssistantMessageComponent::new(
@@ -578,11 +564,7 @@ pub(super) fn extension_usage_text(
         "customType": "token-usage",
         "usage": usage,
     });
-    let value = invoke_extension_renderer(
-        session,
-        kiqi_host::RegisteredRendererKind::Message,
-        &payload,
-    )?;
+    let value = invoke_extension_renderer(session, RendererKind::Message, &payload)?;
     value
         .get("text")
         .and_then(|value| value.as_str())
@@ -599,8 +581,7 @@ pub(super) fn extension_entry_component(
         "customType": custom_type,
         "data": data,
     });
-    let value =
-        invoke_extension_renderer(session, kiqi_host::RegisteredRendererKind::Entry, &payload)?;
+    let value = invoke_extension_renderer(session, RendererKind::Entry, &payload)?;
     extension_text_component(&value)
 }
 

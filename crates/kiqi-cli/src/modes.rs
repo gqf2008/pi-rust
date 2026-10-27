@@ -1063,11 +1063,10 @@ pub async fn interactive(
     reload_context: &crate::session::ReloadContext,
 ) -> i32 {
     // ---- Session lifecycle (P1): BeforeTuiStart ----
-    // `BeforeTuiStart`: extensions may prepare (connect a server, load a
-    // resource) before the interactive UI initializes. Runs with a per-event
-    // timeout; a handler returning `EVENT_HANDLER_ABORT` **vetoes** startup —
-    // we print the reason and exit without entering the TUI. No-op when no
-    // extension subscribes.
+    // `BeforeTuiStart`: extensions prepare (connect a server, load a resource)
+    // before the interactive UI initializes. Observer-only: the extension
+    // contract has no veto, so the returned option is always `None` and this
+    // never exits the TUI path.
     if let Some(reason) = crate::session::dispatch_session_event_async(
         reload_context,
         kiqi_host::EventTag::BeforeTuiStart,
@@ -1825,13 +1824,10 @@ mod tests {
         assert_eq!(retry["error"], "503 service unavailable");
     }
 
-    /// A `ReloadContext` whose extension cell serves `registry`'s snapshot, so
-    /// a lifecycle dispatch resolves a live handler list. Everything else is
-    /// inert defaults — the one-shot modes only read the cell for the dispatch.
-    fn shutdown_test_context(
-        registry: kiqi_host::ExtensionRegistry,
-    ) -> crate::session::ReloadContext {
-        let session = kiqi_host::ExtensionSession::from_parts(Arc::new(registry.snapshot()), None);
+    /// A `ReloadContext` with an extension-free session; the lifecycle
+    /// dispatch reaches the process sink installed by the test.
+    fn shutdown_test_context() -> crate::session::ReloadContext {
+        let session = kiqi_host::ExtensionSession::none();
         let (emitter, _) = kiqi_agent::CollectorEmitter::new();
         crate::session::ReloadContext {
             extension_session: Arc::new(Mutex::new(session)),
@@ -1863,87 +1859,83 @@ mod tests {
     /// The one-shot modes must end a run with a `SessionShutdown` dispatch —
     /// that is the only signal the wasm langfuse guest gets to flush its
     /// traces (`-p` / `--mode json` never reach the TUI/rpc lifecycle).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn print_mode_dispatches_session_shutdown_to_extensions() {
-        use std::sync::atomic::AtomicUsize;
-        extern "C" fn record(
-            _: kiqi_host::StableExtensionEvent,
-            data: *mut std::ffi::c_void,
-        ) -> i32 {
-            unsafe { &*(data as *const AtomicUsize) }
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            0
-        }
-        let hits = AtomicUsize::new(0);
-        let mut registry = kiqi_host::ExtensionRegistry::new();
-        registry.register_event_handler(
-            "recorder".into(),
-            kiqi_host::EventTag::SessionShutdown,
-            record,
-            &hits as *const _ as *mut std::ffi::c_void,
-        );
-        let reload_context = shutdown_test_context(registry);
-
-        let (harness, _) = rpc_test_harness("done", 500.0).await;
-        let code = print(
-            &harness,
-            &Args::default(),
-            Some("hello".to_string()),
-            &[],
-            Vec::new(),
-            &reload_context,
-        )
-        .await;
-
-        assert_eq!(code, 0);
+    #[test]
+    fn print_mode_dispatches_session_shutdown_to_extensions() {
+        let _gate = crate::extensions::lock_test_sink();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        kiqi_host::set_compiled_event_sink(Arc::new(move |_mode, event| {
+            if event.tag == kiqi_host::EventTag::SessionShutdown {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            kiqi_host::CompiledVerdict::Continue
+        }));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let reload_context = shutdown_test_context();
+            let (harness, _) = rpc_test_harness("done", 500.0).await;
+            let code = print(
+                &harness,
+                &Args::default(),
+                Some("hello".to_string()),
+                &[],
+                Vec::new(),
+                &reload_context,
+            )
+            .await;
+            assert_eq!(code, 0);
+        });
         assert_eq!(
             hits.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "print mode must dispatch SessionShutdown exactly once"
         );
+        kiqi_host::clear_compiled_event_sink();
     }
 
     /// Same contract for `--mode json`: the structured error path returns
     /// early, and it too must route through the `SessionShutdown` tail.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn json_mode_dispatches_session_shutdown_to_extensions() {
-        use std::sync::atomic::AtomicUsize;
-        extern "C" fn record(
-            _: kiqi_host::StableExtensionEvent,
-            data: *mut std::ffi::c_void,
-        ) -> i32 {
-            unsafe { &*(data as *const AtomicUsize) }
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            0
-        }
-        let hits = AtomicUsize::new(0);
-        let mut registry = kiqi_host::ExtensionRegistry::new();
-        registry.register_event_handler(
-            "recorder".into(),
-            kiqi_host::EventTag::SessionShutdown,
-            record,
-            &hits as *const _ as *mut std::ffi::c_void,
-        );
-        let reload_context = shutdown_test_context(registry);
-
-        let (harness, _) = rpc_test_harness("done", 500.0).await;
-        let code = json(
-            &harness,
-            &Args::default(),
-            Some("hello".to_string()),
-            &[],
-            Vec::new(),
-            None,
-            &reload_context,
-        )
-        .await;
-
-        assert_eq!(code, 0);
+    #[test]
+    fn json_mode_dispatches_session_shutdown_to_extensions() {
+        let _gate = crate::extensions::lock_test_sink();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        kiqi_host::set_compiled_event_sink(Arc::new(move |_mode, event| {
+            if event.tag == kiqi_host::EventTag::SessionShutdown {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            kiqi_host::CompiledVerdict::Continue
+        }));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let reload_context = shutdown_test_context();
+            let (harness, _) = rpc_test_harness("done", 500.0).await;
+            let code = json(
+                &harness,
+                &Args::default(),
+                Some("hello".to_string()),
+                &[],
+                Vec::new(),
+                None,
+                &reload_context,
+            )
+            .await;
+            assert_eq!(code, 0);
+        });
         assert_eq!(
             hits.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "json mode must dispatch SessionShutdown exactly once"
         );
+        kiqi_host::clear_compiled_event_sink();
     }
 
     /// Sink that records everything the heartbeat writes.

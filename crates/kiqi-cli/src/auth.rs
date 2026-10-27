@@ -20,7 +20,6 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
-use std::sync::Arc;
 
 use crate::config::{
     self, delete_credential, read_auth, upsert_credential, Credential, DEFAULT_PROVIDER_ID,
@@ -34,22 +33,17 @@ const EXIT_ERROR: i32 = 2;
 /// `ki auth <sub> [args]` entry. `args` is the slice *after* `auth` (i.e. the
 /// subcommand + its flags). Returns the process exit code. Async to match the
 /// `app::run` shape, though v1 does no async work here.
+///
+/// OAuth flows belong to wasm extensions and are reached through
+/// `wasm_oauth`; the native (cdylib) provider registry was removed on
+/// 2026-10-27 (`docs/design/extension-abi.md` §6.49).
 pub async fn run(args: &[String]) -> i32 {
-    run_with_extensions(args, None).await
-}
-
-/// Run auth with an optional extension snapshot. The caller must keep the
-/// matching extension session alive until this future completes.
-pub async fn run_with_extensions(
-    args: &[String],
-    snapshot: Option<Arc<kiqi_host::RegistrySnapshot>>,
-) -> i32 {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("");
     match sub {
-        "login" => run_login(&args[1..], snapshot.as_ref()).await,
+        "login" => run_login(&args[1..]).await,
         "check" | "status" => run_check(&args[1..]).await,
-        "refresh" => run_refresh(&args[1..], snapshot.as_ref()).await,
-        "logout" => run_logout(&args[1..], snapshot.as_ref()).await,
+        "refresh" => run_refresh(&args[1..]).await,
+        "logout" => run_logout(&args[1..]).await,
         "--help" | "-h" | "help" | "" => {
             print_auth_help();
             0
@@ -64,7 +58,7 @@ pub async fn run_with_extensions(
 }
 
 /// `ki auth login [--provider <id>]` — prompt for a key and persist it.
-async fn run_login(args: &[String], snapshot: Option<&Arc<kiqi_host::RegistrySnapshot>>) -> i32 {
+async fn run_login(args: &[String]) -> i32 {
     let provider = parse_provider(args).unwrap_or(DEFAULT_PROVIDER_ID);
     // The `extension:` prefix is the extension credential namespace in `auth.json`
     // (`extension:<install-id>:<provider-id>`); config::upsert_oauth_token refuses
@@ -88,11 +82,6 @@ async fn run_login(args: &[String], snapshot: Option<&Arc<kiqi_host::RegistrySna
         Err(error) => {
             eprintln!("error: {error}");
             return EXIT_ERROR;
-        }
-    }
-    if let Some(snapshot) = snapshot {
-        if snapshot.oauth_provider(provider).is_some() {
-            return run_oauth_login(provider, snapshot).await;
         }
     }
     // Compatibility API-key login. This path is provider-neutral; OAuth
@@ -168,7 +157,7 @@ async fn run_check(args: &[String]) -> i32 {
 }
 
 /// `ki auth logout [--provider <id>]` — drop the stored credential.
-async fn run_refresh(args: &[String], snapshot: Option<&Arc<kiqi_host::RegistrySnapshot>>) -> i32 {
+async fn run_refresh(args: &[String]) -> i32 {
     let provider = parse_provider(args).unwrap_or(DEFAULT_PROVIDER_ID);
     // Host-only for a wasm provider: the refresh token never enters a guest.
     #[cfg(feature = "extension-wasm")]
@@ -201,60 +190,13 @@ async fn run_refresh(args: &[String], snapshot: Option<&Arc<kiqi_host::RegistryS
             return EXIT_ERROR;
         }
     }
-    let Some(snapshot) = snapshot else {
-        eprintln!("error: no OAuth extensions are loaded");
-        return EXIT_ERROR;
-    };
-    let Some(Credential::Oauth {
-        access,
-        refresh,
-        expires,
-        ..
-    }) = config::read_oauth_token(provider).ok().flatten()
-    else {
-        eprintln!("error: no stored OAuth credentials for \"{provider}\"");
-        return EXIT_NOT_READY;
-    };
-    let response = match kiqi_host::request_oauth(
-        snapshot,
-        provider,
-        "refresh",
-        serde_json::json!({"credential": {"access": access, "refresh": refresh, "expires_at": expires}}),
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("error: OAuth refresh failed: {error}");
-            return EXIT_ERROR;
-        }
-    };
-    let response = match kiqi_host::OAuthActionResponse::parse(response) {
-        Ok(response) => response,
-        Err(error) => {
-            eprintln!("error: invalid OAuth refresh response: {error}");
-            return EXIT_ERROR;
-        }
-    };
-    let Some(token) = (match response.credential() {
-        Ok(token) => token,
-        Err(error) => {
-            eprintln!("error: invalid OAuth refresh credential: {error}");
-            return EXIT_ERROR;
-        }
-    }) else {
-        eprintln!("error: OAuth refresh returned no credential");
-        return EXIT_ERROR;
-    };
-    if let Err(error) =
-        config::upsert_oauth_token(provider, token.access, token.refresh, token.expires_at)
-    {
-        eprintln!("error: could not save refreshed OAuth credentials: {error}");
-        return EXIT_ERROR;
-    }
-    println!("OAuth credentials refreshed for \"{provider}\".");
-    0
+    eprintln!(
+        "error: no wasm extension provides OAuth for \"{provider}\"; install one with an `oauth` grant"
+    );
+    EXIT_ERROR
 }
 
-async fn run_logout(args: &[String], snapshot: Option<&Arc<kiqi_host::RegistrySnapshot>>) -> i32 {
+async fn run_logout(args: &[String]) -> i32 {
     let provider = parse_provider(args).unwrap_or(DEFAULT_PROVIDER_ID);
     // Host-only for a wasm provider: revoke through the grant's endpoint, then
     // delete exactly the namespaced key. A bare `auth.json` entry is untouched.
@@ -292,43 +234,11 @@ async fn run_logout(args: &[String], snapshot: Option<&Arc<kiqi_host::RegistrySn
             return EXIT_ERROR;
         }
     }
-    if let Ok(Some(Credential::Oauth {
-        access, refresh, ..
-    })) = config::read_oauth_token(provider)
-    {
-        let Some(snapshot) = snapshot else {
-            eprintln!("error: cannot revoke OAuth credentials: no OAuth extensions are loaded");
-            return EXIT_ERROR;
-        };
-        let response = match kiqi_host::request_oauth(
-            snapshot,
-            provider,
-            "revoke",
-            serde_json::json!({"credential": {"access": access, "refresh": refresh}}),
-        ) {
-            Ok(response) => response,
-            Err(error) => {
-                eprintln!("error: OAuth revoke failed; local credentials were kept: {error}");
-                return EXIT_ERROR;
-            }
-        };
-        match kiqi_host::OAuthActionResponse::parse(response) {
-            Ok(response) if response.kind == kiqi_host::OAuthResponseKind::Success => {}
-            Ok(_) => {
-                eprintln!(
-                    "error: OAuth revoke did not return success; local credentials were kept"
-                );
-                return EXIT_ERROR;
-            }
-            Err(error) => {
-                eprintln!(
-                    "error: invalid OAuth revoke response; local credentials were kept: {error}"
-                );
-                return EXIT_ERROR;
-            }
-        }
-        /*
-         */
+    if let Ok(Some(Credential::Oauth { .. })) = config::read_oauth_token(provider) {
+        eprintln!(
+            "error: cannot revoke OAuth credentials for \"{provider}\": no wasm extension provides it"
+        );
+        return EXIT_ERROR;
     }
     match delete_credential(provider) {
         Ok(true) => {
@@ -342,83 +252,6 @@ async fn run_logout(args: &[String], snapshot: Option<&Arc<kiqi_host::RegistrySn
         Err(e) => {
             eprintln!("error: could not remove credentials: {e}");
             EXIT_ERROR
-        }
-    }
-}
-
-/// Pull the `--provider <id>` value from a subcommand's args (defaults to
-/// `None`). Mirrors the TS `--provider` handshake before it falls back to the
-/// default.
-async fn run_oauth_login(provider: &str, snapshot: &Arc<kiqi_host::RegistrySnapshot>) -> i32 {
-    let mut input = serde_json::json!({});
-    let mut action = "begin";
-    loop {
-        let raw = match kiqi_host::request_oauth(snapshot, provider, action, input) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("error: OAuth {action} failed: {error}");
-                return EXIT_ERROR;
-            }
-        };
-        let response = match kiqi_host::OAuthActionResponse::parse(raw) {
-            Ok(response) => response,
-            Err(error) => {
-                eprintln!("error: invalid OAuth response: {error}");
-                return EXIT_ERROR;
-            }
-        };
-        match response.kind {
-            kiqi_host::OAuthResponseKind::Credential => {
-                let Some(token) = response.credential().ok().flatten() else {
-                    eprintln!("error: OAuth response contained no valid credential");
-                    return EXIT_ERROR;
-                };
-                if let Err(error) = config::upsert_oauth_token(
-                    provider,
-                    token.access,
-                    token.refresh,
-                    token.expires_at,
-                ) {
-                    eprintln!("error: could not save OAuth credentials: {error}");
-                    return EXIT_ERROR;
-                }
-                println!("OAuth credentials saved for \"{provider}\".");
-                return 0;
-            }
-            kiqi_host::OAuthResponseKind::Error => {
-                eprintln!("error: OAuth provider rejected the request");
-                return EXIT_ERROR;
-            }
-            kiqi_host::OAuthResponseKind::Success => {
-                eprintln!("error: OAuth login completed without credentials");
-                return EXIT_ERROR;
-            }
-            kiqi_host::OAuthResponseKind::Interaction => {
-                let display = response.payload.get("display").unwrap_or(&response.payload);
-                if let Some(title) = display.get("title").and_then(serde_json::Value::as_str) {
-                    println!("{title}");
-                }
-                if let Some(url) = display.get("url").and_then(serde_json::Value::as_str) {
-                    println!("{url}");
-                }
-                if let Some(instructions) = display
-                    .get("instructions")
-                    .and_then(serde_json::Value::as_array)
-                {
-                    for instruction in instructions.iter().filter_map(serde_json::Value::as_str) {
-                        println!("{instruction}");
-                    }
-                }
-                eprint!("OAuth input: ");
-                let _ = io::stderr().flush();
-                let mut line = String::new();
-                if io::stdin().read_line(&mut line).is_err() || line.trim().is_empty() {
-                    eprintln!("error: empty OAuth input; nothing saved.");
-                    return EXIT_ERROR;
-                }
-                input = serde_json::json!({"value": line.trim()});
-                action = "exchange";
-            }
         }
     }
 }
@@ -765,24 +598,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn standard_oauth_credential_response_is_parsed() {
-        let response = kiqi_host::OAuthActionResponse::parse(serde_json::json!({
-            "version": 1,
-            "kind": "credential",
-            "payload": {
-                "access": "access",
-                "refresh": "refresh",
-                "expires_at": 123
-            }
-        }))
-        .unwrap();
-        let credential = response.credential().unwrap().unwrap();
-        assert_eq!(credential.access, "access");
-        assert_eq!(credential.refresh, "refresh");
-        assert_eq!(credential.expires_at, 123);
-    }
-
     #[tokio::test]
     async fn check_not_ready_with_no_credentials() {
         let _cfg = TempConfig::new();
@@ -873,13 +688,10 @@ mod tests {
     #[tokio::test]
     async fn login_refuses_a_reserved_extension_namespaced_provider_id() {
         let _cfg = TempConfig::new();
-        let code = run_login(
-            &[
-                "--provider".to_string(),
-                "extension:install-1:anthropic".to_string(),
-            ],
-            None,
-        )
+        let code = run_login(&[
+            "--provider".to_string(),
+            "extension:install-1:anthropic".to_string(),
+        ])
         .await;
         assert_eq!(code, EXIT_ERROR);
         // The refusal happens before any prompt or store write.
@@ -898,7 +710,7 @@ mod tests {
         )
         .unwrap();
         assert!(auth_path().unwrap().exists());
-        let code = run_logout(&[], None).await;
+        let code = run_logout(&[]).await;
         assert_eq!(code, 0);
         // The entry should be gone → check is now not_ready.
         assert_eq!(run_check(&[]).await, EXIT_NOT_READY);
@@ -907,7 +719,7 @@ mod tests {
     #[tokio::test]
     async fn logout_when_empty_is_noop() {
         let _cfg = TempConfig::new();
-        let code = run_logout(&[], None).await;
+        let code = run_logout(&[]).await;
         assert_eq!(code, 0);
     }
 

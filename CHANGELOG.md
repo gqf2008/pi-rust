@@ -40,6 +40,18 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Removed
 
+- **The C-ABI registration machine is gone; the event bus is pure serde
+  (breaking).** The unreachable native (cdylib) registry layer left behind by
+  the channel retirement was removed: `HostApi` and its thread-local, every
+  `trampoline_register_*`, `ExtensionToolAdapter`/`ExtensionToolHandle`,
+  `PluggableProvider`, native OAuth/prompt-transform/resources handlers, and the
+  whole `kiqi_host::abi` module (`StbString`, `StableExtensionEvent`,
+  `EventView`, `ExtensionApi`, handler constants). Events now cross the
+  compiled/wasm sink as the plain serde `Event` (tag + JSON payload), with the
+  dispatch funnels building it directly. `RegistrySnapshot` shrinks to the
+  session staleness flag; `EventTag`/`Event`/`EventAction`, the compiled sink,
+  `translate` funnels, mailboxes, `ToolCallContext` and `stdio` remain. Notes in
+  `docs/design/extension-abi.md` §6.49.
 - **The cdylib extension channel is retired (breaking).** wasm guests
   (`extensions/wasm/kiqi-*`, `ki insmod`) are the only extension channel now.
   Gone: the `kiqi-extension-sdk` crate (C ABI types), `examples/extension-stub`, the

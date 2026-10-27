@@ -813,29 +813,11 @@ pub(super) fn build_builtin_registry() -> CommandRegistry {
 
 pub(super) fn register_extension_commands(
     registry: &mut CommandRegistry,
-    session: crate::session::ExtensionSessionCell,
+    _session: crate::session::ExtensionSessionCell,
 ) {
-    let commands = session
-        .lock()
-        .ok()
-        .and_then(|s| s.snapshot_arc())
-        .map(|snap| snap.commands().to_vec())
-        .unwrap_or_default();
-    for command in commands {
-        let name = if command.name.starts_with('/') {
-            command.name.clone()
-        } else {
-            format!("/{}", command.name)
-        };
-        if registry.find(&name).is_some() {
-            continue;
-        }
-        registry.register(Arc::new(ExtensionCommand {
-            name,
-            description: command.description,
-            session: session.clone(),
-        }));
-    }
+    // Native (cdylib) commands were removed with the registration machine
+    // (docs/design/extension-abi.md §6.49). Wasm and compiled-in commands are
+    // the only contributors now.
     register_compiled_commands(registry);
 }
 

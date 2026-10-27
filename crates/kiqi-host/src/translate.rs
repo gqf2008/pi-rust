@@ -1,31 +1,29 @@
-//! `AgentEvent → StableExtensionEvent` translation, plus the [`ExtensionEmitter`]
-//! that impls [`AgentEmitter`] by subscribing to the host's
-//! `broadcast::Sender<AgentEvent>`, folding each event into a stable event, and
-//! fan-out dispatching to every registered handler for the event's tag — all
-//! dispatch wrapped in `catch_unwind` (a panicky extension handler must not unwind
-//! across FFI).
+//! `AgentEvent → Event` translation, plus the [`ExtensionEmitter`] that impls
+//! [`AgentEmitter`] by subscribing to the host's `broadcast::Sender<AgentEvent>`,
+//! folding each event into the extension event contract, and fanning it out to
+//! the compiled/wasm sink.
 //!
-//! The 10 stable lifecycle `AgentEvent` variants fold into their matching
-//! `StableExtensionEvent` tags. Internal host events such as retry scheduling are
-//! intentionally not projected onto the fixed 33-tag extension ABI.
+//! The ten stable lifecycle `AgentEvent` variants fold into their matching
+//! `EventTag` tags. Internal host events such as retry scheduling are
+//! intentionally not projected onto the fixed extension event surface.
+//!
+//! The event that crosses this seam is the plain serde [`Event`] from the
+//! extension contract — no `repr(C)` wire format any more (the C-ABI bus was
+//! removed in the pure-serde batch, `docs/design/extension-abi.md` §6.49).
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
+use crate::Event;
 use crate::EventTag;
-use crate::{StableExtensionEvent, StbString};
 use futures::future::BoxFuture;
 use kiqi_agent::events::{AgentEmitter, AgentEvent};
 use serde_json::Value;
 
-use crate::host_free_string;
-use crate::registry::RegistrySnapshot;
-
 /// Map a native [`AgentEvent`] to its pi `on()` [`EventTag`], or `None` if the
 /// host event has no stable-event counterpart. This is the **fold** described
 /// in the crate docs: the ten stable lifecycle variants map onto matching tags;
-/// internal retry scheduling stays host-only, and the rest of the 33-category
-/// surface is driven by direct host emission in B3+.
+/// internal retry scheduling stays host-only, and the rest of the surface is
+/// driven by direct host emission.
 pub fn event_tag_for(event: &AgentEvent) -> Option<EventTag> {
     match event {
         AgentEvent::AgentStart => Some(EventTag::AgentStart),
@@ -42,25 +40,18 @@ pub fn event_tag_for(event: &AgentEvent) -> Option<EventTag> {
     }
 }
 
-/// Serialize an [`AgentMessage`](kiqi_agent::message::AgentMessage) to an owning
-/// `StbString` for a message-payload event. The host produced this string, so
-/// the **handler** (extension side) frees it via the host's `free_string`.
-fn message_to_stb(message: &kiqi_agent::message::AgentMessage) -> StbString {
-    // AgentMessage is Serialize (#[serde(tag="kind")]); use serde_json round-trip.
-    let text = serde_json::to_string(message).unwrap_or_else(|_| "null".to_string());
-    StbString::from_string(text)
-}
-
-/// Build the stable event for an `AgentEvent`, or `None` if the event carries
+/// Build the extension event for an `AgentEvent`, or `None` if the event carries
 /// no payload that maps onto a stable variant (always maps today, but kept as
-/// `Option` for forward-compat with unmapped future variants). Ownership of any
-/// `StbString` in the returned event passes to the handler.
-pub fn translate(event: &AgentEvent) -> Option<StableExtensionEvent> {
+/// `Option` for forward-compat with unmapped future variants).
+pub fn translate(event: &AgentEvent) -> Option<Event> {
     let tag = event_tag_for(event)?;
     match event {
         AgentEvent::MessageStart { message } | AgentEvent::MessageEnd { message } => {
-            let stb = message_to_stb(message);
-            Some(StableExtensionEvent::message(tag, stb))
+            // AgentMessage is Serialize (#[serde(tag="kind")]); use serde_json
+            // round-trip. A serialization failure degrades to a null payload,
+            // matching the old wire contract.
+            let payload = serde_json::to_value(message).unwrap_or(Value::Null);
+            Some(Event::new(tag, payload))
         }
         AgentEvent::MessageUpdate {
             assistant_message_event,
@@ -69,11 +60,8 @@ pub fn translate(event: &AgentEvent) -> Option<StableExtensionEvent> {
             // Match native Pi's wire contract: message_update carries the
             // provider event, not a growing message snapshot. Consumers that
             // need live text read assistantMessageEvent.delta directly.
-            let payload = assistant_message_event_to_json(assistant_message_event);
-            Some(StableExtensionEvent::message(
-                tag,
-                StbString::from_string(payload),
-            ))
+            let payload = assistant_message_event_to_value(assistant_message_event);
+            Some(Event::new(tag, payload))
         }
 
         AgentEvent::ToolExecutionStart {
@@ -86,11 +74,13 @@ pub fn translate(event: &AgentEvent) -> Option<StableExtensionEvent> {
             tool_name,
             args,
             ..
-        } => Some(StableExtensionEvent::tool_call(
+        } => Some(Event::new(
             tag,
-            StbString::from_string(tool_call_id.clone()),
-            StbString::from_string(tool_name.clone()),
-            StbString::from_string(serde_json::to_string(args).unwrap_or_else(|_| "null".into())),
+            serde_json::json!({
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "params": args,
+            }),
         )),
 
         AgentEvent::ToolExecutionEnd {
@@ -98,23 +88,21 @@ pub fn translate(event: &AgentEvent) -> Option<StableExtensionEvent> {
             tool_name,
             result,
             is_error,
-        } => {
-            // Serialize the AgentToolResult to JSON for the result payload.
-            let result_json = agent_tool_result_to_json(result);
-            Some(StableExtensionEvent::tool_result(
-                tag,
-                StbString::from_string(tool_call_id.clone()),
-                StbString::from_string(tool_name.clone()),
-                StbString::from_string(result_json),
-                *is_error,
-            ))
-        }
+        } => Some(Event::new(
+            tag,
+            serde_json::json!({
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "result": agent_tool_result_to_value(result),
+                "isError": is_error,
+            }),
+        )),
 
         // No-payload events.
         AgentEvent::AgentStart
         | AgentEvent::TurnStart
         | AgentEvent::AgentEnd { .. }
-        | AgentEvent::TurnEnd { .. } => Some(StableExtensionEvent::empty(tag)),
+        | AgentEvent::TurnEnd { .. } => Some(Event::new(tag, Value::Null)),
 
         AgentEvent::RetryScheduled { .. } => None,
     }
@@ -125,7 +113,7 @@ pub fn translate(event: &AgentEvent) -> Option<StableExtensionEvent> {
 /// Do not include `partial`: it is a cumulative snapshot and the native JSON /
 /// RPC contract deliberately omits it so consumers process each delta exactly
 /// once and stream size stays linear.
-fn assistant_message_event_to_json(event: &kiqi_ai::types::AssistantMessageEvent) -> String {
+fn assistant_message_event_to_value(event: &kiqi_ai::types::AssistantMessageEvent) -> Value {
     use kiqi_ai::types::AssistantMessageEvent as E;
 
     let value = match event {
@@ -200,7 +188,7 @@ fn assistant_message_event_to_json(event: &kiqi_ai::types::AssistantMessageEvent
         }
     };
 
-    serde_json::json!({ "assistantMessageEvent": value }).to_string()
+    serde_json::json!({ "assistantMessageEvent": value })
 }
 
 fn event_type_name(event: &kiqi_ai::types::AssistantMessageEvent) -> &'static str {
@@ -221,672 +209,140 @@ fn event_type_name(event: &kiqi_ai::types::AssistantMessageEvent) -> &'static st
     }
 }
 
-/// Serialize an `AgentToolResult` to the JSON shape handlers expect (same shape
-/// the tool adapter uses). Kept here (not reusing tool.rs's `result_to_stb`)
-/// because the emitter must not depend on adapter internals, and this is the
-/// event-side direction.
-fn agent_tool_result_to_json(result: &kiqi_agent::types::AgentToolResult) -> String {
-    let mut txt = String::new();
-    txt.push('{');
-    txt.push_str("\"content\":[");
-    for (i, c) in result.content.iter().enumerate() {
-        if i > 0 {
-            txt.push(',');
-        }
-        match c {
+/// Serialize an `AgentToolResult` to the JSON shape extensions expect.
+fn agent_tool_result_to_value(result: &kiqi_agent::types::AgentToolResult) -> Value {
+    let content: Vec<Value> = result
+        .content
+        .iter()
+        .map(|c| match c {
             kiqi_agent::types::TextContentOrImage::Text(t) => {
-                txt.push_str(
-                    &serde_json::to_string(&serde_json::json!({ "type": "text", "text": t.text }))
-                        .unwrap_or_else(|_| "\"\"".into()),
-                );
+                serde_json::json!({ "type": "text", "text": t.text })
             }
-            kiqi_agent::types::TextContentOrImage::Image(img) => {
-                txt.push_str(
-                    &serde_json::to_string(&serde_json::json!({
-                        "type": "image",
-                        "data": img.data,
-                        "mimeType": img.mime_type,
-                    }))
-                    .unwrap_or_else(|_| "\"\"".into()),
-                );
-            }
-        }
-    }
-    txt.push(']');
-    txt.push_str(",\"details\":");
-    txt.push_str(&serde_json::to_string(&result.details).unwrap_or_else(|_| "null".into()));
-    txt.push_str(",\"terminate\":");
-    txt.push_str(if result.terminate { "true" } else { "false" });
-    txt.push_str(",\"addedToolNames\":");
-    txt.push_str(&serde_json::to_string(&result.added_tool_names).unwrap_or_else(|_| "[]".into()));
-    txt.push('}');
-    txt
-}
-
-/// Free every `StbString` owned by a dispatched [[`StableExtensionEvent`]] via the
-/// host's `free_string`. Called after dispatch completes (the handler SHOULD
-/// have freed them, but the host keeps ownership-of-cleanup so a buggy extension
-/// that retains/leaks can't double-free the host's allocation — the host never
-/// trusts the extension to free, per the SDK's "receiver owns" contract: here the
-/// host is the producer → receiver is the extension; if the extension failed to free,
-/// the host's free is a leak fix, not a double-free, because `StbString` is
-/// `Copy` and the host's `host_free_string` reconstructs the `Box<[u8]>` and
-/// drops it — a second free of the same bytes would be UB, so this must run
-/// EXACTLY ONCE per event. The contract is: the extension frees what it receives.
-/// To honor that, we do NOT free here; the extension owns the free. This fn is
-/// therefore a no-op kept for documentation + future audit).
-///
-/// **In practice:** the extension handler is contractually required to free every
-/// `StbString` it receives via the host `free_string`. The host does not
-/// double-free. If an extension leaks, that is an extension bug.
-#[allow(dead_code)]
-fn free_event_strings(_event: &StableExtensionEvent) {
-    // intentionally empty — see doc comment.
+            kiqi_agent::types::TextContentOrImage::Image(img) => serde_json::json!({
+                "type": "image",
+                "data": img.data,
+                "mimeType": img.mime_type,
+            }),
+        })
+        .collect();
+    serde_json::json!({
+        "content": content,
+        "details": result.details,
+        "terminate": result.terminate,
+        "addedToolNames": result.added_tool_names,
+    })
 }
 
 // ===========================================================================
-// ExtensionEmitter — AgentEmitter impl fanning out to extension handlers
+// ExtensionEmitter — AgentEmitter impl fanning out to the compiled sink
 // ===========================================================================
 
-/// An [`AgentEmitter`] that fans each [`AgentEvent`] out to every extension handler
-/// registered for the event's tag. Built from a [`RegistrySnapshot`] (so it
-/// shares the registry's staleness flag) and installed into
-/// `AgentHarnessOptions.agent_emitter` **alongside** the host's
-/// [`BroadcastEmitter`] — events flow to BOTH the TUI (which drains the
-/// broadcast receiver) and the extension handlers (which receive translated
-/// `StableExtensionEvent`s). The host composes the two via
-/// [`TeeEmitter`](super::TeeEmitter); this emitter alone only dispatches to
-/// extensions.
+/// An [`AgentEmitter`] that fans each [`AgentEvent`] out to the installed
+/// compiled/wasm sink. Installed into `AgentHarnessOptions.agent_emitter`
+/// **alongside** the host's `BroadcastEmitter` — events flow to BOTH the TUI
+/// (which drains the broadcast receiver) and the extensions.
 ///
-/// Dispatch is `catch_unwind`-wrapped: a panicking extension handler is logged and
-/// skipped (abort-on-unwind policy would be too aggressive for event dispatch
-/// where one bad handler shouldn't kill the session; we log + continue, unlike
-/// tool-partial dispatch which aborts because it cannot unwind across FFI from
-/// a blocking thread). The distinction: `emit` runs on the async runtime thread
-/// where `catch_unwind` can recover cleanly; the tool partial cb runs inside
-/// `spawn_blocking` cross-FFI where recovery is unsafe.
-pub struct ExtensionEmitter {
-    snapshot: Arc<RegistrySnapshot>,
-}
+/// The host composes the two via [`TeeEmitter`]; this emitter alone only
+/// dispatches to extensions.
+pub struct ExtensionEmitter;
 
 impl ExtensionEmitter {
-    /// Build an emitter over a snapshot.
-    pub fn new(snapshot: Arc<RegistrySnapshot>) -> Self {
-        Self { snapshot }
+    /// Build an emitter. The compiled sink is process-global (see
+    /// [`crate::compiled::set_compiled_event_sink`]), so there is no per-session
+    /// state to capture.
+    pub fn new() -> Self {
+        Self
     }
 
-    /// Dispatch one stable event to all handlers for its tag. Each handler call
-    /// is `catch_unwind`-wrapped; errors (nonzero return) are logged but do not
-    /// abort the fan-out (one handler's failure doesn't block the others — mir-
-    /// rors pi's per-handler try/catch).
-    fn dispatch(&self, event: &StableExtensionEvent) {
-        dispatch_to_handlers(&self.snapshot, event);
+    /// Dispatch one event to the compiled extensions.
+    fn dispatch(&self, event: &Event) {
+        dispatch_to_handlers(event);
     }
 }
 
-/// Fan an already-built event out to the tag's handlers (or free it when no
-/// handler subscribes). Shared by [`ExtensionEmitter`] and the provider-hook
-/// dispatcher ([`crate::provider_hooks`]). Handlers MUST NOT free the event
-/// strings; the host frees exactly once after the fan-out.
-pub fn dispatch_to_handlers(snapshot: &RegistrySnapshot, event: &StableExtensionEvent) {
-    // Compiled extensions observe the same event stream as cdylib handlers, whether
-    // or not any native handler subscribes (a `ki` with no dylibs still traces).
+impl Default for ExtensionEmitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fan an already-built event out to the compiled/wasm sink.
+pub fn dispatch_to_handlers(event: &Event) {
     // The verdict is ignored here on purpose: this is the observe fan-out, and
-    // the native path does not act on `CLAIMED` either (only the routing
-    // dispatchers do).
+    // only the routing dispatchers act on `Claimed`.
     let _ = crate::compiled::dispatch_observe(event);
-    dispatch_native_handlers(snapshot, event);
-}
-
-/// Native (cdylib) half of [`dispatch_to_handlers`], including the one free of
-/// the event's strings.
-fn dispatch_native_handlers(snapshot: &RegistrySnapshot, event: &StableExtensionEvent) {
-    // Staleness guard: a stale registry (swapped-out session) does nothing.
-    if !crate::registry::assert_active(snapshot.active_flag()) {
-        return;
-    }
-    let handlers = snapshot.handlers_for(event.tag);
-    if handlers.is_empty() {
-        // No subscribers — and critically, the event's StbStrings are owned
-        // by the host and must still be freed (no handler ran to free them).
-        free_dispatched_event(event);
-        return;
-    }
-    for h in handlers {
-        // P2: skip a handler whose extension declared platforms excluding this host.
-        if !crate::registry::platform_allows(&h.platforms) {
-            crate::event_log::log_handler_invocation(
-                event.tag,
-                &h.extension,
-                "PlatformSkip",
-                0,
-                Some(format!("host={}", crate::registry::current_platform())),
-            );
-            continue;
-        }
-        // SAFETY: the extension warrants `handler` + `user_data` are safe to
-        // call from this thread. catch_unwind so a panic cannot cross FFI.
-        let started = std::time::Instant::now();
-        let outcome = catch_unwind(AssertUnwindSafe(|| (h.handler)(*event, h.user_data)));
-        let duration_ms = started.elapsed().as_millis() as u64;
-        match outcome {
-            // `CLAIMED` from an ordinary observe dispatch is not an error — the
-            // handler simply consumed the event. Only routing dispatchers act on
-            // it (`dispatch_data_event_claiming`).
-            Ok(rc) if rc == crate::EVENT_HANDLER_CLAIMED => {
-                crate::event_log::log_handler_invocation(
-                    event.tag,
-                    &h.extension,
-                    "Claimed",
-                    duration_ms,
-                    None,
-                );
-            }
-            Ok(rc) if rc != 0 => {
-                tracing::warn!(tag = ?event.tag, rc, "extension event handler returned nonzero");
-                crate::event_log::log_handler_invocation(
-                    event.tag,
-                    &h.extension,
-                    "Error",
-                    duration_ms,
-                    Some(format!("rc={rc}")),
-                );
-            }
-            Ok(_) => {
-                crate::event_log::log_handler_invocation(
-                    event.tag,
-                    &h.extension,
-                    "Continue",
-                    duration_ms,
-                    None,
-                );
-            }
-            Err(_) => {
-                tracing::error!(tag = ?event.tag, "extension event handler panicked — skipped");
-                crate::event_log::log_handler_invocation(
-                    event.tag,
-                    &h.extension,
-                    "Panic",
-                    duration_ms,
-                    None,
-                );
-            }
-        }
-    }
-    // Host frees the event's strings exactly once after the fan-out.
-    free_dispatched_event(event);
 }
 
 /// Dispatch one `before-provider-request` turn: observe pass + provider gate.
 ///
-/// Two payloads are needed because delivery is graded per host:
-///
-/// * `rich` carries everything a granted sandboxed host may receive (including
-///   header values); the wasm host strips what its `provider-request` grant
-///   does not allow, per guest.
-/// * `redacted` is the source-redacted form (`headerNames` only) handed to
-///   legacy cdylib handlers, which have no grant model and must never see a
-///   credential value.
-///
-/// The observe pass invokes only observe-only sandboxed hosts (a patch-capable
-/// host is skipped by the sink), and the gate pass invokes only patch-capable
-/// hosts. Each host is therefore called at most once per request. Returns the
-/// validated patch to apply, if any.
-pub fn dispatch_before_provider_request(
-    snapshot: &RegistrySnapshot,
-    redacted: &str,
-    rich: &str,
-) -> Option<Value> {
-    let observed = StableExtensionEvent::data(
+/// Both passes receive the same rich payload; the wasm host strips what its
+/// `provider-request` grant does not allow, per guest. The observe pass invokes
+/// only observe-only hosts (a patch-capable host is skipped by the sink), and
+/// the gate pass invokes only patch-capable hosts. Each host is therefore called
+/// at most once per request. Returns the validated patch to apply, if any.
+pub fn dispatch_before_provider_request(rich: &str) -> Option<Value> {
+    let event = crate::Event::new(
         EventTag::BeforeProviderRequest,
-        StbString::from_string(rich.to_string()),
+        serde_json::from_str(rich).unwrap_or(Value::Null),
     );
-    let _ = crate::compiled::dispatch_observe(&observed);
-    free_dispatched_event(&observed);
-
-    let native = StableExtensionEvent::data(
-        EventTag::BeforeProviderRequest,
-        StbString::from_string(redacted.to_string()),
-    );
-    dispatch_native_handlers(snapshot, &native);
-
-    let gate = StableExtensionEvent::data(
-        EventTag::BeforeProviderRequest,
-        StbString::from_string(rich.to_string()),
-    );
-    let patch = crate::compiled::dispatch_provider_gate(&gate);
-    free_dispatched_event(&gate);
-    patch
+    let _ = crate::compiled::dispatch_observe(&event);
+    crate::compiled::dispatch_provider_gate(&event)
 }
 
-/// Build + dispatch a generic `data` event (JSON payload) to the tag's
-/// handlers. Returns whether any handler was invoked. Used by the B4
-/// provider-hook observer path ([`crate::provider_hooks`]) which has no
-/// matching `AgentEvent` to translate.
-pub fn dispatch_data_event(snapshot: &RegistrySnapshot, tag: EventTag, data: &str) -> bool {
-    // `dispatch_to_handlers` fans the event to the compiled extensions even when no
-    // cdylib handler subscribes, so it must always be reached.
-    let invoked = !snapshot.handlers_for(tag).is_empty();
-    let event = StableExtensionEvent::data(tag, StbString::from_string(data.to_string()));
-    dispatch_to_handlers(snapshot, &event);
-    invoked
+/// Build + dispatch a generic `data` event (JSON payload). Returns whether any
+/// native handler was invoked — always `false` now that the native registration
+/// channel is gone; kept for call-site compatibility with the observe funnels.
+pub fn dispatch_data_event(tag: EventTag, data: &str) -> bool {
+    let event = build_data_event(tag, data);
+    dispatch_to_handlers(&event);
+    false
 }
 
-/// Build + dispatch a **no-payload** event (e.g. `session_start`, `session_shutdown`,
-/// the kiqi-specific `before_tui_start`) to the tag's handlers. Returns whether any
-/// handler was invoked. Mirrors [`dispatch_data_event`] for events whose payload
-/// is `EventEmpty`; a handler that subscribes to a no-payload tag receives the
-/// event with an empty payload.
-pub fn dispatch_empty_event(snapshot: &RegistrySnapshot, tag: EventTag) -> bool {
-    let invoked = !snapshot.handlers_for(tag).is_empty();
-    let event = StableExtensionEvent::empty(tag);
-    dispatch_to_handlers(snapshot, &event);
-    invoked
+/// Build + dispatch a **no-payload** event (e.g. `session_start`,
+/// `session_shutdown`, the kiqi-specific `before_tui_start`). Returns whether
+/// any native handler was invoked — always `false`.
+pub fn dispatch_empty_event(tag: EventTag) -> bool {
+    dispatch_to_handlers(&Event::new(tag, Value::Null));
+    false
 }
 
-/// Timeout budget for a `ToolCall` approval dispatch. Generous because the
-/// handler may wait on a human (e.g. an ACP `session/request_permission`).
-pub const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-
-/// Dispatch a tool approval against a live session. Only a successful continue
-/// permits execution; stale sessions, cancellation, timeout and handler errors
-/// block it. Blocking callbacks retain the extension libraries until they return,
-/// even when the async caller has already stopped waiting.
-pub async fn dispatch_tool_call_event(
-    session: &crate::ExtensionSession,
-    tool_call_id: &str,
-    tool_name: &str,
-    params: &serde_json::Value,
-    signal: &tokio_util::sync::CancellationToken,
-    ui_dialog: &crate::UiDialogMailbox,
-) -> Option<String> {
-    dispatch_tool_call_event_with_timeout(
-        session,
-        tool_call_id,
-        tool_name,
-        params,
-        signal,
-        ui_dialog,
-        TOOL_CALL_TIMEOUT,
-    )
-    .await
+/// Dispatch a data event and report whether it was **claimed** by a compiled
+/// extension (anything other than `EventAction::Continue`).
+pub fn dispatch_data_event_claiming(tag: EventTag, data: &str) -> bool {
+    let event = build_data_event(tag, data);
+    crate::compiled::dispatch_claiming(&event) == crate::compiled::CompiledVerdict::Claimed
 }
 
-async fn dispatch_tool_call_event_with_timeout(
-    session: &crate::ExtensionSession,
-    tool_call_id: &str,
-    tool_name: &str,
-    params: &serde_json::Value,
-    signal: &tokio_util::sync::CancellationToken,
-    ui_dialog: &crate::UiDialogMailbox,
-    timeout: std::time::Duration,
-) -> Option<String> {
-    let snapshot = session.snapshot()?;
-    if !crate::registry::assert_active(snapshot.active_flag()) {
-        return Some(format!(
-            "tool `{tool_name}` approval session is stale; retry after reload"
-        ));
-    }
-    for h in snapshot.handlers_for(EventTag::ToolCall).iter().cloned() {
-        if !crate::registry::platform_allows(&h.platforms) {
-            continue;
-        }
-        if signal.is_cancelled() {
-            ui_dialog.cancel_tool_call(tool_call_id);
-            return Some(format!("tool `{tool_name}` approval cancelled"));
-        }
-        if !crate::registry::assert_active(snapshot.active_flag()) {
-            return Some(format!(
-                "tool `{tool_name}` approval session is stale; retry after reload"
-            ));
-        }
-        let extension_name = h.extension.clone();
-        let id = tool_call_id.to_string();
-        let name = tool_name.to_string();
-        let payload = params.to_string();
-        let started = std::time::Instant::now();
-        // Capture the whole RegisteredHandler rather than its raw user_data.
-        let mut task =
-            tokio::task::spawn_blocking(move || call_tool_call_handler(h, id, name, payload));
-        let outcome = tokio::select! {
-            biased;
-            _ = signal.cancelled() => {
-                task.abort(); // Prevent a queued callback from starting.
-                ui_dialog.cancel_tool_call(tool_call_id);
-                crate::event_log::log_handler_invocation(
-                    EventTag::ToolCall, &extension_name, "Cancelled",
-                    started.elapsed().as_millis() as u64, None,
-                );
-                return Some(format!("tool `{tool_name}` approval cancelled"));
-            }
-            outcome = tokio::time::timeout(timeout, &mut task) => outcome,
-        };
-        let duration_ms = started.elapsed().as_millis() as u64;
-        let (status, error) = match outcome {
-            Ok(Ok(Ok(rc))) if rc == crate::EVENT_HANDLER_CONTINUE => ("Continue", None),
-            Ok(Ok(Ok(rc))) if rc == crate::EVENT_HANDLER_ABORT => (
-                "Abort",
-                Some(format!(
-                    "extension `{extension_name}` blocked tool `{tool_name}`"
-                )),
-            ),
-            Ok(Ok(Ok(rc))) => (
-                "Error",
-                Some(format!(
-                    "extension `{extension_name}` tool `{tool_name}` approval failed: rc={rc}"
-                )),
-            ),
-            Ok(Ok(Err(_))) => (
-                "Panic",
-                Some(format!(
-                    "extension `{extension_name}` tool `{tool_name}` approval panicked"
-                )),
-            ),
-            Ok(Err(error)) => (
-                "JoinFailed",
-                Some(format!(
-                    "extension `{extension_name}` tool `{tool_name}` approval task failed: {error}"
-                )),
-            ),
-            Err(_) => {
-                task.abort();
-                (
-                    "Timeout",
-                    Some(format!(
-                        "extension `{extension_name}` tool `{tool_name}` approval timed out"
-                    )),
-                )
-            }
-        };
-        crate::event_log::log_handler_invocation(
-            EventTag::ToolCall,
-            &extension_name,
-            status,
-            duration_ms,
-            error.clone(),
-        );
-        if let Some(reason) = error {
-            ui_dialog.cancel_tool_call(tool_call_id);
-            return Some(reason);
-        }
-        // A reload can invalidate this session while the callback is running.
-        if !crate::registry::assert_active(snapshot.active_flag()) {
-            ui_dialog.cancel_tool_call(tool_call_id);
-            return Some(format!(
-                "tool `{tool_name}` approval session is stale; retry after reload"
-            ));
-        }
-    }
-    None
+/// Build a data event, parsing the JSON string payload. A malformed payload
+/// degrades to `null` rather than dropping the event.
+fn build_data_event(tag: EventTag, data: &str) -> Event {
+    Event::new(tag, serde_json::from_str(data).unwrap_or(Value::Null))
 }
 
-/// Like [`dispatch_data_event`], but reports whether a handler **claimed** the
-/// event by returning [`EVENT_HANDLER_CLAIMED`].
+/// Fan a **no-payload lifecycle event** (`BeforeTuiStart` / `SessionStart` /
+/// `SessionShutdown`) out to the compiled extensions.
 ///
-/// This exists for input routing: the TUI asks extensions "is this key yours?"
-/// and must know whether to swallow the key (skip the editor) or pass it
-/// through. A handler that subscribes but is currently inactive (e.g.
-/// push-to-talk toggled off) returns the ordinary continue code and the key
-/// falls through to normal editor handling.
-///
-/// Every handler is still invoked (fan-out is not short-circuited) so a later
-/// handler can disagree; the event is considered claimed if **any** returned
-/// [`EVENT_HANDLER_CLAIMED`].
-/// Dispatch a data event and report whether it was **claimed**: a native handler
-/// returning `CLAIMED`, or a compiled extension returning anything other than
-/// `EventAction::Continue`.
-///
-/// `snapshot` is optional so a compiled-only session (no cdylibs loaded) still
-/// delivers the event: the compiled fan-out does not need a native registry.
-pub fn dispatch_data_event_claiming(
-    snapshot: Option<&RegistrySnapshot>,
-    tag: EventTag,
-    data: &str,
-) -> bool {
-    let event = StableExtensionEvent::data(tag, StbString::from_string(data.to_string()));
-    // Compiled extensions are asked first and unconditionally: they are not gated on
-    // a native subscription, and a claim stands on its own.
-    let compiled_claimed =
-        crate::compiled::dispatch_claiming(&event) == crate::compiled::CompiledVerdict::Claimed;
-    let Some(snapshot) = snapshot else {
-        free_dispatched_event(&event);
-        return compiled_claimed;
-    };
-    if !crate::registry::assert_active(snapshot.active_flag()) {
-        free_dispatched_event(&event);
-        return compiled_claimed;
-    }
-    let handlers = snapshot.handlers_for(tag);
-    if handlers.is_empty() {
-        free_dispatched_event(&event);
-        return compiled_claimed;
-    }
-    let mut claimed = compiled_claimed;
-    for h in handlers {
-        if !crate::registry::platform_allows(&h.platforms) {
-            continue;
-        }
-        // SAFETY: as in `dispatch_to_handlers` — the extension warrants the handler
-        // and its user_data are safe to call from this thread.
-        let outcome = catch_unwind(AssertUnwindSafe(|| (h.handler)(event, h.user_data)));
-        match outcome {
-            Ok(rc) if rc == crate::EVENT_HANDLER_CLAIMED => claimed = true,
-            Ok(rc) if rc != 0 => {
-                tracing::warn!(tag = ?tag, rc, "extension event handler returned nonzero");
-            }
-            Err(_) => {
-                tracing::error!(tag = ?tag, "extension event handler panicked — skipped");
-            }
-            Ok(_) => {}
-        }
-    }
-    free_dispatched_event(&event);
-    claimed
-}
-
-/// Per-lifecycle-event handler timeout budget (see docs/extensions/lifecycle.md):
-/// startup 5s, session shutdown 15s, everything else 10s. A handler that
-/// exceeds its budget is logged + skipped (it keeps running on its blocking
-/// thread, but no longer gates startup/shutdown).
-pub fn lifecycle_timeout_for(tag: EventTag) -> std::time::Duration {
-    use crate::EventTag as T;
-    match tag {
-        T::BeforeTuiStart => std::time::Duration::from_secs(5),
-        T::SessionShutdown => std::time::Duration::from_secs(15),
-        _ => std::time::Duration::from_secs(10),
-    }
-}
-
-/// Invoke one no-payload lifecycle handler, catching unwinds at the FFI boundary.
-///
-/// Takes [`RegisteredHandler`](crate::registry::RegisteredHandler) **by value**
-/// so the caller's `spawn_blocking` closure captures the whole struct (which has
-/// `unsafe impl Send`) rather than its disjoint fields: `user_data` is a raw
-/// `*mut c_void` and is NOT `Send` on its own (Rust 2021 disjoint closure
-/// capture would otherwise move the raw pointer directly into the closure env
-/// and fail the `Send` bound).
-fn call_lifecycle_handler(
-    h: crate::registry::RegisteredHandler,
-    tag: EventTag,
-) -> std::thread::Result<i32> {
-    let event = StableExtensionEvent::empty(tag);
-    // SAFETY: the extension warrants `h.handler` + `h.user_data` are safe to call
-    // from any thread; catch_unwind so a panic cannot cross FFI.
-    catch_unwind(AssertUnwindSafe(|| (h.handler)(event, h.user_data)))
-}
-
-/// Invoke one `ToolCall` handler on a blocking thread. Takes the whole
-/// [`RegisteredHandler`](crate::registry::RegisteredHandler) **by value** for the
-/// same `Send` reason as [`call_lifecycle_handler`]: the closure must capture the
-/// `Send` struct whole, not its non-`Send` `user_data` field. Builds and frees
-/// the tool-call event on this thread (a `StableExtensionEvent` holds raw pointers).
-fn call_tool_call_handler(
-    h: crate::registry::RegisteredHandler,
-    tool_call_id: String,
-    tool_name: String,
-    params: String,
-) -> std::thread::Result<i32> {
-    let event = StableExtensionEvent::tool_call(
-        EventTag::ToolCall,
-        StbString::from_string(tool_call_id),
-        StbString::from_string(tool_name),
-        StbString::from_string(params),
-    );
-    // SAFETY: the extension warrants `h.handler` + `h.user_data` are safe to call
-    // from any thread; catch_unwind so a panic cannot cross FFI.
-    let rc = catch_unwind(AssertUnwindSafe(|| (h.handler)(event, h.user_data)));
-    free_dispatched_event(&event);
-    rc
-}
-
-/// Veto-aware, timeout-bounded dispatch for a **no-payload lifecycle event**
-/// (`BeforeTuiStart` / `SessionStart` / `SessionShutdown`).
-///
-/// Unlike [`dispatch_empty_event`] (fire-and-forget observe fan-out), this:
-///
-/// 1. Runs each handler on a blocking thread with a per-event timeout
-///    ([`lifecycle_timeout_for`]) — a hung handler is logged + skipped, it
-///    does not stall startup or shutdown.
-/// 2. Honors the SDK's [`EVENT_HANDLER_ABORT`] veto code: the first handler to
-///    return it stops the fan-out and this returns `Some(reason)`.
-///
-/// Returns `None` when no handler vetoed (continue the lifecycle); `Some` when
-/// a handler aborted. A stale registry (swapped-out session) returns `None`.
-/// The **caller** decides what a veto means for the phase — e.g. a
-/// `BeforeTuiStart` veto aborts startup before the TUI initializes.
-pub async fn dispatch_lifecycle_event(
-    snapshot: &RegistrySnapshot,
-    tag: EventTag,
-) -> Option<String> {
-    // Compiled extensions subscribe to these no-payload lifecycle events too; fan
-    // them out before the native-handler early return (a `ki` with no dylibs
-    // would otherwise never deliver `SessionStart`/`SessionShutdown`). The
-    // verdict has no lifecycle meaning here — a compiled extension cannot veto (the
-    // contract's `EventAction` has no abort, unlike the native `ABORT` code).
-    let _ = crate::compiled::dispatch_observe(&StableExtensionEvent::empty(tag));
-    // Staleness guard: a stale registry (swapped-out session) does nothing.
-    if !crate::registry::assert_active(snapshot.active_flag()) {
-        return None;
-    }
-    let handlers = snapshot.handlers_for(tag).to_vec();
-    if handlers.is_empty() {
-        return None;
-    }
-    // Lifecycle tags are no-payload: the event is `EventEmpty`. We build it
-    // inside the helper (via `spawn_blocking`) so the closure env only carries
-    // Send values.
-    let timeout = lifecycle_timeout_for(tag);
-    for h in handlers {
-        // P2: skip a handler whose extension declared platforms excluding this host.
-        if !crate::registry::platform_allows(&h.platforms) {
-            crate::event_log::log_handler_invocation(
-                tag,
-                &h.extension,
-                "PlatformSkip",
-                0,
-                Some(format!("host={}", crate::registry::current_platform())),
-            );
-            continue;
-        }
-        // Capture the owning extension's display name for the veto message
-        // before the handler is moved into the blocking closure.
-        let extension_name = h.extension.clone();
-        let h_task = h;
-        let tag_task = tag;
-        let started = std::time::Instant::now();
-        let outcome = tokio::time::timeout(
-            timeout,
-            tokio::task::spawn_blocking(move || call_lifecycle_handler(h_task, tag_task)),
-        )
-        .await;
-        let duration_ms = started.elapsed().as_millis() as u64;
-        match outcome {
-            Ok(Ok(Ok(rc))) if rc == crate::EVENT_HANDLER_ABORT => {
-                tracing::warn!(
-                    tag = ?tag,
-                    extension = %extension_name,
-                    "extension handler vetoed lifecycle event"
-                );
-                crate::event_log::log_handler_invocation(
-                    tag,
-                    &extension_name,
-                    "Abort",
-                    duration_ms,
-                    None,
-                );
-                return Some(format!("extension `{extension_name}` vetoed {tag:?}"));
-            }
-            Ok(Ok(Ok(rc))) => {
-                let result = if rc == 0 { "Continue" } else { "Error" };
-                crate::event_log::log_handler_invocation(
-                    tag,
-                    &extension_name,
-                    result,
-                    duration_ms,
-                    if rc == 0 {
-                        None
-                    } else {
-                        Some(format!("rc={rc}"))
-                    },
-                );
-            }
-            Ok(Ok(Err(_))) => {
-                tracing::error!(tag = ?tag, "extension handler panicked — skipped");
-                crate::event_log::log_handler_invocation(
-                    tag,
-                    &extension_name,
-                    "Panic",
-                    duration_ms,
-                    None,
-                );
-            }
-            Ok(Err(join_err)) => {
-                tracing::error!(
-                    tag = ?tag,
-                    error = %join_err,
-                    "extension handler task join failed — skipped"
-                );
-                crate::event_log::log_handler_invocation(
-                    tag,
-                    &extension_name,
-                    "JoinFailed",
-                    duration_ms,
-                    Some(join_err.to_string()),
-                );
-            }
-            Err(_elapsed) => {
-                tracing::warn!(
-                    tag = ?tag,
-                    timeout_ms = timeout.as_millis(),
-                    "extension handler timed out — skipped (still running on its blocking thread)"
-                );
-                crate::event_log::log_handler_invocation(
-                    tag,
-                    &extension_name,
-                    "Timeout",
-                    duration_ms,
-                    Some(format!("budget_ms={}", timeout.as_millis())),
-                );
-            }
-        }
-    }
+/// The extension contract's `EventAction` has no abort/veto, so this never
+/// returns a reason; the signature is kept for the callers that used to honor a
+/// native veto.
+pub async fn dispatch_lifecycle_event(tag: EventTag) -> Option<String> {
+    let _ = crate::compiled::dispatch_observe(&Event::new(tag, Value::Null));
     None
 }
 
 impl AgentEmitter for ExtensionEmitter {
     fn emit(&self, event: AgentEvent) -> BoxFuture<'static, ()> {
         // Translate + dispatch synchronously (the emitter's emit is awaited by
-        // the loop in event order; dispatch is non-blocking fn-pointer calls).
-        // If the event maps to no tag, do nothing.
-        if let Some(stable) = translate(&event) {
-            self.dispatch(&stable);
+        // the loop in event order). If the event maps to no tag, do nothing.
+        if let Some(event) = translate(&event) {
+            self.dispatch(&event);
         }
         Box::pin(async {})
     }
 
     fn try_emit(&self, event: AgentEvent) {
-        if let Some(stable) = translate(&event) {
-            self.dispatch(&stable);
+        if let Some(event) = translate(&event) {
+            self.dispatch(&event);
         }
     }
 }
@@ -897,27 +353,21 @@ impl AgentEmitter for ExtensionEmitter {
 
 /// An [`AgentEmitter`] that forwards every event to each of its children, in
 /// registration order. The host builds one around `[BroadcastEmitter (→ TUI),
-/// ExtensionEmitter (→ extension handlers)]` so a single `AgentHarnessOptions
-/// .agent_emitter` slot feeds both consumers: the TUI keeps rendering from its
-/// broadcast receiver, and extension `on()` handlers receive translated
-/// `StableExtensionEvent`s.
+/// ExtensionEmitter (→ extensions)]` so a single `AgentHarnessOptions
+/// .agent_emitter` slot feeds both consumers.
 ///
 /// `emit` awaits each child in turn (the loop awaits `emit`, so order matches
 /// registration); `try_emit` calls each child's `try_emit` (the tool
-/// `on_update` path — non-blocking). A child that panics is isolated by the
-/// child's own `catch_unwind` where applicable (the `ExtensionEmitter` does);
-/// the `BroadcastEmitter` cannot panic (it's a `tx.send`). We do NOT wrap the
-/// fan-out itself in `catch_unwind` — each child is responsible for its own
-/// soundness, and a generic wrapper would mask a child's contract violation.
+/// `on_update` path — non-blocking). We do NOT wrap the fan-out itself in
+/// `catch_unwind` — each child is responsible for its own soundness, and a
+/// generic wrapper would mask a child's contract violation.
 pub struct TeeEmitter {
     emitters: Vec<Arc<dyn AgentEmitter>>,
 }
 
 impl TeeEmitter {
     /// Build a tee over the given emitters. Order is preserved: `emit`/`try_emit`
-    /// visit them front-to-back. A single-child tee is a trivial passthrough
-    /// (the host uses that when no extensions loaded, so the code path is
-    /// uniform).
+    /// visit them front-to-back. A single-child tee is a trivial passthrough.
     pub fn new(emitters: Vec<Arc<dyn AgentEmitter>>) -> Self {
         Self { emitters }
     }
@@ -925,11 +375,6 @@ impl TeeEmitter {
 
 impl AgentEmitter for TeeEmitter {
     fn emit(&self, event: AgentEvent) -> BoxFuture<'static, ()> {
-        // We can't hold `&self` across an await boundary into a 'static future
-        // cheaply here without cloning the Arcs — so clone them and drive the
-        // fan-out inside a pinned async block. Each child's emit returns a
-        // no-op future (both BroadcastEmitter and ExtensionEmitter complete
-        // synchronously), so this is effectively a synchronous loop in practice.
         let emitters = self.emitters.clone();
         Box::pin(async move {
             for e in &emitters {
@@ -945,82 +390,6 @@ impl AgentEmitter for TeeEmitter {
     }
 }
 
-/// Free every owning `StbString` in a dispatched event exactly once via the
-/// host's `free_string`. Called by [`ExtensionEmitter::dispatch`] after the
-/// fan-out completes. Handlers MUST NOT free event strings (host owns cleanup).
-fn free_dispatched_event(event: &StableExtensionEvent) {
-    use crate::EventTag as T;
-    match event.tag {
-        T::MessageStart | T::MessageUpdate | T::MessageEnd => {
-            // SAFETY: tag matches the message variant.
-            unsafe { host_free_string(event.payload.message.message) };
-        }
-        T::ToolCall | T::ToolExecutionStart | T::ToolExecutionUpdate => {
-            // SAFETY: tag matches the tool_call variant.
-            unsafe {
-                let tc = &event.payload.tool_call;
-                host_free_string(tc.tool_call_id);
-                host_free_string(tc.tool_name);
-                host_free_string(tc.params);
-            }
-        }
-        T::ToolResult | T::ToolExecutionEnd => {
-            // SAFETY: tag matches the tool_result variant.
-            unsafe {
-                let tr = &event.payload.tool_result;
-                host_free_string(tr.tool_call_id);
-                host_free_string(tr.tool_name);
-                host_free_string(tr.result);
-            }
-        }
-        T::ProjectTrust
-        | T::ResourcesDiscover
-        | T::SessionStart
-        | T::SessionInfoChanged
-        | T::SessionBeforeSwitch
-        | T::SessionBeforeFork
-        | T::SessionBeforeCompact
-        | T::SessionCompact
-        | T::SessionShutdown
-        | T::SessionBeforeTree
-        | T::SessionTree
-        | T::Context
-        | T::AgentStart
-        | T::AgentEnd
-        | T::AgentSettled
-        | T::TurnStart
-        | T::TurnEnd
-        | T::ModelSelect
-        | T::ThinkingLevelSelect
-        | T::UserBash
-        | T::BeforeTuiStart
-        | T::UiPromptStart
-        | T::UiPromptEnd => {
-            // no payload today.
-        }
-        // The B4 provider-hook observer events — `BeforeAgentStart` included,
-        // which is built by `dispatch_data_event` with the prompt JSON — and
-        // the `Input`/`EditorChange` events dispatched by the TUI carry a
-        // generic data payload; free the single StbString.
-        T::BeforeAgentStart
-        | T::BeforeProviderRequest
-        | T::BeforeProviderHeaders
-        | T::AfterProviderResponse
-        | T::Input
-        | T::EditorChange => {
-            // SAFETY: these tags are only ever constructed as data payloads.
-            unsafe { host_free_string(event.payload.data.data) };
-        }
-    }
-}
-
-// SAFETY note on the `unsafe { host_free_string(...) }` calls above:
-// `host_free_string` is itself a safe `extern "C" fn` (it reconstructs a
-// `Box<[u8]>` from ptr+len and drops it, idempotent on null/empty). The
-// `unsafe` block is required only because reading the union payload is
-// `unsafe` (the compiler can't verify tag/variant match) — which we guarantee
-// by matching on `event.tag` first. So the union read is sound.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,23 +397,15 @@ mod tests {
     use kiqi_agent::message::AgentMessage;
     use kiqi_agent::types::AgentToolResult;
     use kiqi_ai::types::{AssistantMessage, AssistantMessageEvent, Usage};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
 
-    // The two handler-fan-out tests share the process-global `HANDLER_HITS`
-    // counter (the handler is an `extern "C" fn` that can't capture per-test
-    // state). Parallel #[test] execution would have one test's `store(0)`
-    // wipe the other's in-flight increment. Hold this lock for the ENTIRE
-    // body of both tests so their reset/dispatch windows don't overlap. The
-    // dispatch is synchronous (fn-pointer calls), so the guard is released
-    // before the test returns — no handler outlives the test.
-    static HANDLER_TEST_LOCK: Mutex<()> = Mutex::new(());
+    use crate::SINK_TEST_LOCK as TEST_LOCK;
 
-    #[test]
-    fn all_ten_agent_events_map_to_a_tag() {
-        let am = AgentMessage::Assistant(Box::new(AssistantMessage {
+    fn assistant_message(text: &str) -> AgentMessage {
+        AgentMessage::Assistant(Box::new(AssistantMessage {
             role: kiqi_ai::types::AssistantRole,
-            content: vec![kiqi_ai::types::Content::text("hi")],
+            content: vec![kiqi_ai::types::Content::text(text)],
             api: kiqi_ai::types::Api::AnthropicMessages,
             provider: "anthropic".to_string(),
             model: "m".into(),
@@ -1057,7 +418,12 @@ mod tests {
             raw_stop_reason: None,
             end_turn: None,
             timestamp: 0,
-        }));
+        }))
+    }
+
+    #[test]
+    fn all_ten_agent_events_map_to_a_tag() {
+        let am = assistant_message("hi");
         let events = vec![
             AgentEvent::AgentStart,
             AgentEvent::AgentEnd { messages: vec![] },
@@ -1146,10 +512,7 @@ mod tests {
                     partial: Arc::clone(&partial),
                 },
             };
-            let stable = translate(&event).expect("message_update maps");
-            let payload = unsafe { stable.payload.message.message.to_string_lossy() };
-            unsafe { host_free_string(stable.payload.message.message) };
-            serde_json::from_str::<serde_json::Value>(&payload).expect("valid payload")
+            translate(&event).expect("message_update maps").payload
         };
 
         let first = translate_delta("你好");
@@ -1164,145 +527,83 @@ mod tests {
 
     #[test]
     fn translate_message_end_produces_message_payload() {
-        let am = AgentMessage::Assistant(Box::new(AssistantMessage {
-            role: kiqi_ai::types::AssistantRole,
-            content: vec![kiqi_ai::types::Content::text("hi")],
-            api: kiqi_ai::types::Api::AnthropicMessages,
-            provider: "anthropic".to_string(),
-            model: "m".into(),
-            response_model: None,
-            response_id: None,
-            usage: Usage::zero(),
-            stop_reason: kiqi_ai::types::StopReason::Stop,
-            deferred: None,
-            error_message: None,
-            raw_stop_reason: None,
-            end_turn: None,
-            timestamp: 0,
-        }));
-        let ev = AgentEvent::MessageEnd { message: am };
-        let stable = translate(&ev).expect("maps");
-        assert_eq!(stable.tag, EventTag::MessageEnd);
-        // free the payload string (host owns cleanup).
-        // SAFETY: tag == MessageEnd.
-        unsafe { host_free_string(stable.payload.message.message) };
-    }
-
-    // --- an emitter fan-out test with an in-process handler -----------------
-
-    static HANDLER_HITS: AtomicUsize = AtomicUsize::new(0);
-
-    extern "C" fn counting_handler(_ev: StableExtensionEvent, _ud: *mut std::ffi::c_void) -> i32 {
-        HANDLER_HITS.fetch_add(1, Ordering::SeqCst);
-        0
+        let ev = AgentEvent::MessageEnd {
+            message: assistant_message("hi"),
+        };
+        let event = translate(&ev).expect("maps");
+        assert_eq!(event.tag, EventTag::MessageEnd);
+        assert_eq!(event.payload["content"][0]["text"], "hi");
     }
 
     #[test]
-    fn emitter_dispatches_to_registered_handlers() {
-        let _guard = HANDLER_TEST_LOCK.lock().unwrap();
-        HANDLER_HITS.store(0, Ordering::SeqCst);
-        let mut reg = crate::registry::ExtensionRegistry::new();
-        reg.register_event_handler(
-            "test-extension".to_string(),
-            EventTag::MessageEnd,
-            counting_handler,
-            std::ptr::null_mut(),
-        );
-        let snap = Arc::new(reg.snapshot());
-        let emitter = ExtensionEmitter::new(snap);
+    fn translate_tool_events_use_camel_case_payloads() {
+        let start = translate(&AgentEvent::ToolExecutionStart {
+            tool_call_id: "c1".into(),
+            tool_name: "bash".into(),
+            args: json!({"command": "ls"}),
+        })
+        .unwrap();
+        assert_eq!(start.payload["toolCallId"], "c1");
+        assert_eq!(start.payload["toolName"], "bash");
+        assert_eq!(start.payload["params"]["command"], "ls");
 
-        let am = AgentMessage::Assistant(Box::new(AssistantMessage {
-            role: kiqi_ai::types::AssistantRole,
-            content: vec![kiqi_ai::types::Content::text("hi")],
-            api: kiqi_ai::types::Api::AnthropicMessages,
-            provider: "anthropic".to_string(),
-            model: "m".into(),
-            response_model: None,
-            response_id: None,
-            usage: Usage::zero(),
-            stop_reason: kiqi_ai::types::StopReason::Stop,
-            deferred: None,
-            error_message: None,
-            raw_stop_reason: None,
-            end_turn: None,
-            timestamp: 0,
-        }));
-        // Use try_emit (sync) — no runtime needed.
-        emitter.try_emit(AgentEvent::MessageEnd { message: am });
-        assert_eq!(HANDLER_HITS.load(Ordering::SeqCst), 1);
+        let end = translate(&AgentEvent::ToolExecutionEnd {
+            tool_call_id: "c1".into(),
+            tool_name: "bash".into(),
+            result: AgentToolResult::text("ok"),
+            is_error: true,
+        })
+        .unwrap();
+        assert_eq!(end.payload["toolCallId"], "c1");
+        assert_eq!(end.payload["result"]["content"][0]["text"], "ok");
+        assert_eq!(end.payload["isError"], true);
+    }
 
-        // Stale registry → no dispatch.
-        reg.invalidate();
-        let am2 = AgentMessage::Assistant(Box::new(AssistantMessage {
-            role: kiqi_ai::types::AssistantRole,
-            content: vec![kiqi_ai::types::Content::text("hi")],
-            api: kiqi_ai::types::Api::AnthropicMessages,
-            provider: "anthropic".to_string(),
-            model: "m".into(),
-            response_model: None,
-            response_id: None,
-            usage: Usage::zero(),
-            stop_reason: kiqi_ai::types::StopReason::Stop,
-            deferred: None,
-            error_message: None,
-            raw_stop_reason: None,
-            end_turn: None,
-            timestamp: 0,
+    /// The emitter fans each translated event into the installed sink.
+    #[test]
+    fn emitter_dispatches_to_the_compiled_sink() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let seen: Arc<Mutex<Vec<(EventTag, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        crate::compiled::set_compiled_event_sink(Arc::new(move |_mode, event| {
+            record
+                .lock()
+                .unwrap()
+                .push((event.tag, event.payload.clone()));
+            crate::compiled::CompiledVerdict::Continue
         }));
-        emitter.try_emit(AgentEvent::MessageEnd { message: am2 });
-        assert_eq!(
-            HANDLER_HITS.load(Ordering::SeqCst),
-            1,
-            "stale registry must not dispatch"
-        );
+
+        let emitter = ExtensionEmitter::new();
+        emitter.try_emit(AgentEvent::MessageEnd {
+            message: assistant_message("hi"),
+        });
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, EventTag::MessageEnd);
+        assert_eq!(seen[0].1["content"][0]["text"], "hi");
+        drop(seen);
+        crate::compiled::clear_compiled_event_sink();
     }
 
     // --- TeeEmitter: fan-out to both the broadcast + the extension emitter ----
 
     #[tokio::test]
     async fn tee_emitter_fans_out_to_every_child() {
-        let _guard = HANDLER_TEST_LOCK.lock().unwrap();
         use kiqi_agent::events::{AgentEmitter, CollectorEmitter};
 
-        // Two collector emitters + record how many extension handler hits land.
         let (collector_a, events_a) = CollectorEmitter::new();
         let (collector_b, events_b) = CollectorEmitter::new();
-        HANDLER_HITS.store(0, Ordering::SeqCst);
-        let mut reg = crate::registry::ExtensionRegistry::new();
-        reg.register_event_handler(
-            "test-extension".to_string(),
-            EventTag::MessageEnd,
-            counting_handler,
-            std::ptr::null_mut(),
-        );
-        let snap = Arc::new(reg.snapshot());
-        let ext = ExtensionEmitter::new(snap);
 
         let tee = TeeEmitter::new(vec![
             Arc::new(collector_a),
             Arc::new(collector_b),
-            Arc::new(ext),
+            Arc::new(ExtensionEmitter::new()),
         ]);
 
-        let am = AgentMessage::Assistant(Box::new(AssistantMessage {
-            role: kiqi_ai::types::AssistantRole,
-            content: vec![kiqi_ai::types::Content::text("hi")],
-            api: kiqi_ai::types::Api::AnthropicMessages,
-            provider: "anthropic".to_string(),
-            model: "m".into(),
-            response_model: None,
-            response_id: None,
-            usage: Usage::zero(),
-            stop_reason: kiqi_ai::types::StopReason::Stop,
-            deferred: None,
-            error_message: None,
-            raw_stop_reason: None,
-            end_turn: None,
-            timestamp: 0,
-        }));
-        // Broadcast path: both collectors receive the event, and the extension
-        // emitter dispatches to the one registered handler.
-        tee.emit(AgentEvent::MessageEnd { message: am }).await;
+        tee.emit(AgentEvent::MessageEnd {
+            message: assistant_message("hi"),
+        })
+        .await;
         assert_eq!(
             events_a.lock().unwrap().len(),
             1,
@@ -1313,515 +614,68 @@ mod tests {
             1,
             "collector B got the event"
         );
-        assert_eq!(
-            HANDLER_HITS.load(Ordering::SeqCst),
-            1,
-            "extension handler fired once"
-        );
-    }
-
-    // --- dispatch_empty_event: no-payload lifecycle events (P0 session events)
-
-    /// Verifies `dispatch_empty_event` fans a no-payload event (e.g. the
-    /// kiqi-specific `BeforeTuiStart` / session lifecycle tags) to every
-    /// subscriber and reports whether any handler was invoked.
-    #[test]
-    fn dispatch_empty_event_fans_out_to_subscribers() {
-        let _guard = HANDLER_TEST_LOCK.lock().unwrap();
-        HANDLER_HITS.store(0, Ordering::SeqCst);
-        let mut reg = crate::registry::ExtensionRegistry::new();
-        reg.register_event_handler(
-            "test-extension".to_string(),
-            EventTag::SessionStart,
-            counting_handler,
-            std::ptr::null_mut(),
-        );
-        reg.register_event_handler(
-            "test-extension".to_string(),
-            EventTag::BeforeTuiStart,
-            counting_handler,
-            std::ptr::null_mut(),
-        );
-        let snap = Arc::new(reg.snapshot());
-
-        // No subscriber for SessionShutdown → no handler invoked.
-        assert!(!dispatch_empty_event(&snap, EventTag::SessionShutdown));
-        assert_eq!(HANDLER_HITS.load(Ordering::SeqCst), 0);
-
-        // SessionStart + BeforeTuiStart both have one subscriber each.
-        assert!(dispatch_empty_event(&snap, EventTag::SessionStart));
-        assert!(dispatch_empty_event(&snap, EventTag::BeforeTuiStart));
-        assert_eq!(HANDLER_HITS.load(Ordering::SeqCst), 2);
-
-        // Stale registry (session swapped): dispatch is a silent no-op inside
-        // `dispatch_to_handlers` — no handler is invoked — though the fn still
-        // reports subscribers existed (matches `dispatch_data_event` semantics).
-        reg.invalidate();
-        assert!(dispatch_empty_event(&snap, EventTag::SessionStart));
-        assert!(dispatch_empty_event(&snap, EventTag::BeforeTuiStart));
-        assert_eq!(HANDLER_HITS.load(Ordering::SeqCst), 2);
-    }
-
-    // --- dispatch_lifecycle_event: veto + timeout (P1) ---
-
-    /// A lifecycle handler that vetoes (returns the SDK abort code).
-    extern "C" fn aborting_handler(_ev: StableExtensionEvent, _ud: *mut std::ffi::c_void) -> i32 {
-        crate::EVENT_HANDLER_ABORT
-    }
-
-    /// A lifecycle handler that returns success (`0`) — no veto.
-    extern "C" fn continue_handler(_ev: StableExtensionEvent, _ud: *mut std::ffi::c_void) -> i32 {
-        crate::EVENT_HANDLER_CONTINUE
-    }
-
-    /// A lifecycle handler that returns a generic handled error — no veto.
-    extern "C" fn error_handler(_ev: StableExtensionEvent, _ud: *mut std::ffi::c_void) -> i32 {
-        crate::EVENT_HANDLER_ERROR
     }
 
     #[test]
-    fn lifecycle_timeout_budget_matches_spec() {
-        assert_eq!(
-            lifecycle_timeout_for(EventTag::BeforeTuiStart),
-            std::time::Duration::from_secs(5)
-        );
-        assert_eq!(
-            lifecycle_timeout_for(EventTag::SessionShutdown),
-            std::time::Duration::from_secs(15)
-        );
-        assert_eq!(
-            lifecycle_timeout_for(EventTag::SessionStart),
-            std::time::Duration::from_secs(10)
-        );
-    }
+    fn lifecycle_and_data_funnels_only_reach_the_compiled_sink() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tags: Arc<Mutex<Vec<EventTag>>> = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&tags);
+        crate::compiled::set_compiled_event_sink(Arc::new(move |_mode, event| {
+            record.lock().unwrap().push(event.tag);
+            crate::compiled::CompiledVerdict::Continue
+        }));
 
-    /// A handler returning `EVENT_HANDLER_ABORT` vetoes the phase; the returned
-    /// reason names the owning extension.
-    #[tokio::test]
-    async fn dispatch_lifecycle_event_honors_veto() {
-        let mut reg = crate::registry::ExtensionRegistry::new();
-        reg.register_event_handler(
-            "veto-ext".to_string(),
-            EventTag::BeforeTuiStart,
-            aborting_handler,
-            std::ptr::null_mut(),
-        );
-        let snap = Arc::new(reg.snapshot());
-        let result = dispatch_lifecycle_event(&snap, EventTag::BeforeTuiStart).await;
-        assert_eq!(
-            result.as_deref(),
-            Some("extension `veto-ext` vetoed BeforeTuiStart")
-        );
-    }
-
-    /// A `0` (continue) or generic nonzero (handled error) return does NOT veto;
-    /// the fan-out still visits every handler and returns `None`.
-    #[tokio::test]
-    async fn dispatch_lifecycle_event_continue_and_error_do_not_veto() {
-        let mut reg = crate::registry::ExtensionRegistry::new();
-        reg.register_event_handler(
-            "ok-ext".to_string(),
-            EventTag::SessionStart,
-            continue_handler,
-            std::ptr::null_mut(),
-        );
-        reg.register_event_handler(
-            "err-ext".to_string(),
-            EventTag::SessionStart,
-            error_handler,
-            std::ptr::null_mut(),
-        );
-        let snap = Arc::new(reg.snapshot());
-        assert!(dispatch_lifecycle_event(&snap, EventTag::SessionStart)
-            .await
-            .is_none());
-    }
-
-    fn tool_call_session(reg: &crate::ExtensionRegistry) -> crate::ExtensionSession {
-        crate::ExtensionSession::from_parts(Arc::new(reg.snapshot()), None)
-    }
-
-    #[tokio::test]
-    async fn tool_call_approval_error_and_stale_session_block_execution() {
-        let mut reg = crate::ExtensionRegistry::new();
-        reg.register_event_handler(
-            "broken-gate".into(),
-            EventTag::ToolCall,
-            error_handler,
-            std::ptr::null_mut(),
-        );
-        let session = tool_call_session(&reg);
-        let signal = tokio_util::sync::CancellationToken::new();
-        let ui = crate::UiDialogMailbox::new();
-        let reason =
-            dispatch_tool_call_event(&session, "c1", "bash", &serde_json::json!({}), &signal, &ui)
-                .await
-                .unwrap();
-        assert!(reason.contains("approval failed: rc="), "{reason}");
-        reg.invalidate();
-        let reason =
-            dispatch_tool_call_event(&session, "c2", "bash", &serde_json::json!({}), &signal, &ui)
-                .await
-                .unwrap();
-        assert!(reason.contains("stale"), "{reason}");
-    }
-
-    struct WaitingApproval {
-        ui: crate::UiDialogMailbox,
-        entered: tokio::sync::Notify,
-        finished: tokio::sync::Notify,
-        release: std::sync::atomic::AtomicBool,
-    }
-
-    extern "C" fn waiting_approval(
-        event: StableExtensionEvent,
-        data: *mut std::ffi::c_void,
-    ) -> i32 {
-        // The test owns this context until the worker reports completion.
-        let state = unsafe { Arc::from_raw(data as *const WaitingApproval) };
-        let call_id = unsafe { event.payload.tool_call.tool_call_id.to_string_lossy() };
-        state
-            .ui
-            .handle(serde_json::json!({
-                "op": "open", "requestId": "approval", "toolCallId": call_id,
-                "ui": {"question": "Allow?"},
-            }))
-            .unwrap();
-        state.entered.notify_one();
-        loop {
-            if state.release.load(Ordering::SeqCst) {
-                break;
-            }
-            if state.ui.poll("approval").unwrap()["status"] == "cancelled" {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        // Stay inside the callback so the test can check library retention
-        // after the async dispatch has already returned.
-        while !state.release.load(Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        state.finished.notify_one();
-        crate::EVENT_HANDLER_ABORT
-    }
-
-    async fn check_interrupted_approval(cancel: bool) {
-        let ui = crate::UiDialogMailbox::new();
-        ui.attach();
-        ui.handle(serde_json::json!({
-            "requestId": "other", "toolCallId": "other-call", "ui": {},
-        }))
-        .unwrap();
-        let state = Arc::new(WaitingApproval {
-            ui: ui.clone(),
-            entered: tokio::sync::Notify::new(),
-            finished: tokio::sync::Notify::new(),
-            release: std::sync::atomic::AtomicBool::new(false),
-        });
-        // Release on failed assertions too, so the blocking runtime can exit.
-        struct ReleaseWorker(Arc<WaitingApproval>);
-        impl Drop for ReleaseWorker {
-            fn drop(&mut self) {
-                self.0.release.store(true, Ordering::SeqCst);
-            }
-        }
-        let _release = ReleaseWorker(state.clone());
-        let mut reg = crate::ExtensionRegistry::new();
-        reg.register_event_handler(
-            "waiting-gate".into(),
-            EventTag::ToolCall,
-            waiting_approval,
-            Arc::into_raw(state.clone()) as *mut std::ffi::c_void,
-        );
-        let session = crate::ExtensionSession::from_parts(Arc::new(reg.snapshot()), None);
-        let signal = tokio_util::sync::CancellationToken::new();
-        let task_signal = signal.clone();
-        let task_ui = ui.clone();
-        let task = tokio::spawn(async move {
-            dispatch_tool_call_event_with_timeout(
-                &session,
-                "call",
-                "bash",
-                &serde_json::json!({}),
-                &task_signal,
-                &task_ui,
-                if cancel {
-                    TOOL_CALL_TIMEOUT
-                } else {
-                    std::time::Duration::from_millis(200)
-                },
-            )
-            .await
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(2), state.entered.notified())
-            .await
-            .unwrap();
-        if cancel {
-            signal.cancel();
-        }
-        let reason = tokio::time::timeout(std::time::Duration::from_secs(2), task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(
-            reason.contains(if cancel { "cancelled" } else { "timed out" }),
-            "{reason}"
-        );
-        assert_eq!(ui.poll("other").unwrap()["status"], "pending");
-        state.release.store(true, Ordering::SeqCst);
-        tokio::time::timeout(std::time::Duration::from_secs(2), state.finished.notified())
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn tool_call_approval_cancel_releases_waiter() {
-        check_interrupted_approval(true).await;
-    }
-
-    #[tokio::test]
-    async fn tool_call_approval_timeout_blocks() {
-        check_interrupted_approval(false).await;
-    }
-
-    // --- dispatch_tool_call_event: veto (B3b before_tool_call) ---
-
-    /// A `ToolCall` handler that vetoes blocks the tool and names the tool.
-    #[tokio::test]
-    async fn dispatch_tool_call_event_honors_veto() {
-        let mut reg = crate::registry::ExtensionRegistry::new();
-        reg.register_event_handler(
-            "gate-ext".to_string(),
-            EventTag::ToolCall,
-            aborting_handler,
-            std::ptr::null_mut(),
-        );
-        let session = tool_call_session(&reg);
-        let veto = dispatch_tool_call_event(
-            &session,
-            "call_1",
-            "bash",
-            &serde_json::json!({"command": "rm -rf /"}),
-            &tokio_util::sync::CancellationToken::new(),
-            &crate::UiDialogMailbox::new(),
-        )
-        .await;
-        assert_eq!(
-            veto.as_deref(),
-            Some("extension `gate-ext` blocked tool `bash`")
-        );
-    }
-
-    /// A continue code does not veto; no subscribers is also `None`.
-    #[tokio::test]
-    async fn dispatch_tool_call_event_continue_and_empty_do_not_veto() {
-        let mut reg = crate::registry::ExtensionRegistry::new();
-        reg.register_event_handler(
-            "ok-ext".to_string(),
-            EventTag::ToolCall,
-            continue_handler,
-            std::ptr::null_mut(),
-        );
-        let session = tool_call_session(&reg);
-        assert!(dispatch_tool_call_event(
-            &session,
-            "call_1",
-            "read",
-            &serde_json::json!({"path": "x"}),
-            &tokio_util::sync::CancellationToken::new(),
-            &crate::UiDialogMailbox::new(),
-        )
-        .await
-        .is_none());
-
-        let empty = crate::registry::ExtensionRegistry::new();
-        let empty_session = tool_call_session(&empty);
-        assert!(dispatch_tool_call_event(
-            &empty_session,
-            "call_2",
-            "read",
-            &serde_json::json!({}),
-            &tokio_util::sync::CancellationToken::new(),
-            &crate::UiDialogMailbox::new()
-        )
-        .await
-        .is_none());
-    }
-
-    /// No subscribers → no veto, no work.
-    #[tokio::test]
-    async fn dispatch_lifecycle_event_no_subscribers_is_none() {
-        let reg = crate::registry::ExtensionRegistry::new();
-        let snap = Arc::new(reg.snapshot());
-        assert!(dispatch_lifecycle_event(&snap, EventTag::BeforeTuiStart)
-            .await
-            .is_none());
-    }
-
-    /// A stale registry (swapped-out session) is a no-op — a veto from a stale
-    /// handler must NOT abort the new session's startup.
-    #[tokio::test]
-    async fn dispatch_lifecycle_event_stale_is_none() {
-        let mut reg = crate::registry::ExtensionRegistry::new();
-        reg.register_event_handler(
-            "veto-ext".to_string(),
-            EventTag::BeforeTuiStart,
-            aborting_handler,
-            std::ptr::null_mut(),
-        );
-        let snap = Arc::new(reg.snapshot());
-        reg.invalidate();
-        assert!(dispatch_lifecycle_event(&snap, EventTag::BeforeTuiStart)
-            .await
-            .is_none());
-    }
-
-    /// The observe fan-out records one JSONL line per handler when the global
-    /// event logger is enabled.
-    #[test]
-    fn dispatch_records_handler_invocation_to_event_log() {
-        let _guard = HANDLER_TEST_LOCK.lock().unwrap();
-        HANDLER_HITS.store(0, Ordering::SeqCst);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("events.jsonl");
-        crate::event_log::set_event_logger_for_test(crate::event_log::EventLogger::open(
-            path.clone(),
+        assert!(!dispatch_empty_event(EventTag::SessionStart));
+        assert!(!dispatch_data_event(
+            EventTag::EditorChange,
+            r#"{"chars":4,"empty":false}"#
         ));
-
-        let mut reg = crate::registry::ExtensionRegistry::new();
-        reg.register_event_handler(
-            "log-ext".to_string(),
-            EventTag::MessageEnd,
-            counting_handler,
-            std::ptr::null_mut(),
-        );
-        let snap = Arc::new(reg.snapshot());
-        let event = StableExtensionEvent::message(
-            EventTag::MessageEnd,
-            StbString::from_string("m".to_string()),
-        );
-        dispatch_to_handlers(&snap, &event);
-
-        // Restore the disabled default so later tests don't write into the
-        // (soon-deleted) temp file.
-        crate::event_log::set_event_logger_for_test(crate::event_log::EventLogger::disabled());
-
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains(r#""event":"MessageEnd""#), "log: {text}");
-        assert!(text.contains(r#""extension":"log-ext""#), "log: {text}");
-        assert!(text.contains(r#""result":"Continue""#), "log: {text}");
-        assert_eq!(HANDLER_HITS.load(Ordering::SeqCst), 1);
-    }
-
-    // --- key-routing (`dispatch_data_event_claiming`) ----------------------
-
-    /// Handler that claims the event unless `CLAIM_ROUTING` says otherwise.
-    /// `CLAIM_ROUTING` is global because an `extern "C" fn` cannot capture.
-    static CLAIM_ROUTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-
-    extern "C" fn claiming_handler(ev: StableExtensionEvent, _ud: *mut std::ffi::c_void) -> i32 {
-        // The payload must be readable as a data event (this is also what
-        // exercises the `Input` free path not leaking/aliasing).
-        let seen = unsafe { ev.payload.data.data.to_string_lossy() };
-        assert!(seen.contains("space"), "payload not delivered: {seen}");
-        if CLAIM_ROUTING.load(Ordering::SeqCst) {
-            crate::EVENT_HANDLER_CLAIMED
-        } else {
-            crate::EVENT_HANDLER_CONTINUE
-        }
-    }
-
-    fn input_snapshot(with_handler: bool) -> Arc<crate::registry::RegistrySnapshot> {
-        let mut reg = crate::registry::ExtensionRegistry::new();
-        if with_handler {
-            reg.register_event_handler(
-                "voice".to_string(),
-                EventTag::Input,
-                claiming_handler,
-                std::ptr::null_mut(),
-            );
-        }
-        Arc::new(reg.snapshot())
-    }
-
-    #[test]
-    fn claiming_dispatch_reports_claim_and_passthrough() {
-        let _guard = HANDLER_TEST_LOCK.lock().unwrap();
-        let snap = input_snapshot(true);
-
-        CLAIM_ROUTING.store(true, Ordering::SeqCst);
-        assert!(
-            dispatch_data_event_claiming(Some(&*snap), EventTag::Input, r#"{"key":"space"}"#),
-            "a CLAIMED handler must swallow the key"
-        );
-
-        CLAIM_ROUTING.store(false, Ordering::SeqCst);
-        assert!(
-            !dispatch_data_event_claiming(Some(&*snap), EventTag::Input, r#"{"key":"space"}"#),
-            "a CONTINUE handler must let the key reach the editor"
-        );
-        CLAIM_ROUTING.store(true, Ordering::SeqCst);
-    }
-
-    #[test]
-    fn claiming_dispatch_without_subscribers_is_false() {
-        let snap = input_snapshot(false);
         assert!(!dispatch_data_event_claiming(
-            Some(&*snap),
             EventTag::Input,
             r#"{"key":"space"}"#
         ));
-    }
-
-    // --- editor-change (`dispatch_data_event`) -----------------------------
-
-    /// The `EditorChange` notification reaches subscribers with its payload
-    /// intact and returns "no veto" (it is an observer event: the draft change
-    /// has already happened and must never be blocked).
-    #[test]
-    fn editor_change_reaches_subscribers_with_its_payload() {
-        let _guard = HANDLER_TEST_LOCK.lock().unwrap();
-        let mut reg = crate::registry::ExtensionRegistry::new();
-        reg.register_event_handler(
-            "voice".to_string(),
-            EventTag::EditorChange,
-            editor_change_handler,
-            std::ptr::null_mut(),
-        );
-        let snap = Arc::new(reg.snapshot());
-
-        EDITOR_CHANGE_SEEN.store(false, Ordering::SeqCst);
-        assert!(
-            dispatch_data_event(
-                &snap,
+        let seen: Vec<EventTag> = tags
+            .lock()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|tag| {
+                matches!(
+                    tag,
+                    EventTag::SessionStart | EventTag::EditorChange | EventTag::Input
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                EventTag::SessionStart,
                 EventTag::EditorChange,
-                r#"{"chars":4,"empty":false}"#
-            ),
-            "a subscribed handler must be invoked"
+                EventTag::Input
+            ]
         );
-        assert!(
-            EDITOR_CHANGE_SEEN.load(Ordering::SeqCst),
-            "payload missing or handler not called"
-        );
+
+        crate::compiled::clear_compiled_event_sink();
     }
 
-    /// Handler that records it saw a well-formed editor-change payload. The
-    /// flag is global because an `extern "C" fn` cannot capture.
-    static EDITOR_CHANGE_SEEN: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
+    #[test]
+    fn a_data_payload_is_parsed_and_malformed_input_becomes_null() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let payloads: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&payloads);
+        crate::compiled::set_compiled_event_sink(Arc::new(move |_mode, event| {
+            record.lock().unwrap().push(event.payload.clone());
+            crate::compiled::CompiledVerdict::Continue
+        }));
 
-    extern "C" fn editor_change_handler(
-        ev: StableExtensionEvent,
-        _ud: *mut std::ffi::c_void,
-    ) -> i32 {
-        // Reading the data payload here also exercises the `EditorChange` free
-        // path (a wrong arm in `free_dispatched_event` would corrupt/leak).
-        let seen = unsafe { ev.payload.data.data.to_string_lossy() };
-        if seen.contains("chars") && seen.contains("empty") {
-            EDITOR_CHANGE_SEEN.store(true, Ordering::SeqCst);
-        }
-        crate::EVENT_HANDLER_CONTINUE
+        dispatch_data_event(EventTag::EditorChange, r#"{"chars":4}"#);
+        dispatch_data_event(EventTag::EditorChange, "not json");
+        assert_eq!(
+            *payloads.lock().unwrap(),
+            vec![json!({"chars": 4}), Value::Null]
+        );
+
+        crate::compiled::clear_compiled_event_sink();
     }
 }

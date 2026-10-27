@@ -1,17 +1,24 @@
 # 扩展生命周期事件
 
-本文描述当前实现，替代旧的生命周期事件总线设计稿。事件标签与 trait 契约见 [kiqi-host](../../crates/kiqi-host/src/lib.rs)，C-ABI 线格式见 [abi.rs](../../crates/kiqi-host/src/abi.rs)，分发实现见 [translate.rs](../../crates/kiqi-host/src/translate.rs)。（cdylib 通道已于 2026-10-26 退役；下文提到「扩展」时，权威路径是 wasm guest。）
+本文描述当前实现，替代旧的生命周期事件总线设计稿。事件标签与 trait 契约见
+[kiqi-host](../../crates/kiqi-host/src/lib.rs)，分发实现见
+[translate.rs](../../crates/kiqi-host/src/translate.rs)。（cdylib 通道已于
+2026-10-26 退役，其 C-ABI 注册机也已在 2026-10-27 删除——见
+[extension-abi.md](../design/extension-abi.md) §6.49；下文「扩展」的权威载体是
+wasm guest。）
 
-`BeforeTuiStart` 是 ki 特有的启动事件，在 TUI 初始化前调用。扩展可通过返回值否决启动。`SessionStart` 和 `SessionShutdown` 处理会话启动与关闭。生命周期事件使用无 payload 的 `EventEmpty`，不是旧设计稿中的 Rust 资源注入总线。
+`BeforeTuiStart` 是 ki 特有的启动事件，在 TUI 初始化前发送。`SessionStart` 和
+`SessionShutdown` 处理会话启动与关闭，`SessionTree` 在会话树移动后通知。生命周期
+事件使用无 payload 的 `Event`（`payload` 为 JSON `null`），经 `translate` 漏斗送达
+编译期/wasm sink：`dispatch_lifecycle_event` → `CompiledEventSink` →
+`Extension::on_event`。
 
-宿主在 blocking 线程中调用 handler，并在 FFI 边界捕获 panic。分发使用以下超时预算：
+事件是**观察性**的：扩展契约的 `EventAction` 只有 `Continue`/`Claimed`/`Patch`,
+没有 abort/veto，所以扩展不能否决启动或关闭。需要阻止某个动作时，扩展应在对应
+的可路由事件（如 `Input`、`ToolCall`）上返回 `Claimed`，而不是依赖终止回调。
 
-| 事件 | 单个 handler 的超时 |
-| --- | --- |
-| `BeforeTuiStart` | 5 秒 |
-| `SessionShutdown` | 15 秒 |
-| 其他生命周期标签 | 10 秒 |
-
-超时后记录日志并跳过等待；已经运行的 blocking handler 仍可能继续执行，超时不会强制终止它。扩展应自行限制阻塞和资源占用，且不能让 panic 穿过 ABI 边界。
+宿主调用 `on_event` 时按 sink 的派发模式决定是否等待忙碌的 guest：observe 漏斗
+跳过忙的 guest，claiming 漏斗等待其结论。panic 在宿主侧被隔离，不会展开穿过
+wasm 边界。
 
 扩展注册、支持的事件与工具生命周期见 [扩展开发指南](authoring.md)。

@@ -1,45 +1,27 @@
-//! B5a — the extension→host `runtime_action` bridge (inverted FFI).
+//! The extension→host action bridge and its mailboxes.
 //!
-//! An extension invokes `ExtensionApi::runtime_action` to drive the harness (send a
-//! message, switch models, fork a session, reload extensions, …). Unlike the
-//! register trampolines — which run synchronously inside the selected register
-//! entrypoint
-//! and recover host state via the thread-local `CURRENT_HOST_API` —
-//! `runtime_action` is called **post-register**, from (a) a `spawn_blocking`
-//! pool thread mid-tool-drive, or (b) a foreign thread the extension spawned
-//! itself. Neither has the thread-local set, and the host cannot predict which
-//! threads an extension will call from. Thread-local is the wrong tool here.
+//! [`ActionBridge`] carries the session's action host, reload callback and the
+//! UI/status/editor mailboxes. Historically an extension reached them through
+//! the C-ABI `runtime_action` trampoline; that FFI entry was removed with the
+//! rest of the C-ABI registration machine (`docs/design/extension-abi.md`
+//! §6.49). Wasm guests reach the same host through the typed `SessionRead` /
+//! `SessionControl` / `InjectApi` / `UiApi` capabilities in `HostCaps`.
 //!
-//! The verified-correct recovery channel is [`ExtensionApi::user_data`]: it is
-//! `Send+Sync`, populated at vtable build, passed back unchanged on every call,
-//! and the SDK designates it "the host's opaque context". Today every register
-//! trampoline ignores `user_data` (the register path uses the thread-local), so
-//! repurposing `user_data` for the action bridge breaks nothing.
-//!
-//! [`ActionBridge`] holds a [`tokio::runtime::Handle`] **captured at build
-//! time** (the host is on the runtime when it constructs the bridge) — the fix
-//! for the foreign-thread case: `Handle::spawn` works from any thread, no
-//! ambient runtime needed. The real [`trampoline_runtime_action`] derefs
-//! `user_data` as `&ActionBridge`, drives the host's async dispatch on the
-//! runtime via a `std::sync::mpsc::sync_channel(1)`, and parks the extension thread
-//! on `rx.recv()` (STD — not `tokio::oneshot`, whose `recv` needs a runtime the
-//! extension's foreign thread lacks).
+//! The bridge survives because `kiqi-cli` still uses it for its stdio lifecycle,
+//! its `/reload` staleness flag, and the shared mailboxes the TUI polls.
 //!
 //! ## Cycle-free leaf DAG
 //!
 //! [`RuntimeActionHost`] is defined here (NOT in `kiqi-harness`) so
-//! `kiqi-extensions` stays a leaf: the trait names only JSON + primitives — no
+//! `kiqi-host` stays a leaf: the trait names only JSON + primitives — no
 //! `kiqi-harness` types cross. The host impl (`HarnessActionHost`) lives in
-//! `kiqi-cli`, where it can name the harness freely; `kiqi-extensions` only
-//! carries the async surface. This preserves the documented DAG
-//! (`lib.rs:10-16`: `kiqi-extensions` does NOT depend on `kiqi-harness`).
+//! `kiqi-cli`, where it can name the harness freely; `kiqi-host` only carries
+//! the async surface. This preserves the documented DAG.
 
 use std::collections::{HashMap, VecDeque};
-use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 
-use crate::{RuntimeActionId, StbString, StbStringRef};
 use tokio::runtime::Handle;
 
 /// A pending host UI request emitted by an extension runtime action.
@@ -352,14 +334,13 @@ impl UiDialogMailbox {
 /// only names the async surface + carries JSON params/results. No `kiqi-harness`
 /// types appear in the trait.
 ///
-/// Each method corresponds to one [`RuntimeActionId`] variant. Complex args
+/// Each method corresponds to one runtime action. Complex args
 /// arrive as parsed JSON (`serde_json::Value`); complex results return as
 /// `serde_json::Value`. The host maps its native types (Model, AgentMessage, …)
 /// to/from JSON at the impl boundary. Errors are `String` (become the action's
 /// nonzero `i32` + `{"error": msg}` JSON on the extension side).
 ///
-/// The 18 methods map 1:1 to [`RuntimeActionId`]; `dispatch` below is the
-/// exhaustive switch that connects the FFI id to the method.
+/// The methods are the async surface a host implements over its harness.
 #[async_trait::async_trait]
 pub trait RuntimeActionHost: Send + Sync {
     /// `SendMessage` — drive a full agent run from an assistant/user message.
@@ -435,43 +416,35 @@ pub trait RuntimeActionHost: Send + Sync {
     }
 }
 
-/// The host-side bridge carried in [`ExtensionApi::user_data`] so
-/// [`trampoline_runtime_action`] can recover the harness state from any thread.
+/// The session's extension action state: the harness host, reload callback and
+/// the UI/status/editor mailboxes. Wasm guests reach the host through the typed
+/// capabilities in `HostCaps`; the C-ABI `runtime_action` trampoline that used
+/// to dereference this struct was removed (`docs/design/extension-abi.md`
+/// §6.49).
 ///
 /// `runtime: Handle` is captured at build time (the host is on the runtime when
-/// it constructs the bridge) — this is the foreign-thread fix. `host` is the
-/// `kiqi-cli` impl over the harness. `reload` is a CLI-owned callback that
-/// re-runs extension discovery + Part-A loaders (a CLI concern, NOT a harness
-/// op) — wired by `kiqi-cli` in B5d via [`reload_callback_from_mailbox`].
+/// it constructs the bridge). `host` is the `kiqi-cli` impl over the harness.
+/// `reload` is a CLI-owned callback that re-runs extension discovery + Part-A
+/// loaders (a CLI concern, NOT a harness op) — wired by `kiqi-cli` via
+/// [`reload_callback_from_mailbox`].
 ///
 /// ## Staleness (B5d)
 ///
-/// `active: Arc<AtomicBool>` is shared with a [`ReloadMailbox`]-driven swap
-/// site. A `/reload` (TUI command OR an extension's `runtime_action(Reload)`) builds
-/// a fresh `ExtensionSession` + a fresh `ActionBridge`, calls
-/// [`invalidate`](Self::invalidate) on the old bridge, and swaps the new one in.
-/// In-flight `runtime_action` calls that recovered the OLD bridge from
-/// `user_data` (the pointer an extension stored during the prior `register`) then
-/// hit the staleness guard in [`run_action`] and fail with a structured error
-/// instead of driving a half-swapped harness. (Extensions load fresh on reload,
-/// handing them the NEW bridge pointer; the guard only catches the race window
-/// where an old call is still parked on `rx.recv()`.)
-///
-/// Held behind `Arc` (pointer-stable for the bridge's lifetime via
-/// [`Arc::as_ptr`]); `kiqi-cli` keeps one clone for the session lifetime so the
-/// pointer an extension stored during register stays valid post-register. (The
-/// transient `HostApi` built per `load_one` holds a clone only during register
-/// — when it drops after `take_registry`, the master `Arc` in `kiqi-cli` keeps
-/// the allocation alive.)
+/// `active: Arc<AtomicBool>` marks the live session's bridge. A `/reload`
+/// builds a fresh `ExtensionSession` + `ActionBridge`, calls
+/// [`invalidate`](Self::invalidate) on the old bridge, and swaps the new one in;
+/// the old bridge's component registrations are dropped with it.
 pub struct ActionBridge {
     stdio: crate::StdioLifecycle,
     extension_identity: Option<(u64, String)>,
     component_owners: Arc<std::sync::Mutex<Vec<u64>>>,
     /// Captured at build time from a thread running the target runtime.
+    #[allow(dead_code)] // the FFI trampoline that spawned on it is gone
     pub(crate) runtime: Handle,
     /// The host impl (`HarnessActionHost` in kiqi-cli).
     pub(crate) host: Arc<dyn RuntimeActionHost>,
     /// B5d reload callback; `None` until the TUI wires `/reload`.
+    #[allow(dead_code)] // kept for the CLI reload plumbing; no FFI caller any more
     pub(crate) reload:
         Option<Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>>,
     /// Session-scoped UI mailbox. It is cloned into reload-created bridges so
@@ -568,6 +541,7 @@ impl ActionBridge {
         })
     }
 
+    #[allow(dead_code)] // only tests construct per-extension scopes now
     pub(crate) fn for_extension(&self, name: &str) -> Arc<Self> {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let owner = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -593,6 +567,7 @@ impl ActionBridge {
         self.stdio.clone()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn claim_stdio(&self) -> Result<(), String> {
         let (id, name) = self
             .extension_identity
@@ -601,6 +576,7 @@ impl ActionBridge {
         self.stdio.claim(*id, name)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn release_stdio_claim(&self) {
         if let Some((id, _)) = &self.extension_identity {
             self.stdio.release_failed_registration(*id);
@@ -734,712 +710,21 @@ pub fn reload_callback_from_mailbox(
 // is Send+Sync, and the reload closure is `Send + Sync` — so `ActionBridge` is
 // naturally Send+Sync; no manual unsafe impl needed.
 
-/// Dispatch one action to the host. Async — runs on the bridge's runtime.
-/// Handles all 19 ids; `Reload` delegates to [`RuntimeActionHost::reload`]
-/// (the "no callback configured" fallback). When the bridge has a reload
-/// callback, the spawn site intercepts `Reload` and awaits the callback
-/// instead (a CLI concern, not a harness op) — this helper is the plain
-/// host-only path.
-async fn dispatch(
-    host: &Arc<dyn RuntimeActionHost>,
-    ui_dialog: &UiDialogMailbox,
-    ext_status: &crate::status::ExtensionStatusMailbox,
-    editor_text: &crate::editor_text::EditorTextMailbox,
-    action: RuntimeActionId,
-    args: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    match action {
-        RuntimeActionId::SendMessage => host.send_message(args).await,
-        RuntimeActionId::SendUserMessage => host.send_user_message(args).await,
-        RuntimeActionId::AppendEntry => host.append_entry(args).await,
-        RuntimeActionId::SetSessionName => host.set_session_name(args).await,
-        RuntimeActionId::GetActiveTools => host.get_active_tools(args).await,
-        RuntimeActionId::SetActiveTools => host.set_active_tools(args).await,
-        RuntimeActionId::SetModel => host.set_model(args).await,
-        RuntimeActionId::GetThinkingLevel => host.get_thinking_level(args).await,
-        RuntimeActionId::SetThinkingLevel => host.set_thinking_level(args).await,
-        RuntimeActionId::Compact => host.compact(args).await,
-        RuntimeActionId::GetSystemPrompt => host.get_system_prompt(args).await,
-        RuntimeActionId::NewSession => host.new_session(args).await,
-        RuntimeActionId::Fork => host.fork(args).await,
-        RuntimeActionId::NavigateTree => host.navigate_tree(args).await,
-        RuntimeActionId::SwitchSession => host.switch_session(args).await,
-        RuntimeActionId::Reload => host.reload(args).await,
-        RuntimeActionId::GetCliFlag => host.get_cli_flag(args).await,
-        RuntimeActionId::UiDialog => ui_dialog.handle(args),
-        // UI-only action: handled by the bridge (no harness call), exactly like
-        // `UiDialog`. Written straight into the shared registry the TUI polls.
-        RuntimeActionId::SetStatus => ext_status.handle(args),
-        RuntimeActionId::UiComponent => Err("UiComponent requires an extension bridge".into()),
-        // Editor-only action: served by the bridge (no harness call), exactly
-        // like `SetStatus`/`UiDialog`. The TUI drains the queue each tick.
-        RuntimeActionId::SetEditorText => editor_text.handle(args),
-        RuntimeActionId::GetSessionBranch => host.get_session_branch(args).await,
-        RuntimeActionId::StdioLifecycle => {
-            Err("stdio lifecycle requires an extension context".to_owned())
+impl Drop for ActionBridge {
+    fn drop(&mut self) {
+        if let Some((owner, _)) = &self.extension_identity {
+            self.ext_status.remove_owner(*owner);
         }
     }
 }
 
-/// The real `runtime_action` trampoline — replaces `stub_runtime_action` when a
-/// bridge is present (see [`HostApi::build_vtable`](crate::HostApi)).
-///
-/// Recovers `&ActionBridge` from `user_data`, parses `args_json`, drives the
-/// host's async dispatch on the bridge's runtime via `Handle::spawn`, and parks
-/// the extension thread on a std `mpsc` `recv` (works from ANY thread — no ambient
-/// runtime needed, which is the load-bearing property for foreign extension
-/// threads).
-///
-/// ## Return codes
-/// - `0` — success; `*out` written with the result JSON (host-owned
-///   [`StbString`]; the extension frees it via the host `free_string` from the
-///   vtable).
-/// - `1` — host-level error; `*out` written with `{"error": msg}` JSON.
-/// - `2` — unknown numeric action id; `*out` contains a structured error and
-///   no host method is dispatched.
-/// - `-1` — no bridge present (`user_data` null; should not happen when wired).
-/// - `-2` — the spawned task dropped its sender without sending (runtime
-///   shutdown / dispatch panic); no result available.
-///
-/// The whole body is `catch_unwind`-wrapped — a panic across FFI ⇒ abort (same
-/// policy as the tool partial callback, `tool.rs:206`).
-pub extern "C" fn trampoline_runtime_action(
-    action_id: u32,
-    args_json: StbStringRef,
-    out: *mut StbString,
-    user_data: *mut c_void,
-) -> i32 {
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_action(
-            action_id,
-            // Highest id this ABI defines — bump when adding an action.
-            u32::from(RuntimeActionId::UiComponent),
-            args_json,
-            out,
-            user_data,
-        )
-    }));
-    match outcome {
-        Ok(rc) => rc,
-        Err(_) => {
-            // A panic in the host-side dispatch was caught. Do not abort the
-            // process: report a host-level error to the caller (documented
-            // code `1`) with a structured payload when `out` is writable.
-            tracing::error!("runtime_action trampoline panicked — reporting host error");
-            if !out.is_null() {
-                unsafe {
-                    *out = StbString::from_string(
-                        r#"{"error":"runtime_action panicked"}"#.to_string(),
-                    );
-                }
-            }
-            1
-        }
-    }
-}
-
-/// Inner synchronous driver (split out so the `catch_unwind` wrapper is clean).
-fn run_action(
-    action_id: u32,
-    max_action_id: u32,
-    args_json: StbStringRef,
-    out: *mut StbString,
-    user_data: *mut c_void,
-) -> i32 {
-    // Validate the raw FFI integer before dereferencing host state or entering
-    // the enum-based dispatch. Unknown values are ordinary protocol errors;
-    // they never become invalid Rust enum discriminants.
-    let action = match RuntimeActionId::try_from(action_id) {
-        Ok(action) if action_id <= max_action_id => action,
-        Ok(_) | Err(_) => {
-            if !out.is_null() {
-                let json = serde_json::json!({
-                    "error": format!("unknown runtime action id {action_id}")
-                })
-                .to_string();
-                // SAFETY: `out` is non-null and points to the caller-provided
-                // output slot. The extension reclaims this host allocation via
-                // `host_free_string` from the vtable.
-                unsafe {
-                    *out = StbString::from_string(json);
-                }
-            }
-            return 2;
-        }
-    };
-
-    if user_data.is_null() {
-        return -1;
-    }
-    // SAFETY: the host guarantees `user_data` points at a live `ActionBridge`.
-    // `kiqi-cli` builds one `Arc<ActionBridge>` per session and keeps it for the
-    // harness lifetime; `Arc::as_ptr` is pointer-stable while any clone lives.
-    // We only borrow for the duration of this call.
-    let bridge: &ActionBridge = unsafe { &*(user_data as *const ActionBridge) };
-
-    // B5d staleness guard: a `/reload` that swapped in a fresh bridge calls
-    // `invalidate` on the old one. An extension that still holds the old pointer
-    // (stored during the prior `register`) must not drive the swapped-out
-    // session. Surface a structured "stale bridge" error so the extension's
-    // `runtime_action` returns nonzero + `{"error": ...}` instead of racing
-    // the swap. (The new bridge's pointer was handed to the reloaded extensions;
-    // this guard only catches the race window where an old call is still parked.)
-    if !bridge.is_active() {
-        if out.is_null() {
-            return 1;
-        }
-        let json = serde_json::json!({
-            "error": "runtime_action on a stale ActionBridge (session reloaded/swapped)"
-        })
-        .to_string();
-        unsafe {
-            *out = StbString::from_string(json);
-        }
-        return 1;
-    }
-
-    // Parse args. An empty/invalid JSON blob collapses to `{}` — getters ignore
-    // args; setters that require a field surface a clear error string.
-    let args_str = unsafe { args_json.as_str() };
-    let args: serde_json::Value = if args_str.is_empty() {
-        serde_json::Value::Object(serde_json::Map::new())
-    } else {
-        serde_json::from_str(args_str)
-            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
-    };
-
-    // Drive the host's async dispatch on the bridge's runtime. STD mpsc so the
-    // extension thread can recv from any thread (no ambient runtime). sync_channel
-    // (1): bounded; the send completes once the value is delivered. rx.recv()
-    // parks the extension thread until the spawn finishes (or its sender drops).
-    let (tx, rx) = mpsc::sync_channel::<Result<serde_json::Value, String>>(1);
-    // Clone the bridge's host + reload callback into the spawned task. We pass
-    // an owned `Arc<dyn RuntimeActionHost>` plus a reload-option snapshot so the
-    // `dispatch` helper has everything it needs without borrowing `bridge`.
-    let host = Arc::clone(&bridge.host);
-    let ui_dialog = bridge.ui_dialog.clone();
-    let ext_status = bridge.ext_status.clone();
-    let editor_text = bridge.editor_text.clone();
-    let reload_cb = bridge.reload.clone();
-    if action == RuntimeActionId::StdioLifecycle {
-        let result = bridge.stdio.handle(
-            bridge.extension_identity.as_ref().map_or(0, |(id, _)| *id),
-            args,
-        );
-        let _ = tx.send(result);
-    } else if action == RuntimeActionId::UiComponent {
-        let owner = bridge.extension_identity.as_ref().map_or(0, |(id, _)| *id);
-        let _owners = bridge
-            .component_owners
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let result = if bridge.is_active() {
-            ext_status.component(owner, args)
-        } else {
-            Err("stale extension bridge".into())
-        };
-        let _ = tx.send(result);
-    } else if action == RuntimeActionId::SetStatus {
-        // Same reasoning as `UiDialog`: this action never touches the harness,
-        // so it must not need a Tokio worker. An extension calling it from inside a
-        // single-threaded runtime (a tool poll callback, say) would otherwise
-        // park that executor and deadlock.
-        std::thread::spawn(move || {
-            let _ = tx.send(ext_status.handle(args));
-        });
-    } else if action == RuntimeActionId::SetEditorText {
-        // Editor-only, like `SetStatus`: no harness call, so keep it off the
-        // Tokio worker for the same single-thread-runtime reason.
-        std::thread::spawn(move || {
-            let _ = tx.send(editor_text.handle(args));
-        });
-    } else if action == RuntimeActionId::UiDialog {
-        // UiDialog is intentionally synchronous at the extension ABI boundary:
-        // `open` waits until the TUI answers. Never park that wait inside the
-        // Tokio worker that services the bridge. A SEARCH/extension tool that
-        // invokes `ui_request/open` from a single-thread runtime would
-        // otherwise block the executor before the TUI can deliver the answer.
-        std::thread::spawn(move || {
-            let _ = tx.send(ui_dialog.handle(args));
-        });
-    } else {
-        bridge.runtime.spawn(async move {
-            let r = if action == RuntimeActionId::Reload {
-                if let Some(cb) = reload_cb {
-                    cb().await;
-                    Ok(serde_json::Value::Null)
-                } else {
-                    host.reload(args).await
-                }
-            } else {
-                dispatch(&host, &ui_dialog, &ext_status, &editor_text, action, args).await
-            };
-            // If the extension thread already moved on (dropped rx), discard — a
-            // send error is NOT a host fault.
-            let _ = tx.send(r);
-        });
-    }
-
-    let result = match rx.recv() {
-        Ok(r) => r,
-        Err(_) => {
-            // Spawned task dropped the sender without sending: runtime shutdown
-            // or the dispatch future panicked (caught inside dispatch? no —
-            // dispatch is plain async, a panic would propagate to the spawn and
-            // drop the sender). No result to return.
-            return -2;
-        }
-    };
-
-    // Write the result (or error) into `*out` as a host-owned StbString. The
-    // extension frees it via the vtable's `free_string` (= `host_free_string`).
-    if out.is_null() {
-        // Nothing to write to; still report the outcome via the return code.
-        return match result {
-            Ok(_) => 0,
-            Err(_) => 1,
-        };
-    }
-
-    let (rc, payload) = match result {
-        Ok(value) => {
-            let json = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
-            (0, json)
-        }
-        Err(msg) => {
-            let json = serde_json::json!({ "error": msg }).to_string();
-            (1, json)
-        }
-    };
-    // SAFETY: `out` is a valid `*mut StbString` the extension provided for this
-    // call (null checked above). `from_string` allocates a `Box<[u8]>` the host
-    // owns; the extension reclaims it via `host_free_string` (which reconstructs
-    // the Box from ptr+len — matches `from_string`'s allocation, same pattern
-    // used by translate.rs/tool.rs).
-    unsafe {
-        *out = StbString::from_string(payload);
-    }
-    rc
-}
-
-// ===========================================================================
-// Tests — round-trip the real trampoline + dispatch + Handle::spawn + mpsc
-// against a mock host. This is the B5a unit proof: extension→host `runtime_action`
-// recovers the `ActionBridge` via `user_data`, drives the host's async method on
-// the runtime, parks the caller on `rx.recv()`, and writes the result JSON back
-// through `*out` (freed via `host_free_string`). No cdylib needed — the trampoline
-// is the same `extern "C" fn` an extension's vtable carries.
-// ===========================================================================
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn stdio_claim_is_exclusive_and_only_its_scoped_context_can_finish() {
-        let master = ActionBridge::new(
-            Handle::current(),
-            Arc::new(MockHost {
-                prompt: String::new(),
-                saw: Mutex::new(Vec::new()),
-            }),
-        );
-        let diag: Arc<dyn crate::ExtensionDiagnostics> = Arc::new(crate::NullDiagnostics);
-        let owner = crate::HostApi::with_action_bridge(
-            "owner",
-            crate::ExtensionRegistry::new(),
-            diag.clone(),
-            master.clone(),
-        );
-        let other = crate::HostApi::with_action_bridge(
-            "other",
-            crate::ExtensionRegistry::new(),
-            diag,
-            master.clone(),
-        );
-        let vtable = owner.build_vtable();
-        let claim = r#"{"ownsStdio":true}"#;
-        unsafe {
-            crate::set_current_api(&owner);
-        }
-        assert_eq!(vtable.declare.unwrap()(StbStringRef::from_str(claim)), 0);
-        crate::clear_current_api();
-        let other_vtable = other.build_vtable();
-        let finish = StbStringRef::from_str(r#"{"op":"finish","exitCode":7}"#);
-        let mut out = StbString::empty();
-        // Direct, on a single-thread executor: this action must not park on Tokio.
-        assert_eq!(
-            (other_vtable.runtime_action)(
-                RuntimeActionId::StdioLifecycle as u32,
-                finish,
-                &mut out,
-                other_vtable.user_data
-            ),
-            1
-        );
-        (other_vtable.free_string)(out);
-        assert_eq!(
-            (vtable.runtime_action)(
-                RuntimeActionId::StdioLifecycle as u32,
-                finish,
-                &mut out,
-                vtable.user_data
-            ),
-            0
-        );
-        (vtable.free_string)(out);
-        assert_eq!(master.stdio_lifecycle().wait().await, 7);
-        unsafe {
-            crate::set_current_api(&other);
-        }
-        assert_ne!(
-            other_vtable.declare.unwrap()(StbStringRef::from_str(claim)),
-            0
-        );
-        crate::clear_current_api();
-        assert!(master
-            .stdio_lifecycle()
-            .validate()
-            .unwrap_err()
-            .contains("owner"));
-    }
-
-    /// A minimal `RuntimeActionHost` that answers `get_system_prompt` with a
-    /// canned string and `reload` with Ok(null); every other action returns an
-    /// "unimplemented" error. Enough to prove the dispatch switch + the async
-    /// spawn + the mpsc round-trip + the StbString write.
-    struct MockHost {
-        prompt: String,
-        saw: Mutex<Vec<RuntimeActionId>>,
-    }
-
-    #[async_trait::async_trait]
-    impl RuntimeActionHost for MockHost {
-        async fn send_message(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn send_user_message(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn append_entry(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn set_session_name(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn get_active_tools(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn set_active_tools(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn set_model(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn get_thinking_level(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn set_thinking_level(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn compact(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn get_system_prompt(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            self.saw
-                .lock()
-                .unwrap()
-                .push(RuntimeActionId::GetSystemPrompt);
-            Ok(serde_json::json!({ "prompt": self.prompt }))
-        }
-        async fn new_session(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn fork(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn navigate_tree(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn switch_session(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!("not under test")
-        }
-        async fn reload(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            self.saw.lock().unwrap().push(RuntimeActionId::Reload);
-            Ok(serde_json::Value::Null)
-        }
-        async fn get_cli_flag(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            self.saw.lock().unwrap().push(RuntimeActionId::GetCliFlag);
-            Ok(serde_json::json!({ "value": true }))
-        }
-    }
-
-    /// NOTE: these tests use `flavor = "multi_thread"`. The trampoline parks the
-    /// caller on a std `mpsc::rx.recv()` (sync blocking) while the dispatch runs
-    /// via `Handle::spawn` on the runtime. Under a current-thread runtime the
-    /// test's own worker is the only thread that can poll the spawned task —
-    /// blocking it on `recv` self-deadlocks. In the real host the caller is a
-    /// extension / `spawn_blocking` thread (never a runtime worker), so there is no
-    /// deadlock; multi_thread here mirrors that (another worker runs the spawn
-    /// while the test thread parks).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn trampoline_round_trips_get_system_prompt() {
-        let host = Arc::new(MockHost {
-            prompt: "hello from host".to_string(),
-            saw: Mutex::new(Vec::new()),
-        });
-        let host_for_assert = Arc::clone(&host);
-        let host_dyn: Arc<dyn RuntimeActionHost> = host;
-        let runtime = tokio::runtime::Handle::current();
-        let bridge = ActionBridge::new(runtime, host_dyn);
-        let user_data = Arc::as_ptr(&bridge) as *mut c_void;
-
-        // Build a StbStringRef for the args. `{}` — getters ignore it.
-        let args_str = "{}";
-        let args_ref = StbStringRef::from_str(args_str);
-
-        let mut out = StbString::empty();
-        let rc = trampoline_runtime_action(
-            RuntimeActionId::GetSystemPrompt.into(),
-            args_ref,
-            &mut out as *mut StbString,
-            user_data,
-        );
-        assert_eq!(rc, 0, "success return code");
-
-        // Read the result JSON back + reclaim the host-owned StbString.
-        let json_text = out.to_string_lossy();
-        let parsed: serde_json::Value = serde_json::from_str(&json_text).expect("valid json");
-        assert_eq!(parsed["prompt"], "hello from host");
-        crate::host_free_string(out);
-
-        // The host saw exactly the one action. `host_for_assert` is a clone of
-        // the `Arc<MockHost>` kept before it was coerced to the trait object.
-        let saw = host_for_assert.saw.lock().unwrap().clone();
-        assert_eq!(saw, vec![RuntimeActionId::GetSystemPrompt]);
-    }
-
-    /// The `SetEditorText` runtime action must reach the bridge's editor-text
-    /// mailbox through the ABI trampoline. This is the wiring an extension relies on
-    /// (a voice extension writes a transcription draft here); a broken action id
-    /// or a dropped dispatch would be invisible to the extension — it only sees
-    /// `ok: true` — so pin it here.
-    #[tokio::test]
-    async fn trampoline_routes_set_editor_text_into_the_mailbox() {
-        let host = Arc::new(MockHost {
-            prompt: String::new(),
-            saw: Mutex::new(Vec::new()),
-        });
-        let host_dyn: Arc<dyn RuntimeActionHost> = host;
-        let bridge = ActionBridge::new(tokio::runtime::Handle::current(), host_dyn);
-        let mailbox = bridge.editor_text_mailbox();
-        let user_data = Arc::as_ptr(&bridge) as *mut c_void;
-
-        let args_ref =
-            StbStringRef::from_str(r#"{"text":"from voice","mode":"append","autoSendMs":2000}"#);
-        let mut out = StbString::empty();
-        let rc = trampoline_runtime_action(
-            RuntimeActionId::SetEditorText.into(),
-            args_ref,
-            &mut out as *mut StbString,
-            user_data,
-        );
-        assert_eq!(rc, 0, "success return code");
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(&out.to_string_lossy()).expect("valid json");
-        assert_eq!(parsed["ok"], serde_json::json!(true));
-        assert_eq!(parsed["chars"], serde_json::json!(10));
-        crate::host_free_string(out);
-
-        // The queued edit is what the host will apply to the prompt editor.
-        let edit = mailbox.take_pending().expect("queued edit");
-        assert_eq!(edit.text, "from voice");
-        assert_eq!(edit.mode, crate::EditorTextMode::Append);
-        assert_eq!(edit.auto_send_ms, Some(2000));
-        assert!(mailbox.take_pending().is_none());
-    }
+    // ---- ReloadMailbox (TUI /reload signalling) ----
 
     #[tokio::test]
-    async fn trampoline_null_user_data_returns_minus_one() {
-        let args_ref = StbStringRef::from_str("{}");
-        let mut out = StbString::empty();
-        let rc = trampoline_runtime_action(
-            RuntimeActionId::GetSystemPrompt.into(),
-            args_ref,
-            &mut out as *mut StbString,
-            std::ptr::null_mut(),
-        );
-        assert_eq!(rc, -1, "null user_data ⇒ no bridge");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn trampoline_intercepts_reload_when_bridge_has_callback() {
-        // A bridge with a reload callback: the spawn site intercepts Reload and
-        // runs the callback instead of the host's `reload` method. Proves the
-        // bridge-level special-casing (the host impl is the fallback only).
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let reload_calls = Arc::new(AtomicUsize::new(0));
-        let reload_calls_for_cb = Arc::clone(&reload_calls);
-        let reload: Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync> =
-            Arc::new(move || {
-                let c = Arc::clone(&reload_calls_for_cb);
-                Box::pin(async move {
-                    c.fetch_add(1, Ordering::SeqCst);
-                })
-            });
-        let host = Arc::new(MockHost {
-            prompt: String::new(),
-            saw: Mutex::new(Vec::new()),
-        });
-        let host_for_assert = Arc::clone(&host);
-        let host_dyn: Arc<dyn RuntimeActionHost> = host;
-        let runtime = tokio::runtime::Handle::current();
-        let bridge = ActionBridge::with_reload(runtime, host_dyn, reload);
-        let user_data = Arc::as_ptr(&bridge) as *mut c_void;
-
-        let args_ref = StbStringRef::from_str("{}");
-        let mut out = StbString::empty();
-        let rc = trampoline_runtime_action(
-            RuntimeActionId::Reload.into(),
-            args_ref,
-            &mut out as *mut StbString,
-            user_data,
-        );
-        assert_eq!(rc, 0);
-        // The callback ran once; the host's `reload` did NOT.
-        assert_eq!(reload_calls.load(Ordering::SeqCst), 1);
-        assert!(host_for_assert.saw.lock().unwrap().is_empty());
-        crate::host_free_string(out);
-    }
-
-    /// B5d: an invalidated bridge rejects `runtime_action` with a stale-bridge
-    /// error instead of dispatching. A `/reload` calls `invalidate` on the old
-    /// bridge; an in-flight call that still holds the old pointer must fail
-    /// fast rather than drive the swapped-out session.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn trampoline_rejects_stale_bridge_with_invalidate() {
-        let host = Arc::new(MockHost {
-            prompt: String::new(),
-            saw: Mutex::new(Vec::new()),
-        });
-        let host_for_assert = Arc::clone(&host);
-        let host_dyn: Arc<dyn RuntimeActionHost> = host;
-        let runtime = tokio::runtime::Handle::current();
-        let bridge = ActionBridge::new(runtime, host_dyn);
-        let user_data = Arc::as_ptr(&bridge) as *mut c_void;
-
-        // Invalidate (as a `/reload` would on the old bridge).
-        bridge.invalidate();
-        assert!(!bridge.is_active());
-
-        let args_ref = StbStringRef::from_str("{}");
-        let mut out = StbString::empty();
-        let rc = trampoline_runtime_action(
-            RuntimeActionId::GetSystemPrompt.into(),
-            args_ref,
-            &mut out as *mut StbString,
-            user_data,
-        );
-        // Nonzero (error), and the host method never ran (no dispatch).
-        assert_eq!(rc, 1, "stale bridge ⇒ error return code");
-        let json_text = out.to_string_lossy();
-        assert!(
-            json_text.contains("stale"),
-            "stale-bridge error payload: {json_text}"
-        );
-        crate::host_free_string(out);
-        assert!(
-            host_for_assert.saw.lock().unwrap().is_empty(),
-            "host dispatch must NOT run on a stale bridge"
-        );
-    }
-
-    #[tokio::test]
-    async fn trampoline_rejects_unknown_numeric_id_without_dispatch() {
-        let host = Arc::new(MockHost {
-            prompt: String::new(),
-            saw: Mutex::new(Vec::new()),
-        });
-        let host_for_assert = Arc::clone(&host);
-        let host_dyn: Arc<dyn RuntimeActionHost> = host;
-        let bridge = ActionBridge::new(tokio::runtime::Handle::current(), host_dyn);
-        let user_data = Arc::as_ptr(&bridge) as *mut c_void;
-
-        let mut out = StbString::empty();
-        let rc = trampoline_runtime_action(
-            0xFFFF_FFFE,
-            StbStringRef::from_str("{}"),
-            &mut out,
-            user_data,
-        );
-
-        assert_eq!(rc, 2, "unknown action id must be a protocol error");
-        let payload: serde_json::Value =
-            serde_json::from_str(&out.to_string_lossy()).expect("structured error JSON");
-        assert_eq!(payload["error"], "unknown runtime action id 4294967294");
-        crate::host_free_string(out);
-        assert!(
-            host_for_assert.saw.lock().unwrap().is_empty(),
-            "unknown action id must not reach host dispatch"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn v2_trampoline_accepts_new_action() {
-        let host = Arc::new(MockHost {
-            prompt: "v2".to_string(),
-            saw: Mutex::new(Vec::new()),
-        });
-        let host_for_assert = Arc::clone(&host);
-        let host_dyn: Arc<dyn RuntimeActionHost> = host;
-        let bridge = ActionBridge::new(tokio::runtime::Handle::current(), host_dyn);
-        let user_data = Arc::as_ptr(&bridge) as *mut c_void;
-
-        let mut v2_out = StbString::empty();
-        assert_eq!(
-            trampoline_runtime_action(
-                RuntimeActionId::GetCliFlag.into(),
-                StbStringRef::from_str(r#"{"name":"flag"}"#),
-                &mut v2_out,
-                user_data,
-            ),
-            0
-        );
-        crate::host_free_string(v2_out);
-
-        assert_eq!(
-            *host_for_assert.saw.lock().unwrap(),
-            vec![RuntimeActionId::GetCliFlag]
-        );
-    }
-
-    /// `ReloadMailbox` + `reload_callback_from_mailbox` round-trip: signalling
-    /// fires the installed receiver; an uninstalled mailbox yields `Err` (the
-    /// host's "not configured" fallback). Exercises the B5d reload-signal path
-    /// the TUI installs.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reload_mailbox_signals_installed_receiver() {
         let mailbox = ReloadMailbox::new();
         // No receiver installed yet ⇒ signal fails.
@@ -1457,7 +742,7 @@ mod tests {
         mailbox.clear();
     }
 
-    // ---- UiDialogMailbox (runtime action 17 / ask_user) ----
+    // ---- UiDialogMailbox (ask_user) ----
 
     fn open_args(id: &str, tool_call: &str) -> serde_json::Value {
         serde_json::json!({
@@ -1581,74 +866,24 @@ mod tests {
         assert!(mailbox.take_pending().is_none());
     }
 
-    /// The v2 trampoline must route action 17 into the session mailbox rather
-    /// than rejecting it as unknown, and a detached mailbox must surface the
-    /// explicit "requires an interactive UI" error (headless contract).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn v2_dispatch_routes_ui_dialog_action_17() {
-        let host: Arc<dyn RuntimeActionHost> = Arc::new(MockHost {
-            prompt: String::new(),
-            saw: Mutex::new(Vec::new()),
-        });
-        let bridge = ActionBridge::with_ui_dialog(
-            tokio::runtime::Handle::current(),
-            host,
-            UiDialogMailbox::new(),
-        );
-        let user_data = Arc::as_ptr(&bridge) as *mut c_void;
-
-        let mut out = StbString::empty();
-        let rc = trampoline_runtime_action(
-            17,
-            StbStringRef::from_str(r#"{"op":"open","requestId":"r1","ui":{}}"#),
-            &mut out,
-            user_data,
-        );
-        assert_eq!(rc, 1);
-        let payload: serde_json::Value =
-            serde_json::from_str(&out.to_string_lossy()).expect("structured error JSON");
-        assert!(
-            payload["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("interactive UI")),
-            "unexpected payload: {payload}"
-        );
-        crate::host_free_string(out);
-
-        // A genuinely unknown id is still rejected (no silent acceptance).
-        // 23 is one past the highest defined action.
-        let mut out = StbString::empty();
-        assert_eq!(
-            trampoline_runtime_action(23, StbStringRef::from_str("{}"), &mut out, user_data),
-            2
-        );
-        crate::host_free_string(out);
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn component_bridge_isolates_extensions_and_cleans_up_reload_and_drop() {
-        let host = Arc::new(MockHost {
-            prompt: String::new(),
-            saw: Mutex::new(Vec::new()),
-        });
+        let host = Arc::new(StubHost);
         let root = ActionBridge::new(tokio::runtime::Handle::current(), host);
         let a = root.for_extension("a");
         let b = root.for_extension("b");
         let mailbox = root.extension_status_mailbox();
         for extension in [&a, &b] {
-            let mut out = StbString::empty();
-            assert_eq!(
-                trampoline_runtime_action(
-                    22,
-                    StbStringRef::from_str(
-                        r#"{"op":"register","id":"same","slot":"footer.after"}"#
-                    ),
-                    &mut out,
-                    Arc::as_ptr(extension) as *mut c_void
-                ),
-                0
-            );
-            crate::host_free_string(out);
+            let (owner, _) = extension.extension_identity.as_ref().unwrap();
+            extension
+                .ext_status
+                .component(
+                    *owner,
+                    serde_json::json!({
+                        "op": "register", "id": "same", "slot": "footer.after"
+                    }),
+                )
+                .unwrap();
         }
         assert_eq!(mailbox.panels().len(), 2);
         drop(a);
@@ -1657,64 +892,82 @@ mod tests {
         assert!(mailbox.panels().is_empty());
     }
 
-    /// Action 18 (`SetStatus`) is bridge-local, like `UiDialog`: it writes the
-    /// shared registry the TUI polls and never touches the harness.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn v2_dispatch_routes_set_status_action_18() {
-        let host: Arc<dyn RuntimeActionHost> = Arc::new(MockHost {
-            prompt: String::new(),
-            saw: Mutex::new(Vec::new()),
-        });
-        let status = crate::status::ExtensionStatusMailbox::new();
-        let bridge = ActionBridge::with_reload_and_ui(
-            tokio::runtime::Handle::current(),
-            host,
-            Arc::new(|| Box::pin(async {})),
-            UiDialogMailbox::new(),
-            status.clone(),
-            crate::editor_text::EditorTextMailbox::new(),
-        );
-        let user_data = Arc::as_ptr(&bridge) as *mut c_void;
+    /// A minimal host for the bridge tests: everything is unimplemented.
+    struct StubHost;
 
-        let mut out = StbString::empty();
-        let rc = trampoline_runtime_action(
-            18,
-            StbStringRef::from_str(r#"{"key":"langfuse","value":"langfuse ✓ (trace sent)"}"#),
-            &mut out,
-            user_data,
-        );
-        assert_eq!(rc, 0);
-        assert_eq!(status.text(), "langfuse ✓ (trace sent)");
-        crate::host_free_string(out);
-
-        // Clearing through the same action empties the line again.
-        let mut out = StbString::empty();
-        assert_eq!(
-            trampoline_runtime_action(
-                18,
-                StbStringRef::from_str(r#"{"key":"langfuse","value":""}"#),
-                &mut out,
-                user_data
-            ),
-            0
-        );
-        assert_eq!(status.text(), "");
-        crate::host_free_string(out);
-
-        // A missing key is a host-level error (rc=1), not an unknown action.
-        let mut out = StbString::empty();
-        assert_eq!(
-            trampoline_runtime_action(18, StbStringRef::from_str("{}"), &mut out, user_data),
-            1
-        );
-        crate::host_free_string(out);
-    }
-}
-
-impl Drop for ActionBridge {
-    fn drop(&mut self) {
-        if let Some((owner, _)) = &self.extension_identity {
-            self.ext_status.remove_owner(*owner);
+    #[async_trait::async_trait]
+    impl RuntimeActionHost for StubHost {
+        async fn send_message(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn send_user_message(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn append_entry(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn set_session_name(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn get_active_tools(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn set_active_tools(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn set_model(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn get_thinking_level(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn set_thinking_level(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn compact(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn get_system_prompt(
+            &self,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn new_session(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn fork(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn navigate_tree(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn switch_session(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn reload(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            unreachable!()
+        }
+        async fn get_cli_flag(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
+            unreachable!()
         }
     }
 }
