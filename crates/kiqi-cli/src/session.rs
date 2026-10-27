@@ -4641,6 +4641,12 @@ mod tests {
 
     #[tokio::test]
     async fn reload_shutdown_dispatches_session_shutdown_to_the_sink() {
+        // Hold the crate's process-global sink gate across install -> dispatch ->
+        // clear: an ungated write from a neighbouring test would otherwise land in
+        // this window and steal the sink (modes.rs's SessionShutdown tests do the
+        // same). The guard is deliberately held across the await; nothing reached
+        // from `shutdown_extensions_for_reload` re-takes it.
+        let _gate = crate::extensions::lock_test_sink();
         use std::sync::atomic::AtomicUsize;
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
@@ -4663,6 +4669,9 @@ mod tests {
     /// completes instead of propagating the veto.
     #[tokio::test]
     async fn session_tree_notification_reaches_the_compiled_sink() {
+        // Same gate as above: install, dispatch and clear must be one atomic
+        // window relative to every other test that writes the global sink.
+        let _gate = crate::extensions::lock_test_sink();
         use std::sync::atomic::AtomicUsize;
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
