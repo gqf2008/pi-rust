@@ -45,9 +45,20 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   own session's caps instead of the last-installed session's; the process-global
   sink stays as the fallback for call sites without a snapshot. Honest boundary:
   the wasm **host instances are still process-global**, so this isolates which
-  caps a dispatch uses, not which guests can observe an event. `COMPILED_CAPS`
-  (tools, commands, probes, prompt transforms) is still process-global. Notes in
+  caps a dispatch uses, not which guests can observe an event. Notes in
   `docs/design/extension-abi.md` §6.50.
+- **Session capabilities are per-session too (breaking for `kiqi-host`).**
+  `RegistrySnapshot` now carries `Option<Arc<dyn SessionCaps>>` alongside the
+  sink (`with_session_caps` / `session_caps`), and `ExtensionSession::none_with_compiled_sink_and_caps`
+  mounts both. The CLI's owned bundle implements the new `SessionCaps` trait, so
+  `kiqi-host` never learns the concrete type. Probes, extension commands and
+  prompt transforms resolve the **current session's** caps from the snapshot
+  instead of the process-global last-writer-wins slot; that slot remains only as
+  the fallback for call sites with no session. Consequence: in the ACP
+  multi-session server, a guest in session A can no longer cancel, inject into
+  or set the status/editor text of session B. Single-session behaviour is
+  unchanged; a poisoned session cell is recovered rather than reaching another
+  session's caps. Notes in `docs/design/extension-abi.md` §6.51.
 
 - **`EditorChange` now reaches wasm guests.** It used to be short-circuited by
   the native-handler pre-check (always empty in a wasm-only install), so guests

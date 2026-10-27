@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::compiled::CompiledEventSink;
 use crate::registry::RegistrySnapshot;
-use crate::ActionBridge;
+use crate::{ActionBridge, SessionCaps};
 
 /// The host session's extension state: a snapshot of the session's extension
 /// state plus the session's action bridge.
@@ -58,10 +58,28 @@ impl ExtensionSession {
     /// therefore cannot cross-talk. `None` leaves the snapshot on the global
     /// fallback path.
     pub fn none_with_compiled_sink(sink: Option<CompiledEventSink>) -> Self {
-        let snapshot = match sink {
-            Some(sink) => RegistrySnapshot::new().with_compiled_sink(sink),
-            None => RegistrySnapshot::new(),
-        };
+        Self::none_with_compiled_sink_and_caps(sink, None)
+    }
+
+    /// Like [`none_with_compiled_sink`](Self::none_with_compiled_sink), but the
+    /// snapshot also carries the session's capability bundle.
+    ///
+    /// This is the production constructor: probes, extension commands and
+    /// prompt transforms resolve capabilities from the snapshot, so two
+    /// sessions in one process (the ACP multi-session server) each use their
+    /// own caps instead of the last-built session's. `None` keeps the
+    /// sessionless fallback to the process-global slot.
+    pub fn none_with_compiled_sink_and_caps(
+        sink: Option<CompiledEventSink>,
+        caps: Option<Arc<dyn SessionCaps>>,
+    ) -> Self {
+        let mut snapshot = RegistrySnapshot::new();
+        if let Some(sink) = sink {
+            snapshot = snapshot.with_compiled_sink(sink);
+        }
+        if let Some(caps) = caps {
+            snapshot = snapshot.with_session_caps(caps);
+        }
         Self::from_parts(Arc::new(snapshot), None)
     }
 
@@ -97,6 +115,13 @@ impl ExtensionSession {
     /// compiled/wasm sink unconditionally.
     pub fn snapshot_arc(&self) -> Option<Arc<RegistrySnapshot>> {
         self.snapshot.clone()
+    }
+
+    /// The session's capability bundle, when its snapshot carries one.
+    /// Callers outside a tool invocation use this instead of the process-wide
+    /// slot so a guest can only act on the session it belongs to.
+    pub fn session_caps(&self) -> Option<&Arc<dyn SessionCaps>> {
+        self.snapshot.as_ref().and_then(|snap| snap.session_caps())
     }
 
     /// Whether any extension claimed ownership of this host process's stdio

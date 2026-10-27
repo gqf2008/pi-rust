@@ -459,13 +459,20 @@ pub async fn build_with_selection(
     // still ahead). The sink also lands in the process-global slot as the
     // fallback for call sites without a snapshot; mounting it on the session is
     // what keeps this session's events away from every other session's.
-    let extension_caps = crate::extensions::owned_caps(
+    let extension_caps = std::sync::Arc::new(crate::extensions::owned_caps(
         std::sync::Arc::clone(&extension_caps_host),
         Some(runtime.clone()),
         Some(std::sync::Arc::clone(&extension_ui)),
+    ));
+    let compiled_sink =
+        crate::extensions::install_compiled_event_sink(std::sync::Arc::clone(&extension_caps));
+    // The caps ride on the session snapshot alongside the sink: probes,
+    // extension commands and prompt transforms resolve them from the current
+    // session, so a guest in another ACP session can never act on this one.
+    let extension_session = ExtensionSession::none_with_compiled_sink_and_caps(
+        Some(compiled_sink),
+        Some(std::sync::Arc::clone(&extension_caps) as std::sync::Arc<dyn kiqi_host::SessionCaps>),
     );
-    let compiled_sink = crate::extensions::install_compiled_event_sink(extension_caps.clone());
-    let extension_session = ExtensionSession::none_with_compiled_sink(Some(compiled_sink));
     crate::extensions::merge_compiled_extension_tools(
         &mut tools,
         &crate::extensions::compiled_extension_hosts(),
@@ -906,9 +913,11 @@ pub async fn build_with_selection(
     // discover the first permission gate.
     let extension_session_cell = Arc::new(Mutex::new(extension_session.clone()));
     let policy_guard = crate::permissions::PolicyGuard::new(cwd.to_path_buf());
-    let before_tool_call = Some(
-        policy_guard.guarded_before(extension_tool_call_hook(cwd.to_path_buf(), project_trusted)),
-    );
+    let before_tool_call = Some(policy_guard.guarded_before(extension_tool_call_hook(
+        cwd.to_path_buf(),
+        project_trusted,
+        std::sync::Arc::clone(&extension_session_cell),
+    )));
 
     let options = AgentHarnessOptions {
         model: resolved.model.clone(),
@@ -978,6 +987,7 @@ pub async fn build_with_selection(
         provider_hooks: Some(crate::extensions::compiled_prompt_hooks(
             kiqi_host::ExtensionProviderHooks::from_session(&extension_session)
                 .map(|h| Arc::new(h) as Arc<dyn kiqi_ai::ProviderHooks>),
+            std::sync::Arc::clone(&extension_caps) as std::sync::Arc<dyn kiqi_host::SessionCaps>,
         )),
     };
 
@@ -1069,12 +1079,17 @@ pub async fn build_with_selection(
 }
 
 /// Host policy + the compiled/wasm extension gate for tool calls.
-fn extension_tool_call_hook(cwd: PathBuf, project_trusted: bool) -> kiqi_agent::BeforeToolCall {
+fn extension_tool_call_hook(
+    cwd: PathBuf,
+    project_trusted: bool,
+    extension_session: crate::session::ExtensionSessionCell,
+) -> kiqi_agent::BeforeToolCall {
     Arc::new(move |ctx: kiqi_agent::BeforeToolCallContext<'_>, _signal| {
         let tool_call_id = ctx.tool_call.id.clone();
         let tool_name = ctx.tool_call.name.clone();
         let params = ctx.args.clone();
         let policy_cwd = cwd.clone();
+        let session = std::sync::Arc::clone(&extension_session);
         Box::pin(async move {
             // Host policy runs before any extension. A compiled or cdylib extension
             // must not be able to widen the host's rules, and a local deny
@@ -1098,7 +1113,12 @@ fn extension_tool_call_hook(cwd: PathBuf, project_trusted: bool) -> kiqi_agent::
             // Compiled extensions' gate runs next: it is local and synchronous, so
             // a veto arrives without opening an approval dialog. A rewrite is
             // carried into the native dispatch so neither path sees stale args.
-            let compiled = crate::extensions::probe_tool_call(&tool_call_id, &tool_name, &params);
+            let compiled = crate::extensions::probe_tool_call_in_session(
+                &session,
+                &tool_call_id,
+                &tool_name,
+                &params,
+            );
             let replacement = match compiled {
                 Some(kiqi_host::Verdict::Block { reason }) => {
                     return Some(kiqi_agent::BeforeToolCallResult {
@@ -1510,22 +1530,28 @@ where
     // Build the fresh capabilities and the fresh per-session sink BEFORE the
     // session: the snapshot that goes into the cell must carry this sink, and
     // the reload's own `resources_discover` / provider hooks below dispatch
-    // through it. Installing here also refreshes the process-global fallback and
-    // `COMPILED_CAPS` (tools, commands, prompt transforms) with the same set,
-    // which is why the later tool-merge block reuses `extension_caps` instead of
-    // installing a second time.
-    let extension_caps = crate::extensions::reload_caps(
+    // through it. Installing here also refreshes the process-global fallback
+    // (for sessionless callers) with the same set, which is why the later
+    // tool-merge block reuses `extension_caps` instead of installing a second
+    // time. The session's own surfaces resolve these caps from the fresh
+    // snapshot, never from that fallback.
+    let extension_caps = std::sync::Arc::new(crate::extensions::reload_caps(
         std::sync::Arc::clone(&host_for_extensions),
         ctx.ui_dialog.clone(),
         ctx.ext_status.clone(),
         ctx.editor_text.clone(),
-    );
-    let compiled_sink = crate::extensions::install_compiled_event_sink(extension_caps.clone());
+    ));
+    let compiled_sink =
+        crate::extensions::install_compiled_event_sink(std::sync::Arc::clone(&extension_caps));
 
     // P6: the cdylib loader is gone — the fresh session is always the empty
     // registry (wasm guests reload through `extensions::reload_caps`, not here).
-    let extension_session =
-        kiqi_host::ExtensionSession::none_with_compiled_sink(Some(compiled_sink));
+    // The fresh caps ride on the fresh snapshot, so the post-swap probe hook
+    // (which reads the cell at call time) dispatches with this reload's caps.
+    let extension_session = kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(
+        Some(compiled_sink),
+        Some(std::sync::Arc::clone(&extension_caps) as std::sync::Arc<dyn kiqi_host::SessionCaps>),
+    );
 
     // ---- 2. Invalidate the old session + bridge BEFORE the swap ----
     // The old bridge's flag flips false so in-flight `runtime_action` calls
@@ -1706,6 +1732,7 @@ where
         .set_provider_hooks(Some(crate::extensions::compiled_prompt_hooks(
             kiqi_host::ExtensionProviderHooks::from_session(&extension_session)
                 .map(|h| Arc::new(h) as Arc<dyn kiqi_ai::ProviderHooks>),
+            std::sync::Arc::clone(&extension_caps) as std::sync::Arc<dyn kiqi_host::SessionCaps>,
         )))
         .await;
 
@@ -3654,7 +3681,11 @@ mod tests {
             r#"{"permissions":{"allow":["Bash(git *)"],"deny":["Bash(git push *)"]}}"#,
         )
         .unwrap();
-        let hook = extension_tool_call_hook(project.path().to_path_buf(), true);
+        let hook = extension_tool_call_hook(
+            project.path().to_path_buf(),
+            true,
+            std::sync::Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
+        );
 
         // Deny wins, and the reason names both the rule and the tool.
         let result = invoke_tool_hook(
@@ -3720,7 +3751,11 @@ mod tests {
         let (project, policy) = hook_project();
         std::fs::write(&policy, r#"{"permissions":{"deny":["Bash(*)"]}}"#).unwrap();
         let make_hook = |project_trusted: bool| {
-            extension_tool_call_hook(project.path().to_path_buf(), project_trusted)
+            extension_tool_call_hook(
+                project.path().to_path_buf(),
+                project_trusted,
+                std::sync::Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
+            )
         };
 
         // An untrusted project's policy is project-controlled input: ignore it.

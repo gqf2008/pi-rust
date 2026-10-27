@@ -299,6 +299,15 @@ impl OwnedCaps {
     }
 }
 
+/// The owned bundle is the CLI's `SessionCaps` implementation: `kiqi-host`
+/// stores it as a trait object on the session snapshot without learning the
+/// concrete type.
+impl kiqi_host::SessionCaps for OwnedCaps {
+    fn host_caps(&self) -> HostCaps<'_> {
+        self.caps()
+    }
+}
+
 /// Capabilities for a compiled extension, backed by the real action host.
 ///
 /// `runtime` is `None` when the caller has no tokio handle; the extension then
@@ -371,10 +380,12 @@ pub fn reload_caps(
 /// Test builds serialise installs through [`TEST_SINK_LOCK`]: a test that has
 /// installed its own sink and is about to dispatch must not have a session
 /// build elsewhere in this binary replace it first.
-pub fn install_compiled_event_sink(caps: OwnedCaps) -> kiqi_host::CompiledEventSink {
+pub fn install_compiled_event_sink(
+    caps: impl Into<std::sync::Arc<OwnedCaps>>,
+) -> kiqi_host::CompiledEventSink {
     #[cfg(test)]
     let _guard = lock_test_sink();
-    install_compiled_event_sink_locked(caps)
+    install_compiled_event_sink_locked(caps.into())
 }
 
 /// Remove the process-wide sink under the same test gate as
@@ -393,12 +404,15 @@ fn clear_compiled_event_sink() {
 /// [`install_compiled_event_sink`] without the test gate, for callers that
 /// already hold it ([`with_test_sink`]). Never call this from a
 /// `with_test_sink` closure: the gate is not reentrant.
-fn install_compiled_event_sink_locked(caps: OwnedCaps) -> kiqi_host::CompiledEventSink {
+fn install_compiled_event_sink_locked(
+    caps: std::sync::Arc<OwnedCaps>,
+) -> kiqi_host::CompiledEventSink {
     // Remember the same capabilities for the surfaces that run outside a tool
-    // call (commands, probes, prompt transforms): they are built here, once per
-    // session, from the live action host.
+    // call (commands, probes, prompt transforms) **when they have no session**.
+    // The production path mounts the owning session's caps on its
+    // `RegistrySnapshot`; this slot is the compatibility fallback only.
     if let Ok(mut guard) = COMPILED_CAPS.write() {
-        *guard = Some(caps.clone());
+        *guard = Some((*caps).clone());
     }
     let hosts = compiled_extension_hosts();
     let sink: kiqi_host::CompiledEventSink = std::sync::Arc::new(move |mode, event| {
@@ -480,9 +494,9 @@ pub(crate) fn lock_test_sink() -> std::sync::MutexGuard<'static, ()> {
 /// without that feature.
 #[cfg(test)]
 #[allow(dead_code)]
-fn with_test_sink<R>(caps: OwnedCaps, f: impl FnOnce() -> R) -> R {
+fn with_test_sink<R>(caps: impl Into<std::sync::Arc<OwnedCaps>>, f: impl FnOnce() -> R) -> R {
     let _guard = lock_test_sink();
-    let _ = install_compiled_event_sink_locked(caps);
+    let _ = install_compiled_event_sink_locked(caps.into());
     let result = f();
     kiqi_host::clear_compiled_event_sink();
     result
@@ -742,6 +756,31 @@ pub fn compiled_caps() -> OwnedCaps {
             ui: None,
             log: std::sync::Arc::new(StderrLog),
         })
+}
+
+/// The capabilities the surface serving `cell` must use.
+///
+/// Production sessions mount their own bundle on the snapshot, so two sessions
+/// in one process (the ACP multi-session server) each hand their own caps to
+/// probes, extension commands and prompt transforms. Only a session that
+/// carries none — a sessionless test, or `ki extension …` before any session
+/// exists — falls back to [`COMPILED_CAPS`], which is exactly the old behaviour
+/// for that path.
+///
+/// A poisoned cell is recovered with `into_inner`: the lock only guards a
+/// `mem::replace`, so the inner value is always a complete session, and using
+/// it is the fail-closed choice (never another session's bundle).
+pub fn session_caps_from_cell(
+    cell: &crate::session::ExtensionSessionCell,
+) -> std::sync::Arc<dyn kiqi_host::SessionCaps> {
+    let guard = match cell.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match guard.session_caps() {
+        Some(caps) => std::sync::Arc::clone(caps),
+        None => std::sync::Arc::new(compiled_caps()),
+    }
 }
 
 /// Owners for compiled extensions start here, far above any registry id.
@@ -1271,8 +1310,11 @@ impl ExtensionHost {
     }
 }
 
-/// Run the compiled extensions' `before-tool-call` gate.
+/// Run the compiled extensions' `before-tool-call` gate with the
+/// process-global fallback caps.
 ///
+/// A sessionful caller must use [`probe_tool_call_in_session`] (the production
+/// path); this variant exists for sessionless call sites and tests.
 /// `Some(Block)` when an extension vetoes, `Some(Replace)` when the last extension to
 /// opine rewrote the arguments, `None` when everyone declined. Local and
 /// synchronous — no extension is asked unless it declared the point — so it runs
@@ -1291,11 +1333,46 @@ pub fn probe_tool_call(
     )
 }
 
+/// Run the gate with the **current session's** capabilities.
+///
+/// This is the production entry point. It resolves the bundle from the
+/// session cell's snapshot at call time (so it follows a `/reload` swap) and
+/// only falls back to the process-wide slot for a sessionless caller. A
+/// poisoned cell is recovered — the swap itself never leaves the cell in a
+/// half-written state — rather than silently reaching another session's caps.
+pub fn probe_tool_call_in_session(
+    cell: &crate::session::ExtensionSessionCell,
+    tool_call_id: &str,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Option<kiqi_host::Verdict> {
+    probe_tool_call_in_session_with(
+        &compiled_extension_hosts(),
+        cell,
+        tool_call_id,
+        tool_name,
+        args,
+    )
+}
+
+/// [`probe_tool_call_in_session`] over an explicit host list, so a test can
+/// prove two sessions resolve to different caps without the process registry.
+pub(crate) fn probe_tool_call_in_session_with(
+    hosts: &[std::sync::Arc<ExtensionHost>],
+    cell: &crate::session::ExtensionSessionCell,
+    tool_call_id: &str,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Option<kiqi_host::Verdict> {
+    let caps = session_caps_from_cell(cell);
+    probe_tool_call_with(hosts, caps.as_ref(), tool_call_id, tool_name, args)
+}
+
 /// The gate itself, over an explicit host list so it can be tested without the
 /// process-wide registry.
 pub fn probe_tool_call_with(
     hosts: &[std::sync::Arc<ExtensionHost>],
-    caps: &OwnedCaps,
+    caps: &dyn kiqi_host::SessionCaps,
     tool_call_id: &str,
     tool_name: &str,
     args: &serde_json::Value,
@@ -1316,7 +1393,8 @@ pub fn probe_tool_call_with(
             "toolName": tool_name,
             "args": current.clone(),
         });
-        match host.probe("before-tool-call", &payload, &caps.caps()) {
+        let borrowed = caps.host_caps();
+        match host.probe("before-tool-call", &payload, &borrowed) {
             kiqi_host::Verdict::Block { reason } => {
                 return Some(kiqi_host::Verdict::Block { reason })
             }
@@ -1355,10 +1433,15 @@ pub fn shortcut_hosts(
 /// replace the prompt it produced. Keyed on the latest user prompt, so a tool
 /// loop's several provider calls compute the transform once per prompt, exactly
 /// like the native slot.
+///
+/// `caps` is the **owning session's** capability bundle, captured at build (and
+/// rebuilt on `/reload`): a prompt transform belongs to one harness, so it must
+/// not read whichever session was constructed last.
 pub fn compiled_prompt_hooks(
     inner: Option<std::sync::Arc<dyn kiqi_ai::ProviderHooks>>,
+    caps: std::sync::Arc<dyn kiqi_host::SessionCaps>,
 ) -> std::sync::Arc<dyn kiqi_ai::ProviderHooks> {
-    compiled_prompt_hooks_with(inner, compiled_extension_hosts())
+    compiled_prompt_hooks_with(inner, compiled_extension_hosts(), caps)
 }
 
 /// See [`compiled_prompt_hooks`]; explicit hosts so it can be tested without the
@@ -1366,10 +1449,12 @@ pub fn compiled_prompt_hooks(
 pub fn compiled_prompt_hooks_with(
     inner: Option<std::sync::Arc<dyn kiqi_ai::ProviderHooks>>,
     hosts: Vec<std::sync::Arc<ExtensionHost>>,
+    caps: std::sync::Arc<dyn kiqi_host::SessionCaps>,
 ) -> std::sync::Arc<dyn kiqi_ai::ProviderHooks> {
     std::sync::Arc::new(CompiledPromptHooks {
         inner,
         hosts,
+        caps,
         cache: std::sync::Mutex::new(None),
     })
 }
@@ -1377,6 +1462,8 @@ pub fn compiled_prompt_hooks_with(
 struct CompiledPromptHooks {
     inner: Option<std::sync::Arc<dyn kiqi_ai::ProviderHooks>>,
     hosts: Vec<std::sync::Arc<ExtensionHost>>,
+    /// The hosting session's capabilities (never the process-wide fallback).
+    caps: std::sync::Arc<dyn kiqi_host::SessionCaps>,
     /// `Some((timestamp, Some(prompt)))` = this prompt was transformed;
     /// `Some((timestamp, None))` = computed and everyone declined;
     /// `None` = not computed yet. The distinction keeps handlers from re-running
@@ -1393,10 +1480,10 @@ impl CompiledPromptHooks {
     fn compiled_transform(&self, timestamp: i64, event: &serde_json::Value) -> Option<String> {
         let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
         if cache.as_ref().map(|(ts, _)| *ts) != Some(timestamp) {
-            let caps = compiled_caps();
+            let caps = self.caps.host_caps();
             let mut forced = None;
             for host in &self.hosts {
-                if let Some(next) = host.before_agent_start(event, &caps.caps()) {
+                if let Some(next) = host.before_agent_start(event, &caps) {
                     forced = Some(next);
                 }
             }
@@ -2325,6 +2412,178 @@ mod tests {
     struct Silent;
     impl Log for Silent {
         fn log(&self, _level: LogLevel, _message: &str) {}
+    }
+
+    /// A `SessionRead` whose only answer is the session id: enough to tell which
+    /// session's capability bundle a call was handed.
+    struct IdOnlySession(&'static str);
+    impl SessionRead for IdOnlySession {
+        fn active_tools(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn system_prompt(&self) -> String {
+            String::new()
+        }
+        fn thinking_level(&self) -> String {
+            String::new()
+        }
+        fn cli_flag(&self, _name: &str) -> Option<kiqi_host::FlagValue> {
+            None
+        }
+        fn session_branch(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+        fn session_id(&self) -> Option<String> {
+            Some(self.0.to_string())
+        }
+    }
+
+    fn caps_with_id(id: &'static str) -> OwnedCaps {
+        OwnedCaps {
+            session: Some(std::sync::Arc::new(IdOnlySession(id))),
+            control: None,
+            inject: None,
+            ui: None,
+            log: std::sync::Arc::new(Silent),
+        }
+    }
+
+    fn session_cell_with_id(id: &'static str) -> crate::session::ExtensionSessionCell {
+        let caps: std::sync::Arc<dyn kiqi_host::SessionCaps> =
+            std::sync::Arc::new(caps_with_id(id));
+        std::sync::Arc::new(std::sync::Mutex::new(
+            kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(None, Some(caps)),
+        ))
+    }
+
+    /// Records the session id of every capability bundle it is called with.
+    struct CapsRecorder {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl CapsRecorder {
+        fn note(&self, caps: &HostCaps<'_>) -> String {
+            let id = caps
+                .session
+                .and_then(|session| session.session_id())
+                .unwrap_or_else(|| "<no-session>".to_string());
+            self.seen.lock().unwrap().push(id.clone());
+            id
+        }
+    }
+
+    impl kiqi_host::Extension for CapsRecorder {
+        fn id(&self) -> &str {
+            "caps-recorder"
+        }
+
+        fn probe_points(&self) -> Vec<String> {
+            vec!["before-tool-call".to_string()]
+        }
+
+        fn probe(
+            &self,
+            _point: &str,
+            _payload: &serde_json::Value,
+            caps: &HostCaps<'_>,
+        ) -> kiqi_host::Verdict {
+            self.note(caps);
+            kiqi_host::Verdict::Continue
+        }
+
+        fn run_command(
+            &self,
+            name: &str,
+            _arguments: &str,
+            caps: &HostCaps<'_>,
+        ) -> Result<kiqi_host::CommandResult, kiqi_host::ExtensionError> {
+            let id = self.note(caps);
+            Ok(kiqi_host::CommandResult::message(format!(
+                "{name} via {id}"
+            )))
+        }
+
+        fn before_agent_start(
+            &self,
+            _prompt: &serde_json::Value,
+            caps: &HostCaps<'_>,
+        ) -> Option<String> {
+            Some(format!("prompt-by-{}", self.note(caps)))
+        }
+    }
+
+    fn prompt_context() -> kiqi_ai::Context {
+        let user = kiqi_ai::UserMessage {
+            role: kiqi_ai::types::UserRole,
+            content: kiqi_ai::UserContent::Text("hello".to_string()),
+            timestamp: 1,
+        };
+        kiqi_ai::Context::new(vec![kiqi_ai::Message::User(user)])
+    }
+
+    /// Two sessions in one process, each with its own capability bundle. Every
+    /// out-of-tool-call surface must use the caps of the session it serves:
+    /// before this, all three read the process-global last-writer-wins slot, so
+    /// session A's guest could cancel/inject/status into session B.
+    #[test]
+    fn two_sessions_use_their_own_caps_for_probe_command_and_prompt() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let host = std::sync::Arc::new(ExtensionHost::new(
+            "caps-recorder",
+            Box::new(CapsRecorder {
+                seen: std::sync::Arc::clone(&seen),
+            }),
+        ));
+        let hosts = vec![std::sync::Arc::clone(&host)];
+        let cell_a = session_cell_with_id("session-a");
+        let cell_b = session_cell_with_id("session-b");
+
+        // Probe (before-tool-call gate).
+        let args = serde_json::json!({});
+        assert!(
+            probe_tool_call_in_session_with(&hosts, &cell_a, "call-a", "bash", &args).is_none()
+        );
+        assert!(
+            probe_tool_call_in_session_with(&hosts, &cell_b, "call-b", "bash", &args).is_none()
+        );
+        assert_eq!(
+            &seen.lock().unwrap()[..],
+            ["session-a".to_string(), "session-b".to_string()]
+        );
+
+        // Extension command (the path the TUI worker runs).
+        seen.lock().unwrap().clear();
+        for (cell, expected) in [(&cell_a, "session-a"), (&cell_b, "session-b")] {
+            let caps = session_caps_from_cell(cell);
+            host.run_command("record", "", &caps.host_caps())
+                .expect("the recorder command runs");
+            assert_eq!(
+                seen.lock().unwrap().last().map(String::as_str),
+                Some(expected),
+                "the command used its own session's caps"
+            );
+        }
+
+        // Prompt transform (one hooks object per harness, as build/reload makes).
+        seen.lock().unwrap().clear();
+        let model = kiqi_ai::Model::new("m", "m", kiqi_ai::Api::Faux, "test", "");
+        let ctx = prompt_context();
+        for (cell, expected) in [(&cell_a, "session-a"), (&cell_b, "session-b")] {
+            let caps = session_caps_from_cell(cell);
+            let hooks = compiled_prompt_hooks_with(None, hosts.clone(), caps);
+            let patch = hooks
+                .transform_context(&model, &ctx)
+                .expect("the recorder transforms the prompt");
+            assert_eq!(
+                patch.system_prompt,
+                Some(format!("prompt-by-{expected}")),
+                "the transform used its own session's caps"
+            );
+        }
+        assert_eq!(
+            &seen.lock().unwrap()[..],
+            ["session-a".to_string(), "session-b".to_string()]
+        );
     }
 
     /// Build a guest fixture through the same path `ki extension insmod --build`
@@ -3780,6 +4039,8 @@ mod tests {
         let hooks = CompiledPromptHooks {
             inner: None,
             hosts: vec![host],
+            caps: std::sync::Arc::new(caps_with_id("prompt-test"))
+                as std::sync::Arc<dyn kiqi_host::SessionCaps>,
             cache: std::sync::Mutex::new(None),
         };
         let event = serde_json::json!({ "prompt": "hello" });
@@ -4626,6 +4887,8 @@ mod tests {
         let hooks = CompiledPromptHooks {
             inner: None,
             hosts: vec![host],
+            caps: std::sync::Arc::new(caps_with_id("prompt-test"))
+                as std::sync::Arc<dyn kiqi_host::SessionCaps>,
             cache: std::sync::Mutex::new(None),
         };
         let event = serde_json::json!({ "prompt": "hi" });

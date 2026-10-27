@@ -823,6 +823,22 @@ impl<'a> HostCaps<'a> {
     }
 }
 
+/// A session-scoped capability provider.
+///
+/// `kiqi-host` deliberately does not know the CLI's owned capability bundle:
+/// the host only needs a way to borrow [`HostCaps`] from whatever bundle the
+/// session carries. A [`RegistrySnapshot`](crate::RegistrySnapshot) may hold an
+/// `Arc<dyn SessionCaps>`; call sites outside a tool invocation (probes,
+/// extension commands, prompt transforms) then resolve the **current session's**
+/// capabilities from that snapshot instead of the process-global fallback.
+///
+/// Implementations must be cheap to call repeatedly: it runs on every probe,
+/// command and prompt transform.
+pub trait SessionCaps: Send + Sync {
+    /// The capabilities to hand an extension for this call.
+    fn host_caps(&self) -> HostCaps<'_>;
+}
+
 // ---------------------------------------------------------------------------
 // The extension
 // ---------------------------------------------------------------------------

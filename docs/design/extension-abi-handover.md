@@ -154,9 +154,13 @@ wasm 就是权威路径，**2026-10-26 的 P6 把 cdylib 装载机整体删除**
 `translate` 的 5 个派发点优先用 `snapshot.compiled_sink()`，所以同一进程内两个会话
 （ACP 多会话）用各自的 caps 派发，不再 last-writer-wins；**wasm host 实例仍是
 进程级共享**，会话级隔离的是"用哪份 caps 派发"，不是"哪个 guest 收到事件"。
-`COMPILED_CAPS`
-（工具/命令/probe/prompt transform 读取的进程级能力集）仍是 last-writer-wins，
-不在本批范围内。
+
+**非派发面也已按会话隔离**（2026-10-27，§6.51）：`RegistrySnapshot` 同时持有
+`Option<Arc<dyn SessionCaps>>`（`with_session_caps`），`OwnedCaps` 在 CLI 侧实现
+`kiqi_host::SessionCaps`。probe（经 hook 捕获的会话 cell 现取）、扩展命令（TUI worker
+从 `ReloadContext.extension_session` 现取）与 prompt transform（build/reload 时绑定
+本会话 caps）都用当前会话的 caps；`COMPILED_CAPS` 只保留为无会话路径的 fallback。
+因此会话 A 的 guest 不能再对会话 B 做 `session_control` / `inject` / `set_status`。
 
 
 ## 5. 上手
@@ -214,7 +218,7 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 | **内建 provider 不自动消费 OAuth entry** | 内建链路的 `stored_api_key` 仍只匹配 `ApiKey`；但 wasm provider 已能通过显式 `--credential-from` 使用 OAuth access token，并在每次请求重算凭据指纹，不能再概括为「OAuth 没有模型请求消费者」（§6.40/§6.41）。 |
 | **O17 残余风险仍在，告警已落地** | 同时持有 `exec`/`fs`/`net-sockets` 与 `oauth`/`provider` 时，`credential_capability_warning` 会在授权后警告并给出 revoke/logout 命令；它不拒绝授权，也不能消除插件经其它能力读取 `auth.json` 的爆炸半径（§6.39）。 |
 | **同意面仍不对称** | `probe`/`verdict.replace`、`before-agent-start`、`session-read`/`session-control`/`inject`/`ui` 在 0.8.0 仍不需要 grant（业主决定，§6.39 记录）。 |
-| ~~cdylib 的 OAuth/provider/renderer/resources 槽位待删~~ | ✅ 已解（2026-10-26 P6）：装载机与 `kiqi-extension-sdk`/`ki dev`/`ki install`/`ki package` 全部删除，旧槽位不可达；~~进程级 compiled event sink 仍是 last-writer-wins~~ ✅ 已解（2026-10-27）：sink 挂在会话的 `RegistrySnapshot` 上，进程级槽位只作无快照路径的 fallback（见上节）。`COMPILED_CAPS` 仍是进程级 last-writer-wins。 |
+| ~~cdylib 的 OAuth/provider/renderer/resources 槽位待删~~ | ✅ 已解（2026-10-26 P6）：装载机与 `kiqi-extension-sdk`/`ki dev`/`ki install`/`ki package` 全部删除，旧槽位不可达；~~进程级 compiled event sink 仍是 last-writer-wins~~ ✅ 已解（2026-10-27）：sink 挂在会话的 `RegistrySnapshot` 上，进程级槽位只作无快照路径的 fallback（见上节）；~~`COMPILED_CAPS` 仍是进程级 last-writer-wins~~ ✅ 已解（2026-10-27，§6.51）：probe/扩展命令/prompt transform 改读会话快照上的 `SessionCaps`，进程级槽位只剩无会话 fallback。 |
 | 装完需重启 | `compiled_extension_hosts()` 是进程级 `OnceLock` |
 | ~~e2e 的 `exec_does_not_hang_when_the_command_leaves_a_background_child` 满负载偶发超时~~ | ✅ 已在 `dce1216` 缓解：把 `fixture_wasm()` 移到计时窗口**之外**（`e2e.rs:2425-2428` 的注释写明理由），15s 窗口里不再包含 wasmtime 编译时间。阈值未动，因为根因是窗口里混入了无关工作而非窗口太小。实测：e2e 单跑 3 次全绿；再与整个 workspace 测试**并行**跑一次，0 失败 |
 | ~~**acp 不迁，宿主级立项**~~ | ✅ 已落地：`ki acp serve`（批次 1/2 于 2026-10-16 完成；批次 3 为 abb 对接与文档销账）。裁定与方案见 `extension-abi.md` §6.2 与 `ki-acp-serve.md`（进程内驱动 AgentHarness、协议层用官方 `agent-client-protocol` crate、abb-agent 做语义层参照） |

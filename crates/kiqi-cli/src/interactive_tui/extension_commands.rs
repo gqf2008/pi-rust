@@ -101,18 +101,22 @@ fn spawn_call(
     let display = name.clone();
     let thread_host = host.clone();
     let thread_name = name.clone();
+    // The command belongs to the TUI's live session, not to whichever session
+    // was built last: resolve the caps from the session cell inside the worker,
+    // so a `/reload` swap is picked up and a guest in this session can only
+    // act on this session.
+    let session_cell = std::sync::Arc::clone(&ctx.reload_context.extension_session);
     let spawned = std::thread::Builder::new()
         .name(format!("extension-command {name}"))
         .spawn(move || {
-            // Read the live caps inside the worker: the process-wide sink may
-            // have been replaced since the command was typed.
-            let caps = crate::extensions::compiled_caps();
+            let caps = crate::extensions::session_caps_from_cell(&session_cell);
+            let host_caps = caps.host_caps();
             let result = match continuation {
                 Some((flow_id, reply)) => thread_host
-                    .continue_command(&thread_name, &flow_id, reply, &caps.caps())
+                    .continue_command(&thread_name, &flow_id, reply, &host_caps)
                     .map_err(|error| error.to_string()),
                 None => thread_host
-                    .run_command(&thread_name, &arguments, &caps.caps())
+                    .run_command(&thread_name, &arguments, &host_caps)
                     .map_err(|error| error.to_string()),
             };
             let _ = tx.send(TuiMessage::ExtensionCommandDone(ExtensionCommandOutcome {

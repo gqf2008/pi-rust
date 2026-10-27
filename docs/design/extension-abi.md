@@ -1463,3 +1463,54 @@ C ABI 线格式（`StbString`/`StableExtensionEvent`/`EventView`/handler consts�
 - 已知遗留（非本批）：sink 经 caps 反向持有 action host，而 host 强持有 harness，
   构成 `harness → … → snapshot → sink → caps → host → harness` 的 Arc 环；单会话无
   影响，ACP 多会话下会话对象不释放，后续批次以 `Weak` 断开。
+
+### 6.51 会话级 caps：probe / 扩展命令 / prompt transform（2026-10-27）
+
+§6.50 把事件 sink 挂到了 `RegistrySnapshot`，但**非派发**的三条路径仍读进程级
+`COMPILED_CAPS`：`before-tool-call` probe、扩展命令（TUI 的 `/…`）、以及 prompt
+transform。ACP 多会话下它是 last-writer-wins——会话 A 的 guest 可以 `session_control`
+取消/改名会话 B、`inject` 写入 B 的对话、`set_status`/`set_editor_text` 改写 B 的 UI。
+本节把这三条路径也改为**会话作用域**。
+
+**承载方式（类型安全，`kiqi-host` 不认识 CLI 的类型）**
+
+- `kiqi-host` 新增 `trait SessionCaps: Send + Sync { fn host_caps(&self) -> HostCaps<'_>; }`。
+  它只产出契约里已有的 `HostCaps`，不暴露任何 CLI 类型。
+- `RegistrySnapshot` 增加 `session_caps: Option<Arc<dyn SessionCaps>>`
+  （`with_session_caps` / `session_caps`），与 `compiled_sink` 并列；`/reload` 换
+  snapshot 时 caps 与 sink 一起原子换掉。
+- `ExtensionSession::none_with_compiled_sink_and_caps(sink, caps)` 是生产构造器；
+  旧的 `none_with_compiled_sink` / `none` 委托它并传 `None`（保持测试与无扩展路径）。
+- CLI 的 `OwnedCaps` 实现 `kiqi_host::SessionCaps`（`host_caps()` 即原来的
+  `caps()`）。取舍：trait 放在 `kiqi-host` 而不是把 `OwnedCaps` 搬进去，是为了让
+  契约层继续零 CLI 依赖；代价是每次调用多一次 `dyn` 间接（本来 probe/命令/transform
+  就是 `dyn Extension` 调用，可忽略）。
+
+**消费点**
+
+- **probe**：`extension_tool_call_hook` 捕获会话 cell，调用时
+  `session_caps_from_cell` 现取快照上的 caps。之所以不把 caps 捕获进 hook：harness
+  的 `before_tool_call` 没有 setter，`/reload` 换不了它；读 cell 才能跟随 reload。
+- **扩展命令**：TUI worker 从 `ReloadContext.extension_session` 读当前会话的 caps
+  （同为 call-time 解析）。
+- **prompt transform**：`compiled_prompt_hooks(inner, caps)` 在 build/reload 时绑定
+  该 harness 自己的 caps；reload 本来就会 `set_provider_hooks` 换新实例。
+- **进程级槽位**：`COMPILED_CAPS` 降级为无会话路径的 fallback
+  （`ki` 子命令、测试、`ExtensionSession::none()`）。生产 build 一定把 caps 挂上
+  snapshot，所以两个 ACP 会话不会互相取用。
+
+**失败路径**：`session_caps_from_cell` 对 poisoned mutex 用 `into_inner` 恢复——锁只
+保护一次 `mem::replace`，内部值始终是完整会话，这是 fail-closed 的选择（绝不回落到
+“最近构建的另一个会话”）。无会话的调用者才回落到进程级槽位，与旧行为一致。单会话
+行为不变。
+
+**测试**：`crates/kiqi-cli/src/extensions.rs` 的
+`two_sessions_use_their_own_caps_for_probe_command_and_prompt` 在同一进程建两个
+`ExtensionSessionCell`（session-a / session-b，各带 `session_id` 不同的 `SessionRead`），
+用一个记录型 `Extension` 分别触发 before-tool-call probe、`run_command` 与
+`before_agent_start`，断言三条路径各自拿到自己的 session id。`kiqi-host` 侧另测
+snapshot 的 caps 随之 clone。
+
+**边界不变**：wasm host 实例仍进程级共享（§6.50 的诚实边界）；本节只保证“用哪份
+caps 调用”，不保证“哪个 guest 收到事件”。第三方插件在调用时读进程 cwd 的残余限制
+仍需单独的插件路由改造。
