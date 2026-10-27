@@ -1649,7 +1649,32 @@ fn build_guest_in_cache(dir: &Path, cache: &Path) -> Result<PathBuf, String> {
             snapshot.display()
         )
     })?;
+    prune_snapshots(&build_dir.join("artifacts"), 4);
     Ok(snapshot)
+}
+
+/// Keep the newest `keep` snapshot directories and remove the rest.
+///
+/// Every build hands its caller a fresh snapshot (so a later build can never
+/// rewrite a component someone is still reading), and the cache otherwise grows
+/// without bound in the user's agent directory. Pruning under the same build
+/// lock is safe: no other builder writes here while it is held.
+fn prune_snapshots(artifacts: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(artifacts) else {
+        return;
+    };
+    let mut dirs: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect();
+    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in dirs.into_iter().skip(keep) {
+        let _ = std::fs::remove_dir_all(path);
+    }
 }
 
 /// Whether `path` starts with the WebAssembly module magic (`\0asm`).
@@ -2526,6 +2551,7 @@ mod tests {
     /// Each caller receives a stable snapshot rather than the file a later build
     /// could replace, and neither builder uses the source tree or outer target.
     #[test]
+    #[cfg(feature = "extension-wasm")]
     fn concurrent_guest_builds_are_isolated_and_stable() {
         let guest = tempfile::tempdir().unwrap();
         std::fs::create_dir(guest.path().join("src")).unwrap();

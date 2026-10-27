@@ -271,7 +271,7 @@ cargo test -p kiqi-cli --lib --locked extensions::tests::extension_calls_run_out
 
 ```
 R1 已修 70fbfff；把 guest 的 present 改成 |_name| !tools.is_empty() 后
-cargo test -p kiqi-extension-host --test e2e --locked goal_injection_carries
+cargo test -p kiqi-host --features wasm --test e2e --locked goal_injection_carries
 → FAILED（e2e.rs:3292）；还原后 1 passed
 ```
 

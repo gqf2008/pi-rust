@@ -1672,6 +1672,35 @@ impl Grants {
         grants: &Grants,
     ) -> Result<(), String> {
         let path = grants_path_at(root, extension_id);
+        // A save rewrites the whole document, so it must not run over a file
+        // this build only partially understands: a future version's contents
+        // (or a duplicated key that failed to parse) would be silently erased.
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            match serde_json::from_str::<Value>(&text) {
+                Ok(value) => {
+                    if let Ok(version) = grants_file_version(&value) {
+                        if version != GRANTS_VERSION && version != GRANTS_VERSION_LEGACY {
+                            return Err(format!(
+                                "{} has unsupported grants.json version {version}; refusing to overwrite it",
+                                path.display()
+                            ));
+                        }
+                    }
+                    if serde_json::from_str::<RejectDuplicateKeys>(&text).is_err() {
+                        return Err(format!(
+                            "{} has duplicated keys; refusing to overwrite it",
+                            path.display()
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "{} is unreadable ({error}); refusing to overwrite it",
+                        path.display()
+                    ));
+                }
+            }
+        }
         let mut current = grants.clone();
         current.version = Some(GRANTS_VERSION);
         if let Some(parent) = path.parent() {
@@ -3341,5 +3370,47 @@ mod tests {
                 max_handles: PROVIDER_MAX_HANDLES_DEFAULT,
             }],
         }
+    }
+
+    /// A save rewrites the whole document, so it must refuse to run over a file
+    /// this build cannot interpret (future version / duplicated keys /
+    /// malformed), leaving the user's bytes untouched.
+    #[test]
+    fn save_refuses_to_overwrite_a_file_it_cannot_interpret() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = extension_dir_at(root.path(), "future");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grants.json");
+
+        let mut grants = Grants::default();
+        grants.net_http = Some(NetHttpGrant {
+            hosts: vec!["a.example".to_string()],
+        });
+
+        for (label, body) in [
+            (
+                "future version",
+                r#"{"version": 99, "net-http": {"hosts": ["a.example"]}}"#,
+            ),
+            (
+                "duplicate keys",
+                r#"{"version": 2, "exec": {"commands": ["safe"]}, "exec": {"commands": ["*"]}}"#,
+            ),
+            ("malformed", "{"),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            let error = Grants::save_for_at(root.path(), "future", &grants)
+                .expect_err(&format!("{label} must refuse a save"));
+            assert!(error.contains("refusing to overwrite"), "{label}: {error}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), body, "{label}");
+        }
+
+        // A v1 file is interpretable, so a save upgrades it in place.
+        std::fs::write(&path, r#"{"exec": {"commands": ["safe"]}}"#).unwrap();
+        Grants::save_for_at(root.path(), "future", &grants).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["version"], GRANTS_VERSION);
+        assert_eq!(saved["net-http"]["hosts"][0], "a.example");
     }
 }

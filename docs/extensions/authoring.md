@@ -428,9 +428,9 @@ ki auth login --provider <id>
 wasm 插件不注册槽位，改为**导出接口 + 授权 key**：能力是否存在只看 `grants.json`
 （缺失 = 拒绝），策略随授权一起存。下面五个 key 都**不会被 `--yes` 自动授予**——它们的
 策略无法从 import 名推导，必须显式执行 `ki extension grant`（`AUTO_GRANT_EXEMPT`，
-`crates/kiqi-cli/src/extension_cli.rs:1272-1278`；无 tty 且无 `--yes` 时什么都不授）。
-接口 → grant key 的唯一映射是 `grant_key_for_interface`
-（`crates/kiqi-host/src/grants.rs:1224-1243`）。
+见 `crates/kiqi-cli/src/extension_cli.rs`；无 tty 且无 `--yes` 时什么都不授）。
+接口 → grant key 的唯一映射是 `grant_key_for_interface`（`crates/kiqi-host/src/grants.rs`）
+——行号会漂移，引用函数名而不是行号。
 
 | 能力 | 导出 / 导入面 | grant key | 授权命令 |
 |---|---|---|---|
