@@ -68,6 +68,7 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "edit",
     "write",
     "docs",
+    "skill",
     "permissions",
     "signals",
 ];
@@ -438,7 +439,8 @@ pub async fn build_with_selection(
     // loaders below (borrowed); clone one branch so both hold a reference.
     let ctx = ExecutionToolContext::new(env_dyn.clone(), Some(mut_env));
 
-    let mut tools = build_tools(&ctx, args, cwd, &signal_host);
+    let skill_cell = crate::skill_tool::new_skill_cell();
+    let mut tools = build_tools(&ctx, args, cwd, &signal_host, &skill_cell);
 
     // ---- Extensions (Part B2) ----
     // Load cdylib extensions from the resolved extension dirs, merge their tools
@@ -663,6 +665,11 @@ pub async fn build_with_selection(
         skills = result.skills;
         skill_diags = result.diagnostics;
         resource_diags.extend(result.resource_diagnostics);
+        // The `skill` tool reads this cell, so a reload's fresh set is visible
+        // without rebuilding the tool.
+        if let Ok(mut cell) = skill_cell.write() {
+            *cell = skills.clone();
+        }
     }
 
     let mut prompt_templates: Vec<kiqi_harness::types::PromptTemplate> = Vec::new();
@@ -1039,6 +1046,7 @@ pub async fn build_with_selection(
     // of a harness back-reference so it can be `Clone` into the reload callback).
     let reload_context = ReloadContext {
         extension_session: extension_session_cell,
+        skill_cell: Arc::clone(&skill_cell),
         action_bridge: Arc::new(Mutex::new(Some(Arc::clone(&action_bridge)))),
         tool_context,
         catalog,
@@ -1198,6 +1206,9 @@ pub type ActionBridgeCell = Arc<Mutex<Option<Arc<kiqi_host::ActionBridge>>>>;
 pub struct ReloadContext {
     /// The live extension-session cell (swapped on reload).
     pub extension_session: ExtensionSessionCell,
+    /// The session's discovered skills, shared with the `skill` tool. `/reload`
+    /// rewrites this cell in place so the tool sees the new set.
+    pub skill_cell: Arc<std::sync::RwLock<Vec<kiqi_harness::types::Skill>>>,
     /// The session's extension-tool context (`cwd` + session id), reused — not
     /// rebuilt — on reload so the rebuilt adapters keep serving the SAME
     /// session. A reload that made a fresh context would leave every extension
@@ -1581,6 +1592,10 @@ where
         skills = result.skills;
         skill_diags = result.diagnostics;
         resource_diags.extend(result.resource_diagnostics);
+        // Same cell the tool reads: `/reload` swaps the set in place.
+        if let Ok(mut cell) = ctx.skill_cell.write() {
+            *cell = skills.clone();
+        }
     }
 
     let mut prompt_templates: Vec<kiqi_harness::types::PromptTemplate> = Vec::new();
@@ -1668,7 +1683,13 @@ where
     // reload's set (and, on the first reload, the hard-coded one).
     let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
     let tool_ctx = kiqi_tools::ExecutionToolContext::new(env_dyn.clone(), Some(mut_env));
-    let mut tools = build_tools(&tool_ctx, &effective_args, &ctx.cwd, &ctx.signal_host);
+    let mut tools = build_tools(
+        &tool_ctx,
+        &effective_args,
+        &ctx.cwd,
+        &ctx.signal_host,
+        &ctx.skill_cell,
+    );
     // ---- Rebuild the emitter (TeeEmitter over fresh ExtensionEmitter) ----
     let emitter: Arc<dyn kiqi_agent::AgentEmitter> = Arc::new(TeeEmitter::new(vec![
         ctx.broadcast.clone(),
@@ -1993,6 +2014,7 @@ fn build_tools(
     args: &Args,
     cwd: &Path,
     signal_host: &Arc<crate::signal_host::SignalHost>,
+    skill_cell: &Arc<std::sync::RwLock<Vec<kiqi_harness::types::Skill>>>,
 ) -> Vec<HarnessTool> {
     if args.no_tools {
         return Vec::new();
@@ -2042,6 +2064,16 @@ fn build_tools(
             ))),
         ),
     ];
+
+    // Progressive skill loading: the system prompt lists skills, this tool
+    // loads one body on demand (and re-reads it, so edits are current).
+    if !args.no_skills {
+        all.push((
+            "skill",
+            HarnessTool::new(crate::skill_tool::create_skill_tool(Arc::clone(skill_cell)))
+                .with_replay(ToolReplay::Safe),
+        ));
+    }
 
     // Add PowerShell tool on Windows
     #[cfg(target_os = "windows")]
@@ -3934,7 +3966,13 @@ mod tests {
         let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
         let context = ExecutionToolContext::new(env_dyn, Some(mut_env));
         let signal_host = Arc::new(crate::signal_host::SignalHost::new());
-        let tools = build_tools(&context, &Args::default(), Path::new("."), &signal_host);
+        let tools = build_tools(
+            &context,
+            &Args::default(),
+            Path::new("."),
+            &signal_host,
+            &crate::skill_tool::new_skill_cell(),
+        );
 
         let replay_of = |name: &str| {
             tools
@@ -3968,11 +4006,16 @@ mod tests {
         let mut_env: Arc<dyn kiqi_tools::MutatingEnv> = env.clone();
         let context = ExecutionToolContext::new(env_dyn, Some(mut_env));
         let signal_host = Arc::new(crate::signal_host::SignalHost::new());
-        let names: Vec<String> =
-            build_tools(&context, &Args::default(), Path::new("."), &signal_host)
-                .iter()
-                .map(|tool| tool.tool.schema().name.clone())
-                .collect();
+        let names: Vec<String> = build_tools(
+            &context,
+            &Args::default(),
+            Path::new("."),
+            &signal_host,
+            &crate::skill_tool::new_skill_cell(),
+        )
+        .iter()
+        .map(|tool| tool.tool.schema().name.clone())
+        .collect();
 
         // `docs` and the host-owned `permissions` policy tool are default
         // capabilities; the legacy kiqi-only lookup tools stay unregistered.
@@ -4752,6 +4795,7 @@ mod tests {
         }));
         let reload_context = ReloadContext {
             extension_session: Arc::new(Mutex::new(ExtensionSession::none())),
+            skill_cell: crate::skill_tool::new_skill_cell(),
             tool_context: kiqi_host::ToolCallContext::default(),
             action_bridge: Arc::new(Mutex::new(None)),
             ext_status: kiqi_host::ExtensionStatusMailbox::default(),

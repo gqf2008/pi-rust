@@ -1831,6 +1831,7 @@ mod tests {
         let (emitter, _) = kiqi_agent::CollectorEmitter::new();
         crate::session::ReloadContext {
             extension_session: Arc::new(Mutex::new(session)),
+            skill_cell: crate::skill_tool::new_skill_cell(),
             tool_context: kiqi_host::ToolCallContext::default(),
             action_bridge: Arc::new(Mutex::new(None)),
             ext_status: kiqi_host::ExtensionStatusMailbox::default(),

@@ -95,6 +95,14 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
+- **Progressive skill loading.** `/skill <name>` loads one skill's instructions
+  into the conversation (`/skill` alone lists them), and the new `skill` tool
+  gives the model the same on-demand load. The system prompt still carries only
+  name/description/location; the body is re-read from disk at load time, and the
+  reply appends a one-level listing of the skill directory so referenced files
+  (scripts, references) are read by name. Skills with `disableModelInvocation`
+  are refused to the model and reachable only through `/skill`.
+
 - **Session-scoped scheduled jobs.** `.ki/cron.json` in the session working directory can
   hold `prompt` or `command` jobs on a 5-field cron schedule (plus `@hourly`/`@daily`/
   `@weekly`/`@monthly`). They tick only while an interactive session is open and are

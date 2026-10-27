@@ -637,6 +637,9 @@ enum TuiMessage {
     /// through the main loop so it starts a run exactly like an editor submit;
     /// a fire that lands during a run is steered instead (see `cron.rs`).
     CronInject(String),
+    /// `/skill <name>`: load one skill's instructions as this turn's user
+    /// message (the explicit half of progressive skill disclosure).
+    InvokeSkill(String),
 }
 
 /// Terminal result of a user-initiated `!command` shell run.
@@ -2880,6 +2883,69 @@ pub async fn interactive_tui(
                     continue;
                 }
                 add_user_message(&chat_container, &prompt);
+                tui.request_render(false);
+                run_prompt_streaming(
+                    &lane,
+                    &prompt,
+                    false,
+                    &tui,
+                    &state,
+                    drain_handle.is_some(),
+                    Vec::new(),
+                )
+                .await;
+            }
+            Some(TuiMessage::InvokeSkill(name)) => {
+                // User-invoked skill: same run path as a submitted prompt, but
+                // the transcript shows the command while the skill body rides
+                // as the turn's user message.
+                let skills = harness
+                    .get_resources()
+                    .await
+                    .map(|resources| resources.skills.unwrap_or_default())
+                    .unwrap_or_default();
+                if name.trim().is_empty() {
+                    let mut text = String::from("Available skills:\n");
+                    if skills.is_empty() {
+                        text.push_str("  (none discovered — create .ki/skills/<name>/SKILL.md)\n");
+                    }
+                    for skill in &skills {
+                        text.push_str(&format!("  {} — {}\n", skill.name, skill.description));
+                    }
+                    text.push_str("\nUse `/skill <name>` to load one.");
+                    add_note_message(&chat_container, &text);
+                    tui.request_render(false);
+                    continue;
+                }
+                let Some(skill) = skills
+                    .iter()
+                    .find(|skill| skill.name.eq_ignore_ascii_case(&name))
+                else {
+                    let available: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+                    let message = if available.is_empty() {
+                        format!("Unknown skill `{name}`: no skills are discovered")
+                    } else {
+                        format!(
+                            "Unknown skill `{name}`. Available: {}",
+                            available.join(", ")
+                        )
+                    };
+                    add_error_message(&chat_container, &message);
+                    tui.request_render(false);
+                    continue;
+                };
+                let prompt = kiqi_harness::skills::format_skill_invocation(skill, None);
+                if !state.try_start_working() {
+                    let message = user_message_with_images(&prompt, Vec::new());
+                    if let Err(error) = lane.steer(message).await {
+                        diagnostic_log(&format!("skill: 注入失败（排队）：{error}"));
+                    } else {
+                        refresh_pending_messages(&state, &lane).await;
+                    }
+                    tui.request_render(false);
+                    continue;
+                }
+                add_user_message(&chat_container, &format!("/skill {}", skill.name));
                 tui.request_render(false);
                 run_prompt_streaming(
                     &lane,

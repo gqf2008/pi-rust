@@ -21,6 +21,30 @@ impl SlashCommand for HelpCommand {
     }
 }
 
+/// `/skill <name>` — load one skill's instructions into the conversation.
+///
+/// This is the explicit half of progressive skill disclosure: the system prompt
+/// advertises name/description/location, and the body only enters the context
+/// when the user or the model asks for it (the model's half is the `skill`
+/// tool).
+pub(super) struct SkillCommand;
+impl SlashCommand for SkillCommand {
+    fn name(&self) -> &'static str {
+        "/skill"
+    }
+    fn description(&self) -> &'static str {
+        "Load a skill's instructions by name; `/skill` alone lists them"
+    }
+    fn execute(&self, ctx: &CommandContext, args: &str) {
+        let name = args.trim();
+        if name.is_empty() {
+            let _ = ctx.tx.send(TuiMessage::InvokeSkill(String::new()));
+            return;
+        }
+        let _ = ctx.tx.send(TuiMessage::InvokeSkill(name.to_string()));
+    }
+}
+
 pub(super) struct ClearChatCommand;
 impl SlashCommand for ClearChatCommand {
     fn name(&self) -> &'static str {
@@ -790,6 +814,7 @@ pub(super) fn build_builtin_registry() -> CommandRegistry {
     r.register(Arc::new(CopyCommand));
     r.register(Arc::new(HotkeysCommand));
     r.register(Arc::new(ContextCommand));
+    r.register(Arc::new(SkillCommand));
     r.register(Arc::new(UsageCommand));
     r.register(Arc::new(SignalsCommand));
     // Recognized but inert in v1 (one struct backs them all). The TS builtins
@@ -897,6 +922,15 @@ mod tests {
             !command.description_owned().is_empty(),
             "autocomplete needs a description"
         );
+    }
+
+    /// `/skill` is a first-class built-in: its description drives autocomplete,
+    /// and `/skill <name>` routes to the TUI as an `InvokeSkill` message.
+    #[test]
+    fn skill_command_is_registered_with_a_description() {
+        let registry = build_builtin_registry();
+        let command = registry.find("/skill").expect("/skill is registered");
+        assert!(!command.description_owned().is_empty());
     }
 
     /// An extension cannot shadow a built-in: built-ins register first and the

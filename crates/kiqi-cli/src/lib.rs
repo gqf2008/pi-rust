@@ -69,6 +69,7 @@ pub mod settings;
 pub mod signal_host;
 pub mod signal_wake;
 pub mod signals_tool;
+pub mod skill_tool;
 pub mod source_info;
 pub mod timings;
 mod transcript_navigation;
