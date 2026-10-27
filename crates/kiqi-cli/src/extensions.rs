@@ -407,13 +407,6 @@ fn clear_compiled_event_sink() {
 fn install_compiled_event_sink_locked(
     caps: std::sync::Arc<OwnedCaps>,
 ) -> kiqi_host::CompiledEventSink {
-    // Remember the same capabilities for the surfaces that run outside a tool
-    // call (commands, probes, prompt transforms) **when they have no session**.
-    // The production path mounts the owning session's caps on its
-    // `RegistrySnapshot`; this slot is the compatibility fallback only.
-    if let Ok(mut guard) = COMPILED_CAPS.write() {
-        *guard = Some((*caps).clone());
-    }
     let hosts = compiled_extension_hosts();
     let sink: kiqi_host::CompiledEventSink = std::sync::Arc::new(move |mode, event| {
         if mode == kiqi_host::DispatchMode::ProviderGate {
@@ -741,30 +734,14 @@ fn merge_patches(base: Option<serde_json::Value>, patch: serde_json::Value) -> s
 /// probes and prompt transforms reach the same live host the tools do. Before a
 /// session exists (a test, or `ki extension …`) an extension gets logging only, rather
 /// than a capability that would fail at call time.
-static COMPILED_CAPS: std::sync::RwLock<Option<OwnedCaps>> = std::sync::RwLock::new(None);
-
-/// See [`COMPILED_CAPS`]. Cloned so the caller's borrow does not hold the lock.
-pub fn compiled_caps() -> OwnedCaps {
-    COMPILED_CAPS
-        .read()
-        .ok()
-        .and_then(|guard| guard.clone())
-        .unwrap_or_else(|| OwnedCaps {
-            session: None,
-            control: None,
-            inject: None,
-            ui: None,
-            log: std::sync::Arc::new(StderrLog),
-        })
-}
-
 /// The capabilities the surface serving `cell` must use.
 ///
 /// Production sessions mount their own bundle on the snapshot, so two sessions
 /// in one process (the ACP multi-session server) each hand their own caps to
 /// probes, extension commands and prompt transforms. Only a session that
 /// carries none — a sessionless test, or `ki extension …` before any session
-/// exists — falls back to [`COMPILED_CAPS`], which is exactly the old behaviour
+/// exists — falls back to a **deny-all** bundle (fail closed: a session with
+/// no caps mounted grants nothing, and can never reach another session's caps).
 /// for that path.
 ///
 /// A poisoned cell is recovered with `into_inner`: the lock only guards a
@@ -780,15 +757,17 @@ pub fn session_caps_from_cell(
     match guard.session_caps() {
         Some(caps) => std::sync::Arc::clone(caps),
         None => {
-            // Never silent: a builder that forgot to mount caps would fall back
-            // to the process-global (last-built) bundle — exactly the
-            // cross-session leak this indirection removes. Production builders
-            // always mount; this warning catches the next wiring mistake.
-            eprintln!(
-                "warning: extension session has no caps mounted; falling back to the \
-                 process-global bundle"
-            );
-            std::sync::Arc::new(compiled_caps())
+            // Fail closed: a session with no caps mounted grants nothing. The
+            // deny-all bundle keeps every surface (probes, commands, prompt
+            // transforms) working — they just always get "denied" — without
+            // ever reaching another session's bundle.
+            std::sync::Arc::new(OwnedCaps {
+                session: None,
+                control: None,
+                inject: None,
+                ui: None,
+                log: std::sync::Arc::new(StderrLog),
+            })
         }
     }
 }
@@ -1327,9 +1306,9 @@ impl ExtensionHost {
 ///
 /// This is the production entry point. It resolves the bundle from the
 /// session cell's snapshot at call time (so it follows a `/reload` swap) and
-/// only falls back to the process-wide slot for a sessionless caller. A
-/// poisoned cell is recovered — the swap itself never leaves the cell in a
-/// half-written state — rather than silently reaching another session's caps.
+/// A poisoned cell is recovered — the swap itself never leaves the cell in a
+/// half-written state — rather than silently reaching another session's caps
+/// (the deny-all fallback grants nothing, so misconfiguration fails closed).
 pub fn probe_tool_call_in_session(
     cell: &crate::session::ExtensionSessionCell,
     tool_call_id: &str,
