@@ -51,6 +51,9 @@ use kiqi_tools::{
     MutationQueueRegistry, OsExecutionEnv,
 };
 
+#[cfg(target_os = "windows")]
+use kiqi_tools::create_powershell_tool;
+
 use crate::args::Args;
 use crate::docs_tool::create_docs_tool;
 use crate::provider::ResolvedModel;
