@@ -86,24 +86,19 @@ do
     }
 done
 
-# --- 2. Pushing goes to `fork`, never `origin` ------------------------------
-grep -q '日常推送主远端 `walgit`' "$AGENTS" || {
-    echo "note: AGENTS.md no longer states the walgit/fork push model; review this test" >&2
-}
-grep -q '`fork` 只作 GitHub 镜像与发布目标' "$AGENTS" || {
-    echo "note: AGENTS.md no longer names fork as the release mirror; review this test" >&2
-}
-grep -n 'git push origin' "$RELEASE" && {
-    echo "FAIL: scripts/release.sh pushes to 'origin', which is bigfish1913/pi-rust" >&2
-    echo "      (AGENTS.md: push to 'fork')" >&2
-    status=1
+# --- 2. Pushing goes to `origin` (gqf2008/pi-rust, the GitHub mirror) ------
+# 2026-10-27: the old `fork` remote was renamed to `origin` and now points at
+# the project's own GitHub repo (the unrelated bigfish1913/pi-rust fork has
+# been removed from the config). `origin` is correct here.
+grep -q 'PUSH_REMOTE=.*origin' "$RELEASE" || {
+    echo "note: release.sh no longer defaults to origin; review this test" >&2
 }
 grep -q 'git push "\$PUSH_REMOTE" HEAD' "$RELEASE" || {
     echo "FAIL: scripts/release.sh does not push the branch to \$PUSH_REMOTE" >&2
     status=1
 }
-grep -q 'PUSH_REMOTE="\${KI_RELEASE_REMOTE:-fork}"' "$RELEASE" || {
-    echo "FAIL: \$PUSH_REMOTE must default to 'fork'" >&2
+grep -q 'PUSH_REMOTE="\${KI_RELEASE_REMOTE:-origin}"' "$RELEASE" || {
+    echo "FAIL: \$PUSH_REMOTE must default to 'origin'" >&2
     status=1
 }
 
@@ -134,6 +129,6 @@ grep -q 'PackageIdentifier: gqf2008.ki' "$ROOT/packaging/winget/gqf2008.ki.yaml"
 }
 
 if [ "$status" -eq 0 ]; then
-    echo "release.sh: asset names match the workflow, push target is 'fork', channels target gqf2008"
+    echo "release.sh: asset names match the workflow, push target is 'origin', channels target gqf2008"
 fi
 exit "$status"

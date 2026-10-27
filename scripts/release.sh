@@ -31,7 +31,7 @@ REPO="gqf2008/pi-rust"
 # bigfish1913/pi-rust, which AGENTS.md forbids pushing to; `fork` is
 # gqf2008/pi-rust. Override with `KI_RELEASE_REMOTE` when a clone names it
 # differently.
-PUSH_REMOTE="${KI_RELEASE_REMOTE:-fork}"
+PUSH_REMOTE="${KI_RELEASE_REMOTE:-origin}"
 # `<target>:<archive extension>` — must mirror the `archive:` column of the
 # release-binaries matrix. Each target publishes exactly ONE archive (plus its
 # `.sha256` sidecar), so requiring both formats here waits forever.

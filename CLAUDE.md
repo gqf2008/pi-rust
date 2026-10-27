@@ -2,8 +2,7 @@
 
 ## 仓库
 
-`ki`（crate 前缀 `kiqi-`）：Rust 编码代理。远端 `walgit` 主推，`fork` GitHub 镜像，
-`origin` 无关不用。
+`ki`（crate 前缀 `kiqi-`）：Rust 编码代理。远端 `walgit` 主推，`origin` GitHub 镜像 / 发布。
 
 ## 门禁
 
