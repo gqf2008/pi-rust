@@ -42,7 +42,7 @@ rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/gqf2008/pi-rust"
 homepage = "https://ki.laofu.online/"
-version = "0.4.2"
+version = "0.4.3"
 authors = ["BigFish <bigfish1913@gmail.com>"]
 
 [workspace.dependencies]
@@ -88,17 +88,17 @@ dirs = "5"
 rpassword = "7"
 
 # ki internal crates (package names and directories both use the `kiqi-` prefix).
-kiqi-telemetry = { path = "crates/kiqi-telemetry", version = "0.4.2" }
-kiqi-ai = { path = "crates/kiqi-ai", version = "0.4.2" }
-kiqi-agent = { path = "crates/kiqi-agent", version = "0.4.2" }
-kiqi-tools = { path = "crates/kiqi-tools", version = "0.4.2" }
-kiqi-harness = { path = "crates/kiqi-harness", version = "0.4.2" }
+kiqi-telemetry = { path = "crates/kiqi-telemetry", version = "0.4.3" }
+kiqi-ai = { path = "crates/kiqi-ai", version = "0.4.3" }
+kiqi-agent = { path = "crates/kiqi-agent", version = "0.4.3" }
+kiqi-tools = { path = "crates/kiqi-tools", version = "0.4.3" }
+kiqi-harness = { path = "crates/kiqi-harness", version = "0.4.3" }
 
-kiqi-tui = { path = "crates/kiqi-tui", version = "0.4.2" }
+kiqi-tui = { path = "crates/kiqi-tui", version = "0.4.3" }
 
-kiqi-host = { path = "crates/kiqi-host", version = "0.4.2" }
-kiqi-mcp = { path = "crates/kiqi-mcp", version = "0.4.2" }
-kiqi-acp = { path = "crates/kiqi-acp", version = "0.4.2" }
+kiqi-host = { path = "crates/kiqi-host", version = "0.4.3" }
+kiqi-mcp = { path = "crates/kiqi-mcp", version = "0.4.3" }
+kiqi-acp = { path = "crates/kiqi-acp", version = "0.4.3" }
 
 [profile.release]
 lto = "thin"

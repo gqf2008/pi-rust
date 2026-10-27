@@ -11,6 +11,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-10-28
+
 ### Fixed
 
 - **A minimal custom-model configuration now works end to end.** With no saved
