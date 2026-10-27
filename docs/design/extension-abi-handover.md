@@ -142,8 +142,9 @@ wasm 就是权威路径，**2026-10-26 的 P6 把 cdylib 装载机整体删除**
 | `register_message_renderer` / `register_markdown_transformer` / `register_entry_renderer` | 死面：renderer tier 对空 registry 恒无命中 | `render-api`（§6.42）。0.8.0 **只有 markdown**，消息/entry renderer 不提供 |
 | `register_resources_discover` | 死面：startup/reload 发现对空 registry 恒无输出 | `resources.json` + `resources` grant（§6.43） |
 
-遗留（惰性，不可达）：C ABI 注册回调机器（`HostApi`/vtable/线程局部 `current_api`）与
-`ExtensionToolAdapter` 仍随脊柱编译，但无装载路径；折叠成纯 serde 事件总线是独立后续批次
+已删除（2026-10-27，§6.49）：C ABI 注册回调机器（`HostApi`/vtable/线程局部
+`current_api`）与 `ExtensionToolAdapter` 已随纯 serde 事件总线一批移除，不再随
+脊柱编译
 （`extension-abi.md` §6.45）。
 
 **事件 sink 已按会话隔离**（2026-10-27，`refactor/extension-session-sinks`）：
@@ -151,7 +152,9 @@ wasm 就是权威路径，**2026-10-26 的 P6 把 cdylib 装载机整体删除**
 它同时返回该 sink，`kiqi-cli` 在 build/reload 里把它挂到会话的
 `RegistrySnapshot`（`ExtensionSession::none_with_compiled_sink` → `RegistrySnapshot::compiled_sink`）。
 `translate` 的 5 个派发点优先用 `snapshot.compiled_sink()`，所以同一进程内两个会话
-（ACP 多会话）各自只收到自己的事件，不再 last-writer-wins。`COMPILED_CAPS`
+（ACP 多会话）用各自的 caps 派发，不再 last-writer-wins；**wasm host 实例仍是
+进程级共享**，会话级隔离的是"用哪份 caps 派发"，不是"哪个 guest 收到事件"。
+`COMPILED_CAPS`
 （工具/命令/probe/prompt transform 读取的进程级能力集）仍是 last-writer-wins，
 不在本批范围内。
 

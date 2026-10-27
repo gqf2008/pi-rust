@@ -1440,3 +1440,26 @@ C ABI 线格式（`StbString`/`StableExtensionEvent`/`EventView`/handler consts�
 验证：`cargo fmt --all -- --check`、`cargo check --workspace --all-targets`
 （±`--all-features`）、`cargo test --workspace`、`cargo test -p kiqi-host
 --features wasm`（含构建 guest 的 e2e）。
+
+### 6.50 纯 serde 事件总线 + 会话级 sink（2026-10-27）
+
+- **C-ABI 注册机删除**：`HostApi`/线程局部 `current_api`/trampoline 注册函数/
+  `ExtensionToolAdapter`/`PluggableProvider` 与本地的 OAuth/prompt-transform/
+  resources handler，以及整个 `kiqi_host::abi` 模块（`StbString`/
+  `StableExtensionEvent`/`EventView`/`ExtensionApi`/handler 常量）。事件经漏斗直接
+  构造 serde `Event`（tag + JSON payload）。
+- **sink 会话化**：`RegistrySnapshot` 持有 `Option<CompiledEventSink>`
+  （`with_compiled_sink` / `compiled_sink`），`compiled` 增加
+  `dispatch_*_with(sink, …)`，漏斗优先用 `snapshot.compiled_sink()`；进程级槽位保留
+  作为无快照路径的 fallback。cli 的 build 在创建 emitter 之前挂载 sink，reload 先建
+  caps/sink 再换 cell。
+- **边界如实记录**：wasm **host 实例仍是进程级共享**——会话级隔离的是"用哪份 caps
+  派发"，不是"哪个 guest 收到事件"。`COMPILED_CAPS`（工具/命令/probe/prompt
+  transform）仍进程级。
+- **`EditorChange`** 现在随每次草稿变化送达 sink（此前 wasm-only 安装被原生 handler
+  预检查短路、从未送达）；有意的行为变化，代价是每次变化一次 guest 观察调用。
+- **staleness 标志**：`RegistrySnapshot::invalidate` 保留但不再参与派发门控
+  （`assert_active` 无调用者）；文档不再声称 `/reload` 靠它停止旧会话派发。
+- 已知遗留（非本批）：sink 经 caps 反向持有 action host，而 host 强持有 harness，
+  构成 `harness → … → snapshot → sink → caps → host → harness` 的 Arc 环；单会话无
+  影响，ACP 多会话下会话对象不释放，后续批次以 `Weak` 断开。

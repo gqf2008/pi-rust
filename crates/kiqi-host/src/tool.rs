@@ -1,19 +1,23 @@
-//! [`ToolCallContext`] — the per-session context the host injects into
-//! extension tool arguments under [`crate::HOST_CONTEXT_KEY`].
+//! [`ToolCallContext`] — the per-session context of an extension tool call.
+//!
+//! [`crate::HOST_CONTEXT_KEY`] is a **legacy** constant from the retired
+//! C-ABI channel: nothing injects it any more. The wasm contract carries
+//! session identity through `HostCaps` (session-read) instead.
 //!
 //! This module used to also carry `ExtensionToolHandle` / `ExtensionToolAdapter`,
 //! the C-ABI tool lifecycle. The cdylib channel was retired on 2026-10-26 and
 //! the registration machine was removed in the pure-serde event-bus batch
 //! (`docs/design/extension-abi.md` §6.49); wasm tool calls go through the
-//! `Extension::call_tool` contract instead. Only the context survives because
-//! the wasm backend still injects it into every extension tool call.
+//! `Extension::call_tool` contract instead.
 
 use std::sync::{Arc, RwLock};
 
 use serde_json::Value;
 
-/// Per-session context the host injects into extension tool arguments under
-/// [`crate::HOST_CONTEXT_KEY`].
+/// Per-session context an extension tool call carries (session id + cwd).
+///
+/// Kept as a plain Rust type for host callers; the wasm contract carries the
+/// same facts through `HostCaps`, not through a `__ki` argument injection.
 ///
 /// A built-in tool gets an `ExecutionToolContext` from the harness and can
 /// resolve the working directory from it; an extension tool has no such channel.

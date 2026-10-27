@@ -41,11 +41,18 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   the session's `RegistrySnapshot`: `install_compiled_event_sink` returns the
   sink it installed, `ExtensionSession::none_with_compiled_sink` mounts it, and
   every `translate` funnel prefers `snapshot.compiled_sink()`. Two sessions in
-  one process — the ACP multi-session server — therefore receive only their own
-  events instead of the last-installed session's; the process-global sink stays
-  as the fallback for call sites without a snapshot. `COMPILED_CAPS` (tools,
-  commands, probes, prompt transforms) is still process-global. Notes in
-  `docs/design/extension-abi-handover.md`.
+  one process — the ACP multi-session server — therefore dispatch through their
+  own session's caps instead of the last-installed session's; the process-global
+  sink stays as the fallback for call sites without a snapshot. Honest boundary:
+  the wasm **host instances are still process-global**, so this isolates which
+  caps a dispatch uses, not which guests can observe an event. `COMPILED_CAPS`
+  (tools, commands, probes, prompt transforms) is still process-global. Notes in
+  `docs/design/extension-abi.md` §6.50.
+
+- **`EditorChange` now reaches wasm guests.** It used to be short-circuited by
+  the native-handler pre-check (always empty in a wasm-only install), so guests
+  never saw it; it is now delivered on every changed draft — an intentional
+  behaviour change with one guest observe-call per keystroke.
 
 ### Removed
 
@@ -57,8 +64,9 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   whole `kiqi_host::abi` module (`StbString`, `StableExtensionEvent`,
   `EventView`, `ExtensionApi`, handler constants). Events now cross the
   compiled/wasm sink as the plain serde `Event` (tag + JSON payload), with the
-  dispatch funnels building it directly. `RegistrySnapshot` shrinks to the
-  session staleness flag; `EventTag`/`Event`/`EventAction`, the compiled sink,
+  dispatch funnels building it directly. `RegistrySnapshot` keeps the session
+  staleness flag (no longer consulted by any dispatch path — see §6.50) and
+  gains the per-session sink; `EventTag`/`Event`/`EventAction`, the compiled sink,
   `translate` funnels, mailboxes, `ToolCallContext` and `stdio` remain. Notes in
   `docs/design/extension-abi.md` §6.49.
 - **The cdylib extension channel is retired (breaking).** wasm guests

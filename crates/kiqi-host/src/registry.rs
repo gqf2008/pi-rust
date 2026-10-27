@@ -4,14 +4,15 @@
 //! extension's `kiqi_extension_register` call and snapshotted them for the host
 //! session. The cdylib channel was retired on 2026-10-26 and the C-ABI
 //! registration machine that fed it was removed in the pure-serde event-bus
-//! batch (2026-10-27, `docs/design/extension-abi.md` §6.49). What survives is
-//! the piece the dispatch spine still uses: the shared **staleness flag** a
-//! `/reload` flips so a swapped-out session stops dispatching.
+//! batch (2026-10-27, `docs/design/extension-abi.md` §6.49/§6.50). What
+//! survives is the snapshot itself: the **per-session sink** (what actually
+//! routes a session's dispatch) plus the historical `active` staleness flag.
 //!
-//! Extensions themselves live in the wasm backend and receive events through
-//! the [`compiled`](crate::compiled) sink; there is no native registry any more.
-//! The snapshot also carries the **per-session** sink (when a session installed
-//! one), so dispatch from one session never reaches another's extensions.
+//! The staleness flag is **no longer consulted by any dispatch path** — the
+//! native-handler funnels that checked it are gone, and the sink belongs to the
+//! snapshot, so a swapped-out session cannot dispatch with its old caps anyway.
+//! `invalidate`/`assert_active` remain for API compatibility and for callers
+//! that want to mark a session closed.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

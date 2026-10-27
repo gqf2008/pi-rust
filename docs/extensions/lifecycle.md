@@ -14,8 +14,9 @@ wasm guest。）
 `Extension::on_event`。
 
 事件是**观察性**的：扩展契约的 `EventAction` 只有 `Continue`/`Claimed`/`Patch`,
-没有 abort/veto，所以扩展不能否决启动或关闭。需要阻止某个动作时，扩展应在对应
-的可路由事件（如 `Input`、`ToolCall`）上返回 `Claimed`，而不是依赖终止回调。
+没有 abort/veto，所以扩展不能否决启动或关闭。需要阻止某个动作时，扩展应在
+**可路由事件**（如 `Input`）上返回 `Claimed`；工具调用不在事件面上，阻断走宿主
+的 tool gate（probe），不是 `ToolCall` 事件。
 
 宿主调用 `on_event` 时按 sink 的派发模式决定是否等待忙碌的 guest：observe 漏斗
 跳过忙的 guest，claiming 漏斗等待其结论。panic 在宿主侧被隔离，不会展开穿过

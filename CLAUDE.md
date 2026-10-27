@@ -117,9 +117,9 @@ TUI Enter → `interactive_tui/run.rs::run_prompt_streaming` →
 - 编译期一方插件通道已于 2026-10-21 退役；**cdylib 通道（`kiqi-extension-sdk` /
   `ki dev` / `ki install` / `ki package` / `libloading` 装载）已于 2026-10-26 整体退役**——
   wasm 是唯一插件通道。三个宿主侧 crate 已合并为 **`kiqi-host`**（契约 + 派发脊柱
-  + `wasm` 子模块；trait 由 `Extension` 改名为 `Extension`）：registry/translate/
-  compiled sink/mailboxes 恒编译，wasmtime 只在 `wasm` feature 后；
-  `src/abi.rs` 是内部事件总线的线格式。
+  + `wasm` 子模块；trait 为 `Extension`）：registry/translate/compiled sink/
+  mailboxes 恒编译，wasmtime 只在 `wasm` feature 后。事件总线是**纯 serde**
+  （`Event` = tag + JSON payload），C-ABI 线格式已随 §6.49 删除。
 - **wasm guest 的单测**：guest 的**纯逻辑**可以带原生 `#[cfg(test)]` 单测，在
   `extensions/wasm` 工作区里 `cargo test -p kiqi-<x>` 就能在宿主目标上跑
   （实测可行：wit-bindgen 会为宿主目标生成桩）。**跨 WIT 边界的行为**（import
