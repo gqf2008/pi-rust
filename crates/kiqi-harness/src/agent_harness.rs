@@ -2800,19 +2800,22 @@ impl AgentHarness {
     /// `AgentHarness::create`), so here the harness only appends the
     /// `<available_skills>` listing — the one section it owns itself.
     ///
-    /// **Read-tool gate** (pi `skills.ts:335-336`): the skills listing is
-    /// injected only when the `read` tool is in `active_tool_names`. The model
-    /// needs `read` to load a skill's full file on invocation; without it, the
-    /// listing would advertise skills the model cannot act on, so pi suppresses
-    /// it. The `disable_model_invocation` filter is applied inside
-    /// `format_skills_for_system_prompt`.
+    /// **Loader-tool gate** (pi `skills.ts:335-336` gates on `read`): the
+    /// skills listing is injected only when a tool that can load a skill's full
+    /// text is active — `read` (pi's original loader) or the `skill` tool
+    /// (`kiqi-cli`'s on-demand loader). Without either, the listing would
+    /// advertise skills the model cannot act on. The `disable_model_invocation`
+    /// filter is applied inside `format_skills_for_system_prompt`.
     fn compose_prompt(
         base: Option<&str>,
         resources: &AgentHarnessResources,
         active_tool_names: &[String],
     ) -> String {
         let all_skills: &[Skill] = resources.skills.as_deref().unwrap_or(&[]);
-        let skills: &[Skill] = if active_tool_names.iter().any(|n| n == "read") {
+        let skills: &[Skill] = if active_tool_names
+            .iter()
+            .any(|n| n == "read" || n == "skill")
+        {
             all_skills
         } else {
             &[]
@@ -6030,5 +6033,43 @@ mod soft_interrupt_tests {
         assert!(signal.is_cancelled(), "abort kills the run");
 
         harness.release_run();
+    }
+}
+
+/// The `<available_skills>` listing is only useful when a tool can load it:
+/// `read` (pi's loader) or ki's `skill` tool. Regression guard for the gate
+/// that used to know only about `read`, which made the skill tool
+/// undiscoverable in a `--tools skill` / `--exclude-tools read` session.
+#[cfg(test)]
+mod prompt_skill_gate_tests {
+    use super::*;
+
+    fn resources_with_skill() -> AgentHarnessResources {
+        AgentHarnessResources {
+            skills: Some(vec![Skill {
+                name: "demo".to_string(),
+                description: "Demo skill".to_string(),
+                content: "body".to_string(),
+                file_path: "/skills/demo/SKILL.md".to_string(),
+                disable_model_invocation: None,
+            }]),
+            ..Default::default()
+        }
+    }
+
+    fn listing_with(tools: &[&str]) -> bool {
+        let names: Vec<String> = tools.iter().map(|tool| tool.to_string()).collect();
+        AgentHarness::compose_prompt(None, &resources_with_skill(), &names)
+            .contains("<available_skills>")
+    }
+
+    #[test]
+    fn a_loader_tool_is_required_to_advertise_skills() {
+        assert!(!listing_with(&["bash"]), "no loader, no listing");
+        assert!(listing_with(&["read"]), "read is the pi-parity loader");
+        assert!(
+            listing_with(&["skill"]),
+            "the skill tool loads a listing entry without read"
+        );
     }
 }

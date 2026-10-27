@@ -6,7 +6,9 @@
 //! 已知的进程级限制：`extensions::COMPILED_CAPS`（工具/命令/probe/prompt transform
 //! 读取的能力集）仍是 last-writer-wins，部分第三方插件也会在调用时读取进程 cwd。
 //! compiled-extension 事件 sink 已按会话隔离（挂在 `RegistrySnapshot` 上，进程级槽位只作
-//! 无快照路径的 fallback），所以 `session::build` 之后的 extension 事件不会跨会话串话。
+//! 无快照路径的 fallback），所以 `session::build` 之后的派发用各自会话的 caps，不再
+//! last-writer-wins。**隔离的是「用哪份 caps 派发」，不是「哪个 guest 收到事件」**：wasm
+//! host 实例仍是进程级共享，同一 guest 会观察所有会话的事件（`extension-abi.md` §6.50）。
 //! 内置工具使用显式 cwd，ACP 的 run、cancel、标题和上下文不经过这些全局槽；不同 cwd 的
 //! 第三方插件工具/项目状态目前仍不能按会话隔离，后续需要单独的插件路由改造。
 

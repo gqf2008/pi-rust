@@ -19,6 +19,7 @@ use kiqi_agent::error::AgentError;
 use kiqi_agent::types::{AgentToolResult, ToolExecutionMode, ToolResultPartial};
 use kiqi_ai::types::Tool;
 use kiqi_harness::types::Skill;
+use kiqi_tools::{ExecutionEnv, FileKind};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -38,10 +39,15 @@ pub struct SkillInput {
 pub struct SkillTool {
     schema: Tool,
     skills: Arc<RwLock<Vec<Skill>>>,
+    /// The session's filesystem view. The catalog's `file_path` values came out
+    /// of this same env, so the re-read sees the files the loader saw, honors
+    /// the cancellation token, and never blocks a runtime worker on a slow
+    /// filesystem (`std::fs` here would).
+    env: Arc<dyn ExecutionEnv>,
 }
 
 impl SkillTool {
-    fn new(skills: Arc<RwLock<Vec<Skill>>>) -> Self {
+    fn new(skills: Arc<RwLock<Vec<Skill>>>, env: Arc<dyn ExecutionEnv>) -> Self {
         let params = schemars::schema_for!(SkillInput);
         Self {
             schema: Tool {
@@ -58,12 +64,16 @@ impl SkillTool {
                 constrained_sampling: None,
             },
             skills,
+            env,
         }
     }
 }
 
-pub fn create_skill_tool(skills: Arc<RwLock<Vec<Skill>>>) -> Arc<dyn AgentTool> {
-    Arc::new(SkillTool::new(skills))
+pub fn create_skill_tool(
+    skills: Arc<RwLock<Vec<Skill>>>,
+    env: Arc<dyn ExecutionEnv>,
+) -> Arc<dyn AgentTool> {
+    Arc::new(SkillTool::new(skills, env))
 }
 
 /// The shared cell a session's skill list lives in; the reload path updates the
@@ -116,14 +126,25 @@ impl AgentTool for SkillTool {
                 .iter()
                 .find(|skill| skill.name.eq_ignore_ascii_case(wanted))
                 .ok_or_else(|| {
-                    AgentError::Tool(format!(
-                        "unknown skill `{wanted}`; available: {}",
-                        skills
-                            .iter()
-                            .map(|skill| skill.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ))
+                    // Never enumerate `disableModelInvocation` skills here: the
+                    // filter in `format_skills_for_system_prompt` keeps them out
+                    // of model-visible surfaces, and a typo's error message must
+                    // not defeat it.
+                    let available: Vec<&str> = skills
+                        .iter()
+                        .filter(|skill| !skill.disable_model_invocation.unwrap_or(false))
+                        .map(|skill| skill.name.as_str())
+                        .collect();
+                    if available.is_empty() {
+                        AgentError::Tool(format!(
+                            "unknown skill `{wanted}`; no model-invocable skills are available"
+                        ))
+                    } else {
+                        AgentError::Tool(format!(
+                            "unknown skill `{wanted}`; available: {}",
+                            available.join(", ")
+                        ))
+                    }
                 })?
                 .clone()
         };
@@ -134,63 +155,102 @@ impl AgentTool for SkillTool {
             )));
         }
 
-        // Fresh read: the listing in the prompt may predate an edit.
-        let body = std::fs::read_to_string(&skill.file_path).unwrap_or(skill.content);
+        // Fresh read through the session env: the listing in the prompt may
+        // predate an edit. A failed re-read falls back to the discovery-time
+        // body, but says so — silently serving a stale body would contradict
+        // the freshness contract above. (`current` is moved, not cloned: the
+        // catalog body is only copied on the rare fallback path.)
+        let mut current = skill;
+        let (body, stale) = match self
+            .env
+            .read_text_file(&current.file_path, Some(&signal))
+            .await
+        {
+            Ok(raw) => (kiqi_harness::skills::skill_body(&raw), false),
+            Err(_) if signal.is_cancelled() => {
+                return Err(AgentError::Tool("skill load cancelled".into()))
+            }
+            Err(_) => (current.content.clone(), true),
+        };
         let mut body = body.trim().to_string();
         if body.chars().count() > MAX_BODY_CHARS {
             body = body.chars().take(MAX_BODY_CHARS).collect();
             body.push_str("\n… (truncated; read the file for the rest)");
         }
 
-        Ok(AgentToolResult::text(format!(
-            "<skill name=\"{}\" location=\"{}\">\n{}\n</skill>\n\n{}",
-            skill.name,
-            skill.file_path,
-            body,
-            directory_listing(&skill.file_path)
-        )))
+        // Build the block through the harness helper so the model sees the same
+        // `<skill name location>` contract whether it called this tool or the
+        // user typed `/skill`; only the trailing directory listing is ours.
+        current.content = body;
+        let mut out = kiqi_harness::skills::format_skill_invocation(&current, None);
+        if stale {
+            out.push_str(
+                "\n\n(Note: the skill file could not be re-read; this is the version \
+                 discovered when the session started.)",
+            );
+        }
+        let listing = self.directory_listing(&current.file_path, &signal).await;
+        if !listing.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(&listing);
+        }
+        Ok(AgentToolResult::text(out))
     }
 }
 
-/// One-level listing of the skill's directory, so referenced files are named
-/// (relative to the skill dir) instead of guessed.
-fn directory_listing(file_path: &str) -> String {
-    let Some(dir) = std::path::Path::new(file_path).parent() else {
-        return String::new();
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return String::new();
-    };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name == "SKILL.md" {
-                return None;
-            }
-            let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-            Some(if is_dir { format!("{name}/") } else { name })
-        })
-        .collect();
-    if names.is_empty() {
-        return String::new();
+impl SkillTool {
+    /// One-level listing of the skill's directory, so referenced files are named
+    /// (relative to the skill dir) instead of guessed.
+    async fn directory_listing(&self, file_path: &str, signal: &CancellationToken) -> String {
+        let Some(dir) = std::path::Path::new(file_path).parent() else {
+            return String::new();
+        };
+        let Ok(entries) = self
+            .env
+            .list_dir(&dir.to_string_lossy(), Some(signal))
+            .await
+        else {
+            return String::new();
+        };
+        let mut names: Vec<String> = entries
+            .into_iter()
+            .filter_map(|entry| {
+                if entry.name.eq_ignore_ascii_case("SKILL.md") {
+                    return None;
+                }
+                // Dotfiles/dot-directories are not skill references (`.git/`,
+                // `.env`, `.npmrc`): naming them would invite the model to read
+                // local state the skill never advertised.
+                if entry.name.starts_with('.') {
+                    return None;
+                }
+                Some(match entry.kind {
+                    FileKind::Directory => format!("{}/", entry.name),
+                    _ => entry.name,
+                })
+            })
+            .collect();
+        if names.is_empty() {
+            return String::new();
+        }
+        names.sort();
+        names.truncate(MAX_LISTING_ENTRIES);
+        format!(
+            "Files beside the skill (resolve against {}):\n{}",
+            dir.display(),
+            names
+                .iter()
+                .map(|name| format!("- {name}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
     }
-    names.sort();
-    names.truncate(MAX_LISTING_ENTRIES);
-    format!(
-        "Files beside the skill (resolve against {}):\n{}",
-        dir.display(),
-        names
-            .iter()
-            .map(|name| format!("- {name}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiqi_tools::OsExecutionEnv;
 
     fn skill(name: &str, dir: &std::path::Path, disabled: bool) -> Skill {
         Skill {
@@ -202,15 +262,20 @@ mod tests {
         }
     }
 
+    fn env_for(dir: &std::path::Path) -> Arc<dyn ExecutionEnv> {
+        Arc::new(OsExecutionEnv::with_cwd(dir.to_path_buf()))
+    }
+
     #[tokio::test]
     async fn loads_the_body_fresh_and_lists_the_directory() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("references")).unwrap();
         std::fs::write(dir.path().join("SKILL.md"), "fresh body").unwrap();
         std::fs::write(dir.path().join("references/a.md"), "x").unwrap();
+        std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
         let cell = new_skill_cell();
         *cell.write().unwrap() = vec![skill("demo", dir.path(), false)];
-        let tool = create_skill_tool(cell);
+        let tool = create_skill_tool(cell, env_for(dir.path()));
 
         let out = tool
             .execute(
@@ -224,6 +289,57 @@ mod tests {
         let text = format!("{out:?}");
         assert!(text.contains("fresh body"), "{text}");
         assert!(text.contains("references/"), "{text}");
+        assert!(
+            !text.contains(".env"),
+            "dotfiles are not skill references: {text}"
+        );
+    }
+
+    /// The re-read returns the same body the loader parsed: frontmatter is
+    /// stripped (only the body belongs in the `<skill>` block), and a failed
+    /// re-read falls back to the cached body with a visible note.
+    #[tokio::test]
+    async fn a_fresh_read_strips_frontmatter_and_a_failure_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_path = dir.path().join("SKILL.md");
+        std::fs::write(
+            &skill_path,
+            "---\nname: demo\ndescription: d\n---\n\nfresh body\n",
+        )
+        .unwrap();
+        let cell = new_skill_cell();
+        *cell.write().unwrap() = vec![skill("demo", dir.path(), false)];
+        let tool = create_skill_tool(cell, env_for(dir.path()));
+
+        let out = tool
+            .execute(
+                "t",
+                serde_json::json!({ "name": "demo" }),
+                CancellationToken::new(),
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        let text = format!("{out:?}");
+        assert!(text.contains("fresh body"), "{text}");
+        assert!(
+            !text.contains("description: d"),
+            "frontmatter must not reach the model: {text}"
+        );
+
+        std::fs::remove_file(&skill_path).unwrap();
+        let stale = tool
+            .execute(
+                "t",
+                serde_json::json!({ "name": "demo" }),
+                CancellationToken::new(),
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        let text = format!("{stale:?}");
+        assert!(text.contains("cached body"), "{text}");
+        assert!(text.contains("could not be re-read"), "{text}");
     }
 
     #[tokio::test]
@@ -232,7 +348,7 @@ mod tests {
         std::fs::write(dir.path().join("SKILL.md"), "body").unwrap();
         let cell = new_skill_cell();
         *cell.write().unwrap() = vec![skill("manual", dir.path(), true)];
-        let tool = create_skill_tool(cell);
+        let tool = create_skill_tool(cell, env_for(dir.path()));
 
         let disabled = tool
             .execute(
@@ -245,6 +361,8 @@ mod tests {
             .unwrap_err();
         assert!(disabled.to_string().contains("user-invoked only"));
 
+        // The refusal must not disclose a `disableModelInvocation` state name:
+        // it is hidden from `<available_skills>` and from this error's list.
         let unknown = tool
             .execute(
                 "t",
@@ -254,6 +372,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(unknown.to_string().contains("available: manual"));
+        assert!(
+            unknown.to_string().contains("no model-invocable skills"),
+            "{unknown}"
+        );
+        assert!(!unknown.to_string().contains("manual"), "{unknown}");
     }
 }

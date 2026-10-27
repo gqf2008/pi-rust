@@ -62,10 +62,7 @@ impl ExtensionSession {
             Some(sink) => RegistrySnapshot::new().with_compiled_sink(sink),
             None => RegistrySnapshot::new(),
         };
-        Self {
-            snapshot: Some(Arc::new(snapshot)),
-            action_bridge: None,
-        }
+        Self::from_parts(Arc::new(snapshot), None)
     }
 
     /// Assemble a session from already-loaded parts (tests, or a host that

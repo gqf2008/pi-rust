@@ -181,6 +181,7 @@ pub(super) fn add_help_message(container: &Arc<Container>) {
         ("/model, /m", "Choose a model (live switch)"),
         ("/thinking, /think", "Set reasoning depth (selector)"),
         ("/tools", "Toggle built-in tools on/off"),
+        ("/skill", "Load a skill by name (alone: list skills)"),
         ("/images", "Toggle inline image rendering"),
         ("/session", "List saved sessions"),
         ("/theme", "Choose a theme (selector)"),

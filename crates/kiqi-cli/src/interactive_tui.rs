@@ -2895,46 +2895,94 @@ pub async fn interactive_tui(
                 )
                 .await;
             }
-            Some(TuiMessage::InvokeSkill(name)) => {
+            Some(TuiMessage::InvokeSkill(text)) => {
                 // User-invoked skill: same run path as a submitted prompt, but
                 // the transcript shows the command while the skill body rides
-                // as the turn's user message.
-                let skills = harness
-                    .get_resources()
-                    .await
-                    .map(|resources| resources.skills.unwrap_or_default())
-                    .unwrap_or_default();
-                if name.trim().is_empty() {
-                    let mut text = String::from("Available skills:\n");
-                    if skills.is_empty() {
-                        text.push_str("  (none discovered — create .ki/skills/<name>/SKILL.md)\n");
+                // as the turn's user message. `/skill <name> [instructions]`
+                // loads one skill; `/skill` alone lists them.
+                let command = text.trim().to_string();
+                let (name, instructions) = match command.split_once(char::is_whitespace) {
+                    Some((name, rest)) => {
+                        let rest = rest.trim();
+                        (name, (!rest.is_empty()).then_some(rest))
                     }
-                    for skill in &skills {
-                        text.push_str(&format!("  {} — {}\n", skill.name, skill.description));
-                    }
-                    text.push_str("\nUse `/skill <name>` to load one.");
+                    None => (command.as_str(), None),
+                };
+                if name.is_empty() {
+                    // The same cell the `skill` tool reads, so the two load
+                    // paths can never disagree about the discovered set.
+                    let text = {
+                        let skills = reload_context
+                            .skill_cell
+                            .read()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let mut text = String::from("Available skills:\n");
+                        if skills.is_empty() && args.no_skills {
+                            // A reload reuses the same args, so discovery stays
+                            // off for the session: telling the user to create a
+                            // skill would be advice that can never work.
+                            text.push_str(
+                                "  (skills are disabled — remove --no-skills/-ns to enable them)\n",
+                            );
+                        } else if skills.is_empty() {
+                            // Name every directory the loader reads (mirrors
+                            // the `/context` panel): a partial hint sends
+                            // people to a directory ki may never look at.
+                            text.push_str(
+                                "  (none discovered — create .ki/skills/, .agents/skills/, \
+                                 ~/.ki/agent/skills/ or ~/.agents/skills/)\n",
+                            );
+                        }
+                        for skill in skills.iter() {
+                            text.push_str(&format!("  {} — {}\n", skill.name, skill.description));
+                        }
+                        text.push_str("\nUse `/skill <name>` to load one.");
+                        text
+                    };
                     add_note_message(&chat_container, &text);
                     tui.request_render(false);
                     continue;
                 }
-                let Some(skill) = skills
-                    .iter()
-                    .find(|skill| skill.name.eq_ignore_ascii_case(&name))
-                else {
-                    let available: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
-                    let message = if available.is_empty() {
-                        format!("Unknown skill `{name}`: no skills are discovered")
-                    } else {
-                        format!(
-                            "Unknown skill `{name}`. Available: {}",
-                            available.join(", ")
-                        )
-                    };
-                    add_error_message(&chat_container, &message);
-                    tui.request_render(false);
-                    continue;
+                let found = {
+                    let skills = reload_context
+                        .skill_cell
+                        .read()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    match skills
+                        .iter()
+                        .find(|skill| skill.name.eq_ignore_ascii_case(name))
+                    {
+                        Some(skill) => Ok(skill.clone()),
+                        None => {
+                            let available: Vec<&str> =
+                                skills.iter().map(|skill| skill.name.as_str()).collect();
+                            Err(if available.is_empty() {
+                                format!("Unknown skill `{name}`: no skills are discovered")
+                            } else {
+                                format!(
+                                    "Unknown skill `{name}`. Available: {}",
+                                    available.join(", ")
+                                )
+                            })
+                        }
+                    }
                 };
-                let prompt = kiqi_harness::skills::format_skill_invocation(skill, None);
+                let skill = match found {
+                    Ok(skill) => skill,
+                    Err(message) => {
+                        add_error_message(&chat_container, &message);
+                        tui.request_render(false);
+                        continue;
+                    }
+                };
+                // Re-read the body so an edit is current without a restart —
+                // the same contract as the `skill` tool. The discovered body is
+                // the fallback when the file cannot be read.
+                let mut current = skill;
+                if let Ok(raw) = tokio::fs::read_to_string(&current.file_path).await {
+                    current.content = kiqi_harness::skills::skill_body(&raw);
+                }
+                let prompt = kiqi_harness::skills::format_skill_invocation(&current, instructions);
                 if !state.try_start_working() {
                     let message = user_message_with_images(&prompt, Vec::new());
                     if let Err(error) = lane.steer(message).await {
@@ -2945,7 +2993,7 @@ pub async fn interactive_tui(
                     tui.request_render(false);
                     continue;
                 }
-                add_user_message(&chat_container, &format!("/skill {}", skill.name));
+                add_user_message(&chat_container, &format!("/skill {command}"));
                 tui.request_render(false);
                 run_prompt_streaming(
                     &lane,
@@ -3376,12 +3424,13 @@ pub async fn interactive_tui(
                 }
                 // B5e: the reload swapped a fresh `ExtensionSession` into the
                 // context's cell. Rebuild the markdown transformer from that
-                // fresh snapshot and install it on the in-flight streaming
+                // fresh session and install it on the in-flight streaming
                 // component (so a reloaded extension's transformer takes effect on
                 // the visible message immediately) + future components (they
-                // read `state.markdown_transformer()` at construction). The old
-                // closure no-ops once its snapshot's `active` flag flips false
-                // (reload already did that before the swap).
+                // read `state.markdown_transformer()` at construction). The
+                // transformer itself is served by the process-global renderer
+                // hosts, so the rebuild (not a per-snapshot staleness check) is
+                // what makes the reload take effect.
                 let fresh_transformer = build_markdown_transformer(
                     reload_ctx.extension_session.lock().unwrap().snapshot_arc(),
                 );

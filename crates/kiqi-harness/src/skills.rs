@@ -141,6 +141,18 @@ pub fn format_skills_for_system_prompt(skills: &[Skill]) -> String {
     lines.join("\n")
 }
 
+/// The body of a `SKILL.md` file with its YAML frontmatter removed — exactly
+/// what [`load_skills`] stores in [`Skill::content`]. Callers that re-read a
+/// discovered skill from disk use this so the model receives the same text as
+/// the cached load (and `/skill`) instead of the raw file with its `---`
+/// frontmatter block. Malformed frontmatter returns the input unchanged.
+pub fn skill_body(raw: &str) -> String {
+    match crate::frontmatter::parse_frontmatter(raw) {
+        Ok((_, body)) => body,
+        Err(_) => raw.to_string(),
+    }
+}
+
 /// Escape XML special characters. Mirrors TS `escapeXml`.
 pub fn escape_xml(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
@@ -1046,5 +1058,13 @@ mod tests {
         m3.add(&["*.log".to_string()]);
         assert!(m3.ignores("a.log"));
         assert!(!m3.ignores("a.log/b")); // `*` doesn't cross `/`
+    }
+
+    #[test]
+    fn skill_body_strips_the_frontmatter_block() {
+        let raw = "---\nname: demo\ndescription: Use it\n---\n\nBody line\n";
+        assert_eq!(skill_body(raw), "Body line");
+        // No frontmatter: parse_frontmatter still normalizes line endings.
+        assert_eq!(skill_body("plain\r\nbody"), "plain\nbody");
     }
 }

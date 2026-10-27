@@ -147,7 +147,7 @@ wasm 就是权威路径，**2026-10-26 的 P6 把 cdylib 装载机整体删除**
 脊柱编译
 （`extension-abi.md` §6.45）。
 
-**事件 sink 已按会话隔离**（2026-10-27，`refactor/extension-session-sinks`）：
+**事件 sink 已按会话隔离**（2026-10-27，提交 `bf77562`）：
 `install_compiled_event_sink` 仍把 sink 写进进程级槽位，但只作为**无快照路径的 fallback**；
 它同时返回该 sink，`kiqi-cli` 在 build/reload 里把它挂到会话的
 `RegistrySnapshot`（`ExtensionSession::none_with_compiled_sink` → `RegistrySnapshot::compiled_sink`）。

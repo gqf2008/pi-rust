@@ -257,15 +257,13 @@ impl ExtensionEmitter {
     /// process-global sink. Kept for tests and for callers that only ever run
     /// one session per process.
     pub fn new() -> Self {
-        Self { snapshot: None }
+        Self::with_snapshot(None)
     }
 
     /// Build an emitter bound to `session`'s snapshot, so every event it emits
     /// reaches the session's own sink — the per-session isolation path.
     pub fn for_session(session: &crate::loader::ExtensionSession) -> Self {
-        Self {
-            snapshot: session.snapshot_arc(),
-        }
+        Self::with_snapshot(session.snapshot_arc())
     }
 
     /// Build an emitter from an already-shared snapshot.
@@ -403,8 +401,9 @@ pub async fn dispatch_lifecycle_event_with(
     snapshot: Option<&RegistrySnapshot>,
     tag: EventTag,
 ) -> Option<String> {
-    let sink = snapshot.and_then(RegistrySnapshot::compiled_sink);
-    let _ = crate::compiled::dispatch_observe_with(sink, &Event::new(tag, Value::Null));
+    // Same fan-out as the no-payload data funnel; only the return shape differs
+    // (the extension contract has no veto, so this never reports a reason).
+    dispatch_empty_event_with(snapshot, tag);
     None
 }
 

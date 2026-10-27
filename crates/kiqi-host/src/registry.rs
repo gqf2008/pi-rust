@@ -25,6 +25,7 @@ use crate::compiled::CompiledEventSink;
 /// session's compiled/wasm event sink. Both are cheap `Arc`s, so cloning a
 /// snapshot shares the same flag and the same sink; a `/reload` builds a fresh
 /// snapshot (and sink) and invalidates the old one.
+#[derive(Clone)]
 pub struct RegistrySnapshot {
     active: Arc<AtomicBool>,
     /// The session's own event sink. `Some` makes every dispatch from this
@@ -32,17 +33,6 @@ pub struct RegistrySnapshot {
     /// keeps concurrent sessions (ACP) from cross-talking. `None` is the
     /// compatible path: dispatch falls back to the process-global sink.
     compiled_sink: Option<CompiledEventSink>,
-}
-
-impl Clone for RegistrySnapshot {
-    /// Shares the active flag and the sink `Arc` — cloning a snapshot never
-    /// clones the sink closure or detaches the staleness flag.
-    fn clone(&self) -> Self {
-        Self {
-            active: Arc::clone(&self.active),
-            compiled_sink: self.compiled_sink.clone(),
-        }
-    }
 }
 
 impl RegistrySnapshot {

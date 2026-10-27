@@ -161,8 +161,8 @@ pub struct Args {
     pub no_tools: bool,
     pub no_builtin_tools: bool,
 
-    /// `--no-skills`/`-ns`: skip skill discovery + the `<available_skills>`
-    /// system-prompt listing.
+    /// `--no-skills`/`-ns`: skip skill discovery, the `<available_skills>`
+    /// system-prompt listing, and the model-facing `skill` tool.
     pub no_skills: bool,
     /// `--no-prompt-templates`/`-np`: skip prompt-template discovery (templates
     /// are on-demand only; this suppresses populating the resource registry).
@@ -667,7 +667,7 @@ pub fn print_help() {
   --exclude-tools, -xt <list>    Comma-separated denylist of tool names to disable
   --no-tools, -nt                Disable all tools
   --no-builtin-tools, -nbt       Disable the built-in tools (read, bash, edit, write, docs, permissions)
-  --no-skills, -ns               Skip skill discovery (no <available_skills> block)
+  --no-skills, -ns               Skip skill discovery (no <available_skills> block or skill tool)
   --no-prompt-templates, -np     Skip prompt-template discovery (/expand templates)
   --no-context-files, -nc        Skip AGENTS.md/CLAUDE.md discovery (no <project_context>)
   --no-extensions, -ne           Accepted for compatibility (no-op: the cdylib

@@ -1528,16 +1528,19 @@ where
         kiqi_host::ExtensionSession::none_with_compiled_sink(Some(compiled_sink));
 
     // ---- 2. Invalidate the old session + bridge BEFORE the swap ----
-    // The old registry's `active` flag flips false so any in-flight
-    // `emit_resources_discover`/event dispatch on the old snapshot no-ops; the
-    // old bridge's flag flips false so in-flight `runtime_action` calls parked
-    // on the old `user_data` hit the staleness guard. Invalidate under the
-    // session lock before exposing the replacement to approval callbacks.
+    // The old bridge's flag flips false so in-flight `runtime_action` calls
+    // parked on the old `user_data` hit the staleness guard. The old snapshot's
+    // `active` flag is flipped for API compatibility, but it no longer gates
+    // dispatch (`docs/design/extension-abi.md` §6.50): a dispatch that already
+    // captured the old snapshot keeps running through that session's sink and
+    // caps until it returns. Invalidate under the session lock before exposing
+    // the replacement to approval callbacks.
     //
     // Swap directly to the fresh session under the same lock that approvals
     // use. A temporary empty session would let a concurrent call bypass its gate.
     // In-flight approvals retain their old session until their callback exits;
-    // its staleness flag prevents them from authorizing after this swap.
+    // the bridge's staleness flag (not the snapshot's) prevents them from
+    // authorizing after this swap.
     {
         let mut session_guard = ctx.extension_session.lock().unwrap();
         let old_session = std::mem::replace(&mut *session_guard, extension_session.clone());
@@ -2070,8 +2073,11 @@ fn build_tools(
     if !args.no_skills {
         all.push((
             "skill",
-            HarnessTool::new(crate::skill_tool::create_skill_tool(Arc::clone(skill_cell)))
-                .with_replay(ToolReplay::Safe),
+            HarnessTool::new(crate::skill_tool::create_skill_tool(
+                Arc::clone(skill_cell),
+                Arc::clone(ctx.env()),
+            ))
+            .with_replay(ToolReplay::Safe),
         ));
     }
 

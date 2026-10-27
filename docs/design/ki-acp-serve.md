@@ -378,7 +378,9 @@ session/new / EOF 全通，应答见 §7 表）。Zed 真机手测仍待人工�
 - 事件 sink 已按会话隔离（2026-10-27）：每次 `session::build` 把
   `install_compiled_event_sink` 返回的 sink 挂到该会话的 `RegistrySnapshot`，`translate`
   的派发点优先走快照；进程级槽位只作无快照路径的 fallback。因此 ACP 同进程多会话的
-  extension 事件不再串话。仍属进程级共享的残余是 `extensions::COMPILED_CAPS`
+  派发用各自会话的 caps，不再 last-writer-wins——注意隔离的是「用哪份 caps 派发」，不是
+  「哪个 guest 收到事件」：wasm host 实例仍进程级共享（`extension-abi.md` §6.50）。
+  仍属进程级共享的残余是 `extensions::COMPILED_CAPS`
   （工具/命令/probe/prompt transform 的能力集，last-writer-wins）及第三方插件在调用时
   读取进程 cwd 的既有边界，如实保留在 `kiqi-acp/src/sessions.rs`。内置工具的显式 cwd、ACP
   run/cancel、标题与上下文不经过这些全局槽。
