@@ -690,8 +690,6 @@ pub fn print_help() {
                                 (see `ki auth --help`)
   configure [list]               Add, edit, or remove providers and models in
                                 ~/.ki/agent/models.json (see `ki configure --help`)
-  events path|tail               Inspect the extension event journal (needs
-                                KI_EVENT_LOG=1; see `ki events --help`)
   insmod <path.wasm>             Install a wasm extension (capabilities and policy
                                 ride the grants; `--build <guest-crate-dir>`
                                 compiles one first; see `ki extension --help`)

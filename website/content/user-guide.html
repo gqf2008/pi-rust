@@ -9,7 +9,7 @@ cargo install --path crates/kiqi-cli --force
 ki --version
 ki --help
 </code></pre>
-<p><code>cargo install</code> 安装的是可执行文件；它不等同于 <code>ki install</code>。后者用于安装由 <code>kiqi-extension-sdk</code> 构建的 Rust 动态库扩展。</p>
+<p><code>cargo install</code> 安装的是可执行文件，与扩展安装无关。扩展一律是 wasm 组件，用 <code>ki insmod</code> 安装（cdylib 扩展通道已退役）。</p>
 <h3 id="_1">从源码启动与构建</h3>
 <p>本项目是 Rust Cargo workspace，不是 Node/npm 项目，根目录没有 <code>package.json</code>。在仓库根目录执行：</p>
 <pre><code class="language-bash"># 直接启动 CLI
@@ -131,13 +131,10 @@ ANTHROPIC_AUTH_TOKEN=token
 </code></pre>
 <p>子命令：</p>
 <pre><code class="language-text">ki auth login|check|logout
-ki events path|tail    检查扩展事件日志（需 KI_EVENT_LOG=1）
-ki install &lt;crate&gt;
-ki uninstall &lt;crate&gt;
 ki update                 # 更新 ki CLI 自身
-ki dev [options]          # 开发 Rust 扩展：编译、watch、热重载
-ki dev-local [options]    # 只调试当前 Rust 扩展（隔离模式）
-ki package link|list|unlink # 管理项目本地 Rust 扩展包
+ki insmod &lt;path.wasm&gt;     安装 wasm 扩展（授权走 grants；--build 先编译）
+ki rmmod &lt;id&gt;             卸载 wasm 扩展
+ki extension list|show|grant|revoke|rename   管理扩展
 </code></pre>
 <h3 id="_4">启动资源清单</h3>
 <p>启动 TUI 时，<code>Context</code> 会列出实际加载成功的系统提示词和项目指令文件路径，
@@ -213,30 +210,9 @@ ki --project-only
 <pre><code class="language-bash">KI_CODING_AGENT_DIR=/work/kiqi-agent ki
 </code></pre>
 <p>会话默认保存到 agent 配置目录下的 sessions；<code>--no-session</code> 可使用临时会话。</p>
-<h2 id="6-rust">6. Rust 插件</h2>
-<p>Rust 原生插件是 <code>cdylib</code>，只依赖 <code>kiqi-extension-sdk</code>，由 <code>kiqi-extensions</code> 动态加载：</p>
-<pre><code class="language-bash">cargo build -p extension-stub
-ki --extensions-dir target/debug -p 'echo &quot;hi&quot;'
-</code></pre>
-<p>本仓库的 crate 全部 <code>publish = false</code>，crates.io 上没有可解析的同名包：<code>ki install &lt;name&gt;</code>（不带 <code>--path</code>）必然失败，扩展一律是 wasm 组件，用 <code>ki insmod --build extensions/wasm/kiqi-&lt;name&gt;</code> 安装，可用清单见 <code>website/data/packages.json</code>。</p>
-<p>本地开发：</p>
-<pre><code class="language-bash">ki install my-extension --path ../my-kiqi-extension --force
-</code></pre>
-<p>开发扩展项目时使用 watch 模式：</p>
-<pre><code class="language-bash">cd ../my-kiqi-extension
-ki dev
-# 多扩展 workspace：ki dev --package my-extension
-# 只调试当前扩展：ki dev-local（隔离模式，不加载全局扩展）
-</code></pre>
-<p><code>ki dev</code> 会自动识别 Cargo <code>cdylib</code>、首次编译并从 <code>.ki/extensions/.dev</code> 加载版本化产物。源码变化会触发重新编译和热重载；手工执行 <code>/reload</code> 也会先重新编译。编译失败时继续保留当前已经加载的版本。</p>
-<p>如果希望把开发好的扩展固定到某个项目，可使用项目包命令：</p>
-<pre><code class="language-bash">ki package link --path ../my-extension --package my-extension
-ki package list
-# 之后在该项目目录直接运行 ki 即可加载
-ki package unlink my-extension
-</code></pre>
-<p>项目包位于 <code>.ki/packages/&lt;name&gt;/</code>，是受信任的本机 Rust 动态库；它不是 npm/Node Pi package。全局安装仍使用 <code>ki install</code>。完整模板和边界规则见在线扩展作者指南：<a href="https://ki.laofu.online/extension-authoring.md">https://ki.laofu.online/extension-authoring.md</a><code>，调试技巧见</code>docs<code>的</code>debugging` 主题。</p>
-<p>安装后的动态库位于 <code>~/.ki/agent/extensions</code>（或 <code>KI_CODING_AGENT_DIR</code> 指定的目录），下次启动 ki 时加载。插件通过稳定 ABI 注册工具、Provider、事件处理器和资源处理器；不要直接依赖 <code>kiqi-cli</code> 的私有模块。</p>
+<h2 id="6-wasm">6. wasm 扩展</h2>
+<p>扩展一律是 wasm 组件，实现 <code>extensions/kiqi-extension.wit</code> 的 <code>kiqi:extension@0.9.0</code> 契约：
+<p>本仓库的 crate 全部 <code>publish = false</code>。扩展一律是 wasm 组件，用 <code>ki insmod --build extensions/wasm/kiqi-&lt;name&gt;</code> 安装，可用清单见 <code>website/data/packages.json</code>。</p>
 <h2 id="7-sdk">7. SDK 集成</h2>
 <p>只需要嵌入 Agent 时，依赖 <code>kiqi-agent</code> 和 <code>kiqi-ai</code>；需要内置工具时再加入 <code>kiqi-tools</code>；需要会话、压缩、skills 和上下文文件时加入 <code>kiqi-harness</code>。</p>
 <pre><code class="language-rust">use kiqi_agent::{Agent, AgentEvent};
@@ -260,7 +236,7 @@ while let Some(event) = events.recv().await {
 <h3 id="_7">找不到模型或接口报错</h3>
 <p>运行 <code>ki auth check</code>，确认 provider、<code>models.json</code>、环境变量和 <code>baseUrl</code>。使用 <code>--provider</code> 和完整的 <code>provider/model</code> 避免同名模型歧义。接口错误会保留 provider 返回的诊断文本；先检查 endpoint、认证头和模型 ID。</p>
 <h3 id="_8">扩展加载失败</h3>
-<p>确认 Rust 插件是 <code>cdylib</code> 并与当前平台匹配；临时使用 <code>--extensions-dir</code> 指向生成目录。加载失败时保留宿主输出的完整错误信息，检查扩展是否声明了宿主未提供的能力。</p>
+<p>扩展加载失败时保留宿主输出的完整错误信息；能力未生效先检查 <code>grants.json</code>（缺失 = 全部拒绝），用 <code>ki extension show &lt;id&gt;</code> 查看声明与授权。</p>
 <h3 id="_9">扩展事件处理器没触发或启动被中止</h3>
 <pre><code class="language-bash">export KI_EVENT_LOG=1
 ki            # 记录所有扩展事件处理器调用
@@ -283,7 +259,7 @@ cargo test --workspace
 </code></pre>
 <p>发布 crate 时按依赖顺序：</p>
 <pre><code class="language-text">kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness →
-kiqi-extension-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
+kiqi-host → kiqi-cli
 </code></pre>
 <p>发布前更新版本号和 <code>docs/release-vX.Y.Z.md</code>，确认 README、官网 <code>website/data/docs.json</code> 和本手册中的命令一致。官网是静态站点，文档文件提交到仓库后仍需按项目部署流程重新部署。</p>
 <h2 id="10">10. 文档查询入口</h2>
@@ -291,7 +267,7 @@ kiqi-extension-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
 <li>在线文档：<a href="https://ki.laofu.online/docs.html">https://ki.laofu.online/docs.html</a></li>
 <li>源码仓库：<a href="https://github.com/gqf2008/pi-rust">https://github.com/gqf2008/pi-rust</a></li>
 <li>
-<p>Rust API：<a href="https://docs.rs/kiqi-agent">https://docs.rs/kiqi-agent</a>、<a href="https://docs.rs/kiqi-extension-sdk">https://docs.rs/kiqi-extension-sdk</a></p>
+<p>Rust API：crates 均为 <code>publish = false</code>，无 docs.rs 页面；API 以仓库内源码与 crate README 为准</p>
 </li>
 <li>
 <p>Package 与扩展作者指南：<a href="https://ki.laofu.online/extension-authoring.md">https://ki.laofu.online/extension-authoring.md</a></p>

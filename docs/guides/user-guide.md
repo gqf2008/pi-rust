@@ -17,7 +17,7 @@ ki --version
 ki --help
 ```
 
-`cargo install` 安装的是可执行文件；它不等同于 `ki install`。后者用于安装由 `kiqi-extension-sdk` 构建的 Rust 动态库扩展。
+`cargo install` 安装的是可执行文件，与扩展安装无关。扩展一律是 wasm 组件，用 `ki insmod` 安装（2026-10-26 起 cdylib 扩展通道已退役，`ki install`/`ki dev`/`ki package` 已删除）。
 
 ### 从源码启动与构建
 
@@ -183,13 +183,12 @@ ANTHROPIC_AUTH_TOKEN=token
 
 ```text
 ki auth login|check|logout
-ki events path|tail    检查扩展事件日志（需 KI_EVENT_LOG=1）
-ki install <crate>
-ki uninstall <crate>
 ki update                 # 更新 ki CLI 自身
-ki dev [options]          # 开发 Rust 扩展：编译、watch、热重载
-ki dev-local [options]    # 只调试当前 Rust 扩展（隔离模式）
-ki package link|list|unlink # 管理项目本地 Rust 扩展包
+ki insmod <path.wasm>     # 安装 wasm 扩展（授权走 grants；--build <guest-crate-dir>
+                          # 先编译；见 `ki extension --help`）
+ki rmmod <id>             # 卸载 wasm 扩展
+ki extension list|show|grant|revoke|rename
+                          # 管理扩展：查看/授权/改名（grants 与存储凭据随目录走）
 ```
 
 ### 启动资源清单
@@ -428,46 +427,35 @@ KI_AGENTS_DIR=/work/shared-agents ki
 补跑；同一命令不会重叠执行。诊断（配置错误、注入失败、超时、并发跳过）写入
 `<agent_dir>/logs/ki.log`。
 
-## 6. Rust 插件
+## 6. wasm 扩展
 
-Rust 原生插件是 `cdylib`，只依赖 `kiqi-extension-sdk`，由 `kiqi-extensions` 动态加载：
+扩展一律是 wasm 组件（`wasm32-wasip2`），实现 `extensions/kiqi-extension.wit` 的
+`kiqi:extension@0.9.0` 契约，由宿主用 wasmtime 沙箱加载；能力按
+`$KI_AGENT_DIR/extensions/<id>/grants.json` 授予，缺失 = 全部拒绝。cdylib 通道
+（`kiqi-extension-sdk` / `ki install` / `ki dev` / `ki package` / `libloading`）
+已于 2026-10-26 退役。
 
-```bash
-cargo build -p extension-stub
-ki --extensions-dir target/debug -p 'echo "hi"'
-```
-
-本仓库的 crate 全部 `publish = false`，crates.io 上没有可解析的同名包：`ki install <name>`（不带 `--path`）必然失败，第三方扩展要从源码路径安装。一方能力不走 cdylib 通道——它们是 wasm 组件，用 `ki insmod --build extensions/wasm/kiqi-<name>` 安装，可用清单见 `website/data/packages.json`。
-
-本地开发：
+安装与卸载：
 
 ```bash
-ki install my-extension --path ../my-kiqi-extension --force
+ki insmod --build extensions/wasm/kiqi-todo   # 编译并安装（id 取自包名）
+ki rmmod kiqi-todo                            # 卸载（目录移入 .removed-*）
 ```
 
-开发扩展项目时使用 watch 模式：
+查看与授权：
 
 ```bash
-cd ../my-kiqi-extension
-ki dev
-# 多扩展 workspace：ki dev --package my-extension
-# 只调试当前扩展：ki dev-local（隔离模式，不加载全局扩展）
+ki extension list                # 已安装扩展与已授权能力
+ki extension show kiqi-todo      # 单个扩展的声明与 grants
+ki extension grant kiqi-todo fs --cwd project
+ki extension revoke kiqi-todo net-http
+ki extension rename old-id new-id   # 改名（grants 与存储凭据随迁）
 ```
 
-`ki dev` 会自动识别 Cargo `cdylib`、首次编译并从 `.ki/extensions/.dev` 加载版本化产物。源码变化会触发重新编译和热重载；手工执行 `/reload` 也会先重新编译。编译失败时继续保留当前已经加载的版本。
-
-如果希望把开发好的扩展固定到某个项目，可使用项目包命令：
-
-```bash
-ki package link --path ../my-extension --package my-extension
-ki package list
-# 之后在该项目目录直接运行 ki 即可加载
-ki package unlink my-extension
-```
-
-项目包位于 `.ki/packages/<name>/`，是受信任的本机 Rust 动态库；它不是 npm/Node Pi package。全局安装仍使用 `ki install`。完整模板和边界规则见在线扩展作者指南：<https://ki.laofu.online/extension-authoring.md>`，调试技巧见 `docs` 的 `debugging` 主题。
-
-安装后的动态库位于 `~/.ki/agent/extensions`（或 `KI_CODING_AGENT_DIR` 指定的目录），下次启动 ki 时加载。插件通过稳定 ABI 注册工具、Provider、事件处理器和资源处理器；不要直接依赖 `kiqi-cli` 的私有模块。
+模型侧是渐进式加载：系统提示只带 name/description/location，正文由模型按需通过
+`skill` 工具或 `read` 加载；`disableModelInvocation: true` 的扩展只允许用户显式
+触发。事件是观察性的（`Continue`/`Claimed`/`Patch`），每个会话使用自己的派发
+caps。调试与契约细节见 `docs` 的 `debugging` 与 `extension-abi` 主题。
 
 ## 7. SDK 集成
 
@@ -499,21 +487,12 @@ while let Some(event) = events.recv().await {
 
 运行 `ki auth check`，确认 provider、`models.json`、环境变量和 `baseUrl`。使用 `--provider` 和完整的 `provider/model` 避免同名模型歧义。接口错误会保留 provider 返回的诊断文本；先检查 endpoint、认证头和模型 ID。
 
-### 扩展加载失败
+### 扩展未加载或能力未生效
 
-确认 Rust 插件是 `cdylib` 并与当前平台匹配；临时使用 `--extensions-dir` 指向生成目录。加载失败时保留宿主输出的完整错误信息，检查扩展是否声明了宿主未提供的能力。
-
-### 扩展事件处理器没触发或启动被中止
-
-```bash
-export KI_EVENT_LOG=1
-ki            # 记录所有扩展事件处理器调用
-ki events tail   # 跟踪日志；看 result 是 Continue 还是 Error/Abort/Panic/Timeout
-```
-
-日志默认在 `~/.ki/logs/events.jsonl`（可用 `KI_EVENT_LOG_PATH` 覆盖）。如果
-`BeforeTuiStart` 阶段有扩展返回 veto（`EVENT_HANDLER_ABORT`），CLI 以退出码 `3`
-中止启动并打印原因。
+扩展一律是 wasm 组件：`ki insmod --build extensions/wasm/<crate> --id <id>` 安装，
+能力由 `$KI_AGENT_DIR/extensions/<id>/grants.json` 控制（缺失 = 全部拒绝）。用
+`ki extension show <id>` 查看声明与授权；`/reload` 后用 `ki --debug-system-prompt`
+确认资源与计数。事件日志通道已于 2026-10-27 随 C-ABI 通道退役删除。
 
 ### 资源没有出现在欢迎页
 
@@ -535,12 +514,8 @@ cargo check --workspace
 cargo test --workspace
 ```
 
-发布 crate 时按依赖顺序：
-
-```text
-kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness →
-kiqi-extension-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
-```
+全部 crate 均为 `publish = false`，不发布到 crates.io；安装走本仓库的
+GitHub Releases + `install.sh`。
 
 发布前更新版本号和 `docs/release-vX.Y.Z.md`，确认 README、官网 `website/data/docs.json` 和本手册中的命令一致。官网是静态站点，文档文件提交到仓库后仍需按项目部署流程重新部署。
 
@@ -548,7 +523,7 @@ kiqi-extension-sdk → kiqi-extensions → kiqi-tui → kiqi-cli
 
 - 在线文档：<https://ki.laofu.online/docs.html>
 - 源码仓库：<https://github.com/gqf2008/pi-rust>
-- Rust API：<https://docs.rs/kiqi-agent>、<https://docs.rs/kiqi-extension-sdk>
+- Rust API：crates 均为 `publish = false`，无 docs.rs 页面；API 文档以仓库内源码与 crate README 为准
 
 - Package 与扩展作者指南：<https://ki.laofu.online/extension-authoring.md>
 - 远程模式：<docs/remote/user-guide.md>

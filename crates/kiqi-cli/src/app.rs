@@ -129,7 +129,6 @@ async fn run_inner() -> i32 {
             return crate::acp::run(&argv[1..]).await;
         }
         Some("auth") => return crate::auth::run(&argv[1..]).await,
-        Some("events") => return crate::events::run(&argv[1..]).await,
         Some("configure") => return crate::configure::run(&argv[1..]).await,
         Some("update") => return crate::updates::run_self_update(&argv[1..]),
         Some("extension") => return crate::extension_cli::run(&argv[1..]),

@@ -1084,7 +1084,6 @@ pub use compiled::{
     DispatchMode,
 };
 pub use editor_text::{EditorTextEdit, EditorTextMailbox, EditorTextMode};
-pub use event_log::{event_log_path, log_handler_invocation, EventLogger};
 pub use loader::ExtensionSession;
 pub use provider_hooks::{before_agent_start_input, ExtensionProviderHooks};
 pub use registry::{assert_active, RegistrySnapshot};
@@ -1112,7 +1111,6 @@ pub use stdio::StdioLifecycle;
 mod actions;
 mod compiled;
 mod editor_text;
-mod event_log;
 mod loader;
 mod provider_hooks;
 mod registry;
