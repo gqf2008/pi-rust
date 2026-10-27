@@ -65,6 +65,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   never saw it; it is now delivered on every changed draft — an intentional
   behaviour change with one guest observe-call per keystroke.
 
+- **Skill bodies load on demand.** Discovery now parses frontmatter only
+  (`Skill::content` is empty for discovered skills), so a large skills directory
+  costs no body reads at startup or `/reload`. `/skill`, `AgentLane::skill` and
+  the `skill` tool share `kiqi_harness::skills::load_skill_body`; an unreadable
+  file is reported as an error instead of silently loading an empty or stale
+  body. Notes in `docs/design/extension-abi.md` §6.53.
+
 ### Removed
 
 - **The C-ABI registration machine is gone; the event bus is pure serde

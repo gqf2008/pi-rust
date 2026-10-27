@@ -1553,3 +1553,19 @@ caps 调用”，不保证“哪个 guest 收到事件”。第三方插件在�
 **验证**：`cargo fmt --all -- --check`；`cargo check --workspace --all-targets`
 （±`--all-features`）；lean；`cargo test -p kiqi-cli --lib`；
 `cargo test -p kiqi-host --features wasm --lib`；ACP e2e。
+
+### 6.53 技能正文惰性加载（2026-10-27）
+
+发现阶段只解析 `SKILL.md` 的 YAML frontmatter（`name`/`description`/路径/
+`disableModelInvocation`）；**正文不再在启动时读入**（`Skill::content` 对已发现技能为空），
+上千技能也只是扫描与解析 frontmatter。
+
+- 共享加载器：`kiqi_harness::skills::load_skill_body(&Skill)`（读文件 + 剥 frontmatter）；
+  `format_skill_invocation` 优先走它、回退内存 body；`format_skill_invocation_with_body`
+  给已经读到正文的调用方（`/skill`、`skill` 工具）。
+- `AgentLane::skill()` 同步走同一加载；`/skill` 与 `skill` 工具各自用会话 `ExecutionEnv`
+  读文件。
+- **失败即错误**：文件不可读时 `/skill` 报错、`skill` 工具返回 `could not read skill …`，
+  不再静默注入空正文或陈旧正文。
+- 测试：loader 断言 `content` 为空（正文按需加载）；`skill` 工具断言缺文件是错误；
+  `resource_dirs` 的共享技能测试改为断言「发现不读正文」。

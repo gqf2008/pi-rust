@@ -54,7 +54,7 @@ async fn loads_skill_md_with_frontmatter() {
     let s = &result.skills[0];
     assert_eq!(s.name, "example");
     assert_eq!(s.description, "Example skill");
-    assert_eq!(s.content, "Use this skill.");
+    assert_eq!(s.content, "", "discovery reads frontmatter only");
     assert_eq!(s.disable_model_invocation, Some(true));
     // filePath is the resolved absolute path (cwd "/").
     assert!(s.file_path.ends_with(".agents/skills/example/SKILL.md"));
@@ -82,7 +82,7 @@ async fn loads_skill_with_block_sequence_frontmatter() {
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     assert_eq!(result.skills.len(), 1);
     assert_eq!(result.skills[0].name, "flowchart");
-    assert_eq!(result.skills[0].content, "Use this skill.");
+    assert_eq!(result.skills[0].content, "");
 }
 
 #[tokio::test]
@@ -136,7 +136,7 @@ async fn loads_direct_markdown_children_only_from_root() {
     assert_eq!(result.skills.len(), 1, "{:?}", result.skills);
     // name = parent dir basename ("skills"); frontmatter has no `name`.
     assert_eq!(result.skills[0].name, "skills");
-    assert_eq!(result.skills[0].content, "Root content");
+    assert_eq!(result.skills[0].content, "");
 }
 
 #[tokio::test]
@@ -173,7 +173,6 @@ async fn loads_individual_skill_md_file_path() {
     let s = &result.skills[0];
     assert_eq!(s.name, "dynamic", "frontmatter name wins");
     assert_eq!(s.description, "A discovered skill");
-    assert_eq!(s.content, "Dynamic content.");
     assert!(s.file_path.ends_with("dyn/skills/dynamic.md"));
 }
 

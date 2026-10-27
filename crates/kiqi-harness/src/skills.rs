@@ -87,10 +87,34 @@ pub struct LoadSkillsResult {
 /// block is **NOT** XML-escaped — the skill `content` is embedded verbatim so
 /// the model reads the full instructions.
 pub fn format_skill_invocation(skill: &Skill, additional_instructions: Option<&str>) -> String {
+    // Bodies are lazy since discovery stopped reading them: prefer the file (so
+    // an edit is current) and fall back to an in-memory body when there is one.
+    let body = load_skill_body(skill).unwrap_or_else(|_| skill.content.clone());
+    format_skill_invocation_with_body(skill, &body, additional_instructions)
+}
+
+/// Read a skill's body from disk with its YAML frontmatter stripped.
+///
+/// This is the one loader the invocation paths share (`/skill`,
+/// `AgentLane::skill`, and the `skill` tool's fallback). Discovery itself reads
+/// frontmatter only — see [`Skill::content`](crate::types::Skill).
+pub fn load_skill_body(skill: &Skill) -> Result<String, String> {
+    let raw = std::fs::read_to_string(&skill.file_path)
+        .map_err(|error| format!("read {}: {error}", skill.file_path))?;
+    Ok(skill_body(&raw))
+}
+
+/// [`format_skill_invocation`] with the body already in hand (the callers that
+/// read it fresh already have it).
+pub fn format_skill_invocation_with_body(
+    skill: &Skill,
+    body: &str,
+    additional_instructions: Option<&str>,
+) -> String {
     let dirname = dirname_env_path(&skill.file_path);
     let skill_block = format!(
         "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {dirname}.\n\n{}\n</skill>",
-        skill.name, skill.file_path, skill.content
+        skill.name, skill.file_path, body
     );
     match additional_instructions {
         Some(extra) if !extra.is_empty() => format!("{skill_block}\n\n{extra}"),
@@ -521,7 +545,11 @@ async fn load_skill_from_file(
         skill: Some(Skill {
             name,
             description,
-            content: body,
+            // Discovery reads frontmatter only: the body is loaded on demand
+            // (`load_skill_body`) so a directory with hundreds of skills does
+            // not read every SKILL.md into memory at startup. `content` stays
+            // non-empty only for values built in memory (tests, inline uses).
+            content: String::new(),
             file_path: file_path.to_string(),
             disable_model_invocation,
         }),

@@ -75,7 +75,7 @@ use crate::session::types::{
     SessionTree, StepAttemptRecord, StepKind, ToolReplay, ToolStartedRecord, UsageCause,
     UsageRecord, WriteDeferredRecord,
 };
-use crate::skills::format_skill_invocation;
+use crate::skills::{format_skill_invocation_with_body, load_skill_body};
 use crate::system_prompt::compose_system_prompt;
 use crate::types::{
     AgentHarnessOptions, AgentHarnessResources, AgentHarnessStreamOptions, CompactionSettings,
@@ -4261,7 +4261,18 @@ impl AgentLane for AgentHarness {
             let skill = skills.iter().find(|s| s.name == name).ok_or_else(|| {
                 HarnessError::unknown_skill(name, format!("No skill named '{name}'"))
             })?;
-            let invocation = format_skill_invocation(skill, additional_instructions);
+            // Bodies are lazy since discovery: load it here, and fail loudly if
+            // the file is gone — an empty invocation block would silently tell
+            // the model "this skill has no instructions".
+            let body = load_skill_body(skill).or_else(|error| {
+                if skill.content.is_empty() {
+                    Err(HarnessError::Io { message: error })
+                } else {
+                    Ok(skill.content.clone())
+                }
+            })?;
+            let invocation =
+                format_skill_invocation_with_body(skill, &body, additional_instructions);
             AgentMessage::User(UserMessage::new(invocation, now_ms()))
         };
         self.run_core(vec![message]).await

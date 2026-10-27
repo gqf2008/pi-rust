@@ -34,6 +34,10 @@ use crate::session::Session;
 pub struct Skill {
     pub name: String,
     pub description: String,
+    /// The skill body. **Empty for discovered skills** (2026-10-27): discovery
+    /// reads frontmatter only, and every invocation path loads the body on
+    /// demand through [`crate::skills::load_skill_body`]. In-memory values
+    /// (tests, inline uses) may still carry a body.
     pub content: String,
     /// Absolute path to the skill file. Used for model-visible location and
     /// resolving relative references in invocations.

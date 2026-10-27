@@ -155,22 +155,24 @@ impl AgentTool for SkillTool {
             )));
         }
 
-        // Fresh read through the session env: the listing in the prompt may
-        // predate an edit. A failed re-read falls back to the discovery-time
-        // body, but says so — silently serving a stale body would contradict
-        // the freshness contract above. (`current` is moved, not cloned: the
-        // catalog body is only copied on the rare fallback path.)
-        let mut current = skill;
-        let (body, stale) = match self
+        // Bodies are not cached since discovery went lazy, so this read is the
+        // load. A failure is an error — there is no stale body to fall back to.
+        let current = skill;
+        let body = match self
             .env
             .read_text_file(&current.file_path, Some(&signal))
             .await
         {
-            Ok(raw) => (kiqi_harness::skills::skill_body(&raw), false),
+            Ok(raw) => kiqi_harness::skills::skill_body(&raw),
             Err(_) if signal.is_cancelled() => {
                 return Err(AgentError::Tool("skill load cancelled".into()))
             }
-            Err(_) => (current.content.clone(), true),
+            Err(error) => {
+                return Err(AgentError::Tool(format!(
+                    "could not read skill `{}` at {}: {error}",
+                    current.name, current.file_path
+                )))
+            }
         };
         let mut body = body.trim().to_string();
         if body.chars().count() > MAX_BODY_CHARS {
@@ -181,14 +183,8 @@ impl AgentTool for SkillTool {
         // Build the block through the harness helper so the model sees the same
         // `<skill name location>` contract whether it called this tool or the
         // user typed `/skill`; only the trailing directory listing is ours.
-        current.content = body;
-        let mut out = kiqi_harness::skills::format_skill_invocation(&current, None);
-        if stale {
-            out.push_str(
-                "\n\n(Note: the skill file could not be re-read; this is the version \
-                 discovered when the session started.)",
-            );
-        }
+        let mut out =
+            kiqi_harness::skills::format_skill_invocation_with_body(&current, &body, None);
         let listing = self.directory_listing(&current.file_path, &signal).await;
         if !listing.is_empty() {
             out.push_str("\n\n");
@@ -299,7 +295,7 @@ mod tests {
     /// stripped (only the body belongs in the `<skill>` block), and a failed
     /// re-read falls back to the cached body with a visible note.
     #[tokio::test]
-    async fn a_fresh_read_strips_frontmatter_and_a_failure_says_so() {
+    async fn a_fresh_read_strips_frontmatter_and_a_missing_file_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let skill_path = dir.path().join("SKILL.md");
         std::fs::write(
@@ -327,8 +323,11 @@ mod tests {
             "frontmatter must not reach the model: {text}"
         );
 
+        // Bodies are lazy since discovery, so a disappeared file is an error:
+        // there is no cached body to fall back to (and serving one silently
+        // would violate the freshness contract).
         std::fs::remove_file(&skill_path).unwrap();
-        let stale = tool
+        let missing = tool
             .execute(
                 "t",
                 serde_json::json!({ "name": "demo" }),
@@ -336,10 +335,9 @@ mod tests {
                 Arc::new(|_| {}),
             )
             .await
-            .unwrap();
-        let text = format!("{stale:?}");
-        assert!(text.contains("cached body"), "{text}");
-        assert!(text.contains("could not be re-read"), "{text}");
+            .unwrap_err();
+        let text = missing.to_string();
+        assert!(text.contains("could not read skill `demo`"), "{text}");
     }
 
     #[tokio::test]

@@ -596,8 +596,12 @@ mod tests {
             !listing.contains("SECRET_BODY_MARKER"),
             "the skill body must NOT enter the system prompt (progressive loading): {listing}"
         );
-        // The body is still available for the on-demand path.
-        assert!(result.skills[0].content.contains("SECRET_BODY_MARKER"));
+        // Bodies are lazy since 2026-10-27: discovery reads frontmatter only,
+        // and every invocation path loads the body on demand.
+        assert!(
+            result.skills[0].content.is_empty(),
+            "discovery must not read the body into memory"
+        );
     }
 
     /// Invocation must resolve relative references against the skill's own

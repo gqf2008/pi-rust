@@ -2978,14 +2978,28 @@ pub async fn interactive_tui(
                         continue;
                     }
                 };
-                // Re-read the body so an edit is current without a restart —
-                // the same contract as the `skill` tool. The discovered body is
-                // the fallback when the file cannot be read.
-                let mut current = skill;
-                if let Ok(raw) = tokio::fs::read_to_string(&current.file_path).await {
-                    current.content = kiqi_harness::skills::skill_body(&raw);
-                }
-                let prompt = kiqi_harness::skills::format_skill_invocation(&current, instructions);
+                // Bodies are lazy since discovery: this read is the load. A
+                // failed read is reported, never turned into an empty skill.
+                let current = skill;
+                let body = match tokio::fs::read_to_string(&current.file_path).await {
+                    Ok(raw) => kiqi_harness::skills::skill_body(&raw),
+                    Err(error) => {
+                        add_error_message(
+                            &chat_container,
+                            &format!(
+                                "Could not read skill `{}` at {}: {error}",
+                                current.name, current.file_path
+                            ),
+                        );
+                        tui.request_render(false);
+                        continue;
+                    }
+                };
+                let prompt = kiqi_harness::skills::format_skill_invocation_with_body(
+                    &current,
+                    &body,
+                    instructions,
+                );
                 if !state.try_start_working() {
                     let message = user_message_with_images(&prompt, Vec::new());
                     if let Err(error) = lane.steer(message).await {
