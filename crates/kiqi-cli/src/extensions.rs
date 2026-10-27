@@ -1323,26 +1323,6 @@ impl ExtensionHost {
 /// Run the compiled extensions' `before-tool-call` gate with the
 /// process-global fallback caps.
 ///
-/// A sessionful caller must use [`probe_tool_call_in_session`] (the production
-/// path); this variant exists for sessionless call sites and tests.
-/// `Some(Block)` when an extension vetoes, `Some(Replace)` when the last extension to
-/// opine rewrote the arguments, `None` when everyone declined. Local and
-/// synchronous — no extension is asked unless it declared the point — so it runs
-/// *before* the native event, whose dialog would otherwise open first.
-pub fn probe_tool_call(
-    tool_call_id: &str,
-    tool_name: &str,
-    args: &serde_json::Value,
-) -> Option<kiqi_host::Verdict> {
-    probe_tool_call_with(
-        &compiled_extension_hosts(),
-        &compiled_caps(),
-        tool_call_id,
-        tool_name,
-        args,
-    )
-}
-
 /// Run the gate with the **current session's** capabilities.
 ///
 /// This is the production entry point. It resolves the bundle from the

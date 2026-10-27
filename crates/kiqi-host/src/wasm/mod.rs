@@ -2394,7 +2394,7 @@ struct InstanceRecipe {
 
 /// The declarative surfaces an extension publishes, captured once per instance.
 ///
-/// `shortcut_hosts` runs on every key event and `probe_tool_call` on every
+/// `shortcut_hosts` runs on every key event and the tool-call probe on every
 /// tool call, so asking the guest each time would put a mutex and a wasm call
 /// on those hot paths. The cache makes the *first* call populate it; every
 /// later lookup is a clone out of memory. A trapping guest caches an empty
