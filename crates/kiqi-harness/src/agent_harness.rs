@@ -75,7 +75,7 @@ use crate::session::types::{
     SessionTree, StepAttemptRecord, StepKind, ToolReplay, ToolStartedRecord, UsageCause,
     UsageRecord, WriteDeferredRecord,
 };
-use crate::skills::{format_skill_invocation_with_body, load_skill_body};
+use crate::skills::format_skill_invocation;
 use crate::system_prompt::compose_system_prompt;
 use crate::types::{
     AgentHarnessOptions, AgentHarnessResources, AgentHarnessStreamOptions, CompactionSettings,
@@ -649,8 +649,28 @@ struct StartingGuard<'a> {
 }
 
 impl StartingGuard<'_> {
+    #[cfg(test)]
     fn new(harness: &AgentHarness) -> StartingGuard<'_> {
         let mut inner = harness.inner.lock().unwrap();
+        Self::new_with_inner(harness, &mut inner)
+    }
+
+    /// Arm a window only after applying the same closed/busy admission rules
+    /// as `acquire_run`. Fallible preparation performed while this guard is
+    /// alive therefore cannot preempt lifecycle errors or sit outside abort's
+    /// pre-registration latch.
+    fn try_new(harness: &AgentHarness) -> HarnessResult<StartingGuard<'_>> {
+        let mut inner = harness.inner.lock().unwrap();
+        if let Some(error) = run_admission_error(&inner, &harness.lane) {
+            return Err(error);
+        }
+        Ok(Self::new_with_inner(harness, &mut inner))
+    }
+
+    fn new_with_inner<'a>(
+        harness: &'a AgentHarness,
+        inner: &mut HarnessInner,
+    ) -> StartingGuard<'a> {
         let id = inner.next_window_id.wrapping_add(1);
         inner.next_window_id = id;
         inner.starting_window = Some(StartingWindow {
@@ -767,6 +787,25 @@ struct HarnessInner {
     steering_queue: SharedMessageQueue,
     follow_up_queue: SharedMessageQueue,
     next_run_queue: SharedMessageQueue,
+}
+
+/// Compute the admission error shared by checked starting windows and the
+/// actual run registration. Closed wins over busy, matching `acquire_run`.
+fn run_admission_error(inner: &HarnessInner, lane: &str) -> Option<HarnessError> {
+    if inner.closed {
+        return Some(HarnessError::closed());
+    }
+    inner.active_run.as_ref().map(|active| {
+        HarnessError::lane_busy(
+            lane.to_string(),
+            active.run_id.clone(),
+            active.kind,
+            format!(
+                "Lane {lane} already has an active {} operation",
+                active.kind.as_str()
+            ),
+        )
+    })
 }
 
 // ===========================================================================
@@ -1842,20 +1881,8 @@ impl AgentHarness {
         Arc<InterruptControl>,
     )> {
         let mut inner = self.inner.lock().unwrap();
-        if inner.closed {
-            return Err(HarnessError::closed());
-        }
-        if let Some(active) = &inner.active_run {
-            return Err(HarnessError::lane_busy(
-                self.lane.clone(),
-                active.run_id.clone(),
-                active.kind,
-                format!(
-                    "Lane {} already has an active {} operation",
-                    self.lane,
-                    active.kind.as_str()
-                ),
-            ));
+        if let Some(error) = run_admission_error(&inner, &self.lane) {
+            return Err(error);
         }
         // Consume the pre-registration phase owned by THIS call: only an
         // abort latched against this window pre-cancels the run, and only this
@@ -3188,7 +3215,17 @@ impl AgentHarness {
         // Arms the pre-registration window: until `acquire_run` registers the
         // run, `abort()` latches instead of being refused; an early exit
         // clears the latch (see [`StartingGuard`]).
-        let window = StartingGuard::new(self);
+        let window = StartingGuard::try_new(self)?;
+        self.run_core_with_window(prompts, window).await
+    }
+
+    /// Continue a run with a window that was armed before fallible prompt
+    /// preparation (notably skill-body loading).
+    async fn run_core_with_window(
+        &self,
+        prompts: Vec<AgentMessage>,
+        window: StartingGuard<'_>,
+    ) -> HarnessResult<RunResult> {
         let mut normalized = Vec::with_capacity(prompts.len());
         for prompt in prompts {
             normalized.push(normalize_user_images(prompt).await?);
@@ -3212,7 +3249,7 @@ impl AgentHarness {
                 tracing::warn!("context-length error detected, auto-compacting and retrying");
                 let _ = AgentHarness::compact(self, None).await?;
                 // 重置 starting guard 后重试
-                let retry_window = StartingGuard::new(self);
+                let retry_window = StartingGuard::try_new(self)?;
                 return self
                     .run_core_with_entry(normalized, false, retry_window)
                     .await;
@@ -3230,7 +3267,7 @@ impl AgentHarness {
         // The deferred-resume continuation owns a window too: an abort landing
         // between the resume call and its registration must latch, not be
         // refused as `no_active_run`.
-        let window = StartingGuard::new(self);
+        let window = StartingGuard::try_new(self)?;
         self.run_core_with_entry(Vec::new(), true, window).await
     }
 
@@ -3992,7 +4029,7 @@ impl AgentHarness {
     ) -> HarnessResult<CompactionResult> {
         // Owns a pre-registration window too: an abort landing between the
         // `/compact` call and its registration must latch, not be refused.
-        let window = StartingGuard::new(self);
+        let window = StartingGuard::try_new(self)?;
         let (run_id, signal, _idle, _interrupt) =
             self.acquire_run(OperationKind::Compaction, window.id())?;
         let _run_lease = ActiveRunLease { harness: self };
@@ -4252,30 +4289,32 @@ impl AgentLane for AgentHarness {
         name: &str,
         additional_instructions: Option<&str>,
     ) -> HarnessResult<RunResult> {
-        // Scope the `std::sync::MutexGuard` so it is provably dropped before the
-        // `.await` below (a !Send guard cannot cross an await point in a
-        // `Send` future).
-        let message = {
+        // Admit and arm the starting window before any fallible preparation:
+        // closed/busy errors keep their precedence, and an abort during the
+        // body read latches against this invocation instead of being missed.
+        let window = StartingGuard::try_new(self)?;
+        let skill = {
             let inner = self.inner.lock().unwrap();
             let skills: &[Skill] = inner.resources.skills.as_deref().unwrap_or(&[]);
-            let skill = skills.iter().find(|s| s.name == name).ok_or_else(|| {
-                HarnessError::unknown_skill(name, format!("No skill named '{name}'"))
-            })?;
-            // Bodies are lazy since discovery: load it here, and fail loudly if
-            // the file is gone — an empty invocation block would silently tell
-            // the model "this skill has no instructions".
-            let body = load_skill_body(skill).or_else(|error| {
-                if skill.content.is_empty() {
-                    Err(HarnessError::Io { message: error })
-                } else {
-                    Ok(skill.content.clone())
-                }
-            })?;
-            let invocation =
-                format_skill_invocation_with_body(skill, &body, additional_instructions);
-            AgentMessage::User(UserMessage::new(invocation, now_ms()))
+            skills
+                .iter()
+                .find(|skill| skill.name == name)
+                .cloned()
+                .ok_or_else(|| {
+                    HarnessError::unknown_skill(name, format!("No skill named '{name}'"))
+                })?
         };
-        self.run_core(vec![message]).await
+        // The mutex is released before this potentially slow host-filesystem
+        // read; spawn_blocking also keeps it off the async executor.
+        let additional_instructions = additional_instructions.map(str::to_owned);
+        let invocation = tokio::task::spawn_blocking(move || {
+            format_skill_invocation(&skill, additional_instructions.as_deref())
+        })
+        .await
+        .map_err(|error| HarnessError::agent(format!("Skill loading failed: {error}")))?
+        .map_err(|message| HarnessError::Io { message })?;
+        let message = AgentMessage::User(UserMessage::new(invocation, now_ms()));
+        self.run_core_with_window(vec![message], window).await
     }
 
     async fn prompt_from_template(&self, name: &str, args: &[String]) -> HarnessResult<RunResult> {
@@ -5715,6 +5754,49 @@ mod starting_window_tests {
         }
         harness.release_run();
         drop(guard); // no-op: the window already closed in acquire_run
+    }
+
+    fn opts_with_unreadable_skill() -> AgentHarnessOptions {
+        let mut options = opts();
+        options.resources.skills = Some(vec![Skill {
+            name: "demo".into(),
+            description: "d".into(),
+            content: String::new(),
+            file_path: "/missing/SKILL.md".into(),
+            disable_model_invocation: None,
+        }]);
+        options
+    }
+
+    #[tokio::test]
+    async fn skill_closed_error_precedes_body_loading() {
+        let harness = AgentHarness::create(opts_with_unreadable_skill())
+            .await
+            .unwrap();
+        harness.close().await.unwrap();
+
+        let error = AgentLane::skill(&harness, "demo", None).await.unwrap_err();
+        assert!(
+            matches!(error, HarnessError::Closed { .. }),
+            "expected Closed before the missing-file error, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_busy_error_precedes_body_loading() {
+        let harness = AgentHarness::create(opts_with_unreadable_skill())
+            .await
+            .unwrap();
+        let guard = StartingGuard::new(&harness);
+        let _registered = harness.acquire_run(OperationKind::Run, guard.id()).unwrap();
+
+        let error = AgentLane::skill(&harness, "demo", None).await.unwrap_err();
+        assert!(
+            matches!(error, HarnessError::LaneBusy { .. }),
+            "expected LaneBusy before the missing-file error, got {error:?}"
+        );
+        harness.release_run();
+        drop(guard);
     }
 
     #[tokio::test]

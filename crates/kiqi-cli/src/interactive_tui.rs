@@ -2980,15 +2980,14 @@ pub async fn interactive_tui(
                 };
                 // Bodies are lazy since discovery: this read is the load. A
                 // failed read is reported, never turned into an empty skill.
-                let current = skill;
-                let body = match tokio::fs::read_to_string(&current.file_path).await {
+                let body = match tokio::fs::read_to_string(&skill.file_path).await {
                     Ok(raw) => kiqi_harness::skills::skill_body(&raw),
                     Err(error) => {
                         add_error_message(
                             &chat_container,
                             &format!(
                                 "Could not read skill `{}` at {}: {error}",
-                                current.name, current.file_path
+                                skill.name, skill.file_path
                             ),
                         );
                         tui.request_render(false);
@@ -2996,7 +2995,7 @@ pub async fn interactive_tui(
                     }
                 };
                 let prompt = kiqi_harness::skills::format_skill_invocation_with_body(
-                    &current,
+                    &skill,
                     &body,
                     instructions,
                 );

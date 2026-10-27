@@ -157,10 +157,9 @@ impl AgentTool for SkillTool {
 
         // Bodies are not cached since discovery went lazy, so this read is the
         // load. A failure is an error — there is no stale body to fall back to.
-        let current = skill;
         let body = match self
             .env
-            .read_text_file(&current.file_path, Some(&signal))
+            .read_text_file(&skill.file_path, Some(&signal))
             .await
         {
             Ok(raw) => kiqi_harness::skills::skill_body(&raw),
@@ -170,7 +169,7 @@ impl AgentTool for SkillTool {
             Err(error) => {
                 return Err(AgentError::Tool(format!(
                     "could not read skill `{}` at {}: {error}",
-                    current.name, current.file_path
+                    skill.name, skill.file_path
                 )))
             }
         };
@@ -183,9 +182,8 @@ impl AgentTool for SkillTool {
         // Build the block through the harness helper so the model sees the same
         // `<skill name location>` contract whether it called this tool or the
         // user typed `/skill`; only the trailing directory listing is ours.
-        let mut out =
-            kiqi_harness::skills::format_skill_invocation_with_body(&current, &body, None);
-        let listing = self.directory_listing(&current.file_path, &signal).await;
+        let mut out = kiqi_harness::skills::format_skill_invocation_with_body(&skill, &body, None);
+        let listing = self.directory_listing(&skill.file_path, &signal).await;
         if !listing.is_empty() {
             out.push_str("\n\n");
             out.push_str(&listing);
@@ -252,7 +250,7 @@ mod tests {
         Skill {
             name: name.to_string(),
             description: "d".into(),
-            content: "cached body".into(),
+            content: String::new(),
             file_path: dir.join("SKILL.md").to_string_lossy().into_owned(),
             disable_model_invocation: disabled.then_some(true),
         }
@@ -291,9 +289,8 @@ mod tests {
         );
     }
 
-    /// The re-read returns the same body the loader parsed: frontmatter is
-    /// stripped (only the body belongs in the `<skill>` block), and a failed
-    /// re-read falls back to the cached body with a visible note.
+    /// The fresh read strips frontmatter (only the body belongs in the
+    /// `<skill>` block); a missing file is an error because no body is cached.
     #[tokio::test]
     async fn a_fresh_read_strips_frontmatter_and_a_missing_file_is_an_error() {
         let dir = tempfile::tempdir().unwrap();

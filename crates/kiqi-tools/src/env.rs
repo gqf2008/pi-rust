@@ -74,6 +74,10 @@ impl From<Vec<u8>> for FileContent {
     }
 }
 
+/// Inclusive stop predicate for [`FileSystem::read_text_lines_until`].
+/// Higher-ranked so a backend may borrow its current line for the call only.
+pub type LineStopPredicate<'a> = dyn for<'line> Fn(usize, &'line str) -> bool + Send + Sync + 'a;
+
 /// Result of `Shell::exec`. Mirrors the TS inline return type
 /// `{ stdout, stderr, exitCode }`. Signal kills collapse to `exit_code: 0`
 /// (matching the TS `code ?? 0` rule).
@@ -170,6 +174,36 @@ pub trait FileSystem: Send + Sync {
         max_lines: Option<usize>,
         cancel: Option<&CancellationToken>,
     ) -> Result<Vec<String>, FileError>;
+
+    /// Stream-read lines through the first line for which `stop(index, line)`
+    /// returns true (including that line). `index` is zero-based. This avoids
+    /// materializing the remainder when a caller only needs a header.
+    ///
+    /// The default preserves compatibility by repeatedly using
+    /// [`FileSystem::read_text_lines`]; backends should override it with a
+    /// single-pass read.
+    async fn read_text_lines_until(
+        &self,
+        path: &str,
+        stop: &LineStopPredicate<'_>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Vec<String>, FileError> {
+        let mut lines = Vec::new();
+        loop {
+            let index = lines.len();
+            let chunk = self.read_text_lines(path, Some(index + 1), cancel).await?;
+            if chunk.len() <= index {
+                break;
+            }
+            let line = chunk[index].clone();
+            let should_stop = stop(index, &line);
+            lines.push(line);
+            if should_stop {
+                break;
+            }
+        }
+        Ok(lines)
+    }
 
     async fn read_binary_file(
         &self,

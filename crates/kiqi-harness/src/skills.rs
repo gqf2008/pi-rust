@@ -24,6 +24,7 @@
 //!   the source type (Rust has no TS variadic generics); the `mapSkill` hook is
 //!   replaced by the caller post-mapping.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use kiqi_tools::env::{ExecutionEnv, FileInfo, FileKind};
@@ -84,20 +85,36 @@ pub struct LoadSkillsResult {
 
 /// Format a skill invocation prompt, optionally appending additional user
 /// instructions. Mirrors TS `formatSkillInvocation`: the `<skill name location>`
-/// block is **NOT** XML-escaped — the skill `content` is embedded verbatim so
+/// block is **NOT** XML-escaped — the resolved body is embedded verbatim so
 /// the model reads the full instructions.
-pub fn format_skill_invocation(skill: &Skill, additional_instructions: Option<&str>) -> String {
-    // Bodies are lazy since discovery stopped reading them: prefer the file (so
-    // an edit is current) and fall back to an in-memory body when there is one.
-    let body = load_skill_body(skill).unwrap_or_else(|_| skill.content.clone());
-    format_skill_invocation_with_body(skill, &body, additional_instructions)
+///
+/// A nonempty in-memory body remains authoritative. A discovered skill (empty
+/// `content`) is loaded from its host file, and a read failure is returned
+/// rather than being converted into an empty invocation.
+pub fn format_skill_invocation(
+    skill: &Skill,
+    additional_instructions: Option<&str>,
+) -> Result<String, String> {
+    let body = skill_invocation_body(skill)?;
+    Ok(format_skill_invocation_with_body(
+        skill,
+        body.as_ref(),
+        additional_instructions,
+    ))
 }
 
-/// Read a skill's body from disk with its YAML frontmatter stripped.
+fn skill_invocation_body(skill: &Skill) -> Result<Cow<'_, str>, String> {
+    if skill.content.is_empty() {
+        load_skill_body(skill).map(Cow::Owned)
+    } else {
+        Ok(Cow::Borrowed(&skill.content))
+    }
+}
+
+/// Read an OS-backed skill's body from disk with its YAML frontmatter stripped.
 ///
-/// This is the one loader the invocation paths share (`/skill`,
-/// `AgentLane::skill`, and the `skill` tool's fallback). Discovery itself reads
-/// frontmatter only — see [`Skill::content`](crate::types::Skill).
+/// Environment-only skills must instead be read through their discovering
+/// `ExecutionEnv`; this synchronous loader addresses the host filesystem.
 pub fn load_skill_body(skill: &Skill) -> Result<String, String> {
     let raw = std::fs::read_to_string(&skill.file_path)
         .map_err(|error| format!("read {}: {error}", skill.file_path))?;
@@ -165,11 +182,11 @@ pub fn format_skills_for_system_prompt(skills: &[Skill]) -> String {
     lines.join("\n")
 }
 
-/// The body of a `SKILL.md` file with its YAML frontmatter removed — exactly
-/// what [`load_skills`] stores in [`Skill::content`]. Callers that re-read a
-/// discovered skill from disk use this so the model receives the same text as
-/// the cached load (and `/skill`) instead of the raw file with its `---`
-/// frontmatter block. Malformed frontmatter returns the input unchanged.
+/// The body of a raw `SKILL.md` file with its YAML frontmatter removed.
+/// Fresh-read invocation paths use this so the model receives instructions
+/// without the `---` metadata block. Discovery itself leaves `Skill::content`
+/// empty and reads the body on demand. Malformed frontmatter returns the input
+/// unchanged.
 pub fn skill_body(raw: &str) -> String {
     match crate::frontmatter::parse_frontmatter(raw) {
         Ok((_, body)) => body,
@@ -463,6 +480,30 @@ struct LoadSkillFromFileResult {
     diagnostics: Vec<SkillDiagnostic>,
 }
 
+/// Read only the metadata prefix. A non-frontmatter file needs just its first
+/// line to reproduce parse_frontmatter's empty-metadata result; a frontmatter
+/// file is read through (and including) its closing fence.
+async fn read_skill_frontmatter(
+    env: &Arc<dyn ExecutionEnv>,
+    file_path: &str,
+    cancel: &CancellationToken,
+) -> Result<String, kiqi_tools::FileError> {
+    let lines = env
+        .read_text_lines_until(
+            file_path,
+            &|index, line| {
+                if index == 0 {
+                    !line.starts_with("---")
+                } else {
+                    line.starts_with("---")
+                }
+            },
+            Some(cancel),
+        )
+        .await?;
+    Ok(lines.join("\n"))
+}
+
 async fn load_skill_from_file(
     env: &Arc<dyn ExecutionEnv>,
     file_path: &str,
@@ -470,7 +511,7 @@ async fn load_skill_from_file(
 ) -> LoadSkillFromFileResult {
     let mut diagnostics = Vec::new();
     let cancel = CancellationToken::new();
-    let raw = match env.read_text_file(file_path, Some(&cancel)).await {
+    let raw = match read_skill_frontmatter(env, file_path, &cancel).await {
         Ok(s) => s,
         Err(e) => {
             diagnostics.push(SkillDiagnostic {
@@ -485,7 +526,7 @@ async fn load_skill_from_file(
         }
     };
 
-    let (frontmatter, body) = match parse_frontmatter(&raw) {
+    let (frontmatter, _) = match parse_frontmatter(&raw) {
         Ok(v) => v,
         Err(msg) => {
             diagnostics.push(SkillDiagnostic {
@@ -1007,14 +1048,52 @@ mod tests {
             file_path: "/skills/example/SKILL.md".to_string(),
             disable_model_invocation: None,
         };
-        let out = format_skill_invocation(&s, None);
+        let out = format_skill_invocation(&s, None).unwrap();
         assert!(out.starts_with("<skill name=\"example\" location=\"/skills/example/SKILL.md\">"));
         assert!(out.contains("References are relative to /skills/example."));
         assert!(out.contains("Do the <thing> & stuff"));
 
-        let with_extra = format_skill_invocation(&s, Some("also do X"));
+        let with_extra = format_skill_invocation(&s, Some("also do X")).unwrap();
         assert!(with_extra.ends_with("also do X"));
         assert!(with_extra.contains("</skill>\n\nalso do X"));
+    }
+
+    #[test]
+    fn inline_body_is_not_replaced_by_a_readable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(&path, "---\ndescription: d\n---\ndisk body").unwrap();
+        let skill = Skill {
+            name: "example".into(),
+            description: "d".into(),
+            content: "inline body".into(),
+            file_path: path.to_string_lossy().into_owned(),
+            disable_model_invocation: None,
+        };
+
+        let out = format_skill_invocation(&skill, None).unwrap();
+        assert!(out.contains("inline body"), "{out}");
+        assert!(!out.contains("disk body"), "{out}");
+    }
+
+    #[test]
+    fn discovered_body_read_failure_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = Skill {
+            name: "example".into(),
+            description: "d".into(),
+            content: String::new(),
+            file_path: dir
+                .path()
+                .join("missing")
+                .join("SKILL.md")
+                .to_string_lossy()
+                .into_owned(),
+            disable_model_invocation: None,
+        };
+
+        let error = format_skill_invocation(&skill, None).unwrap_err();
+        assert!(error.contains("SKILL.md"), "{error}");
     }
 
     #[test]

@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::env::{
     check_cancel_exec, check_cancel_file, ExecutionEnv, FileContent, FileInfo, FileKind,
-    FileSystem, Shell, ShellExecOptions, ShellOutput,
+    FileSystem, LineStopPredicate, Shell, ShellExecOptions, ShellOutput,
 };
 use crate::error::{
     io_to_file_error, ExecutionError, ExecutionErrorCode, FileError, FileErrorCode,
@@ -437,18 +437,66 @@ impl FileSystem for OsExecutionEnv {
         cancel: Option<&CancellationToken>,
     ) -> Result<Vec<String>, FileError> {
         check_cancel_file(cancel, Some(path))?;
-        if max_lines.map(|m| m == 0).unwrap_or(false) {
+        if max_lines == Some(0) {
             return Ok(Vec::new());
         }
-        let text = self.read_text_file(path, cancel).await?;
-        let mut lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
-        if text.ends_with('\n') {
-            if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
-                lines.pop();
+        self.read_text_lines_until(path, &move |index, _| max_lines == Some(index + 1), cancel)
+            .await
+    }
+
+    async fn read_text_lines_until(
+        &self,
+        path: &str,
+        stop: &LineStopPredicate<'_>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Vec<String>, FileError> {
+        use tokio::io::AsyncBufReadExt;
+
+        check_cancel_file(cancel, Some(path))?;
+        let abs = Self::resolve_path(&self.cwd, path);
+        let open = tokio::fs::File::open(&abs);
+        let file = match cancel {
+            Some(token) => tokio::select! {
+                result = open => result,
+                _ = token.cancelled() => {
+                    return Err(FileError::aborted().with_path(abs.to_string_lossy()));
+                }
+            },
+            None => open.await,
+        }
+        .map_err(|error| io_to_file_error(error, Some(&abs.to_string_lossy())))?;
+
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut lines = Vec::new();
+        loop {
+            let mut line = String::new();
+            let read = reader.read_line(&mut line);
+            let count = match cancel {
+                Some(token) => tokio::select! {
+                    result = read => result,
+                    _ = token.cancelled() => {
+                        return Err(FileError::aborted().with_path(abs.to_string_lossy()));
+                    }
+                },
+                None => read.await,
+            }
+            .map_err(|error| io_to_file_error(error, Some(&abs.to_string_lossy())))?;
+            if count == 0 {
+                break;
+            }
+            if line.ends_with('\n') {
+                line.pop();
+            }
+            let index = lines.len();
+            let should_stop = stop(index, &line);
+            lines.push(line);
+            if should_stop {
+                break;
             }
         }
-        if let Some(m) = max_lines {
-            lines.truncate(m);
+        if lines.is_empty() {
+            // Preserve read_text_lines' existing empty-file shape.
+            lines.push(String::new());
         }
         Ok(lines)
     }
@@ -1107,6 +1155,25 @@ impl MutatingEnv for OsExecutionEnv {
 }
 
 /// Validate a timeout (seconds). Mirrors `resolveTimeoutMs` semantics.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_text_lines_stops_before_invalid_utf8_in_the_remainder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(&path, b"first line\n\xffnot utf-8").unwrap();
+        let env = OsExecutionEnv::with_cwd(dir.path().to_path_buf());
+
+        let lines = env
+            .read_text_lines(&path.to_string_lossy(), Some(1), None)
+            .await
+            .unwrap();
+        assert_eq!(lines, vec!["first line"]);
+    }
+}
+
 fn resolve_timeout(timeout: Option<f64>) -> Result<Option<std::time::Duration>, ExecutionError> {
     match timeout {
         None => Ok(None),

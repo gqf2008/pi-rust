@@ -1560,12 +1560,15 @@ caps 调用”，不保证“哪个 guest 收到事件”。第三方插件在�
 `disableModelInvocation`）；**正文不再在启动时读入**（`Skill::content` 对已发现技能为空），
 上千技能也只是扫描与解析 frontmatter。
 
-- 共享加载器：`kiqi_harness::skills::load_skill_body(&Skill)`（读文件 + 剥 frontmatter）；
-  `format_skill_invocation` 优先走它、回退内存 body；`format_skill_invocation_with_body`
-  给已经读到正文的调用方（`/skill`、`skill` 工具）。
-- `AgentLane::skill()` 同步走同一加载；`/skill` 与 `skill` 工具各自用会话 `ExecutionEnv`
-  读文件。
-- **失败即错误**：文件不可读时 `/skill` 报错、`skill` 工具返回 `could not read skill …`，
-  不再静默注入空正文或陈旧正文。
-- 测试：loader 断言 `content` 为空（正文按需加载）；`skill` 工具断言缺文件是错误；
-  `resource_dirs` 的共享技能测试改为断言「发现不读正文」。
+- 共享加载器：`kiqi_harness::skills::load_skill_body(&Skill)`（宿主文件 + 剥 frontmatter）；
+  非空内存 body 仍直接使用，发现所得的空 `content` 才读盘。`format_skill_invocation`
+  返回 `Result`，读失败不再变成空调用；`format_skill_invocation_with_body` 给已经读到
+  正文的调用方（`/skill`、`skill` 工具）。
+- `AgentLane::skill()` 在 starting window 内用 blocking task 走同一加载：窗口先于 I/O
+  建立，abort 会 latch，Closed/LaneBusy 也不会被读文件错误抢先；`/skill` 用 `tokio::fs`，
+  `skill` 工具用会话 `ExecutionEnv`。
+- **失败即错误**：发现所得技能文件不可读时 `/skill` 报错、`skill` 工具返回
+  `could not read skill …`，不再静默注入空正文或陈旧正文。
+- 发现通过 `FileSystem::read_text_lines_until` 恰好读到 closing fence；OS 与内存后端
+  单遍实现，默认实现兼容现有包装环境。测试用 closing fence 后的非法 UTF-8 证明正文
+  未被解码，并覆盖按需加载成功、inline 优先、缺文件错误与 Closed/LaneBusy 优先级。

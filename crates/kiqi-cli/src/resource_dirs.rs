@@ -617,7 +617,7 @@ mod tests {
             file_path: "/home/u/.agents/skills/shared/SKILL.md".to_string(),
             disable_model_invocation: None,
         };
-        let invocation = kiqi_harness::skills::format_skill_invocation(&skill, None);
+        let invocation = kiqi_harness::skills::format_skill_invocation(&skill, None).unwrap();
         assert!(
             invocation.contains("References are relative to /home/u/.agents/skills/shared."),
             "got: {invocation}"

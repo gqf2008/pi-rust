@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::env::{
     check_cancel_exec, check_cancel_file, ExecutionEnv, FileContent, FileInfo, FileKind,
-    FileSystem, Shell, ShellExecOptions, ShellOutput,
+    FileSystem, LineStopPredicate, Shell, ShellExecOptions, ShellOutput,
 };
 #[cfg(test)]
 use crate::error::ExecutionErrorCode;
@@ -275,18 +275,66 @@ impl FileSystem for InMemoryExecutionEnv {
         cancel: Option<&CancellationToken>,
     ) -> Result<Vec<String>, FileError> {
         check_cancel_file(cancel, Some(path))?;
-        if max_lines.map(|m| m == 0).unwrap_or(false) {
+        if max_lines == Some(0) {
             return Ok(Vec::new());
         }
-        let text = self.read_text_file(path, cancel).await?;
-        let mut lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
-        if text.ends_with('\n') {
-            if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
-                lines.pop();
+        self.read_text_lines_until(path, &move |index, _| max_lines == Some(index + 1), cancel)
+            .await
+    }
+
+    async fn read_text_lines_until(
+        &self,
+        path: &str,
+        stop: &LineStopPredicate<'_>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Vec<String>, FileError> {
+        check_cancel_file(cancel, Some(path))?;
+        let guard = self.inner.lock().await;
+        let abs = Self::resolve_key(&guard.cwd, path);
+        let file = match guard.files.get(&abs) {
+            Some(file) if file.kind == FileKind::File => file,
+            Some(file) if file.kind == FileKind::Directory => {
+                return Err(
+                    FileError::new(FileErrorCode::IsDirectory, "path is a directory")
+                        .with_path(&abs),
+                );
             }
+            Some(file) if file.kind == FileKind::Symlink => {
+                return Err(FileError::new(
+                    FileErrorCode::NotSupported,
+                    "symlink read unsupported",
+                )
+                .with_path(&abs));
+            }
+            _ => return Err(FileError::not_found(&abs)),
+        };
+        if file.bytes.is_empty() {
+            return Ok(vec![String::new()]);
         }
-        if let Some(m) = max_lines {
-            lines.truncate(m);
+
+        let mut lines = Vec::new();
+        let mut start = 0;
+        loop {
+            let end = file.bytes[start..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|offset| start + offset)
+                .unwrap_or(file.bytes.len());
+            let line = String::from_utf8(file.bytes[start..end].to_vec()).map_err(|error| {
+                FileError::new(FileErrorCode::Invalid, format!("invalid utf-8: {error}"))
+                    .with_path(path)
+            })?;
+            let index = lines.len();
+            let should_stop = stop(index, &line);
+            lines.push(line);
+            if should_stop || end == file.bytes.len() {
+                break;
+            }
+            start = end + 1;
+            if start == file.bytes.len() {
+                // A trailing newline does not add another empty line.
+                break;
+            }
         }
         Ok(lines)
     }
@@ -809,6 +857,17 @@ mod tests {
         assert_eq!(text, "hello");
         // Parent dir auto-created.
         assert!(env.exists("/a", None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn read_text_lines_stops_before_invalid_utf8_in_the_remainder() {
+        let env = InMemoryExecutionEnv::new();
+        env.write_file("/x.txt", b"first line\n\xffnot utf-8".to_vec().into(), None)
+            .await
+            .unwrap();
+
+        let lines = env.read_text_lines("/x.txt", Some(1), None).await.unwrap();
+        assert_eq!(lines, vec!["first line"]);
     }
 
     #[tokio::test]

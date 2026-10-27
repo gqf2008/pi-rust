@@ -18,11 +18,12 @@
 use std::sync::Arc;
 
 use kiqi_harness::skills::{
-    format_skill_invocation, format_skills_for_system_prompt, load_skills, load_sourced_skills,
-    SkillDiagnosticCode, SourcedSkillInput,
+    format_skill_invocation, format_skills_for_system_prompt, load_skill_body, load_skills,
+    load_sourced_skills, SkillDiagnosticCode, SourcedSkillInput,
 };
 use kiqi_tools::in_memory::InMemoryExecutionEnv;
 use kiqi_tools::FileSystem;
+use kiqi_tools::OsExecutionEnv;
 
 /// Build an env, returning the typed handle (for seeding) and the dyn view (for
 /// `load_skills`). The env is `Arc`-shared, so both point at the same state.
@@ -254,6 +255,53 @@ async fn non_markdown_file_is_silently_skipped() {
 }
 
 #[tokio::test]
+async fn discovery_does_not_decode_the_body_after_frontmatter() {
+    let (typed, env) = fresh_env();
+    typed
+        .create_dir("skills/example", true, None)
+        .await
+        .unwrap();
+    let mut raw = b"---
+description: Example skill
+---
+"
+    .to_vec();
+    raw.extend_from_slice(b"\xffnot utf-8");
+    typed
+        .write_file("skills/example/SKILL.md", raw.into(), None)
+        .await
+        .unwrap();
+
+    let result = load_skills(&env, &["skills".to_string()]).await;
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(result.skills.len(), 1);
+    assert_eq!(result.skills[0].content, "");
+}
+
+#[tokio::test]
+async fn a_discovered_body_loads_on_demand_without_frontmatter() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("skills/example")).unwrap();
+    std::fs::write(
+        dir.path().join("skills/example/SKILL.md"),
+        "---
+description: Example skill
+---
+Use this skill.
+",
+    )
+    .unwrap();
+    let env: Arc<dyn kiqi_tools::ExecutionEnv> =
+        Arc::new(OsExecutionEnv::with_cwd(dir.path().to_path_buf()));
+
+    let result = load_skills(&env, &["skills".to_string()]).await;
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let skill = &result.skills[0];
+    assert_eq!(skill.content, "");
+    assert_eq!(load_skill_body(skill).unwrap(), "Use this skill.");
+}
+
+#[tokio::test]
 async fn listing_is_xml_escaped_and_invocation_is_not() {
     // Invariant §9: the two skill-format paths are distinct.
     use kiqi_harness::types::Skill;
@@ -272,7 +320,7 @@ async fn listing_is_xml_escaped_and_invocation_is_not() {
     assert!(listing.contains("<location>/skills/a&amp;b/SKILL.md</location>"));
 
     // Path (2) — invocation embeds content verbatim (unescaped).
-    let inv = format_skill_invocation(&s, None);
+    let inv = format_skill_invocation(&s, None).unwrap();
     assert!(inv.contains("Do the <thing> & stuff"));
     assert!(inv.contains("<skill name=\"a&b\" location=\"/skills/a&b/SKILL.md\">"));
     assert!(inv.contains("References are relative to /skills/a&b."));
