@@ -4577,6 +4577,72 @@ fn typed_input_events_reach_the_guest_and_can_be_claimed() {
     assert_eq!(declined, EventAction::Continue);
 }
 
+/// §6.50: `EditorChange` used to be short-circuited by the native-handler
+/// pre-check (always empty in a wasm-only install), so a wasm guest never saw
+/// it. This pins the delivery end to end across the WIT boundary: the host's
+/// observation funnel (`dispatch_data_event` -> the session's compiled sink)
+/// hands the tag to the sink, the sink forwards it to the real conformance
+/// guest, and the guest claims the documented `{"chars":N,"empty":bool}`
+/// payload. A regression that stops the funnel before the sink shows up as an
+/// empty recorded-tag list; one that drops the tag or its fields at
+/// `to_wit_event` shows up as a `Continue` verdict.
+///
+/// The sink mirrors production's observe fan-out: it records the tag, calls
+/// `try_on_event` (never blocking on a busy guest) and maps a guest claim to
+/// `CompiledVerdict::Claimed`. It is mounted on a `RegistrySnapshot` rather
+/// than installed in the process-global slot, so this test cannot race the
+/// other tests in the binary.
+#[test]
+fn editor_change_reaches_the_wasm_guest_through_the_observation_funnel() {
+    let wasm = fixture_wasm();
+    let extension = std::sync::Arc::new(
+        WasmExtension::load_with_grants("conformance", &wasm, Grants::default()).expect("load"),
+    );
+
+    // (tag the funnel handed us, verdict the guest returned) per dispatch.
+    let observed: std::sync::Arc<Mutex<Vec<(EventTag, EventAction)>>> =
+        std::sync::Arc::new(Mutex::new(Vec::new()));
+    let record = std::sync::Arc::clone(&observed);
+    let guest = std::sync::Arc::clone(&extension);
+    let sink: kiqi_host::CompiledEventSink = std::sync::Arc::new(move |mode, event| {
+        assert_eq!(mode, kiqi_host::DispatchMode::Observe);
+        let log = NullLog;
+        let caps = HostCaps::observer(&log);
+        let action = guest.try_on_event(event, &caps);
+        let verdict = match &action {
+            EventAction::Claimed => kiqi_host::CompiledVerdict::Claimed,
+            _ => kiqi_host::CompiledVerdict::Continue,
+        };
+        record.lock().unwrap().push((event.tag, action));
+        verdict
+    });
+    let snapshot = kiqi_host::RegistrySnapshot::new().with_compiled_sink(sink);
+
+    // The exact payload shape kiqi-cli builds for a changed draft.
+    kiqi_host::dispatch_data_event_with(
+        Some(&snapshot),
+        EventTag::EditorChange,
+        r#"{"chars":4,"empty":false}"#,
+    );
+    kiqi_host::dispatch_data_event_with(
+        Some(&snapshot),
+        EventTag::EditorChange,
+        r#"{"chars":0,"empty":true}"#,
+    );
+
+    // The guest's Claimed verdict is the cross-WIT proof: it only claims this
+    // shape, so neither the tag nor its fields were lost in translation.
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![
+            (EventTag::EditorChange, EventAction::Claimed),
+            (EventTag::EditorChange, EventAction::Claimed),
+        ],
+        "the observation funnel must hand EditorChange to the sink, and the \
+         conformance guest must observe it"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // oauth-api: the host wrapper (deny-by-default, cross-check, deadline)
 // ---------------------------------------------------------------------------

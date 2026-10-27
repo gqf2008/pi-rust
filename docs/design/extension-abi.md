@@ -1458,6 +1458,8 @@ C ABI 线格式（`StbString`/`StableExtensionEvent`/`EventView`/handler consts�
   transform）仍进程级。
 - **`EditorChange`** 现在随每次草稿变化送达 sink（此前 wasm-only 安装被原生 handler
   预检查短路、从未送达）；有意的行为变化，代价是每次变化一次 guest 观察调用。
+  有宿主侧 e2e 钉住（`crates/kiqi-host/tests/e2e.rs` 的
+  `editor_change_reaches_the_wasm_guest_through_the_observation_funnel`）。
 - **staleness 标志**：`RegistrySnapshot::invalidate` 保留但不再参与派发门控
   （`assert_active` 无调用者）；文档不再声称 `/reload` 靠它停止旧会话派发。
 - 遗留**已修复**（见 §6.52）：sink 经 caps 反向持有 action host，而 host 曾强持有

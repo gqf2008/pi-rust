@@ -622,6 +622,24 @@ impl Guest for Conformance {
                     None => types::EventAction::Continue,
                 }
             }
+            // §6.50: `EditorChange` is a wasm-visible tag. Claim only the
+            // documented payload shape, so the host e2e that dispatches it
+            // through the observation funnel proves both the tag and its
+            // fields crossed the WIT boundary (`Other` carries a JSON string).
+            types::Event::Other(other) if other.kind == "EditorChange" => {
+                match serde_json::from_str::<serde_json::Value>(&other.payload) {
+                    Ok(value)
+                        if value.get("chars").and_then(serde_json::Value::as_u64).is_some()
+                            && value
+                                .get("empty")
+                                .and_then(serde_json::Value::as_bool)
+                                .is_some() =>
+                    {
+                        types::EventAction::Claimed
+                    }
+                    _ => types::EventAction::Continue,
+                }
+            }
             _ => types::EventAction::Continue,
         }
     }
