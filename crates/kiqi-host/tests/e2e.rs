@@ -4582,8 +4582,8 @@ fn typed_input_events_reach_the_guest_and_can_be_claimed() {
 /// it. This pins the delivery end to end across the WIT boundary: the host's
 /// observation funnel (`dispatch_data_event` -> the session's compiled sink)
 /// hands the tag to the sink, the sink forwards it to the real conformance
-/// guest, and the guest claims the documented `{"chars":N,"empty":bool}`
-/// payload. A regression that stops the funnel before the sink shows up as an
+/// guest, and the guest claims the `chars`/`empty` fields of the payload (the
+/// CLI's real payload also carries `source`; the fixture tolerates it). A regression that stops the funnel before the sink shows up as an
 /// empty recorded-tag list; one that drops the tag or its fields at
 /// `to_wit_event` shows up as a `Continue` verdict.
 ///

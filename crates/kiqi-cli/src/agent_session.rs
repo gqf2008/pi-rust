@@ -104,11 +104,13 @@ impl AgentSession {
     /// Wrap an existing harness. `harness` may be the session owner's
     /// `Arc<AgentHarness>` (the TUI passes it that way so the weak cell the
     /// extension action host reads keeps pointing at the live allocation) or a
-    /// plain `AgentHarness` (tests); both convert into an `Arc`. `catalog` is
+    /// An `Arc` (never a bare `AgentHarness`: the host holds only a `Weak`, so
+    /// a temporary Arc would die immediately and every runtime action would
+    /// fail as "released"). `catalog` is
     /// the resolved model catalog the session may switch within; `scoped_models`
     /// is the (possibly empty) settings-driven subset used by Ctrl+P `/model`.
     pub fn new(
-        harness: impl Into<Arc<AgentHarness>>,
+        harness: Arc<AgentHarness>,
         catalog: Vec<Model>,
         scoped_models: Vec<ScopedModel>,
         cwd: impl Into<PathBuf>,
@@ -555,7 +557,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_values_round_trip_through_the_product_layer() {
-        let session = AgentSession::new(test_harness().await, Vec::new(), Vec::new(), ".");
+        let session =
+            AgentSession::new(Arc::new(test_harness().await), Vec::new(), Vec::new(), ".");
         assert!(session
             .value("display.hide_thinking")
             .await
@@ -584,7 +587,8 @@ mod tests {
 
     #[tokio::test]
     async fn usage_stats_and_snapshot_read_from_the_empty_session() {
-        let session = AgentSession::new(test_harness().await, Vec::new(), Vec::new(), ".");
+        let session =
+            AgentSession::new(Arc::new(test_harness().await), Vec::new(), Vec::new(), ".");
         let stats = session.usage_stats().await.unwrap();
         assert_eq!(stats.message_count, 0);
         assert_eq!(stats.total_tokens, 0);
@@ -597,7 +601,8 @@ mod tests {
 
     #[tokio::test]
     async fn export_writes_every_supported_format() {
-        let session = AgentSession::new(test_harness().await, Vec::new(), Vec::new(), ".");
+        let session =
+            AgentSession::new(Arc::new(test_harness().await), Vec::new(), Vec::new(), ".");
         let dir = tempfile::tempdir().unwrap();
 
         for (format, ext) in [

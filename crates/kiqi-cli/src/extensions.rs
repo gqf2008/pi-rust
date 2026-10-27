@@ -779,7 +779,17 @@ pub fn session_caps_from_cell(
     };
     match guard.session_caps() {
         Some(caps) => std::sync::Arc::clone(caps),
-        None => std::sync::Arc::new(compiled_caps()),
+        None => {
+            // Never silent: a builder that forgot to mount caps would fall back
+            // to the process-global (last-built) bundle — exactly the
+            // cross-session leak this indirection removes. Production builders
+            // always mount; this warning catches the next wiring mistake.
+            eprintln!(
+                "warning: extension session has no caps mounted; falling back to the \
+                 process-global bundle"
+            );
+            std::sync::Arc::new(compiled_caps())
+        }
     }
 }
 

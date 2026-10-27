@@ -47,7 +47,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   the wasm **host instances are still process-global**, so this isolates which
   caps a dispatch uses, not which guests can observe an event. Notes in
   `docs/design/extension-abi.md` §6.50.
-- **Session capabilities are per-session too (breaking for `kiqi-host`).**
+- **Session capabilities are per-session too (additive for `kiqi-host`; the old constructors stay).**
   `RegistrySnapshot` now carries `Option<Arc<dyn SessionCaps>>` alongside the
   sink (`with_session_caps` / `session_caps`), and `ExtensionSession::none_with_compiled_sink_and_caps`
   mounts both. The CLI's owned bundle implements the new `SessionCaps` trait, so

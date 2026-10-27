@@ -134,8 +134,11 @@ impl HarnessActionHost {
     /// the caller keeps (not a temporary one — a temporary would drop right
     /// here and leave the cell permanently dead).
     pub fn set_harness(cell: &Arc<OnceLock<Weak<AgentHarness>>>, harness: &Arc<AgentHarness>) {
-        // `set` panics if already set; that's the right failure (double-build
-        // is a programming error, not a runtime condition).
+        // Idempotent: the cell is seeded once per process, and a `/reload`
+        // reuses the same host (and the same harness), so a second seed is
+        // ignored. `Weak`, not `Arc`: the host must not keep the harness alive
+        // (that edge closed the harness → sink → caps → host → harness cycle,
+        // §6.50) — the caller owns the strong handle.
         let _ = cell.set(Arc::downgrade(harness));
     }
 
@@ -143,10 +146,12 @@ impl HarnessActionHost {
     /// mid-build (before `set_harness`) or after the session released the
     /// harness — never silently substitutes another session's harness.
     fn harness(&self) -> Result<Arc<AgentHarness>, String> {
-        self.harness
-            .get()
-            .and_then(Weak::upgrade)
-            .ok_or_else(|| "runtime action invoked before harness was built".to_string())
+        let Some(weak) = self.harness.get() else {
+            return Err("runtime action invoked before harness was built".to_string());
+        };
+        weak.upgrade().ok_or_else(|| {
+            "harness was released (the session closed); the runtime action cannot run".to_string()
+        })
     }
 
     /// Resolve `id` (case-insensitive exact, then substring) against the
