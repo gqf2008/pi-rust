@@ -4,7 +4,6 @@ name: Release binaries
 # tag. This is what makes `curl -fsSL .../install.sh | sh` work and what removes
 # the "you need a Rust toolchain and a C linker" barrier to trying the CLI.
 #
-# crates.io publishing is handled separately by ci.yml (push to main).
 
 on:
   push:

@@ -10,7 +10,8 @@ task release RELEASE_VERSION=0.4.0   # identical, explicit-version spelling
 ```
 
 `task publish` resolves the version with [`scripts/next-version.sh`](../../scripts/next-version.sh)
-and then runs `scripts/release.sh`, which walks the pipeline in order,
+and then runs `scripts/release.sh`, which walks the pipeline in order. This product
+ships through GitHub Releases and package channels; there is no crates.io publish phase,
 **printing each step before it runs**. Review the plan first with:
 
 ```bash
@@ -57,7 +58,6 @@ below are available through `task publish` too.
 | `commit-channels` | `chore(release): refresh the install channels and the site for X.Y.Z` |
 | `taps` | pushes the formula/manifest into `homebrew-tap` + `scoop-bucket` |
 | `winget` | opens the `microsoft/winget-pkgs` PR (`scripts/winget-submit.sh`) |
-| `crates` | `task publish:crates RELEASE_VERSION=X.Y.Z` (nine crates, dependency order) |
 | `site` | `task kiqi-deploy` |
 
 ## Flags
@@ -65,7 +65,7 @@ below are available through `task publish` too.
 | Flag | Effect |
 | --- | --- |
 | `--dry-run` | print the plan, execute nothing |
-| `--yes` | do not stop at the confirmation checkpoints (`crates`, `site`) |
+| `--yes` | do not stop at the confirmation checkpoints (`site`) |
 | `--only a,b` | run just these phases |
 | `--from P` | start at phase `P` |
 | `--skip a,b` | skip these phases |
@@ -76,16 +76,8 @@ Recovery is just a re-run from the failed phase — every phase is idempotent:
 ```bash
 # CI needed longer than the poll window:
 task publish RELEASE_BUMP=none -- --from channels
-# channels are live; only crates.io + site left:
-task publish RELEASE_VERSION=0.3.4 -- --only crates,site
-```
-
-Crates.io only, no bump/tag/push — for republishing a version whose tree is
-already prepared (it defaults to the `Cargo.toml` version):
-
-```bash
-task publish:crates
-task publish:crates RELEASE_VERSION=0.3.4
+# only the site phase remains:
+task publish RELEASE_VERSION=0.3.4 -- --only site
 ```
 
 ## Credentials
@@ -95,7 +87,6 @@ task publish:crates RELEASE_VERSION=0.3.4
 | `push`, `taps` | git/`gh` write access to `pi-rust`, `homebrew-tap`, `scoop-bucket` |
 | `wait`, `channels` | `gh` authenticated (reads release assets) |
 | `winget` | `gh` authenticated (forks `winget-pkgs`, opens the PR) |
-| `crates` | `cargo login` (a publish-scoped token) |
 | `site` | SSH to the ki web host |
 
 ## What no command can finish

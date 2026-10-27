@@ -2,18 +2,9 @@
 #
 # `task publish` is the one-command release: it computes the next version
 # automatically (scripts/next-version.sh), then hands the whole bump -> tag ->
-# push -> binaries -> channels -> crates.io -> site pipeline to
+# push -> binaries -> channels -> site pipeline to
 # scripts/release.sh. `task release` is the same pipeline for an explicit
-# version; `task publish:crates` is the crates.io-only half.
 #
-# The dep-ordered publish itself is driven by release-helper.rs via plain
-# `cargo publish`. Keep this file as the ergonomic entry point so the
-# dependency order is encoded once and `cargo test` stays the pre-flight.
-#
-# Dependency order (v0.1.4+): telemetry → ai → agent → extension →
-# host → tools → harness → tui → cli. `kiqi-host` is a leaf and
-# extensions depends on extension + ai + agent, so both land before
-# tools/harness (which are independent of them but published in family order).
 #
 # Usage:
 #   task              # list targets
@@ -24,21 +15,14 @@
 #                     # 递增 minor（默认 patch；也可 major / none）
 #   task publish -- --from push --yes
 #                     # 续跑中断的发布，额外参数原样传给 scripts/release.sh
-#   task publish:crates
-#                     # 只发 crates.io，用 Cargo.toml 里已准备好的版本
-#   task publish:fast RELEASE_VERSION=0.1.12
-#                     # 只发 crates.io，跳过 test/check（仍校验发布状态）
-#   task dry-run RELEASE_VERSION=0.1.12
-#                     # package all crates without uploading
 #   task test         # cargo test --workspace --locked
 #
 # 版本自动递增以最高的 `vX.Y.Z` 标签为基准，但 Cargo.toml 里的 workspace 版本
 # 一旦已经领先于所有标签就原样沿用 —— 说明这一版已经 bump 过、只是还没发出去。
 # 所以续跑中断的发布用 `RELEASE_BUMP=none`（或直接给 RELEASE_VERSION）。
 #
-# Prerequisites for `task publish*`: `rustc` and `curl` on PATH, plus a one-time
-# `cargo login` so ~/.cargo/credentials.toml has a publish-scoped token.
-# crates.io records are permanent.
+# Prerequisites: `rustc` on PATH. This product ships through GitHub Releases
+# and package channels; it is not published to crates.io.
 
 version: '3'
 
@@ -58,18 +42,6 @@ tasks:
     cmds:
       - task --list
 
-  dry-run:
-    desc: Package all kiqi-* crates in release order without uploading
-    vars:
-      PREPARED_VERSION:
-        sh: bash scripts/next-version.sh none
-      VERSION: '{{.RELEASE_VERSION | default .PREPARED_VERSION}}'
-    cmds:
-      - task: release:validate
-        vars:
-          RELEASE_VERSION: '{{.VERSION}}'
-      - task: release:dry-run-crates
-
   publish:
     desc: 发布下一个版本 —— 自动递增版本号，然后跑完整发布流水线
     vars:
@@ -78,36 +50,6 @@ tasks:
       VERSION: '{{.RELEASE_VERSION | default .AUTO_VERSION}}'
     cmds:
       - bash scripts/release.sh "{{.VERSION}}" {{.CLI_ARGS}}
-
-  publish:crates:
-    desc: 只发布 crates.io（默认用 Cargo.toml 里已准备好的版本）
-    vars:
-      PREPARED_VERSION:
-        sh: bash scripts/next-version.sh none
-      VERSION: '{{.RELEASE_VERSION | default .PREPARED_VERSION}}'
-    cmds:
-      - task: release:validate
-        vars:
-          RELEASE_VERSION: '{{.VERSION}}'
-      - task: test
-      - task: check
-      - task: release:publish-crates
-        vars:
-          RELEASE_VERSION: '{{.VERSION}}'
-
-  publish:fast:
-    desc: 只发 crates.io，跳过 test/check（仍校验发布状态）
-    vars:
-      PREPARED_VERSION:
-        sh: bash scripts/next-version.sh none
-      VERSION: '{{.RELEASE_VERSION | default .PREPARED_VERSION}}'
-    cmds:
-      - task: release:validate
-        vars:
-          RELEASE_VERSION: '{{.VERSION}}'
-      - task: release:publish-crates
-        vars:
-          RELEASE_VERSION: '{{.VERSION}}'
 
   release:
     desc: One-command release for an explicit version — bump, tag, wait for binaries, refresh every channel
@@ -146,22 +88,6 @@ tasks:
     cmds:
       - rustc --edition=2021 release-helper.rs -o "{{.KI_RELEASE_HELPER}}"
 
-  release:dry-run-crates:
-    internal: true
-    deps:
-      - release:build-helper
-    cmds:
-      - '"{{.KI_RELEASE_HELPER}}" dry-run'
-
-  release:publish-crates:
-    internal: true
-    requires:
-      vars: [RELEASE_VERSION]
-    deps:
-      - release:build-helper
-    cmds:
-      - '"{{.KI_RELEASE_HELPER}}" publish "{{.RELEASE_VERSION}}"'
-
   docs:sync:
     desc: 同步仓库文档到 pi-cli 的 embedded-docs（include_str! 快照，CI 会校验）
     cmds:
@@ -178,7 +104,7 @@ tasks:
       - cargo check --workspace --all-targets --locked
 
   metrics:
-    desc: 打印曝光指标基线（stars / crates.io 下载 / release 下载 / 仓库流量）
+    desc: 打印产品与发布指标（stars / release 下载 / 仓库流量）
     cmds:
       - bash scripts/metrics.sh
 

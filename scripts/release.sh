@@ -6,8 +6,8 @@
 #
 # The pipeline: bump -> changelog -> docs -> tag -> push -> wait for the
 # release binaries -> refresh the install channels (brew/scoop/winget + site)
-# -> push the taps -> open the winget PR -> (crates.io is skipped while
-# `publish = false`) -> deploy site.
+# -> push the taps -> open the winget PR -> deploy site. This product is not
+# published to crates.io; there is intentionally no crates phase.
 #
 # Every step is printed before it runs. Mutating network steps still run under
 # --dry-run's shadow (nothing is executed), so you can review the exact plan
@@ -17,7 +17,6 @@
 #   * git push access to gqf2008/pi-rust, gqf2008/homebrew-tap,
 #     gqf2008/scoop-bucket
 #   * `gh` authenticated (release assets, taps, fork + PR to winget-pkgs)
-#   * `cargo login` only once the crates are no longer `publish = false`
 #   * SSH to the ki web host for the site phase
 #
 # The winget phase only *opens* a PR: a winget-team moderator merges it, which
@@ -74,11 +73,11 @@ Options:
 
 Phases (in order):
   preflight bump changelog docs validate commit tag push wait
-  channels commit-channels taps winget crates site
+  channels commit-channels taps winget site
 EOF
 }
 
-PHASES=(preflight bump changelog docs validate commit tag push wait channels commit-channels taps winget crates site)
+PHASES=(preflight bump changelog docs validate commit tag push wait channels commit-channels taps winget site)
 
 phase_selected() {
   local phase="$1"
@@ -249,16 +248,6 @@ phase_taps() {
 phase_winget() {
   note "open the winget-pkgs PR"
   step bash scripts/winget-submit.sh "$release_version"
-}
-
-phase_crates() {
-  if grep -q '^publish = false' crates/kiqi-cli/Cargo.toml 2>/dev/null; then
-    note "crates are publish = false; skipping crates.io publish"
-    return 0
-  fi
-  note "publish nine crates to crates.io"
-  confirm "Publish $release_version to crates.io (irreversible)?" || { note "  skipped"; return; }
-  step task publish:crates RELEASE_VERSION="$release_version"
 }
 
 phase_site() {
