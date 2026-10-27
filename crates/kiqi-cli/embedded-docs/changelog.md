@@ -11,6 +11,21 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A minimal custom-model configuration now works end to end.** With no saved
+  model choice, the first authenticated `models.json` model wins over unrelated
+  built-in provider credentials, so a configured provider/model/key needs no
+  `defaultProvider`, `defaultModel`, or extra environment variables.
+  `contextWindow` and `maxTokens` remain optional: Anthropic Messages fills its
+  required `max_tokens` with a usable default instead of the previous one-token
+  floor (which produced empty replies), while OpenAI Responses omits an unset
+  `max_output_tokens` and lets the server choose.
+- **Goal `doneWhenCmd` uses the real shell backend on Windows.** It now shares
+  the bash tool's Git-Bash discovery and legacy-WSL transport instead of trying
+  to execute `/bin/bash` or `/bin/sh`. The CLI's Windows-only path assumptions
+  in the extension-collision and permissions tests are fixed as well.
+
 ## [0.4.2] - 2026-10-27
 
 ### Changed

@@ -3084,6 +3084,19 @@ mod tests {
     }
 
     #[test]
+    fn undeclared_max_tokens_omits_the_field_entirely() {
+        // "Not configured" means not sent: the server applies its own default.
+        let mut m = model();
+        m.max_tokens = 0;
+        let body = build_request(
+            &m,
+            &Context::new(Vec::new()),
+            &SimpleStreamOptions::default(),
+        );
+        assert!(body.get("max_output_tokens").is_none());
+    }
+
+    #[test]
     fn responses_clamps_small_max_output_tokens_to_api_minimum() {
         let mut options = SimpleStreamOptions::default();
         options.max_tokens = Some(1);

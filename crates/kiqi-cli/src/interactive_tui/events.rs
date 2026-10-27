@@ -312,39 +312,47 @@ pub(crate) async fn board_open_zero(cwd: &std::path::Path) -> bool {
 /// permission policy). Exit 0 = done; timeout, spawn failure or a non-zero
 /// exit = not done, so auto-continue resumes normally.
 pub(crate) async fn done_when_cmd_satisfied(cwd: &std::path::Path, cmd: &str) -> bool {
+    use std::collections::HashMap;
     use std::time::Duration;
 
     let sandbox =
         kiqi_tools::sandbox::ShellSandbox::macos_for(crate::permissions::shell_sandbox_paths(cwd));
-    let (program, args) = match sandbox.as_ref().and_then(|s| s.shell_override()) {
-        Some(ov) => (ov.program, ov.args),
-        None => {
-            let shell = if std::path::Path::new("/bin/bash").exists() {
-                "/bin/bash"
-            } else {
-                "/bin/sh"
-            };
-            (std::path::PathBuf::from(shell), vec!["-c".to_string()])
-        }
-    };
-    let mut command = tokio::process::Command::new(program);
-    command
-        .args(&args)
-        .arg(cmd)
-        .current_dir(cwd)
-        .kill_on_drop(true)
-        .env_clear();
-    // Only the lookup basics; the sandbox profile still confines writes, and
-    // a goal definition must not smuggle host-private plumbing into a child.
-    command.env(
-        "PATH",
-        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
-    );
-    if let Ok(home) = std::env::var("HOME") {
-        command.env("HOME", home);
+    // Resolve through the same shell backend as the bash tool: Git Bash on
+    // Windows (never cmd.exe), `/bin/bash` → `sh` on POSIX, and stdin transport
+    // for legacy WSL bash. Only the lookup basics are inherited; a goal
+    // definition must not smuggle host-private plumbing into a child.
+    let mut env = HashMap::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
     }
-    match tokio::time::timeout(Duration::from_secs(10), command.output()).await {
-        Ok(Ok(output)) => output.status.success(),
+    if let Some(home) = std::env::var_os("HOME") {
+        env.insert("HOME".to_string(), home.to_string_lossy().into_owned());
+    }
+    #[cfg(windows)]
+    if let Some(userprofile) = std::env::var_os("USERPROFILE") {
+        env.insert(
+            "HOME".to_string(),
+            userprofile.to_string_lossy().into_owned(),
+        );
+    }
+    let options = kiqi_tools::ShellExecOptions {
+        shell: sandbox
+            .as_ref()
+            .and_then(|sandbox| sandbox.shell_override()),
+        cwd: Some(cwd.to_path_buf()),
+        env: Some(env),
+        inherit_env: false,
+        timeout: Some(10.0),
+        ..Default::default()
+    };
+    let shell = kiqi_tools::OsExecutionEnv::with_cwd(cwd.to_path_buf());
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        kiqi_tools::Shell::exec(&shell, cmd, options),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output.exit_code == 0,
         _ => false,
     }
 }

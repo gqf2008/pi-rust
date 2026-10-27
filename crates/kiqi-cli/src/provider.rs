@@ -51,17 +51,15 @@
 //!    keeps it exact to avoid surprising model picks (partial match is a common
 //!    source of "got the wrong model" bugs — documented as a divergence in
 //!    the initial port notes (retired)).
-//! 5. No `--model` ⇒ [`pick_default_model`]:
-//!    (a) scan upstream's `defaultModelPerProvider` entries in their declared
-//!    order and take the first authenticated match; otherwise (b) take the
-//!    **first authenticated model** in the catalog — mirroring the TS
-//!    `findInitialModel` fallback over `availableModels`. This lets a
-//!    `models.json`-only gateway config "just work": the built-in Anthropic
-//!    models carry no auth, so the gateway model (the only authenticated one)
-//!    is picked. The all-builtin/no-custom-code default (`ANTHROPIC_API_KEY`
-//!    path) selects `claude-opus-4-8`. Last resort falls back to
-//!    [`DEFAULT_MODEL_ID`] (or the catalog head) — unreachable in practice
-//!    because the auth gate refuses an unauthed catalog earlier.
+//! 5. No `--model` ⇒ [`pick_default_model`]: take the first authenticated
+//!    `models.json` model in declaration order, then scan upstream's
+//!    `defaultModelPerProvider` entries, then take the first authenticated
+//!    model in the catalog. An explicitly configured gateway therefore wins
+//!    over unrelated Anthropic environment credentials. The
+//!    all-builtin/no-custom-config default (`ANTHROPIC_API_KEY` path) selects
+//!    `claude-opus-4-8`. Last resort falls back to [`DEFAULT_MODEL_ID`] (or
+//!    the catalog head) — unreachable in practice because the auth gate
+//!    refuses an unauthed catalog earlier.
 //!
 //! [`AnthropicProvider`]: kiqi_ai::providers::anthropic::AnthropicProvider
 
@@ -1755,12 +1753,12 @@ fn model_has_header_auth(m: &Model) -> bool {
         .any(|k| NAMES.contains(&k.to_ascii_lowercase().as_str()))
 }
 
-/// Choose the default model when `--model` is absent. Mirrors upstream
-/// `findInitialModel` [`packages/coding-agent/src/core/model-resolver.ts`]:
-/// known-provider defaults are checked in native declaration order, followed by
-/// the first authenticated model in the catalog (`availableModels[0]`). This
-/// also keeps a models.json-only gateway from accidentally selecting an
-/// unauthenticated built-in model.
+/// Choose the default model when `--model` is absent. An explicitly configured
+/// models.json model comes before built-in provider defaults: writing a
+/// provider, model, and credential is enough to select it, even when unrelated
+/// Anthropic environment credentials are also present. Model and provider
+/// declaration order decides between multiple configured models; a saved
+/// default has already been considered by the caller.
 ///
 /// Credential maps are keyed by provider id, so only a credential belonging to
 /// the candidate model can make it participate in default selection.
@@ -1772,7 +1770,31 @@ fn pick_default_model(
     has_cli_key: bool,
     granted_extension_providers: &BTreeSet<String>,
 ) -> Model {
-    // 1. upstream's known-provider defaults, in its declared priority order.
+    // 1. First authenticated models.json model, preserving declaration order.
+    //    Match the model id as well as the provider so configuring a built-in
+    //    provider does not make every built-in model look explicitly configured.
+    if let Some(model) = catalog.iter().find(|model| {
+        models_cfg
+            .providers
+            .get(&model.provider)
+            .is_some_and(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .any(|configured| configured.id.eq_ignore_ascii_case(&model.id))
+            })
+            && model_is_authed_for_resolution(
+                model,
+                anthropic_credentials,
+                openai_credentials,
+                has_cli_key,
+                granted_extension_providers,
+            )
+    }) {
+        return model.clone();
+    }
+
+    // 2. Built-in/known-provider defaults, in their declared priority order.
     for (provider, model_id) in DEFAULT_MODELS_PER_PROVIDER {
         if let Some(model) = catalog.iter().find(|model| {
             model.id.eq_ignore_ascii_case(model_id)
@@ -1789,9 +1811,7 @@ fn pick_default_model(
         }
     }
 
-    // 2. First authed model (TS `availableModels[0]`). Provider and model array
-    //    declaration order is preserved while loading models.json.
-    //    this is the gateway model (Bearer folded onto it, base_url = gateway).
+    // 3. First authed model (for example, a granted extension provider).
     if let Some(m) = catalog.iter().find(|m| {
         model_is_authed_for_resolution(
             m,
@@ -1803,7 +1823,7 @@ fn pick_default_model(
     }) {
         return m.clone();
     }
-    // 3. Last resort: the built-in Anthropic default, authed or not. The auth gate above
+    // 4. Last resort: the built-in Anthropic default, authed or not. The auth gate above
     //    already errored when no source resolved, so reaching here means *some*
     //    auth exists but none folded/attached to a model we can see — keep the
     //    historical default to avoid a NoMatch surprise.
@@ -2679,6 +2699,39 @@ mod tests {
             headers.get("authorization").map(|s| s.as_str()),
             Some("Bearer gw-secret")
         );
+    }
+
+    #[test]
+    fn minimal_models_json_model_beats_anthropic_environment_default() {
+        let _env = TestEnv::new();
+        std::env::set_var(ANTHROPIC_AUTH_TOKEN_ENV, "inherited-token");
+        std::env::set_var(ANTHROPIC_BASE_URL_ENV, "http://127.0.0.1:15721");
+        std::fs::write(
+            config::models_path().unwrap(),
+            r#"{
+  "providers": {
+    "deepseek": {
+      "api": "anthropic-messages",
+      "baseUrl": "https://api.deepseek.com/anthropic",
+      "apiKey": "deepseek-key",
+      "models": [{"id":"deepseek-flash"}]
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let resolved = resolve(None, None, None, None, None).unwrap();
+        assert_eq!(resolved.model.provider, "deepseek");
+        assert_eq!(resolved.model.id, "deepseek-flash");
+        assert_eq!(
+            resolved.model.base_url,
+            "https://api.deepseek.com/anthropic"
+        );
+        assert!(resolved.has_provider_key);
+        // Optional metadata is not part of first-run model selection.
+        assert_eq!(resolved.model.context_window, 0);
+        assert_eq!(resolved.model.max_tokens, 0);
     }
 
     #[test]
@@ -3657,7 +3710,7 @@ mod tests {
     }
 
     #[test]
-    fn native_known_provider_default_beats_first_model_in_array() {
+    fn models_json_first_model_beats_native_known_provider_default() {
         let _env = TestEnv::new();
         std::fs::write(
             config::models_path().unwrap(),
@@ -3679,7 +3732,7 @@ mod tests {
 
         let resolved = resolve(None, None, None, None, None).unwrap();
         assert_eq!(resolved.model.provider, "deepseek");
-        assert_eq!(resolved.model.id, "deepseek-v4-pro");
+        assert_eq!(resolved.model.id, "deepseek-chat");
     }
 
     /// The `/model` selector catalog (`available_catalog`) is auth-filtered —

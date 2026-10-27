@@ -1260,6 +1260,14 @@ pub struct BuiltParams {
     pub beta_header: Option<String>,
 }
 
+/// Output budget sent when a model does not declare `maxTokens`.
+///
+/// The Anthropic Messages contract has no server-side default for the required
+/// `max_tokens` field, so "unconfigured" cannot mean "omit" here the way it
+/// does for OpenAI-shaped protocols. 8 KiB covers real replies while staying
+/// inside conservative per-call output caps.
+const DEFAULT_MODEL_MAX_TOKENS: u64 = 8_192;
+
 /// Build the full Anthropic request body + beta headers from a pi context.
 /// Mirrors `buildParams` + the beta-header assembly in `createClient`.
 ///
@@ -1305,8 +1313,16 @@ pub fn build_params(
     );
 
     // max_tokens: opts.max_tokens wins; else model.max_tokens. Thinking may
-    // inflate this (handled below for budget-based models).
-    let base_max_tokens = opts.max_tokens.unwrap_or(model.max_tokens);
+    // inflate this (handled below for budget-based models). Anthropic Messages
+    // requires the field on every request, so an undeclared model cap gets a
+    // local default instead of the 1-token floor; OpenAI-shaped protocols can
+    // omit the field for the same "unconfigured" input and do.
+    let model_max_tokens = if model.max_tokens == 0 {
+        DEFAULT_MODEL_MAX_TOKENS
+    } else {
+        model.max_tokens
+    };
+    let base_max_tokens = opts.max_tokens.unwrap_or(model_max_tokens);
     let mut max_tokens = clamp_max_tokens_to_context(
         model,
         &ctx.messages,
@@ -1338,7 +1354,7 @@ pub fn build_params(
                 let reasoning_level = opts.reasoning.unwrap_or(ThinkingLevel::High);
                 let (adjusted_max, budget) = adjust_max_tokens_for_thinking(
                     opts.max_tokens,
-                    model.max_tokens,
+                    model_max_tokens,
                     reasoning_level,
                     opts.thinking_budgets.as_ref(),
                 );
@@ -1667,6 +1683,41 @@ mod tests {
         assert_eq!(wire[0].defer_loading, Some(true));
         // No cache_control on deferred.
         assert!(wire[0].cache_control.is_none());
+    }
+
+    #[test]
+    fn undeclared_max_tokens_gets_a_usable_default_budget() {
+        // models.json models may omit `maxTokens` entirely; the zeroed Model
+        // default must never reach the wire (Anthropic requires max_tokens,
+        // and the 1-token floor truncates every reply to nothing).
+        let model = Model::new(
+            "deepseek-flash",
+            "DeepSeek Flash",
+            Api::AnthropicMessages,
+            "deepseek",
+            "https://api.deepseek.com/anthropic",
+        );
+        let ctx = crate::types::Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new("hi", 0))],
+            tools: vec![],
+        };
+        let built = build_params(&model, &ctx, false, &SimpleStreamOptions::default());
+        assert_eq!(built.request.max_tokens, DEFAULT_MODEL_MAX_TOKENS);
+
+        // The thinking-budget path reads the same default.
+        let mut reasoning_model = model.clone();
+        reasoning_model.reasoning = true;
+        let mut opts = SimpleStreamOptions::default();
+        opts.reasoning = Some(ThinkingLevel::High);
+        let built = build_params(&reasoning_model, &ctx, false, &opts);
+        assert_eq!(built.request.max_tokens, DEFAULT_MODEL_MAX_TOKENS);
+        match built.request.thinking {
+            Some(AnthropicThinking::Enabled { budget_tokens, .. }) => {
+                assert!(budget_tokens > 0);
+            }
+            other => panic!("expected Enabled, got {other:?}"),
+        }
     }
 
     #[test]

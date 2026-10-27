@@ -2684,7 +2684,10 @@ mod tests {
         assert_eq!(granted["allowed"], true);
         assert_eq!(
             granted["path"],
-            dir.join(".ki/permissions.json").to_string_lossy().as_ref()
+            dir.join(".ki")
+                .join("permissions.json")
+                .to_string_lossy()
+                .as_ref()
         );
 
         let listed: Value = serde_json::from_str(&call(json!({"action":"list"})).await).unwrap();
@@ -2731,7 +2734,8 @@ mod tests {
         assert_eq!(
             value["path"],
             project
-                .join(".ki/permissions.json")
+                .join(".ki")
+                .join("permissions.json")
                 .to_string_lossy()
                 .as_ref()
         );

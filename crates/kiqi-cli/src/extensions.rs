@@ -5118,7 +5118,10 @@ mod tests {
                 .any(|diagnostic| matches!(
                     diagnostic,
                     kiqi_harness::diagnostics::ResourceDiagnostic::Collision(collision)
-                        if collision.loser_path.contains("extensions/demo")
+                        if collision
+                            .loser_path
+                            .replace('\\', "/")
+                            .contains("extensions/demo")
                 )),
             "a collision must name the extension copy as the loser: {:?}",
             result.resource_diagnostics
