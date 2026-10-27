@@ -374,7 +374,7 @@
       ],
       "releases": [
         {
-          "version": "0.4.1",
+          "version": "0.4.2",
           "status": "current",
           "title": "Compile-time extensions receive events, Langfuse built in",
           "description": "Compiled-in extensions now receive SessionStart, message and tool-call events, so a ki with no dynamic libraries still traces a run. kiqi-langfuse is compiled in by default with OTLP tracing and three langfuse tools."

@@ -2,7 +2,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 
 PackageIdentifier: gqf2008.ki
-PackageVersion: 0.4.1
+PackageVersion: 0.4.2
 PackageLocale: en-US
 Publisher: gqf2008
 PublisherUrl: https://github.com/gqf2008
@@ -30,6 +30,6 @@ Tags:
 - developer-tools
 - llm
 - rust
-ReleaseNotesUrl: https://github.com/gqf2008/pi-rust/releases/tag/v0.4.1
+ReleaseNotesUrl: https://github.com/gqf2008/pi-rust/releases/tag/v0.4.2
 ManifestType: defaultLocale
 ManifestVersion: 1.12.0

@@ -76,7 +76,11 @@ SHA_WIN_X64=$(sha "$WIN_X64")
 # apple-darwin, linux aarch64, linux x86_64).
 # --------------------------------------------------------------------------
 note "packaging/homebrew/ki.rb"
-mapfile -t OLD_BREW < <(grep -oE 'sha256 "[0-9a-f]+"' packaging/homebrew/ki.rb | grep -oE '[0-9a-f]{64}')
+# macOS still ships Bash 3.2, which has arrays but no `mapfile`.
+OLD_BREW=()
+while IFS= read -r hash; do
+  OLD_BREW+=("$hash")
+done < <(grep -oE 'sha256 "[0-9a-f]+"' packaging/homebrew/ki.rb | grep -oE '[0-9a-f]{64}')
 [[ "${#OLD_BREW[@]}" -eq 3 ]] || die "expected 3 sha256 lines in the Homebrew formula"
 perl -pi -e "s/version \"$OLD\"/version \"$VERSION\"/; s/v$OLD/v$VERSION/g" packaging/homebrew/ki.rb
 perl -pi -e "s/${OLD_BREW[0]}/$SHA_MAC_ARM/" packaging/homebrew/ki.rb
@@ -120,7 +124,10 @@ perl -pi -e "s/\"version\": \"$OLD\"/\"version\": \"$VERSION\"/" website/data/lo
 # --------------------------------------------------------------------------
 note "packaging/README.md"
 perl -pi -e "s/sha256 \(v$OLD\)/sha256 (v$VERSION)/; s/TAG=v$OLD/TAG=v$VERSION/; s/v$OLD/v$VERSION/g" packaging/README.md
-mapfile -t OLD_TABLE < <(grep -oE '\| `[0-9a-f]{64}` \|' packaging/README.md | grep -oE '[0-9a-f]{64}')
+OLD_TABLE=()
+while IFS= read -r hash; do
+  OLD_TABLE+=("$hash")
+done < <(grep -oE '\| `[0-9a-f]{64}` \|' packaging/README.md | grep -oE '[0-9a-f]{64}')
 if [[ "${#OLD_TABLE[@]}" -eq 4 ]]; then
   # Table order: linux x86_64, linux aarch64, apple aarch64, windows.
   perl -pi -e "s/${OLD_TABLE[0]}/$SHA_LINUX_X64/" packaging/README.md
