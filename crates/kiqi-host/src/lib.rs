@@ -32,6 +32,12 @@ use serde_json::Value;
 
 pub mod dialogs;
 
+/// The extension ABI version this host speaks (`kiqi:extension@<version>` in
+/// `extensions/kiqi-extension.wit`). Loading a component built for another
+/// version fails with an explicit "rebuild it" message instead of a raw
+/// component-model linker error.
+pub const ABI_VERSION: &str = "0.9.0";
+
 /// Largest accepted serialized provider patch (mirrors the wasm backend's
 /// `wasm::MAX_ENVELOPE_BYTES`; lives at the crate root so the dispatch spine and
 /// lean `ki` builds without the `wasm` feature can enforce it too).
@@ -1027,6 +1033,18 @@ pub type Factory = fn() -> Box<dyn Extension>;
 
 #[cfg(test)]
 mod tests {
+    /// The host's ABI constant must name the WIT package version it actually
+    /// binds — a bump in one place only is the failure this pins.
+    #[test]
+    fn abi_version_matches_the_wit_package() {
+        let wit = include_str!("../../../extensions/kiqi-extension.wit");
+        assert!(
+            wit.contains(&format!("package kiqi:extension@{};", crate::ABI_VERSION)),
+            "extensions/kiqi-extension.wit does not declare kiqi:extension@{}",
+            crate::ABI_VERSION
+        );
+    }
+
     use super::EventTag;
 
     #[test]

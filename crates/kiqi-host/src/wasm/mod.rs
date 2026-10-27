@@ -2450,6 +2450,40 @@ pub const DEFAULT_MAX_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 /// wasmtime requires every engine in the process to agree on this setting
 /// (`Config::validate` panics otherwise), so build engines through this helper
 /// and nowhere else.
+/// The `kiqi:extension` ABI version a component was built against, read from
+/// its imports (`kiqi:extension/<interface>@<version>`).
+///
+/// `None` when the component imports nothing from the extension world (an empty
+/// or foreign component) or fails to parse; the caller then lets instantiation
+/// produce its own error. This check only exists to turn a *mismatch* into an
+/// actionable message.
+fn component_abi_version(bytes: &[u8]) -> Option<String> {
+    use wasmparser::{Parser, Payload};
+    for payload in Parser::new(0).parse_all(bytes) {
+        let Ok(Payload::ComponentImportSection(reader)) = payload else {
+            continue;
+        };
+        for import in reader.into_iter().flatten() {
+            let name = import.name.name;
+            if !name.starts_with("kiqi:extension") {
+                continue;
+            }
+            // The reader splits `kiqi:extension/<iface>@<version>` into
+            // `name` + `version_suffix`; older encoders keep the suffix inline —
+            // accept both so the diagnostic does not depend on the encoder.
+            if let Some(version) = import.name.version_suffix {
+                return Some(version.to_string());
+            }
+            if let Some((_, version)) = name.rsplit_once('@') {
+                if !version.is_empty() {
+                    return Some(version.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn wasmtime_config(options: &Options) -> wasmtime::Config {
     let mut config = wasmtime::Config::new();
     if options.fuel.is_some() {
@@ -2576,7 +2610,20 @@ impl WasmExtension {
             })?;
             ticker.register(&engine);
         }
-        let component = Component::from_file(&engine, wasm)
+        // Read once so the ABI version can be checked before wasmtime gets a
+        // chance to fail with an opaque linker error.
+        let bytes = std::fs::read(wasm)
+            .map_err(|error| ExtensionError::Failed(format!("load {}: {error}", wasm.display())))?;
+        if let Some(version) = component_abi_version(&bytes) {
+            if version != crate::ABI_VERSION {
+                return Err(ExtensionError::Failed(format!(
+                    "{id}: this component was built for kiqi:extension@{version}, but the host \
+                     speaks kiqi:extension@{}; rebuild it with `ki insmod --build extensions/wasm/<crate>`",
+                    crate::ABI_VERSION
+                )));
+            }
+        }
+        let component = Component::new(&engine, &bytes)
             .map_err(|error| ExtensionError::Failed(format!("load {}: {error}", wasm.display())))?;
 
         // Hoist the OAuth grant before it moves into the store: `oauth_providers`

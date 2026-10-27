@@ -52,6 +52,10 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   compiled/wasm sink, action mailboxes); its C-ABI bus types moved to
   `kiqi-extensions::abi` and the shared contract constants live in
   `kiqi-extension`.
+- **A component built against another ABI version gets a clear error.** When a
+  guest's imports say `kiqi:extension@X` and the host speaks
+  `kiqi:extension@0.9.0`, loading now fails with both versions named and a
+  rebuild hint instead of a raw component-model linker error.
 - **`ki extension rename <old> <new>`.** Moving an install to a new id no
   longer means reinstalling and copying grants by hand: the command renames the
   install directory (grants live inside it, so they travel), re-keys the

@@ -3028,6 +3028,41 @@ fn exec_does_not_hang_when_the_command_leaves_a_background_child() {
     );
 }
 
+/// A component built for another ABI version is refused before wasmtime can
+/// fail with an opaque linker error, and the message names both versions.
+#[test]
+fn a_component_from_another_abi_version_is_refused_with_the_versions_named() {
+    let wasm = std::fs::read(fixture_wasm()).expect("read the fixture");
+    let needle = format!("@{}", kiqi_host::ABI_VERSION);
+    let replacement = "@0.0.1";
+    assert_eq!(needle.len(), replacement.len());
+    let positions: Vec<usize> = wasm
+        .windows(needle.len())
+        .enumerate()
+        .filter(|(_, window)| *window == needle.as_bytes())
+        .map(|(index, _)| index)
+        .collect();
+    assert!(
+        !positions.is_empty(),
+        "the fixture must embed the ABI version it was built for"
+    );
+    let mut patched = wasm.clone();
+    for index in positions {
+        patched[index..index + needle.len()].copy_from_slice(replacement.as_bytes());
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("extension.wasm");
+    std::fs::write(&path, &patched).unwrap();
+
+    let error = match WasmExtension::load_with_grants("patched", &path, Grants::default()) {
+        Ok(_) => panic!("a mismatched ABI version must be refused"),
+        Err(error) => error,
+    };
+    let text = error.to_string();
+    assert!(text.contains("@0.0.1") && text.contains(&needle), "{text}");
+    assert!(text.contains("rebuild"), "{text}");
+}
+
 /// `kiqi-webfetch` ported to wasm: the tool's own URL policy runs in the guest,
 /// and where it may actually go is the user's grant — checked before any network
 /// access, so this stays hermetic.
