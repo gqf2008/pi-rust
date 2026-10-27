@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use crate::compiled::CompiledEventSink;
 use crate::registry::RegistrySnapshot;
 use crate::ActionBridge;
 
@@ -45,8 +46,24 @@ impl ExtensionSession {
     /// every event call site off (a wasm-only install delivered nothing, not
     /// even to `on_event`).
     pub fn none() -> Self {
+        Self::none_with_compiled_sink(None)
+    }
+
+    /// An empty session that carries `sink` as its **per-session** event sink.
+    ///
+    /// `kiqi-cli` installs the compiled/wasm sink on the session before it
+    /// builds the emitter / provider hooks, so everything this session
+    /// dispatches goes through its own sink instead of the process-global
+    /// fallback. Two sessions in one process (the ACP multi-session server)
+    /// therefore cannot cross-talk. `None` leaves the snapshot on the global
+    /// fallback path.
+    pub fn none_with_compiled_sink(sink: Option<CompiledEventSink>) -> Self {
+        let snapshot = match sink {
+            Some(sink) => RegistrySnapshot::new().with_compiled_sink(sink),
+            None => RegistrySnapshot::new(),
+        };
         Self {
-            snapshot: Some(Arc::new(RegistrySnapshot::new())),
+            snapshot: Some(Arc::new(snapshot)),
             action_bridge: None,
         }
     }

@@ -1085,8 +1085,11 @@ mod panel;
 pub use panel::{ExtensionPanel, PanelAnchor, PanelLayout};
 pub use tool::ToolCallContext;
 pub use translate::{
-    dispatch_before_provider_request, dispatch_data_event, dispatch_data_event_claiming,
-    dispatch_empty_event, dispatch_lifecycle_event, ExtensionEmitter, TeeEmitter,
+    dispatch_before_provider_request, dispatch_before_provider_request_with, dispatch_data_event,
+    dispatch_data_event_claiming, dispatch_data_event_claiming_with, dispatch_data_event_with,
+    dispatch_empty_event, dispatch_empty_event_with, dispatch_lifecycle_event,
+    dispatch_lifecycle_event_with, dispatch_to_handlers, dispatch_to_handlers_with,
+    ExtensionEmitter, TeeEmitter,
 };
 
 pub use stdio::StdioLifecycle;

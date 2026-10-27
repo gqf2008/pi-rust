@@ -12,7 +12,7 @@
 //! only mutation channel is the provider gate on `BeforeProviderRequest`
 //! ([`crate::translate::dispatch_before_provider_request`]).
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::EventTag;
 use kiqi_ai::types::{Content, Message, UserContent};
@@ -20,10 +20,15 @@ use kiqi_ai::Context;
 use kiqi_ai::{ContextPatch, Model, ProviderHooks, SimpleStreamOptions, SimpleStreamOptionsPatch};
 
 use crate::loader::ExtensionSession;
-use crate::translate::{dispatch_before_provider_request, dispatch_data_event};
+use crate::registry::RegistrySnapshot;
+use crate::translate::{dispatch_before_provider_request_with, dispatch_data_event_with};
 
 /// A [`ProviderHooks`] that dispatches to the compiled/wasm extensions.
 pub struct ExtensionProviderHooks {
+    /// The session snapshot whose sink receives these events. `None` (a session
+    /// with no snapshot) falls back to the process-global sink, exactly like the
+    /// other dispatch funnels.
+    snapshot: Option<Arc<RegistrySnapshot>>,
     /// Timestamp of the last user message we emitted `BeforeAgentStart` for.
     /// The hook fires once per provider call, but `before_agent_start` must
     /// fire once per prompt, so the prompt timestamp is the dedupe key.
@@ -31,21 +36,28 @@ pub struct ExtensionProviderHooks {
 }
 
 impl ExtensionProviderHooks {
-    /// Build hooks for a session. Returns `None` when no compiled sink is
-    /// installed (so a session without extensions runs the plain no-op path).
+    /// Build hooks for a session. Returns `None` when neither the session nor
+    /// the process has a sink (so a session without extensions runs the plain
+    /// no-op path).
     ///
     /// The wasm guest's prompt transform is chained separately by `kiqi-cli`
     /// (`compiled_prompt_hooks`); this bridge is only the provider-event
     /// observer.
-    pub fn from_session(_session: &ExtensionSession) -> Option<Self> {
+    pub fn from_session(session: &ExtensionSession) -> Option<Self> {
         // A wasm-only install has no native handler in the snapshot, but the
         // compiled/wasm fan-out is installed and is the observer. Without this,
         // a sandboxed extension's provider-request grant would be dead in a
         // real session (it was only ever exercised by direct host tests).
-        if !crate::compiled::sink_installed() {
+        //
+        // A session carrying its own sink is self-sufficient; otherwise the
+        // process-global fallback has to be installed.
+        let snapshot = session.snapshot_arc();
+        let has_session_sink = snapshot.as_ref().and_then(|s| s.compiled_sink()).is_some();
+        if !has_session_sink && !crate::compiled::sink_installed() {
             return None;
         }
         Some(Self {
+            snapshot,
             last_before_agent_start: Mutex::new(None),
         })
     }
@@ -85,7 +97,11 @@ impl ProviderHooks for ExtensionProviderHooks {
                 // `BeforeProviderRequest` of this turn reaches it, so the turn is
                 // fully identified (session included) by the time its first
                 // generation is created.
-                dispatch_data_event(EventTag::BeforeAgentStart, &event.to_string());
+                dispatch_data_event_with(
+                    self.snapshot.as_deref(),
+                    EventTag::BeforeAgentStart,
+                    &event.to_string(),
+                );
             }
         }
 
@@ -134,7 +150,7 @@ impl ProviderHooks for ExtensionProviderHooks {
             request["headerValues"] = serde_json::Value::Object(header_values);
         }
         let rich = request.to_string();
-        let patch = dispatch_before_provider_request(&rich);
+        let patch = dispatch_before_provider_request_with(self.snapshot.as_deref(), &rich);
         let headers = serde_json::json!({
             "headerNames": opts
                 .headers
@@ -142,7 +158,11 @@ impl ProviderHooks for ExtensionProviderHooks {
                 .map(|h| h.keys().cloned().collect::<Vec<_>>())
                 .unwrap_or_default()
         });
-        dispatch_data_event(EventTag::BeforeProviderHeaders, &headers.to_string());
+        dispatch_data_event_with(
+            self.snapshot.as_deref(),
+            EventTag::BeforeProviderHeaders,
+            &headers.to_string(),
+        );
         patch.as_ref().and_then(options_patch_from_value)
     }
 }

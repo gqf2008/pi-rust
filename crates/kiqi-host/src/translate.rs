@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use crate::Event;
 use crate::EventTag;
+use crate::RegistrySnapshot;
 use futures::future::BoxFuture;
 use kiqi_agent::events::{AgentEmitter, AgentEvent};
 use serde_json::Value;
@@ -244,19 +245,37 @@ fn agent_tool_result_to_value(result: &kiqi_agent::types::AgentToolResult) -> Va
 ///
 /// The host composes the two via [`TeeEmitter`]; this emitter alone only
 /// dispatches to extensions.
-pub struct ExtensionEmitter;
+pub struct ExtensionEmitter {
+    /// The session this emitter belongs to, if it was built from one. Dispatching
+    /// through the session's snapshot reaches only that session's sink; `None`
+    /// (a bare `ExtensionEmitter::new()`) uses the process-global fallback.
+    snapshot: Option<Arc<RegistrySnapshot>>,
+}
 
 impl ExtensionEmitter {
-    /// Build an emitter. The compiled sink is process-global (see
-    /// [`crate::compiled::set_compiled_event_sink`]), so there is no per-session
-    /// state to capture.
+    /// Build an emitter with no session attached: dispatch uses the
+    /// process-global sink. Kept for tests and for callers that only ever run
+    /// one session per process.
     pub fn new() -> Self {
-        Self
+        Self { snapshot: None }
+    }
+
+    /// Build an emitter bound to `session`'s snapshot, so every event it emits
+    /// reaches the session's own sink — the per-session isolation path.
+    pub fn for_session(session: &crate::loader::ExtensionSession) -> Self {
+        Self {
+            snapshot: session.snapshot_arc(),
+        }
+    }
+
+    /// Build an emitter from an already-shared snapshot.
+    pub fn with_snapshot(snapshot: Option<Arc<RegistrySnapshot>>) -> Self {
+        Self { snapshot }
     }
 
     /// Dispatch one event to the compiled extensions.
     fn dispatch(&self, event: &Event) {
-        dispatch_to_handlers(event);
+        dispatch_to_handlers_with(self.snapshot.as_deref(), event);
     }
 }
 
@@ -267,10 +286,21 @@ impl Default for ExtensionEmitter {
 }
 
 /// Fan an already-built event out to the compiled/wasm sink.
+///
+/// Compatibility entry point for call sites without a session snapshot: it uses
+/// the process-global sink. Per-session paths call
+/// [`dispatch_to_handlers_with`].
 pub fn dispatch_to_handlers(event: &Event) {
+    dispatch_to_handlers_with(None, event);
+}
+
+/// Fan an already-built event out through `snapshot`'s sink, falling back to
+/// the process-global sink when the snapshot has none (or is absent).
+pub fn dispatch_to_handlers_with(snapshot: Option<&RegistrySnapshot>, event: &Event) {
     // The verdict is ignored here on purpose: this is the observe fan-out, and
     // only the routing dispatchers act on `Claimed`.
-    let _ = crate::compiled::dispatch_observe(event);
+    let sink = snapshot.and_then(RegistrySnapshot::compiled_sink);
+    let _ = crate::compiled::dispatch_observe_with(sink, event);
 }
 
 /// Dispatch one `before-provider-request` turn: observe pass + provider gate.
@@ -281,20 +311,40 @@ pub fn dispatch_to_handlers(event: &Event) {
 /// the gate pass invokes only patch-capable hosts. Each host is therefore called
 /// at most once per request. Returns the validated patch to apply, if any.
 pub fn dispatch_before_provider_request(rich: &str) -> Option<Value> {
+    dispatch_before_provider_request_with(None, rich)
+}
+
+/// [`dispatch_before_provider_request`] through `snapshot`'s sink, falling back
+/// to the process-global sink when the snapshot has none.
+pub fn dispatch_before_provider_request_with(
+    snapshot: Option<&RegistrySnapshot>,
+    rich: &str,
+) -> Option<Value> {
     let event = crate::Event::new(
         EventTag::BeforeProviderRequest,
         serde_json::from_str(rich).unwrap_or(Value::Null),
     );
-    let _ = crate::compiled::dispatch_observe(&event);
-    crate::compiled::dispatch_provider_gate(&event)
+    let sink = snapshot.and_then(RegistrySnapshot::compiled_sink);
+    let _ = crate::compiled::dispatch_observe_with(sink, &event);
+    crate::compiled::dispatch_provider_gate_with(sink, &event)
 }
 
 /// Build + dispatch a generic `data` event (JSON payload). Returns whether any
 /// native handler was invoked — always `false` now that the native registration
 /// channel is gone; kept for call-site compatibility with the observe funnels.
 pub fn dispatch_data_event(tag: EventTag, data: &str) -> bool {
+    dispatch_data_event_with(None, tag, data)
+}
+
+/// [`dispatch_data_event`] through `snapshot`'s sink, falling back to the
+/// process-global sink when the snapshot has none.
+pub fn dispatch_data_event_with(
+    snapshot: Option<&RegistrySnapshot>,
+    tag: EventTag,
+    data: &str,
+) -> bool {
     let event = build_data_event(tag, data);
-    dispatch_to_handlers(&event);
+    dispatch_to_handlers_with(snapshot, &event);
     false
 }
 
@@ -302,15 +352,33 @@ pub fn dispatch_data_event(tag: EventTag, data: &str) -> bool {
 /// `session_shutdown`, the kiqi-specific `before_tui_start`). Returns whether
 /// any native handler was invoked — always `false`.
 pub fn dispatch_empty_event(tag: EventTag) -> bool {
-    dispatch_to_handlers(&Event::new(tag, Value::Null));
+    dispatch_empty_event_with(None, tag)
+}
+
+/// [`dispatch_empty_event`] through `snapshot`'s sink, falling back to the
+/// process-global sink when the snapshot has none.
+pub fn dispatch_empty_event_with(snapshot: Option<&RegistrySnapshot>, tag: EventTag) -> bool {
+    dispatch_to_handlers_with(snapshot, &Event::new(tag, Value::Null));
     false
 }
 
 /// Dispatch a data event and report whether it was **claimed** by a compiled
 /// extension (anything other than `EventAction::Continue`).
 pub fn dispatch_data_event_claiming(tag: EventTag, data: &str) -> bool {
+    dispatch_data_event_claiming_with(None, tag, data)
+}
+
+/// [`dispatch_data_event_claiming`] through `snapshot`'s sink, falling back to
+/// the process-global sink when the snapshot has none.
+pub fn dispatch_data_event_claiming_with(
+    snapshot: Option<&RegistrySnapshot>,
+    tag: EventTag,
+    data: &str,
+) -> bool {
     let event = build_data_event(tag, data);
-    crate::compiled::dispatch_claiming(&event) == crate::compiled::CompiledVerdict::Claimed
+    let sink = snapshot.and_then(RegistrySnapshot::compiled_sink);
+    crate::compiled::dispatch_claiming_with(sink, &event)
+        == crate::compiled::CompiledVerdict::Claimed
 }
 
 /// Build a data event, parsing the JSON string payload. A malformed payload
@@ -326,7 +394,17 @@ fn build_data_event(tag: EventTag, data: &str) -> Event {
 /// returns a reason; the signature is kept for the callers that used to honor a
 /// native veto.
 pub async fn dispatch_lifecycle_event(tag: EventTag) -> Option<String> {
-    let _ = crate::compiled::dispatch_observe(&Event::new(tag, Value::Null));
+    dispatch_lifecycle_event_with(None, tag).await
+}
+
+/// [`dispatch_lifecycle_event`] through `snapshot`'s sink, falling back to the
+/// process-global sink when the snapshot has none.
+pub async fn dispatch_lifecycle_event_with(
+    snapshot: Option<&RegistrySnapshot>,
+    tag: EventTag,
+) -> Option<String> {
+    let sink = snapshot.and_then(RegistrySnapshot::compiled_sink);
+    let _ = crate::compiled::dispatch_observe_with(sink, &Event::new(tag, Value::Null));
     None
 }
 
@@ -677,5 +755,111 @@ mod tests {
         );
 
         crate::compiled::clear_compiled_event_sink();
+    }
+
+    /// Two sessions in one process each dispatch through their own sink. The
+    /// process-global slot must stay untouched (it would otherwise cross-talk).
+    #[test]
+    fn two_sessions_dispatch_only_to_their_own_sinks() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use crate::compiled::CompiledVerdict;
+        use crate::loader::ExtensionSession;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let global_hits = Arc::new(AtomicUsize::new(0));
+        let global_counter = Arc::clone(&global_hits);
+        crate::compiled::set_compiled_event_sink(Arc::new(move |_, _| {
+            global_counter.fetch_add(1, Ordering::SeqCst);
+            CompiledVerdict::Continue
+        }));
+
+        let a: Arc<Mutex<Vec<EventTag>>> = Arc::new(Mutex::new(Vec::new()));
+        let b: Arc<Mutex<Vec<EventTag>>> = Arc::new(Mutex::new(Vec::new()));
+        let record_a = Arc::clone(&a);
+        let record_b = Arc::clone(&b);
+        let session_a =
+            ExtensionSession::none_with_compiled_sink(Some(Arc::new(move |_, event| {
+                record_a.lock().unwrap().push(event.tag);
+                CompiledVerdict::Continue
+            })));
+        let session_b =
+            ExtensionSession::none_with_compiled_sink(Some(Arc::new(move |_, event| {
+                record_b.lock().unwrap().push(event.tag);
+                CompiledVerdict::Continue
+            })));
+
+        assert!(!dispatch_empty_event_with(
+            session_a.snapshot(),
+            EventTag::SessionStart
+        ));
+        assert!(!dispatch_empty_event_with(
+            session_b.snapshot(),
+            EventTag::SessionTree
+        ));
+        assert!(!dispatch_empty_event_with(
+            session_a.snapshot(),
+            EventTag::SessionStart
+        ));
+
+        assert_eq!(
+            *a.lock().unwrap(),
+            vec![EventTag::SessionStart, EventTag::SessionStart]
+        );
+        assert_eq!(*b.lock().unwrap(), vec![EventTag::SessionTree]);
+        assert_eq!(
+            global_hits.load(Ordering::SeqCst),
+            0,
+            "a session sink must shadow the global one, not feed it too"
+        );
+
+        crate::compiled::clear_compiled_event_sink();
+    }
+
+    /// A snapshot that carries no sink (and the no-snapshot path) still reaches
+    /// the process-global sink: the compatibility fallback.
+    #[test]
+    fn a_snapshot_without_a_sink_falls_back_to_the_global_sink() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use crate::compiled::CompiledVerdict;
+        use crate::loader::ExtensionSession;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        crate::compiled::set_compiled_event_sink(Arc::new(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            CompiledVerdict::Continue
+        }));
+
+        let session = ExtensionSession::none();
+        assert!(!dispatch_empty_event_with(
+            session.snapshot(),
+            EventTag::SessionStart
+        ));
+        assert!(!dispatch_empty_event_with(None, EventTag::SessionTree));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        crate::compiled::clear_compiled_event_sink();
+    }
+
+    /// The emitter built from a session carries that session's sink, so the
+    /// harness's agent events reach the right extensions even when the global
+    /// slot belongs to another session.
+    #[test]
+    fn an_extension_emitter_uses_its_sessions_sink() {
+        use crate::compiled::CompiledVerdict;
+        use crate::loader::ExtensionSession;
+
+        let seen: Arc<Mutex<Vec<EventTag>>> = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        let session = ExtensionSession::none_with_compiled_sink(Some(Arc::new(move |_, event| {
+            record.lock().unwrap().push(event.tag);
+            CompiledVerdict::Continue
+        })));
+
+        let emitter = ExtensionEmitter::for_session(&session);
+        emitter.try_emit(AgentEvent::AgentStart);
+
+        assert_eq!(*seen.lock().unwrap(), vec![EventTag::AgentStart]);
     }
 }

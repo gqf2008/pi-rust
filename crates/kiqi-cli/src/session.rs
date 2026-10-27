@@ -451,15 +451,19 @@ pub async fn build_with_selection(
     // P6: the cdylib loader is gone — the extension session is always the
     // empty registry, which keeps the dispatch funnels (compiled/wasm sink)
     // live while carrying no native tools/providers/renderers.
-    let extension_session = ExtensionSession::none();
-    // The same capabilities serve tools and events; install the event sink
-    // before anything can dispatch (the first `SessionStart` is still ahead).
+    //
+    // The same capabilities serve tools and events; build the sink before the
+    // session so the session's snapshot carries it (the first `SessionStart` is
+    // still ahead). The sink also lands in the process-global slot as the
+    // fallback for call sites without a snapshot; mounting it on the session is
+    // what keeps this session's events away from every other session's.
     let extension_caps = crate::extensions::owned_caps(
         std::sync::Arc::clone(&extension_caps_host),
         Some(runtime.clone()),
         Some(std::sync::Arc::clone(&extension_ui)),
     );
-    crate::extensions::install_compiled_event_sink(extension_caps.clone());
+    let compiled_sink = crate::extensions::install_compiled_event_sink(extension_caps.clone());
+    let extension_session = ExtensionSession::none_with_compiled_sink(Some(compiled_sink));
     crate::extensions::merge_compiled_extension_tools(
         &mut tools,
         &crate::extensions::compiled_extension_hosts(),
@@ -870,7 +874,7 @@ pub async fn build_with_selection(
     // `Event` and fans it into the compiled/wasm sink).
     let emitter: Arc<dyn kiqi_agent::AgentEmitter> = Arc::new(TeeEmitter::new(vec![
         broadcast_emitter,
-        Arc::new(ExtensionEmitter::new()),
+        Arc::new(ExtensionEmitter::for_session(&extension_session)),
     ]));
 
     // Saved user defaults. Best-effort: a missing or malformed file must not stop
@@ -1274,10 +1278,17 @@ pub struct ReloadContext {
 /// has no veto, so this always returns `None`. The signature is kept because
 /// every run shape funnels its shutdown through here.
 pub async fn dispatch_session_event_async(
-    _reload_context: &ReloadContext,
+    reload_context: &ReloadContext,
     tag: kiqi_host::EventTag,
 ) -> Option<String> {
-    kiqi_host::dispatch_lifecycle_event(tag).await
+    // Use THIS session's sink (never the process-global one) so ACP's concurrent
+    // sessions do not receive each other's lifecycle events.
+    let snapshot = reload_context
+        .extension_session
+        .lock()
+        .unwrap()
+        .snapshot_arc();
+    kiqi_host::dispatch_lifecycle_event_with(snapshot.as_deref(), tag).await
 }
 
 /// Notify extensions the session moved to a different point of its tree — `/tree`
@@ -1324,9 +1335,16 @@ pub async fn dispatch_session_shutdown_advisory(reload_context: &ReloadContext) 
 
 /// Join extension teardown before unloading modules. A detached timed-out handler
 /// could still execute code in the old DLL, so it cannot safely permit a swap.
-async fn shutdown_extensions_for_reload() -> Result<(), String> {
-    tokio::task::spawn_blocking(|| {
-        kiqi_host::dispatch_empty_event(kiqi_host::EventTag::SessionShutdown);
+async fn shutdown_extensions_for_reload(
+    snapshot: Option<Arc<kiqi_host::RegistrySnapshot>>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        // The reload dispatches through the session being torn down, so an
+        // observer here is the old session's, not another session's.
+        kiqi_host::dispatch_empty_event_with(
+            snapshot.as_deref(),
+            kiqi_host::EventTag::SessionShutdown,
+        );
     })
     .await
     .map_err(|error| error.to_string())
@@ -1427,7 +1445,10 @@ where
     let mut warnings = false;
 
     // Tell extensions the session is going away before the reload swaps state.
-    if let Err(reason) = shutdown_extensions_for_reload().await {
+    // Dispatch on the session being torn down (its own sink), never the global
+    // fallback, so a concurrent session's extensions do not see this shutdown.
+    let shutdown_snapshot = ctx.extension_session.lock().unwrap().snapshot_arc();
+    if let Err(reason) = shutdown_extensions_for_reload(shutdown_snapshot).await {
         return ReloadOutcome {
             summary: "Reload failed during extension shutdown".into(),
             had_warnings: true,
@@ -1475,9 +1496,25 @@ where
         ctx.editor_text.clone(),
     );
 
+    // Build the fresh capabilities and the fresh per-session sink BEFORE the
+    // session: the snapshot that goes into the cell must carry this sink, and
+    // the reload's own `resources_discover` / provider hooks below dispatch
+    // through it. Installing here also refreshes the process-global fallback and
+    // `COMPILED_CAPS` (tools, commands, prompt transforms) with the same set,
+    // which is why the later tool-merge block reuses `extension_caps` instead of
+    // installing a second time.
+    let extension_caps = crate::extensions::reload_caps(
+        std::sync::Arc::clone(&host_for_extensions),
+        ctx.ui_dialog.clone(),
+        ctx.ext_status.clone(),
+        ctx.editor_text.clone(),
+    );
+    let compiled_sink = crate::extensions::install_compiled_event_sink(extension_caps.clone());
+
     // P6: the cdylib loader is gone — the fresh session is always the empty
     // registry (wasm guests reload through `extensions::reload_caps`, not here).
-    let extension_session = kiqi_host::ExtensionSession::none();
+    let extension_session =
+        kiqi_host::ExtensionSession::none_with_compiled_sink(Some(compiled_sink));
 
     // ---- 2. Invalidate the old session + bridge BEFORE the swap ----
     // The old registry's `active` flag flips false so any in-flight
@@ -1635,7 +1672,7 @@ where
     // ---- Rebuild the emitter (TeeEmitter over fresh ExtensionEmitter) ----
     let emitter: Arc<dyn kiqi_agent::AgentEmitter> = Arc::new(TeeEmitter::new(vec![
         ctx.broadcast.clone(),
-        Arc::new(ExtensionEmitter::new()),
+        Arc::new(ExtensionEmitter::for_session(&extension_session)),
     ]));
 
     // ---- 5. Push the rebuilt state into the live harness via the B5d setters ----
@@ -1654,17 +1691,10 @@ where
     // context (not the bridge) precisely so they survive the swap, and the
     // action bridge already exposes them — the "no accessor" note that used to
     // be here was stale.
-    let extension_caps = crate::extensions::reload_caps(
-        std::sync::Arc::clone(&host_for_extensions),
-        ctx.ui_dialog.clone(),
-        ctx.ext_status.clone(),
-        ctx.editor_text.clone(),
-    );
-    // Refresh the event sink and the process-wide caps with the same set, so
-    // events, commands, probes, prompt transforms and tools all run against one
-    // consistent capability set after the swap (they were otherwise still on the
-    // build-time set).
-    crate::extensions::install_compiled_event_sink(extension_caps.clone());
+    //
+    // `extension_caps` (and the sink installed with it) was built before the
+    // fresh session, so the post-swap tool adapters reuse exactly the
+    // capabilities the session's snapshot dispatches with.
     crate::extensions::merge_compiled_extension_tools(
         &mut tools,
         &crate::extensions::compiled_extension_hosts(),
@@ -4656,8 +4686,47 @@ mod tests {
             }
             kiqi_host::CompiledVerdict::Continue
         }));
-        super::shutdown_extensions_for_reload().await.unwrap();
+        super::shutdown_extensions_for_reload(None).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        kiqi_host::clear_compiled_event_sink();
+    }
+
+    /// The same shutdown dispatch through a session's own sink: it must reach
+    /// that sink and NOT the process-global one, which is how a reload stops
+    /// leaking SessionShutdown into a concurrent ACP session.
+    #[tokio::test]
+    async fn reload_shutdown_prefers_the_sessions_own_sink() {
+        let _gate = crate::extensions::lock_test_sink();
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let global = Arc::new(AtomicUsize::new(0));
+        let global_counter = Arc::clone(&global);
+        kiqi_host::set_compiled_event_sink(std::sync::Arc::new(move |_mode, event| {
+            if event.tag == kiqi_host::EventTag::SessionShutdown {
+                global_counter.fetch_add(1, Ordering::SeqCst);
+            }
+            kiqi_host::CompiledVerdict::Continue
+        }));
+
+        let session_calls = Arc::new(AtomicUsize::new(0));
+        let session_counter = Arc::clone(&session_calls);
+        let session = ExtensionSession::none_with_compiled_sink(Some(std::sync::Arc::new(
+            move |_mode, event| {
+                if event.tag == kiqi_host::EventTag::SessionShutdown {
+                    session_counter.fetch_add(1, Ordering::SeqCst);
+                }
+                kiqi_host::CompiledVerdict::Continue
+            },
+        )));
+
+        super::shutdown_extensions_for_reload(session.snapshot_arc())
+            .await
+            .unwrap();
+        assert_eq!(session_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            global.load(Ordering::SeqCst),
+            0,
+            "the session sink must receive SessionShutdown, not the global fallback"
+        );
         kiqi_host::clear_compiled_event_sink();
     }
 

@@ -1241,7 +1241,14 @@ impl TuiState {
         let Some(payload) = self.take_editor_change() else {
             return;
         };
-        kiqi_host::dispatch_data_event(EventTag::EditorChange, &payload.to_string());
+        // Route through this TUI's session sink so a concurrent session's
+        // editor stream is not delivered here.
+        let snapshot = self.extension_session.lock().unwrap().snapshot_arc();
+        kiqi_host::dispatch_data_event_with(
+            snapshot.as_deref(),
+            EventTag::EditorChange,
+            &payload.to_string(),
+        );
     }
 
     /// Build the `EditorChange` payload when the draft changed since the last

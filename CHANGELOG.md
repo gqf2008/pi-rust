@@ -37,6 +37,15 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   feature, which only `kiqi-cli` enables, so `kiqi-tools` / `kiqi-mcp` /
   `kiqi-acp` stay wasmtime-free. Code paths: `kiqi_host::` for the contract and
   spine, `kiqi_host::wasm::` for the backend.
+- **Extension events are per-session.** The compiled/wasm event sink now lives on
+  the session's `RegistrySnapshot`: `install_compiled_event_sink` returns the
+  sink it installed, `ExtensionSession::none_with_compiled_sink` mounts it, and
+  every `translate` funnel prefers `snapshot.compiled_sink()`. Two sessions in
+  one process — the ACP multi-session server — therefore receive only their own
+  events instead of the last-installed session's; the process-global sink stays
+  as the fallback for call sites without a snapshot. `COMPILED_CAPS` (tools,
+  commands, probes, prompt transforms) is still process-global. Notes in
+  `docs/design/extension-abi-handover.md`.
 
 ### Removed
 

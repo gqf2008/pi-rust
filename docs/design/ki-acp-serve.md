@@ -375,9 +375,13 @@ session/new / EOF 全通，应答见 §7 表）。Zed 真机手测仍待人工�
 - 每个 `LiveSession` 独立持有 cwd、harness/上下文、事件接收器、system prompt 覆盖、
   turn/cancel 与对话框状态，禁止串话。`initialize` 的协议版本协商和客户端能力快照
   （包括 notices）属于**连接**，能力在会话激活时复制，不随某个会话关闭而丢失。
-- 进程级共享资源不因此复制成协议级全局会话；legacy compiled-extension sink
-  （last-writer-wins）及第三方插件读取进程 cwd 的既有边界如实保留在
-  `kiqi-acp/src/sessions.rs`。内置工具的显式 cwd、ACP run/cancel、标题与上下文不经过这些全局槽。
+- 事件 sink 已按会话隔离（2026-10-27）：每次 `session::build` 把
+  `install_compiled_event_sink` 返回的 sink 挂到该会话的 `RegistrySnapshot`，`translate`
+  的派发点优先走快照；进程级槽位只作无快照路径的 fallback。因此 ACP 同进程多会话的
+  extension 事件不再串话。仍属进程级共享的残余是 `extensions::COMPILED_CAPS`
+  （工具/命令/probe/prompt transform 的能力集，last-writer-wins）及第三方插件在调用时
+  读取进程 cwd 的既有边界，如实保留在 `kiqi-acp/src/sessions.rs`。内置工具的显式 cwd、ACP
+  run/cancel、标题与上下文不经过这些全局槽。
 
 兼容性测试以真实协议面钉住上述变化：旧的
 `second_live_session_is_refused_with_server_error` 拒绝测试由

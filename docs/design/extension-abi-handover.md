@@ -144,9 +144,17 @@ wasm 就是权威路径，**2026-10-26 的 P6 把 cdylib 装载机整体删除**
 
 遗留（惰性，不可达）：C ABI 注册回调机器（`HostApi`/vtable/线程局部 `current_api`）与
 `ExtensionToolAdapter` 仍随脊柱编译，但无装载路径；折叠成纯 serde 事件总线是独立后续批次
-（`extension-abi.md` §6.45）。另一个遗留全局态是进程级 `compiled_event_sink`：每次 session
-build 调用 `install_compiled_event_sink` 都替换同一槽位，仍是 **last-writer-wins**，
-不是每会话独立注册。
+（`extension-abi.md` §6.45）。
+
+**事件 sink 已按会话隔离**（2026-10-27，`refactor/extension-session-sinks`）：
+`install_compiled_event_sink` 仍把 sink 写进进程级槽位，但只作为**无快照路径的 fallback**；
+它同时返回该 sink，`kiqi-cli` 在 build/reload 里把它挂到会话的
+`RegistrySnapshot`（`ExtensionSession::none_with_compiled_sink` → `RegistrySnapshot::compiled_sink`）。
+`translate` 的 5 个派发点优先用 `snapshot.compiled_sink()`，所以同一进程内两个会话
+（ACP 多会话）各自只收到自己的事件，不再 last-writer-wins。`COMPILED_CAPS`
+（工具/命令/probe/prompt transform 读取的进程级能力集）仍是 last-writer-wins，
+不在本批范围内。
+
 
 ## 5. 上手
 
@@ -203,7 +211,7 @@ CI：4 个 job（Linux `cargo test`、Windows `cargo check`、2× Windows instal
 | **内建 provider 不自动消费 OAuth entry** | 内建链路的 `stored_api_key` 仍只匹配 `ApiKey`；但 wasm provider 已能通过显式 `--credential-from` 使用 OAuth access token，并在每次请求重算凭据指纹，不能再概括为「OAuth 没有模型请求消费者」（§6.40/§6.41）。 |
 | **O17 残余风险仍在，告警已落地** | 同时持有 `exec`/`fs`/`net-sockets` 与 `oauth`/`provider` 时，`credential_capability_warning` 会在授权后警告并给出 revoke/logout 命令；它不拒绝授权，也不能消除插件经其它能力读取 `auth.json` 的爆炸半径（§6.39）。 |
 | **同意面仍不对称** | `probe`/`verdict.replace`、`before-agent-start`、`session-read`/`session-control`/`inject`/`ui` 在 0.8.0 仍不需要 grant（业主决定，§6.39 记录）。 |
-| ~~cdylib 的 OAuth/provider/renderer/resources 槽位待删~~ | ✅ 已解（2026-10-26 P6）：装载机与 `kiqi-extension-sdk`/`ki dev`/`ki install`/`ki package` 全部删除，旧槽位不可达；进程级 compiled event sink 仍是 last-writer-wins（见上节）。 |
+| ~~cdylib 的 OAuth/provider/renderer/resources 槽位待删~~ | ✅ 已解（2026-10-26 P6）：装载机与 `kiqi-extension-sdk`/`ki dev`/`ki install`/`ki package` 全部删除，旧槽位不可达；~~进程级 compiled event sink 仍是 last-writer-wins~~ ✅ 已解（2026-10-27）：sink 挂在会话的 `RegistrySnapshot` 上，进程级槽位只作无快照路径的 fallback（见上节）。`COMPILED_CAPS` 仍是进程级 last-writer-wins。 |
 | 装完需重启 | `compiled_extension_hosts()` 是进程级 `OnceLock` |
 | ~~e2e 的 `exec_does_not_hang_when_the_command_leaves_a_background_child` 满负载偶发超时~~ | ✅ 已在 `dce1216` 缓解：把 `fixture_wasm()` 移到计时窗口**之外**（`e2e.rs:2425-2428` 的注释写明理由），15s 窗口里不再包含 wasmtime 编译时间。阈值未动，因为根因是窗口里混入了无关工作而非窗口太小。实测：e2e 单跑 3 次全绿；再与整个 workspace 测试**并行**跑一次，0 失败 |
 | ~~**acp 不迁，宿主级立项**~~ | ✅ 已落地：`ki acp serve`（批次 1/2 于 2026-10-16 完成；批次 3 为 abb 对接与文档销账）。裁定与方案见 `extension-abi.md` §6.2 与 `ki-acp-serve.md`（进程内驱动 AgentHarness、协议层用官方 `agent-client-protocol` crate、abb-agent 做语义层参照） |

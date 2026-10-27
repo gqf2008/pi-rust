@@ -7,6 +7,17 @@
 //! wasm host. No sink installed (a bare `kiqi-host` build, or tests) makes every
 //! call a no-op.
 //!
+//! # Per-session sinks
+//!
+//! A sink may belong to one session rather than the process: the session's
+//! [`RegistrySnapshot`](crate::RegistrySnapshot) carries it, and the `*_with`
+//! variants below dispatch through that sink. The plain variants pass `None`,
+//! which falls back to the process-global slot installed by
+//! [`set_compiled_event_sink`] — the compatibility path for call sites that have
+//! no snapshot. A snapshot that carries its own sink never consults the global
+//! slot, so two sessions in one process (the ACP multi-session server) cannot
+//! cross-talk.
+//!
 //! Events cross the seam as the pure-serde [`crate::Event`] — the same type the
 //! extension contract hands a backend — so a sink needs no translation and no
 //! `repr(C)` wire format.
@@ -51,16 +62,21 @@ pub enum DispatchMode {
 /// Receives one dispatched event and reports what the extensions decided.
 pub type CompiledEventSink = Arc<dyn Fn(DispatchMode, &Event) -> CompiledVerdict + Send + Sync>;
 
+/// Process-global fallback sink. Per-session sinks live on the session's
+/// [`RegistrySnapshot`](crate::RegistrySnapshot); this slot answers the call
+/// sites that have no snapshot (and the tests that drive the funnels directly).
 static SINK: OnceLock<RwLock<Option<CompiledEventSink>>> = OnceLock::new();
 
 fn sink_slot() -> &'static RwLock<Option<CompiledEventSink>> {
     SINK.get_or_init(|| RwLock::new(None))
 }
 
-/// Install (or replace) the sink the host uses to reach compiled extensions.
+/// Install (or replace) the process-global fallback sink.
 ///
-/// Idempotent; last writer wins. The host installs it once per session build
-/// with the session's capabilities captured in the closure.
+/// Idempotent; last writer wins across session builds. This is only the
+/// fallback for call sites without a session snapshot: a session that carries
+/// its own sink on [`RegistrySnapshot`](crate::RegistrySnapshot) dispatches
+/// through that one instead, so concurrent sessions stay isolated.
 pub fn set_compiled_event_sink(sink: CompiledEventSink) {
     *sink_slot().write().unwrap() = Some(sink);
 }
@@ -85,26 +101,72 @@ pub fn clear_compiled_event_sink() {
 
 /// Fan one event out to the compiled/wasm extensions, if a sink is installed.
 /// Observe fan-out: a busy extension is skipped, never waited for.
+///
+/// Compatibility entry point (no session snapshot): the `_with` form is what the
+/// dispatch funnels use now, and they pass `None` for this same global path.
+#[allow(dead_code)] // kept as the named no-snapshot entry point; funnels call `_with`
 pub(crate) fn dispatch_observe(event: &Event) -> CompiledVerdict {
-    dispatch_with(DispatchMode::Observe, event)
+    dispatch_observe_with(None, event)
+}
+
+/// Observe fan-out through `sink` when the session has one, else the global
+/// fallback. `None` means "this call site has no session sink".
+pub(crate) fn dispatch_observe_with(
+    sink: Option<&CompiledEventSink>,
+    event: &Event,
+) -> CompiledVerdict {
+    dispatch_with(sink, DispatchMode::Observe, event)
 }
 
 /// Routing variant: the caller acts on the verdict, so a busy extension is waited
 /// for rather than skipped.
+///
+/// Compatibility entry point; see [`dispatch_observe`].
+#[allow(dead_code)] // kept as the named no-snapshot entry point; funnels call `_with`
 pub(crate) fn dispatch_claiming(event: &Event) -> CompiledVerdict {
-    dispatch_with(DispatchMode::Claiming, event)
+    dispatch_claiming_with(None, event)
+}
+
+/// Claiming fan-out through `sink` when the session has one, else the global
+/// fallback.
+pub(crate) fn dispatch_claiming_with(
+    sink: Option<&CompiledEventSink>,
+    event: &Event,
+) -> CompiledVerdict {
+    dispatch_with(sink, DispatchMode::Claiming, event)
 }
 
 /// Provider-gate variant: asks only the patch-capable hosts and returns the
 /// merged patch, if any. The caller applies it; an observe fan-out never does.
+///
+/// Compatibility entry point; see [`dispatch_observe`].
+#[allow(dead_code)] // kept as the named no-snapshot entry point; funnels call `_with`
 pub(crate) fn dispatch_provider_gate(event: &Event) -> Option<Value> {
-    match dispatch_with(DispatchMode::ProviderGate, event) {
+    dispatch_provider_gate_with(None, event)
+}
+
+/// Provider-gate variant through `sink` when the session has one, else the
+/// global fallback.
+pub(crate) fn dispatch_provider_gate_with(
+    sink: Option<&CompiledEventSink>,
+    event: &Event,
+) -> Option<Value> {
+    match dispatch_with(sink, DispatchMode::ProviderGate, event) {
         CompiledVerdict::Patch(value) => Some(value),
         _ => None,
     }
 }
 
-fn dispatch_with(mode: DispatchMode, event: &Event) -> CompiledVerdict {
+fn dispatch_with(
+    sink: Option<&CompiledEventSink>,
+    mode: DispatchMode,
+    event: &Event,
+) -> CompiledVerdict {
+    // A session sink is authoritative: it must never fall through to another
+    // session's global install.
+    if let Some(sink) = sink {
+        return sink(mode, event);
+    }
     let slot = sink_slot().read().unwrap();
     let Some(sink) = slot.as_ref() else {
         return CompiledVerdict::Continue;

@@ -356,8 +356,14 @@ pub fn reload_caps(
 /// `kiqi-extensions` owns the dispatch funnels (the `AgentEvent` emitter,
 /// lifecycle events, provider hooks); this closure is how those reach
 /// [`Extension::on_event`](kiqi_host::Extension::on_event). The host calls it once
-/// per session build with that session's capabilities; last writer wins, so a
-/// second build (or a test) simply replaces the sink.
+/// per session build with that session's capabilities.
+///
+/// It also installs the closure as the **process-global fallback** and returns
+/// it, so the caller can mount the same sink on the session's
+/// `RegistrySnapshot` (`ExtensionSession::none_with_compiled_sink`). Session
+/// dispatch then goes through that snapshot and never consults the global slot,
+/// which is what keeps concurrent sessions (ACP) isolated; the global slot stays
+/// the fallback for call sites without a snapshot (and for tests).
 ///
 /// The tag discriminant maps straight through (`EventTag` is the single shared
 /// enum; its numbering is pinned by `kiqi-extensions`'s ABI tests).
@@ -365,10 +371,10 @@ pub fn reload_caps(
 /// Test builds serialise installs through [`TEST_SINK_LOCK`]: a test that has
 /// installed its own sink and is about to dispatch must not have a session
 /// build elsewhere in this binary replace it first.
-pub fn install_compiled_event_sink(caps: OwnedCaps) {
+pub fn install_compiled_event_sink(caps: OwnedCaps) -> kiqi_host::CompiledEventSink {
     #[cfg(test)]
     let _guard = lock_test_sink();
-    install_compiled_event_sink_locked(caps);
+    install_compiled_event_sink_locked(caps)
 }
 
 /// Remove the process-wide sink under the same test gate as
@@ -387,7 +393,7 @@ fn clear_compiled_event_sink() {
 /// [`install_compiled_event_sink`] without the test gate, for callers that
 /// already hold it ([`with_test_sink`]). Never call this from a
 /// `with_test_sink` closure: the gate is not reentrant.
-fn install_compiled_event_sink_locked(caps: OwnedCaps) {
+fn install_compiled_event_sink_locked(caps: OwnedCaps) -> kiqi_host::CompiledEventSink {
     // Remember the same capabilities for the surfaces that run outside a tool
     // call (commands, probes, prompt transforms): they are built here, once per
     // session, from the live action host.
@@ -404,7 +410,10 @@ fn install_compiled_event_sink_locked(caps: OwnedCaps) {
         }
         dispatch_event_to_compiled(&hosts, &caps, event, mode)
     });
-    kiqi_host::set_compiled_event_sink(sink);
+    // Global fallback for call sites without a session snapshot; the caller
+    // mounts the returned Arc on its session for the isolated path.
+    kiqi_host::set_compiled_event_sink(std::sync::Arc::clone(&sink));
+    sink
 }
 
 // ---------------------------------------------------------------------------
@@ -473,7 +482,7 @@ pub(crate) fn lock_test_sink() -> std::sync::MutexGuard<'static, ()> {
 #[allow(dead_code)]
 fn with_test_sink<R>(caps: OwnedCaps, f: impl FnOnce() -> R) -> R {
     let _guard = lock_test_sink();
-    install_compiled_event_sink_locked(caps);
+    let _ = install_compiled_event_sink_locked(caps);
     let result = f();
     kiqi_host::clear_compiled_event_sink();
     result

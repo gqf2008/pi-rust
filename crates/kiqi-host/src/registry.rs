@@ -10,17 +10,38 @@
 //!
 //! Extensions themselves live in the wasm backend and receive events through
 //! the [`compiled`](crate::compiled) sink; there is no native registry any more.
+//! The snapshot also carries the **per-session** sink (when a session installed
+//! one), so dispatch from one session never reaches another's extensions.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::compiled::CompiledEventSink;
+
 /// An immutable snapshot of a host session's extension state.
 ///
-/// The only state left is the `active` flag shared with the session that built
-/// it. It is deliberately cheap to clone behind an `Arc` (the event emitter and
-/// lifecycle dispatchers hold one for the session's lifetime).
+/// It carries the session's `active` flag plus — when the session has one — the
+/// session's compiled/wasm event sink. Both are cheap `Arc`s, so cloning a
+/// snapshot shares the same flag and the same sink; a `/reload` builds a fresh
+/// snapshot (and sink) and invalidates the old one.
 pub struct RegistrySnapshot {
     active: Arc<AtomicBool>,
+    /// The session's own event sink. `Some` makes every dispatch from this
+    /// snapshot go here instead of the process-global fallback, which is what
+    /// keeps concurrent sessions (ACP) from cross-talking. `None` is the
+    /// compatible path: dispatch falls back to the process-global sink.
+    compiled_sink: Option<CompiledEventSink>,
+}
+
+impl Clone for RegistrySnapshot {
+    /// Shares the active flag and the sink `Arc` — cloning a snapshot never
+    /// clones the sink closure or detaches the staleness flag.
+    fn clone(&self) -> Self {
+        Self {
+            active: Arc::clone(&self.active),
+            compiled_sink: self.compiled_sink.clone(),
+        }
+    }
 }
 
 impl RegistrySnapshot {
@@ -29,7 +50,21 @@ impl RegistrySnapshot {
     pub fn new() -> Self {
         Self {
             active: Arc::new(AtomicBool::new(true)),
+            compiled_sink: None,
         }
+    }
+
+    /// Attach the session's compiled/wasm event sink (builder form).
+    pub fn with_compiled_sink(mut self, sink: CompiledEventSink) -> Self {
+        self.compiled_sink = Some(sink);
+        self
+    }
+
+    /// The session's own event sink, if one was attached. Dispatch funnels pass
+    /// this to [`crate::compiled`]'s `*_with` variants, which fall back to the
+    /// process-global sink when it is `None`.
+    pub fn compiled_sink(&self) -> Option<&CompiledEventSink> {
+        self.compiled_sink.as_ref()
     }
 
     /// Whether this snapshot's session is still active.
@@ -73,5 +108,38 @@ mod tests {
         snapshot.invalidate();
         assert!(!snapshot.is_active());
         assert!(!assert_active(snapshot.active_flag()));
+    }
+
+    #[test]
+    fn cloning_a_snapshot_shares_the_flag_and_the_sink() {
+        use crate::compiled::CompiledVerdict;
+        use crate::EventTag;
+        use std::sync::atomic::AtomicUsize;
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        let snapshot = RegistrySnapshot::new().with_compiled_sink(Arc::new(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            CompiledVerdict::Continue
+        }));
+        let clone = snapshot.clone();
+
+        // The sink Arc is shared: dispatching through the clone reaches it.
+        assert!(clone.compiled_sink().is_some());
+        let event = crate::Event::new(EventTag::SessionStart, serde_json::Value::Null);
+        assert_eq!(
+            crate::compiled::dispatch_observe_with(clone.compiled_sink(), &event),
+            CompiledVerdict::Continue
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            crate::compiled::dispatch_observe_with(clone.compiled_sink(), &event),
+            CompiledVerdict::Continue
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        // The active flag is shared too.
+        clone.invalidate();
+        assert!(!snapshot.is_active());
     }
 }

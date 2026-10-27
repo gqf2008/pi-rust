@@ -280,17 +280,19 @@ impl CommandRegistry {
 }
 
 /// Dispatch a ui_prompt_start event to extensions.
-fn dispatch_ui_prompt_event(_state: &TuiState) {
+fn dispatch_ui_prompt_event(state: &TuiState) {
     use kiqi_host::EventTag;
 
-    kiqi_host::dispatch_empty_event(EventTag::UiPromptStart);
+    let snapshot = state.extension_session.lock().unwrap().snapshot_arc();
+    kiqi_host::dispatch_empty_event_with(snapshot.as_deref(), EventTag::UiPromptStart);
 }
 
 /// Dispatch a ui_prompt_end event to extensions.
-fn dispatch_ui_prompt_event_end(_state: &TuiState) {
+fn dispatch_ui_prompt_event_end(state: &TuiState) {
     use kiqi_host::EventTag;
 
-    kiqi_host::dispatch_empty_event(EventTag::UiPromptEnd);
+    let snapshot = state.extension_session.lock().unwrap().snapshot_arc();
+    kiqi_host::dispatch_empty_event_with(snapshot.as_deref(), EventTag::UiPromptEnd);
 }
 
 /// Canonical key name for a key event, matching the vocabulary
@@ -400,7 +402,16 @@ fn dispatch_key_event(state: &TuiState, key: &KeyEvent, editor: &Editor) -> bool
     // registered-but-disabled shortcut (push-to-talk toggled off) still lets the
     // key reach the editor normally. Compiled extensions answer through the same
     // call — the funnel fans the event to them and folds in their verdict.
-    let claimed = kiqi_host::dispatch_data_event_claiming(EventTag::Input, &payload.to_string());
+    let claimed = {
+        // This TUI's session sink, not the process-global fallback: a second
+        // session in the same process must not see (or answer) this key.
+        let snapshot = state.extension_session.lock().unwrap().snapshot_arc();
+        kiqi_host::dispatch_data_event_claiming_with(
+            snapshot.as_deref(),
+            EventTag::Input,
+            &payload.to_string(),
+        )
+    };
     if claimed && key.kind == KeyEventKind::Press {
         state
             .extension_claimed_keys
