@@ -15,6 +15,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **`/goal` 直接启动。** 删除 `/goal start` 子命令：`/goal 任务：把卡清干净`
+  或 `/goal 把卡清干净` 立即建立目标；`pause` / `resume` / `stop` 保留。
+  模型侧 `goal` 工具的 `start` action 不变。新增原生解析测试和宿主 e2e，
+  覆盖直接启动、标题剥离和完整生命周期。
+
 - **The extension rename is complete (breaking).** Every surface now says extension. The WIT
   package is `kiqi:extension@0.9.0` (`world extension`, `extension-api`), the
   repo tree is `extensions/` (`extensions/wasm/kiqi-*`), the Rust API

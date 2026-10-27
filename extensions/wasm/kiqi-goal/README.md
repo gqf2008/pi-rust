@@ -10,6 +10,11 @@ turns. The extension is three surfaces over one core:
 - a `TurnEnd` hook that charges a turn against the budget, auto-pauses an
   exhausted goal, and re-injects the active goal into context.
 
+Slash usage is deliberately direct: `/goal 任务：把卡清干净` (or `/goal 把卡清干净`)
+starts immediately; there is no `/goal start` subcommand. `pause`, `resume`, and
+`stop` remain lifecycle commands. The model-facing `goal` tool keeps its
+`start` action because it is an API action, not a shell verb.
+
 State lives in `<project>/.ki/goals.json` in the compiled shape
 (`{"active": …|null, "archived": […]}`) — the exact file and shape the compiled
 `kiqi-orchestrator` reads, so an active goal started here turns the compiled
@@ -116,5 +121,6 @@ cargo build --manifest-path extensions/wasm/kiqi-goal/Cargo.toml \
 # → extensions/wasm/target/wasm32-wasip2/release/kiqi_goal.wasm
 ```
 
-There are no unit tests here: guest crates only link for `wasm32-wasip2`, so the
-behaviour is verified through the host's `crates/kiqi-extension-host/tests/e2e.rs`.
+Pure command parsing has native `#[cfg(test)]` tests (`cargo test
+--manifest-path extensions/wasm/Cargo.toml -p kiqi-goal --locked`). Cross-WIT
+behaviour is verified through the host's `crates/kiqi-host/tests/e2e.rs`.
