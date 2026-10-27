@@ -27,6 +27,7 @@ pub fn run(args: &[String]) -> i32 {
         Some("revoke") => revoke(&args[1..]),
         Some("install") => install(&args[1..]),
         Some("uninstall") => uninstall(&args[1..]),
+        Some("rename") => rename(&args[1..]),
         None | Some("--help") | Some("-h") | Some("help") => {
             print_help();
             0
@@ -1402,6 +1403,8 @@ USAGE:
     ki extension install <path.wasm> [--id <id>] [--yes] [--host <host>]... [--command <cmd>]...
                                   [--cwd <extension-data|project>] [--timeout <seconds>]
     ki extension uninstall <id>
+    ki extension rename <old-id> <new-id>   move an install (grants and stored
+                                  credentials travel with it)
     ki extension grant <id> <capability> [flags]...
     ki extension revoke <id> <capability>
 
@@ -2143,6 +2146,68 @@ fn install_into(args: &[String], root: Option<&Path>) -> i32 {
     0
 }
 
+/// `ki extension rename <old-id> <new-id>` — move an installed extension to a
+/// new id. Grants live inside the install directory, so they travel with the
+/// rename; stored OAuth tokens are keyed by the install id and are re-keyed here
+/// (a bare directory move would strand them).
+pub fn rename(args: &[String]) -> i32 {
+    rename_into(args, None)
+}
+
+/// [`rename`] against an explicit agent root (the test seam).
+fn rename_into(args: &[String], root: Option<&Path>) -> i32 {
+    if args.len() != 2 {
+        eprintln!("error: `ki extension rename <old-id> <new-id>` takes exactly two ids");
+        return 2;
+    }
+    let (old_id, new_id) = (args[0].as_str(), args[1].as_str());
+    for id in [old_id, new_id] {
+        if let Err(error) = validate_id(id) {
+            eprintln!("error: {error}");
+            return 2;
+        }
+    }
+    if old_id == new_id {
+        eprintln!("error: `{old_id}` is already its own name");
+        return 2;
+    }
+    let Some(root) = resolve_root(root) else {
+        eprintln!("error: cannot resolve the agent directory");
+        return 1;
+    };
+    let from = extension_dir_at(&root, old_id);
+    let to = extension_dir_at(&root, new_id);
+    if !from.is_dir() {
+        eprintln!("error: `{old_id}` is not installed");
+        return 1;
+    }
+    if to.exists() {
+        eprintln!("error: `{new_id}` is already installed; uninstall it first");
+        return 1;
+    }
+    if let Err(error) = std::fs::rename(&from, &to) {
+        eprintln!("error: move {}: {error}", from.display());
+        return 1;
+    }
+    match crate::config::rename_extension_credentials_at(&root, old_id, new_id) {
+        Ok(moved) => {
+            if moved > 0 {
+                println!("renamed `{old_id}` -> `{new_id}` (moved {moved} stored credential(s))");
+            } else {
+                println!("renamed `{old_id}` -> `{new_id}`");
+            }
+            0
+        }
+        Err(error) => {
+            // Roll the directory back so a failed credential move does not leave
+            // an install the user did not ask for under the new id.
+            let _ = std::fs::rename(&to, &from);
+            eprintln!("error: move stored credentials for `{old_id}`: {error}");
+            1
+        }
+    }
+}
+
 /// `ki extension uninstall <id>` — moves the extension directory aside rather than
 /// deleting it, so the files stay recoverable.
 fn uninstall(args: &[String]) -> i32 {
@@ -2494,6 +2559,55 @@ mod tests {
     /// install and uninstall exactly as `ki extension install`/`uninstall` do, with
     /// the same flags and the same move-aside semantics.
     #[cfg(feature = "extension-wasm")]
+    /// `rename` moves the install directory (grants ride along) and re-keys
+    /// stored credentials; conflicts and bad ids are refused without touching
+    /// the disk.
+    #[test]
+    fn rename_moves_the_install_and_its_grants() {
+        let agent = tempfile::tempdir().unwrap();
+        let root = agent.path();
+        let dir = extension_dir_at(root, "old");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("extension.wasm"), b"\0asm").unwrap();
+        let grants = Grants {
+            net_http: Some(kiqi_host::grants::NetHttpGrant {
+                hosts: vec!["a.example".to_string()],
+            }),
+            ..Grants::default()
+        };
+        Grants::save_for_at(root, "old", &grants).unwrap();
+
+        assert_eq!(rename_into(&["old".into(), "new".into()], Some(root)), 0);
+        assert!(!root.join("extensions/old").exists());
+        assert!(root.join("extensions/new/extension.wasm").is_file());
+        assert!(Grants::load_for_at(root, "new").allows_host("a.example"));
+
+        // Conflicts and bad input never touch the disk.
+        assert_eq!(
+            rename_into(&["new".into(), "new".into()], Some(root)),
+            2,
+            "same id is a usage error"
+        );
+        assert_eq!(rename_into(&["new".into(), "other".into()], Some(root)), 0);
+        assert_eq!(
+            rename_into(&["missing".into(), "third".into()], Some(root)),
+            1,
+            "a missing source is an error"
+        );
+        assert_eq!(
+            rename_into(&["other".into(), "old".into()], Some(root)),
+            0,
+            "the vacated id can be reused"
+        );
+        assert_eq!(
+            rename_into(&["other".into(), "x".into()], Some(root)),
+            1,
+            "an occupied target is refused"
+        );
+        assert_eq!(rename_into(&["bad/id".into(), "x".into()], Some(root)), 2);
+        assert_eq!(rename_into(&["x".into()], Some(root)), 2);
+    }
+
     #[test]
     fn insmod_and_rmmod_round_trip() {
         let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

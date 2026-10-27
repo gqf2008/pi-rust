@@ -52,6 +52,10 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   compiled/wasm sink, action mailboxes); its C-ABI bus types moved to
   `kiqi-extensions::abi` and the shared contract constants live in
   `kiqi-extension`.
+- **`ki extension rename <old> <new>`.** Moving an install to a new id no
+  longer means reinstalling and copying grants by hand: the command renames the
+  install directory (grants live inside it, so they travel), re-keys the
+  extension's stored OAuth tokens, and refuses an occupied target.
 - **`kiqi-plan-mode-core` is gone — its logic lives in the guest.** The crate
   existed only to make plan-mode logic unit-testable, on the premise that wasm
   guests cannot carry tests; that premise is false (wit-bindgen generates host

@@ -609,6 +609,44 @@ pub fn delete_extension_oauth_token_at(
     })
 }
 
+/// Move every extension-written OAuth credential from `extension:<old>:*` to
+/// `extension:<new>:*`, returning how many entries moved.
+///
+/// `ki extension rename` needs this: the install id is part of the credential
+/// key, so a bare directory rename would strand live tokens under a namespace no
+/// CLI path can reach. Like [`delete_extension_credentials_at`], only
+/// extension-written OAuth entries are touched.
+pub fn rename_extension_credentials_at(
+    root: &Path,
+    old_id: &str,
+    new_id: &str,
+) -> Result<usize, ConfigError> {
+    let old_prefix = format!("extension:{old_id}:");
+    let new_prefix = format!("extension:{new_id}:");
+    with_auth_mutation_lock(root, || {
+        let mut store = read_auth_at(root)?;
+        let keys: Vec<String> = store
+            .keys()
+            .filter(|key| {
+                key.starts_with(&old_prefix)
+                    && store.get(*key).is_some_and(is_extension_owned_credential)
+            })
+            .cloned()
+            .collect();
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        for key in &keys {
+            let provider = key.trim_start_matches(&old_prefix).to_string();
+            if let Some(value) = store.remove(key) {
+                store.insert(format!("{new_prefix}{provider}"), value);
+            }
+        }
+        write_auth_at_locked(root, &store)?;
+        Ok(keys.len())
+    })
+}
+
 /// Remove every extension-written OAuth credential under `extension:<install-id>:*`,
 /// returning how many entries went away. Non-OAuth entries, generic OAuth
 /// entries (no extension fingerprint), bare provider keys, and other extensions'
@@ -1657,6 +1695,40 @@ mod tests {
             Some(Credential::Oauth { access, profile_fingerprint: None, .. })
                 if access == "user-token"
         ));
+    }
+
+    #[test]
+    fn extension_credential_rename_moves_only_extension_entries() {
+        let _cfg = TempConfig::new();
+        // A generic (non-extension) entry in the namespace must not move.
+        let generic = extension_credential_key("old", "generic");
+        upsert_credential(
+            &generic,
+            Credential::Oauth {
+                access: "user-token".into(),
+                refresh: String::new(),
+                expires: 0,
+                profile_fingerprint: None,
+            },
+        )
+        .unwrap();
+        upsert_extension_oauth_token("old", "p", "at".into(), "rt".into(), 0, "fp".into()).unwrap();
+        upsert_extension_oauth_token("other", "p", "at2".into(), "rt".into(), 0, "fp".into())
+            .unwrap();
+
+        let moved =
+            rename_extension_credentials_at(&crate::config::agent_dir().unwrap(), "old", "new")
+                .unwrap();
+        assert_eq!(moved, 1);
+
+        let store = read_auth().unwrap();
+        assert!(store.get(&extension_credential_key("new", "p")).is_some());
+        assert!(store.get(&extension_credential_key("old", "p")).is_none());
+        assert!(store.get(&generic).is_some(), "generic entry must stay put");
+        assert!(
+            store.get(&extension_credential_key("other", "p")).is_some(),
+            "another extension's entry must stay put"
+        );
     }
 
     #[test]
