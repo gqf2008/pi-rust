@@ -11,6 +11,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-27
+
 ### Changed
 
 - **The extension rename is complete (breaking).** Every surface now says extension. The WIT

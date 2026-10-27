@@ -130,7 +130,9 @@ fn validate(expected: &str, allow_dirty: bool) -> Result<(), String> {
                 "{crate_name} must inherit the workspace version or explicitly use {expected}"
             ));
         }
-        validate_publish_field(crate_name, package)?;
+        // Binary GitHub Releases are valid while crates are intentionally
+        // `publish = false`. The crates.io-only publish path enforces the
+        // stricter check separately in `validate_publishable_crates`.
     }
 
     println!("Validated clean release state for kiqi-* {expected}.");
@@ -249,9 +251,22 @@ fn manifest_declares_dependency(manifest: &str, dependency: &str) -> bool {
     })
 }
 
+fn validate_publishable_crates() -> Result<(), String> {
+    for (crate_name, manifest_path) in RELEASE_CRATES {
+        let manifest = read(manifest_path)?;
+        let package = toml_section(&manifest, "package")
+            .ok_or_else(|| format!("{manifest_path} has no [package] section"))?;
+        validate_publish_field(crate_name, package)?;
+    }
+    Ok(())
+}
+
 fn publish(version: &str) -> Result<(), String> {
     // Re-check immediately before upload so a long test/check run cannot leave
     // publish operating on a different tree than the one initially validated.
+    // crates.io publication has a stricter requirement than a binary release:
+    // every package must actually be publishable.
+    validate_publishable_crates()?;
     validate(version, false)?;
     command_output("curl", &["--version"])
         .map_err(|error| format!("curl is required before publishing any crate: {error}"))?;
