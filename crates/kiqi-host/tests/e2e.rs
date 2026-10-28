@@ -2671,6 +2671,101 @@ fn dispatch_delivers_each_task_and_closes_the_child_stdin() {
     );
 }
 
+/// Diagnostic reproduction of the 2026-10-28 dispatch stall: a wave built with
+/// the real `ki` argv shape (`-p --no-session --exclude-tools …`) and a child
+/// that, like `ki -p`, only starts once its stdin reaches EOF.
+///
+/// `#[ignore]`: it mutates the process-wide `PATH`, so it must run alone
+/// (`--ignored --test-threads=1`). It exists to separate "the host never
+/// delivered + closed stdin" from "the child never read it" the next time a
+/// wave stalls.
+#[test]
+#[ignore = "diagnostic: mutates PATH; run with --ignored --test-threads=1"]
+fn a_ki_shaped_child_receives_its_task_and_an_eof() {
+    use kiqi_host::wasm::ProcGrant;
+    use std::io::Write as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("fake-ki.log");
+    let script = dir.path().join("ki");
+    {
+        let mut file = std::fs::File::create(&script).expect("script");
+        writeln!(
+            file,
+            "#!/bin/sh\necho \"argv: $*\" >> {log:?}\nwc -c >> {log:?}\necho ok",
+            log = log
+        )
+        .expect("write script");
+    }
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![dir.path().to_path_buf()];
+    paths.extend(std::env::split_paths(&old_path));
+    let joined = std::env::join_paths(paths).expect("join PATH");
+    // SAFETY: this test is `#[ignore]` and documented to run single-threaded.
+    unsafe { std::env::set_var("PATH", &joined) };
+
+    let wasm = build_guest("kiqi-orchestrator", "kiqi_orchestrator.wasm");
+    let extension = WasmExtension::load_with_grants(
+        "kiqi-orchestrator",
+        &wasm,
+        Grants {
+            proc: Some(ProcGrant {
+                commands: vec!["ki".to_string()],
+                ..ProcGrant::default()
+            }),
+            ..Grants::default()
+        },
+    )
+    .expect("load the orchestrator guest");
+    let caps_log = NullLog;
+    let caps = HostCaps::observer(&caps_log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+    extension
+        .call(
+            "plan",
+            &serde_json::json!({
+                "action": "set",
+                "nodes": [{"id": "a", "task": "do the thing"}]
+            }),
+            &caps,
+            &sink,
+        )
+        .expect("plan");
+    let outcome = extension
+        .call(
+            "dispatch",
+            &serde_json::json!({ "waitSeconds": 20 }),
+            &caps,
+            &sink,
+        )
+        .expect("dispatch");
+    let observed = std::fs::read_to_string(&log).unwrap_or_default();
+    unsafe { std::env::set_var("PATH", old_path) };
+    assert!(
+        observed.contains("argv: -p --no-session --exclude-tools subagent,plan,dispatch"),
+        "the child saw the ki argv shape: {observed}"
+    );
+    // `wc -c` only prints once stdin reaches EOF, so its presence proves the
+    // host closed the write end; the exact byte count is not the point.
+    assert!(
+        observed
+            .lines()
+            .any(|line| line.trim().parse::<usize>().is_ok()),
+        "the child read its task to EOF ({observed}); wave text: {}",
+        text_of(&outcome)
+    );
+    assert!(
+        text_of(&outcome).contains("[x] a"),
+        "the node must finish: {}",
+        text_of(&outcome)
+    );
+}
+
 /// `proc` is gated exactly like `exec`: no grant, a command outside the
 /// allow-list, and a cwd that leaves the scope are each refused.
 #[test]
