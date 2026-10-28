@@ -690,7 +690,7 @@ fn render_status_text(goal: Option<&Goal>) -> String {
                 done
             )
         }
-        None => "🎯 No active goal. Start one with `/goal start <title>`.".to_string(),
+        None => "🎯 No active goal. Start one with `/goal 任务：<title>`.".to_string(),
     }
 }
 
@@ -995,6 +995,16 @@ fn turn_end(host: &dyn GoalHost) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Extract `title` / `--notes` from a free-form string.
+fn normalize_goal_title(title: &str) -> String {
+    let title = title.trim();
+    title
+        .strip_prefix("任务：")
+        .or_else(|| title.strip_prefix("任务:"))
+        .unwrap_or(title)
+        .trim()
+        .to_string()
+}
+
 fn split_title_notes(rest: &str) -> (String, Option<String>) {
     let mut title_parts: Vec<String> = Vec::new();
     let mut notes: Option<String> = None;
@@ -1018,8 +1028,7 @@ fn split_title_notes(rest: &str) -> (String, Option<String>) {
 
 const COMMAND_HELP: &str = "\
 /goal                     show status
-/goal start <title>       start a goal (--notes \"...\" optional)
-/goal <title...>          shorthand for start
+/goal 任务：<title>        start immediately; /goal <title> also works
 /goal pause | resume      pause / resume the active goal
 /goal stop                complete and archive the goal
 /goal turns <N>           max turns (0 clears)
@@ -1043,25 +1052,6 @@ fn run_command(host: &dyn GoalHost, args: &str) -> String {
         }
         "list" => Ok(render_list_text(&read_goals())),
         "help" => Ok(COMMAND_HELP.to_string()),
-        "start" => {
-            let (title, notes) = split_title_notes(rest);
-            op_start(
-                host,
-                &title,
-                notes.as_deref().unwrap_or(""),
-                None,
-                None,
-                None,
-                None,
-            )
-            .map(|goal| {
-                format!(
-                    "🎯 Goal started: {}\n{}",
-                    goal.title,
-                    goal.budget_summary(now_ms())
-                )
-            })
-        }
         "pause" => op_set_status(host, "paused").map(|goal| format!("⏸️ Paused: {}", goal.title)),
         "resume" => op_set_status(host, "active").map(|goal| format!("▶️ Resumed: {}", goal.title)),
         "stop" | "done" | "complete" => {
@@ -1112,6 +1102,7 @@ fn run_command(host: &dyn GoalHost, args: &str) -> String {
         // Unknown verb → treat the whole input as a title (shorthand start).
         _ => {
             let (title, notes) = split_title_notes(args);
+            let title = normalize_goal_title(&title);
             op_start(
                 host,
                 &title,
@@ -1249,3 +1240,30 @@ kiqi_wasm_bindings::bindings::export!(GoalExtension with_types_in kiqi_wasm_bind
 
 // The 0.8.0 contribution exports are mandatory world exports; deny them all.
 kiqi_wasm_bindings::deny_contribution_exports!(GoalExtension);
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn direct_task_prefix_is_not_part_of_the_goal_title() {
+        assert_eq!(normalize_goal_title("任务：把卡清干净"), "把卡清干净");
+        assert_eq!(normalize_goal_title("任务: 把卡清干净"), "把卡清干净");
+        assert_eq!(normalize_goal_title("把卡清干净"), "把卡清干净");
+    }
+
+    #[test]
+    fn direct_start_still_supports_notes() {
+        let (title, notes) = split_title_notes("任务：修 parser --notes 先看调用点");
+        assert_eq!(normalize_goal_title(&title), "修 parser");
+        assert_eq!(notes.as_deref(), Some("先看调用点"));
+    }
+
+    #[test]
+    fn slash_help_has_no_start_subcommand() {
+        assert!(!COMMAND_HELP.contains("/goal start"));
+        assert!(COMMAND_HELP.contains("/goal 任务："));
+        assert!(COMMAND_HELP.contains("/goal pause | resume"));
+        assert!(COMMAND_HELP.contains("/goal stop"));
+    }
+}

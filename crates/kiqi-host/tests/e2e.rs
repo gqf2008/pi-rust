@@ -4029,6 +4029,43 @@ fn goal_guest_writes_the_project_file_in_the_compiled_shape() {
     assert_eq!(value["archived"][0]["status"], "complete");
 }
 
+/// `/goal 任务：...` starts directly, with no `start` subcommand. Lifecycle
+/// commands keep their explicit verbs.
+#[test]
+fn goal_command_starts_directly_from_a_task_title() {
+    let (_component, project, extension) = load_goal_guest(goal_fs_grant());
+    let host = GoalInjectHost::default();
+    let log = NullLog;
+    let caps = goal_caps(&host, &log);
+    let file = project.path().join(".ki/goals.json");
+
+    let started = extension
+        .run_command("goal", "任务：把卡清干净", &caps)
+        .expect("direct goal task");
+    let kiqi_host::CommandResultBody::Message(started) = started.body else {
+        panic!("direct goal start returns a message");
+    };
+    assert!(started.contains("把卡清干净"), "got {started}");
+    assert_eq!(read_json(&file)["active"]["title"], "把卡清干净");
+
+    let paused = extension
+        .run_command("goal", "pause", &caps)
+        .expect("pause");
+    let kiqi_host::CommandResultBody::Message(paused) = paused.body else {
+        panic!("pause returns a message");
+    };
+    assert!(paused.contains("Paused"), "got {paused}");
+    assert_eq!(read_json(&file)["active"]["status"], "paused");
+
+    extension
+        .run_command("goal", "resume", &caps)
+        .expect("resume");
+    assert_eq!(read_json(&file)["active"]["status"], "active");
+    extension.run_command("goal", "stop", &caps).expect("stop");
+    assert!(read_json(&file)["active"].is_null());
+    assert_eq!(read_json(&file)["archived"][0]["title"], "把卡清干净");
+}
+
 /// The budget + fingerprint dedupe survive the move to the project file: a
 /// `TurnEnd` (delivered as an untyped `other` event, kind `"TurnEnd"`) charges a
 /// turn, re-injects only on a state change, and auto-pauses an exhausted goal.
