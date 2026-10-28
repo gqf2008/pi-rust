@@ -11,6 +11,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-10-28
+
 ### Fixed
 
 - **`ask_user` 不再被 60 秒 TTL 替人作答。** 宿主曾给所有提问加 60 秒上限：超时后

@@ -11,6 +11,22 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-10-28
+
+### Fixed
+
+- **`ask_user` 不再被 60 秒 TTL 替人作答。** 宿主曾给所有提问加 60 秒上限：超时后
+  guest 返回 `unanswered` + `keep` 并让本轮结束，而 TUI 的选择框还开着，用户随后
+  点击的答案被送进已取消的请求并静默丢弃——表现为「选完了 ki 不动，要再说一句话」。
+  现在没有显式 `timeout` 的问题会一直等人工回答；请求因超时/取消/abort 失效时 TUI
+  主动关窗并在 transcript 说明，迟到的回答不再被吞。同一批修复：`confirm` 形态保留
+  自己的 `timeout`、超时前先取一次答案（消除临界竞态）、超大 `timeout` 不再溢出
+  trap、超时后回收 mailbox 条目、轮询 25→250ms 退避、RPC abort 能真正取消 guest。
+  goal 自动续跑按既有约定不等人工：直接取消提问并说明。
+- **ACP 客户端提问随扩展关闭。** 扩展停止等待时取消客户端的
+  `request_permission`（协议层自动发 `$/cancel_request`），不再留下一个答案无处可送
+  的权限弹窗。
+
 ## [0.4.4] - 2026-10-28
 
 ### Changed

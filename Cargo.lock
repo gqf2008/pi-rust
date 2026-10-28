@@ -2076,7 +2076,7 @@ dependencies = [
 
 [[package]]
 name = "kiqi-acp"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "agent-client-protocol",
  "futures",
@@ -2096,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "kiqi-agent"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -2113,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "kiqi-ai"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2136,7 +2136,7 @@ dependencies = [
 
 [[package]]
 name = "kiqi-cli"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "agent-client-protocol",
  "arboard",
@@ -2178,7 +2178,7 @@ dependencies = [
 
 [[package]]
 name = "kiqi-harness"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -2201,7 +2201,7 @@ dependencies = [
 
 [[package]]
 name = "kiqi-host"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "dirs",
@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "kiqi-mcp"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2249,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "kiqi-telemetry"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "serde",
@@ -2259,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "kiqi-tools"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2287,7 +2287,7 @@ dependencies = [
 
 [[package]]
 name = "kiqi-tui"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "base64 0.22.1",
  "crossterm",
