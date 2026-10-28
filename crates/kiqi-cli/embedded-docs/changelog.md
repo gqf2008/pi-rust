@@ -384,15 +384,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   resolve (`publish = false`), the second names an extension crate that was deleted
   with the compile-time channel — next to the claim that everything is
   published on crates.io and a count of "9 core crates and 20 installable
-  extensions" for a 28-entry catalog. `website/user-guide.md`,
-  `website/content/user-guide.html` and the authoring guide carried the same
+  extensions" for a 28-entry catalog. the old static user-guide pages and the authoring guide carried the same
   `ki install kiqi-extension-example` example. The hero now shows
   `cargo install --path crates/kiqi-cli` and
   `ki insmod --build extensions/wasm/kiqi-ask-user`, the counts are gone
   (the card list already computes them), and every page says plainly that
   nothing is published. `scripts/tests/docs-install-path.sh` now covers
-  `website/packages.html`, `website/data/locales.json` and the two user-guide
-  copies in addition to `packages.json`, and requires the Packages page to show
+  the old static package and user-guide pages in addition to `packages.json`, and requires the Packages page to show
   at least one command that runs.
 - **The README described an extension channel that no longer exists.** Its Extensions
   section still read "Extensions are Rust `cdylib` libraries" and its only install
@@ -400,8 +398,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   crate that was never published and was deleted with the compile-time channel,
   so the first command a reader copies fails before they learn that anything
   runs. The section now leads with the wasm channel
-  (`ki insmod --build extensions/wasm/kiqi-<name>`, pointing at
-  `website/data/packages.json` for what is available) and keeps the cdylib
+  (`ki insmod --build extensions/wasm/kiqi-<name>`, without an online package catalog) and keeps the cdylib
   channel for third-party extensions with a `--path` install; the same crates.io
   example was dropped from the user guides and the crate README.
   `scripts/tests/docs-install-path.sh` now rejects `ki install kiqi-<name>`

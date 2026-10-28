@@ -11,8 +11,6 @@ agent built on top of it. Nine composable crates span provider adapters, a
 durable crash-resumable agent loop, a terminal UI, and a stable extension ABI — so
 the same code works as an embedded SDK or as a ready-to-run `ki` command.
 
-Website: <https://ki.laofu.online/> · Docs: <https://ki.laofu.online/docs.html>
-
 ![ki interactive session](docs/images/kiqi-interactive.png)
 
 <sub>Interactive TUI. See [`docs/guides/user-guide.md`](docs/guides/user-guide.md) for the full command surface.</sub>
@@ -266,8 +264,8 @@ ki insmod --build extensions/wasm/kiqi-todo    # build that guest, then install 
 ki insmod path/to/component.wasm --yes            # install an already-built component
 ```
 
-[`website/data/packages.json`](website/data/packages.json) lists which
-capabilities are available this way, with the exact command for each.
+Build any guest under `extensions/wasm/` with `ki insmod --build` to make its
+capabilities available.
 
 **The cdylib channel is retired.** Up to 2026-10-26 a third-party extension
 could be a Rust `cdylib` behind a `#[repr(C)]` ABI, installed with `ki install`
@@ -278,8 +276,7 @@ notes in [`docs/design/extension-abi.md`](docs/design/extension-abi.md)) and ins
 it with `ki insmod`.
 
 Ready-to-install wasm extensions live in the companion
-[`pi-rust/rpi-package`](https://github.com/pi-rust/rpi-package) repository, with
-an [online catalog](https://ki.laofu.online/packages.html).
+[`pi-rust/rpi-package`](https://github.com/pi-rust/rpi-package) repository
 
 ## Remote mode
 

@@ -138,7 +138,7 @@ is_exempt_file() {
 cd "$ROOT" || exit 1
 for rel in $(git ls-files '*.md' 'scripts/install.sh' 'scripts/install.ps1' \
     'scripts/tests/install.Tests.ps1' \
-    '.github/ISSUE_TEMPLATE/*.yml' 'website/*.json' 2>/dev/null); do
+    '.github/ISSUE_TEMPLATE/*.yml' 2>/dev/null); do
     is_exempt_file "$rel" && continue
     [ -f "$rel" ] || continue
     grep -n 'bigfish1913/pi-rust' "$rel" \
@@ -148,101 +148,6 @@ for rel in $(git ls-files '*.md' 'scripts/install.sh' 'scripts/install.ps1' \
         status=1
     }
 done
-
-# --- The website catalogue makes the same claims as the docs -----------------
-# The Packages page is a copy-paste surface: every card shows an `install`
-# command and a link, and the counts next to them look like measured data. While
-# nothing is published the page claimed, for nine crates, `cargo install
-# <crate>`, a `crates.io/crates/<crate>` link and a download count. All nine
-# crate names return 404 from crates.io, so the command fails, the link is a
-# missing page, and the counts describe downloads that never happened. The
-# extension cards made the same two claims: `"author": "... / crates.io"` and
-# download counts of 31-102 for names that also return 404.
-#
-# The rule here is deliberately blunt: while nothing is published, the catalogue
-# may not mention crates.io at all, may not tell anyone to `cargo add` (there is
-# nothing to add from), and may only `cargo install` from a local path.
-catalog="$ROOT/website/data/packages.json"
-if [ -f "$catalog" ]; then
-    rel=${catalog#"$ROOT"/}
-    if [ "$published" -eq 0 ]; then
-        grep -n 'crates\.io' "$catalog" >/dev/null && {
-            echo "FAIL: $rel references crates.io, but no crate is published there" >&2
-            grep -n 'crates\.io' "$catalog" | head -5 | sed 's/^/      /' >&2
-            status=1
-        }
-        grep -n '"install"[[:space:]]*:[[:space:]]*"cargo add ' "$catalog" >/dev/null && {
-            echo "FAIL: $rel tells users to 'cargo add' a crate that is not published" >&2
-            status=1
-        }
-        # `cargo install --path` is fine; `cargo install <crate>` is not.
-        if grep -n '"install"[[:space:]]*:[[:space:]]*"cargo install ' "$catalog" \
-            | grep -v '"cargo install --path ' >/dev/null; then
-            echo "FAIL: $rel tells users to 'cargo install' a crate that is not published" >&2
-            grep -n '"install"[[:space:]]*:[[:space:]]*"cargo install ' "$catalog" \
-                | grep -v '"cargo install --path ' | head -5 | sed 's/^/      /' >&2
-            status=1
-        fi
-        # A download count for a crate nobody could download is a fabricated
-        # number. Zero is the honest value while nothing is published.
-        if grep -nE '"downloads"[[:space:]]*:[[:space:]]*[1-9]' "$catalog" >/dev/null; then
-            echo "FAIL: $rel reports downloads for crates that were never published" >&2
-            grep -nE '"downloads"[[:space:]]*:[[:space:]]*[1-9]' "$catalog" | head -5 | sed 's/^/      /' >&2
-            status=1
-        fi
-    fi
-    # The extension cards used to say `ki install <name>`, which resolves
-    # through crates.io and is equally unexecutable while nothing is published.
-    # In-repo guests now show `ki insmod --build ...`, compiled extensions show a
-    # source build, and unknown external extensions are explicitly "not published".
-    if grep -n '"install"[[:space:]]*:[[:space:]]*"ki install ' "$catalog" >/dev/null; then
-        echo "FAIL: $rel tells users to 'ki install' an extension that is not published" >&2
-        grep -n '"install"[[:space:]]*:[[:space:]]*"ki install ' "$catalog" | head -5 | sed 's/^/      /' >&2
-        status=1
-    fi
-fi
-
-# --- The site's own copy-paste surfaces ---------------------------------------
-# `packages.json` was guarded but the page that displays it was not, so the
-# Packages hero kept showing `cargo add kiqi-tools` and `ki install
-# kiqi-ask-user` — neither can run (publish = false, and the extension crate was
-# deleted) — while claiming "every package in this catalog is published on
-# crates.io" and, in the same breath, "9 core crates and 20 installable
-# extensions" against a 28-entry catalog. A copy button makes these worse than
-# prose: one click puts the dead command on the clipboard.
-#
-# Only executable claims are guarded here. Prose that says *nothing* is published
-# necessarily contains the words "published on crates.io"; grep cannot tell it
-# from the claim, so the commands and links — what a reader actually runs or
-# follows — are the checkable part.
-for rel in website/packages.html website/data/locales.json website/user-guide.md \
-    website/content/user-guide.html; do
-    [ -f "$ROOT/$rel" ] || continue
-    if [ "$published" -eq 0 ]; then
-        grep -nE 'cargo add kiqi-|crates\.io/crates/kiqi-' "$ROOT/$rel" >/dev/null && {
-            echo "FAIL: $rel tells users to add or open a crate that is not published" >&2
-            grep -nE 'cargo add kiqi-|crates\.io/crates/kiqi-' "$ROOT/$rel" | head -5 | sed 's/^/      /' >&2
-            status=1
-        }
-    fi
-    if grep -n 'ki install kiqi-' "$ROOT/$rel" | grep -v -- '--path' >/dev/null; then
-        echo "FAIL: $rel tells users to 'ki install kiqi-<name>' from crates.io" >&2
-        grep -n 'ki install kiqi-' "$ROOT/$rel" | grep -v -- '--path' | head -5 | sed 's/^/      /' >&2
-        status=1
-    fi
-done
-
-# The Packages page must offer at least one command that resolves today: from a
-# checkout (`cargo install --path`) or by building a guest (`ki insmod --build`).
-# A page whose install block is entirely unexecutable is the failure being
-# guarded, so absence of both is a failure too.
-if [ -f "$ROOT/website/packages.html" ]; then
-    grep -qE 'cargo install --path crates/kiqi-cli|ki insmod --build extensions/wasm/kiqi-' \
-        "$ROOT/website/packages.html" || {
-        echo "FAIL: website/packages.html shows no install command that can run" >&2
-        status=1
-    }
-fi
 
 # --- Only name packages that exist --------------------------------------------
 # `ki dev --package <name>` / `-P <name>` resolves the name through Cargo, so a
@@ -256,7 +161,7 @@ fi
 # The rule is blunt on purpose: no workspace member is a `kiqi-*` cdylib any more,
 # so any `ki dev --package kiqi-...` is stale by construction.
 cd "$ROOT" || exit 1
-for rel in $(git ls-files 'website/*.md' 'website/content/*.html' 'docs/*.md' \
+for rel in $(git ls-files 'docs/*.md' \
     'docs/*/*.md' 'crates/*/src/*.rs' 'crates/*/*.md' 2>/dev/null); do
     is_exempt_file "$rel" && continue
     [ -f "$rel" ] || continue

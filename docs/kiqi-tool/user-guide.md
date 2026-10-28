@@ -342,7 +342,7 @@ ki extension list
 ki rmmod <id>
 ```
 
-一方能力清单见 `website/data/packages.json`；契约与能力模型见 `docs/design/extension-abi.md`。改写旧 cdylib 扩展请以 `extensions/wasm/kiqi-todo` 为模板。
+能力契约与能力模型见 `docs/design/extension-abi.md`。改写旧 cdylib 扩展请以 `extensions/wasm/kiqi-todo` 为模板。
 
 ## 7. SDK 集成
 
@@ -417,16 +417,16 @@ kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-extension → kiqi-extensions
 kiqi-tools → kiqi-harness → kiqi-tui → kiqi-cli
 ```
 
-发布前更新版本号和 `docs/release-vX.Y.Z.md`，确认 README、官网 `website/data/docs.json` 和本手册中的命令一致。官网是静态站点，文档文件提交到仓库后仍需按项目部署流程重新部署。
+发布前更新版本号和 `docs/release-vX.Y.Z.md`，确认 README 与本手册中的命令一致。文档随仓库和对应 Git tag 一起发布。
 
 ## 10. 文档查询入口
 
-- 在线文档：<https://ki.laofu.online/docs.html>
+- 用户指南：[`docs/guides/user-guide.md`](user-guide.md)
 - 源码仓库：<https://github.com/gqf2008/pi-rust>
 - Rust API：<https://docs.rs/kiqi-agent>
 
-- Package 与扩展作者指南：<https://ki.laofu.online/extension-authoring.md>
+- Package 与扩展作者指南：[`docs/extensions/authoring.md`](docs/extensions/authoring.md)
 - 远程模式：<docs/remote/user-guide.md>
 - Rust 扩展与 agent 调试：`ki` 内 `docs` 工具的 `debugging` 主题
 
-当在线文档和已安装版本不一致时，以对应版本的 Git tag 和仓库内文档为准。
+当文档和已安装版本不一致时，以对应版本的 Git tag 和仓库内文档为准。

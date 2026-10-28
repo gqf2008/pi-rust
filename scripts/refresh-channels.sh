@@ -111,15 +111,6 @@ perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/" \
   packaging/winget/gqf2008.ki.yaml
 
 # --------------------------------------------------------------------------
-# Site data: the "current release" card + the version string.
-# --------------------------------------------------------------------------
-note "website/data/{packages,locales}.json"
-# Every "vX.Y.Z · <suffix>" label, not only "· current": the catalog also uses
-# "· SDK", "· loader" and "· sessions", which used to keep the old version forever.
-perl -pi -e "s/v$OLD · /v$VERSION · /g" website/data/packages.json
-perl -pi -e "s/\"version\": \"$OLD\"/\"version\": \"$VERSION\"/" website/data/locales.json
-
-# --------------------------------------------------------------------------
 # packaging/README.md: the sha table label/rows + the example tag.
 # --------------------------------------------------------------------------
 note "packaging/README.md"

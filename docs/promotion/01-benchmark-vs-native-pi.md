@@ -98,7 +98,6 @@ node scripts/bench-vs-pi.mjs --pi .bench/node_modules/.bin/pi --runs 11 --warmup
 ki 是 Rust 原生、library-first 的 coding-agent runtime，九个 crate 同版本发布：`kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli`，另有 `kiqi-extension-sdk`（稳定 `#[repr(C)]` ABI）与 `kiqi-extensions`（宿主加载器）。MIT 许可。
 
 - GitHub：https://github.com/gqf2008/pi-rust
-- 官网：https://ki.laofu.online/
 - 完整数据与方法：https://github.com/gqf2008/pi-rust/blob/main/docs/performance/benchmark-vs-pi.md
 - 免 Rust 工具链安装：`curl -fsSL https://raw.githubusercontent.com/gqf2008/pi-rust/main/scripts/install.sh | sh`
 

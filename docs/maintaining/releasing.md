@@ -54,18 +54,17 @@ below are available through `task publish` too.
 | `tag` | `git tag vX.Y.Z` |
 | `push` | pushes the branch + tag → `release-binaries.yml` builds the assets |
 | `wait` | polls the GitHub release until every archive + `.sha256` exists |
-| `channels` | rewrites Homebrew / Scoop / winget / site data (`scripts/refresh-channels.sh`) |
-| `commit-channels` | `chore(release): refresh the install channels and the site for X.Y.Z` |
+| `channels` | rewrites Homebrew / Scoop / winget data (`scripts/refresh-channels.sh`) |
+| `commit-channels` | `chore(release): refresh the install channels for X.Y.Z` |
 | `taps` | pushes the formula/manifest into `homebrew-tap` + `scoop-bucket` |
 | `winget` | opens the `microsoft/winget-pkgs` PR (`scripts/winget-submit.sh`) |
-| `site` | `task kiqi-deploy` |
 
 ## Flags
 
 | Flag | Effect |
 | --- | --- |
 | `--dry-run` | print the plan, execute nothing |
-| `--yes` | do not stop at the confirmation checkpoints (`site`) |
+| `--yes` | do not stop at the confirmation checkpoints |
 | `--only a,b` | run just these phases |
 | `--from P` | start at phase `P` |
 | `--skip a,b` | skip these phases |
@@ -76,8 +75,6 @@ Recovery is just a re-run from the failed phase — every phase is idempotent:
 ```bash
 # CI needed longer than the poll window:
 task publish RELEASE_BUMP=none -- --from channels
-# only the site phase remains:
-task publish RELEASE_VERSION=0.3.4 -- --only site
 ```
 
 ## Credentials
@@ -87,7 +84,6 @@ task publish RELEASE_VERSION=0.3.4 -- --only site
 | `push`, `taps` | git/`gh` write access to `pi-rust`, `homebrew-tap`, `scoop-bucket` |
 | `wait`, `channels` | `gh` authenticated (reads release assets) |
 | `winget` | `gh` authenticated (forks `winget-pkgs`, opens the PR) |
-| `site` | SSH to the ki web host |
 
 ## What no command can finish
 

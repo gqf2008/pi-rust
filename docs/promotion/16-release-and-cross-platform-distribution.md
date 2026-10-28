@@ -1,6 +1,6 @@
 # 从 Cargo workspace 到多平台发布：ki 的版本流水线
 
-> 一个 Rust Agent 项目的发布不只是打 tag。ki 把 workspace 版本、依赖锁定、嵌入文档、跨平台二进制、校验和、安装渠道和官网串成可恢复的流水线。
+> 一个 Rust Agent 项目的发布不只是打 tag。ki 把 workspace 版本、依赖锁定、嵌入文档、跨平台二进制、校验和和安装渠道串成可恢复的流水线。
 
 ## 发布流程
 
@@ -32,7 +32,7 @@ bash scripts/release.sh 0.3.5 --dry-run
 bash scripts/release.sh 0.3.5
 ```
 
-脚本会在官网阶段进行确认；这些操作具有外部副作用，应在凭证、CI 产物和版本号都确认后再继续。
+这些操作具有外部副作用，应在凭证、CI 产物和版本号都确认后再继续。
 
 ## 为什么要有 checksum
 
@@ -44,7 +44,6 @@ bash scripts/release.sh 0.3.5
 # CI 还没完成：从 wait 继续
 bash scripts/release.sh 0.3.5 --from wait
 
-# 只剩 crates 和官网
 bash scripts/release.sh 0.3.5 --only crates,site
 ```
 

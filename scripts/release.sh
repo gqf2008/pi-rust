@@ -5,9 +5,9 @@
 #   bash scripts/release.sh 0.3.4 --dry-run
 #
 # The pipeline: bump -> changelog -> docs -> tag -> push -> wait for the
-# release binaries -> refresh the install channels (brew/scoop/winget + site)
-# -> push the taps -> open the winget PR -> deploy site. This product is not
-# published to crates.io; there is intentionally no crates phase.
+# release binaries -> refresh the install channels (brew/scoop/winget)
+# -> push the taps -> open the winget PR. This product is not published to
+# crates.io and has no website deployment phase.
 #
 # Every step is printed before it runs. Mutating network steps still run under
 # --dry-run's shadow (nothing is executed), so you can review the exact plan
@@ -17,7 +17,6 @@
 #   * git push access to gqf2008/pi-rust, gqf2008/homebrew-tap,
 #     gqf2008/scoop-bucket
 #   * `gh` authenticated (release assets, taps, fork + PR to winget-pkgs)
-#   * SSH to the ki web host for the site phase
 #
 # The winget phase only *opens* a PR: a winget-team moderator merges it, which
 # no command here can do.
@@ -73,11 +72,11 @@ Options:
 
 Phases (in order):
   preflight bump changelog docs validate commit tag push wait
-  channels commit-channels taps winget site
+  channels commit-channels taps winget
 EOF
 }
 
-PHASES=(preflight bump changelog docs validate commit tag push wait channels commit-channels taps winget site)
+PHASES=(preflight bump changelog docs validate commit tag push wait channels commit-channels taps winget)
 
 phase_selected() {
   local phase="$1"
@@ -226,7 +225,7 @@ phase_wait() {
 }
 
 phase_channels() {
-  note "refresh install channels + site data for $release_version"
+  note "refresh install channels for $release_version"
   step bash scripts/refresh-channels.sh "$release_version"
 }
 
@@ -237,7 +236,7 @@ phase_commit_channels() {
     note "  nothing to commit"
     return
   fi
-  step git commit -m "chore(release): refresh the install channels and the site for $release_version"
+  step git commit -m "chore(release): refresh the install channels for $release_version"
 }
 
 phase_taps() {
@@ -248,12 +247,6 @@ phase_taps() {
 phase_winget() {
   note "open the winget-pkgs PR"
   step bash scripts/winget-submit.sh "$release_version"
-}
-
-phase_site() {
-  note "deploy the site"
-  confirm "Deploy the site (SSH to the ki host)?" || { note "  skipped"; return; }
-  step task kiqi-deploy
 }
 
 # --------------------------------------------------------------------------

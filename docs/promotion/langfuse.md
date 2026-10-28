@@ -519,7 +519,6 @@ cargo build --package kiqi-langfuse --release
 | 📋 审查报告          | [REVIEW.md](https://github.com/pi-rust/rpi-package/blob/main/packages/kiqi-langfuse/REVIEW.md)                       |
 | 🔍 Langfuse 官网     | [langfuse.com](https://langfuse.com)                                                                                |
 | 📚 Langfuse API 文档 | [langfuse.com/docs](https://langfuse.com/docs)                                                                      |
-| 🏠 ki 官网          | [ki.laofu.online](https://ki.laofu.online)                                                                        |
 | 💻 ki GitHub        | [gqf2008/pi-rust](https://github.com/gqf2008/pi-rust)                                                       |
 
 ---

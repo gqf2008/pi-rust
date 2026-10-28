@@ -186,7 +186,6 @@ SDK 里写死了五条规则，违反任意一条都是 UB：
 ki 是 Rust 原生、library-first 的 coding-agent runtime，MIT 许可，九个 crate 同版本发布。
 
 - GitHub：https://github.com/gqf2008/pi-rust
-- 官网 / 文档：https://ki.laofu.online/
 - 架构文档：https://github.com/gqf2008/pi-rust/blob/main/docs/architecture/overview.md
 - 自己搭 agent 的项目结构建议：
   https://github.com/gqf2008/pi-rust/blob/main/docs/agent/project-structure.md
