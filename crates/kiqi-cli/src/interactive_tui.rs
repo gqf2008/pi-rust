@@ -1261,6 +1261,11 @@ pub async fn interactive_tui(
         selection_start: std::sync::Mutex::new(None),
         selection_end: std::sync::Mutex::new(None),
     });
+    // A restored session's history already carries the todo list and the usage
+    // totals; seed them so the right column is not empty until the next run.
+    if launch_restores_history(args) {
+        seed_panels_from_history(&harness, &state).await;
+    }
 
     // 会话内定时任务：仅当 `.ki/cron.json` 存在时启动。去重状态独立于
     // 调度器代际，在 `/reload` 先停后重建时继续复用，避免同分钟重触发。
