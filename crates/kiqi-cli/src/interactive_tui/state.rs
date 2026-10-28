@@ -241,6 +241,12 @@ pub(super) struct TuiState {
     /// a selector is open; the key loop routes to it first and restores the
     /// editor on done/cancel.
     pub(super) active_selector: std::sync::Mutex<Option<(SelectorView, SelectorKind)>>,
+    /// Tool calls in flight right now: `(tool_call_id, name, started)`.
+    ///
+    /// The host's own right-rail "running" panel is fed from this, so *any*
+    /// long-running call is visible, not just the ones an extension chooses to
+    /// publish (goal, dispatch, subagent).
+    pub(super) running_tool_calls: std::sync::Mutex<Vec<(String, String, std::time::Instant)>>,
     /// Extension-provided editor currently occupying the input slot.
     pub(super) active_extension_editor: std::sync::Mutex<Option<Arc<Editor>>>,
     /// Single-line input currently occupying the input slot for an extension.
@@ -1371,6 +1377,30 @@ impl TuiState {
 
     pub(super) fn clear_ask_user_dialog(&self) {
         *self.ask_user_dialog_id.lock().unwrap() = None;
+    }
+
+    /// Record a tool call that just started; duplicates are ignored so a
+    /// retried start cannot show the same call twice.
+    pub(super) fn tool_started(&self, id: &str, name: &str) {
+        let mut running = self.running_tool_calls.lock().unwrap();
+        if running.iter().any(|(call_id, _, _)| call_id == id) {
+            return;
+        }
+        running.push((id.to_string(), name.to_string(), std::time::Instant::now()));
+    }
+
+    pub(super) fn tool_finished(&self, id: &str) {
+        let mut running = self.running_tool_calls.lock().unwrap();
+        running.retain(|(call_id, _, _)| call_id != id);
+    }
+
+    /// `(name, elapsed_seconds)` for every call still in flight, oldest first.
+    pub(super) fn running_snapshot(&self) -> Vec<(String, u64)> {
+        let running = self.running_tool_calls.lock().unwrap();
+        running
+            .iter()
+            .map(|(_, name, started)| (name.clone(), started.elapsed().as_secs()))
+            .collect()
     }
 
     pub(super) fn extension_dialog_open(&self) -> bool {

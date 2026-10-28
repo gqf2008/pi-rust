@@ -703,6 +703,7 @@ pub(super) async fn handle_agent_event(
             tool_name,
             args,
         } => {
+            state.tool_started(&tool_call_id, &tool_name);
             state.transcript_view().apply(
                 &UiEvent::ToolStart {
                     id: tool_call_id,
@@ -740,6 +741,7 @@ pub(super) async fn handle_agent_event(
             result,
             is_error,
         } => {
+            state.tool_finished(&tool_call_id);
             state.transcript_view().apply(
                 &UiEvent::ToolEnd {
                     id: tool_call_id,

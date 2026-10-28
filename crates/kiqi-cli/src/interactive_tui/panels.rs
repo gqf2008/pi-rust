@@ -7,6 +7,60 @@ use kiqi_tui::{OverlayAnchor, OverlayOptions};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// The host's own "running" panel: every tool call in flight, not just the
+/// ones an extension publishes. Fed from `TuiState::running_snapshot`, so a
+/// long `bash`, an MCP call, a `subagent` or a `dispatch` wave all show up
+/// without each extension having to learn the component API.
+const RUNNING_ID: &str = "ki.tasks";
+const RUNNING_ORDER: i32 = 0;
+const RUNNING_WIDTH: usize = 38;
+const RUNNING_HEIGHT: usize = 12;
+
+pub(super) fn sync_running(
+    mailbox: &kiqi_host::ExtensionStatusMailbox,
+    rows: &[(String, u64)],
+    shown: &mut bool,
+) {
+    if rows.is_empty() {
+        if *shown {
+            let _ = mailbox.component(0, serde_json::json!({ "op": "remove", "id": RUNNING_ID }));
+            *shown = false;
+        }
+        return;
+    }
+    *shown = true;
+    let _ = mailbox.component(
+        0,
+        serde_json::json!({
+            "op": "register",
+            "id": RUNNING_ID,
+            "type": "text",
+            "slot": "sidebar.right",
+            "order": RUNNING_ORDER,
+            "width": RUNNING_WIDTH,
+            "maxHeight": RUNNING_HEIGHT,
+            "border": true,
+            "minScreenWidth": 80,
+        }),
+    );
+    let text = rows
+        .iter()
+        .map(|(name, secs)| {
+            let elapsed = match secs {
+                0..=59 => format!("{secs}s"),
+                60..=3599 => format!("{}m{:02}s", secs / 60, secs % 60),
+                _ => format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60),
+            };
+            format!("▶ {name}  {elapsed}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = mailbox.component(
+        0,
+        serde_json::json!({ "op": "update", "id": RUNNING_ID, "title": "running", "text": text }),
+    );
+}
+
 struct Panel(Mutex<ExtensionPanel>);
 /// Generic extension rows below the built-in usage footer, in both terminal modes.
 pub(super) struct FooterPanels(pub kiqi_host::ExtensionStatusMailbox);

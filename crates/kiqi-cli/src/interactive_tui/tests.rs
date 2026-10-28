@@ -292,6 +292,7 @@ fn test_tui_state() -> Arc<TuiState> {
     Arc::new(TuiState {
         current_assistant: Arc::new(std::sync::Mutex::new(None)),
         tool_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        running_tool_calls: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
@@ -1370,6 +1371,7 @@ fn test_agent_event_mapping_creates_assistant_and_tool() {
     let state = Arc::new(TuiState {
         current_assistant: Arc::new(std::sync::Mutex::new(None)),
         tool_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        running_tool_calls: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
@@ -1849,6 +1851,7 @@ fn test_autocomplete_slash_suggestions_render() {
     let state = Arc::new(TuiState {
         current_assistant: Arc::new(std::sync::Mutex::new(None)),
         tool_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        running_tool_calls: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
@@ -1938,6 +1941,7 @@ fn test_select_list_swap_restores_editor() {
     let state = Arc::new(TuiState {
         current_assistant: Arc::new(std::sync::Mutex::new(None)),
         tool_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        running_tool_calls: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
@@ -2030,6 +2034,7 @@ fn test_message_history_browse_restores_draft() {
     let state = Arc::new(TuiState {
         current_assistant: Arc::new(std::sync::Mutex::new(None)),
         tool_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        running_tool_calls: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
@@ -2125,6 +2130,7 @@ fn test_accept_top_suggestion_replaces_prefix() {
     let state = Arc::new(TuiState {
         current_assistant: Arc::new(std::sync::Mutex::new(None)),
         tool_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        running_tool_calls: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
@@ -2206,6 +2212,7 @@ fn autocomplete_test_state(max_visible: usize) -> Arc<TuiState> {
     Arc::new(TuiState {
         current_assistant: Arc::new(std::sync::Mutex::new(None)),
         tool_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        running_tool_calls: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
