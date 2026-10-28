@@ -2747,10 +2747,17 @@ fn a_ki_shaped_child_receives_its_task_and_an_eof() {
         .expect("dispatch");
     let observed = std::fs::read_to_string(&log).unwrap_or_default();
     unsafe { std::env::set_var("PATH", old_path) };
-    assert!(
-        observed.contains("argv: -p --no-session --exclude-tools subagent,plan,dispatch"),
-        "the child saw the ki argv shape: {observed}"
-    );
+    for flag in [
+        "-p",
+        "--mode json",
+        "--no-session",
+        "--exclude-tools subagent,plan,dispatch",
+    ] {
+        assert!(
+            observed.contains(flag),
+            "the child saw `{flag}` in its argv: {observed}"
+        );
+    }
     // `wc -c` only prints once stdin reaches EOF, so its presence proves the
     // host closed the write end; the exact byte count is not the point.
     assert!(

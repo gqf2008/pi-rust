@@ -1202,6 +1202,8 @@ pub async fn interactive_tui(
         current_assistant: Arc::new(std::sync::Mutex::new(None)),
         tool_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         running_tool_calls: std::sync::Mutex::new(Vec::new()),
+        todo_lines: std::sync::Mutex::new(Vec::new()),
+        llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(hide_thinking)),
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(tool_outputs_expanded)),
@@ -1668,6 +1670,8 @@ pub async fn interactive_tui(
         // The host-owned "running" panel: refreshed once a second so the
         // elapsed readout moves, not on every 80 ms frame.
         let mut running_shown = false;
+        let mut todo_shown = false;
+        let mut model_shown = false;
         let mut running_at = std::time::Instant::now();
         loop {
             interval.tick().await;
@@ -1683,6 +1687,14 @@ pub async fn interactive_tui(
                     rows.push(("!command".to_string(), 0));
                 }
                 panels::sync_running(&state_tick.ext_status, &rows, &mut running_shown);
+                let todos = state_tick.todo_snapshot();
+                panels::sync_todo(&state_tick.ext_status, &todos, &mut todo_shown);
+                panels::sync_model(
+                    &state_tick.ext_status,
+                    &state_tick.current_model_id(),
+                    state_tick.llm_usage_snapshot(),
+                    &mut model_shown,
+                );
             }
             // Extension status (langfuse ✓ …, …) — cheap revision check, and the
             // only reason an idle session repaints its footer.

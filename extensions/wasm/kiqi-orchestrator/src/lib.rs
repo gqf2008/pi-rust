@@ -26,6 +26,7 @@
 use kiqi_wasm_bindings::bindings::exports::kiqi::extension::extension_api::Guest;
 use kiqi_wasm_bindings::bindings::kiqi::extension::{exec, fs, proc, progress, types};
 
+mod child_progress;
 mod panels;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -696,6 +697,8 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     let mut args: Vec<String> = if is_ki {
         vec![
             "-p".into(),
+            "--mode".into(),
+            "json".into(),
             "--no-session".into(),
             "--exclude-tools".into(),
             EXCLUDED_TOOLS.into(),
@@ -758,9 +761,46 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         }
         match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
             Ok(Some(line)) => {
-                output.push_str(&line);
-                output.push('\n');
-                panels::node_line(SUBAGENT_PANEL, &line);
+                if is_ki {
+                    match child_progress::parse(&line) {
+                        child_progress::NodeEvent::ToolStart(name) => {
+                            panels::node_line(SUBAGENT_PANEL, &format!("▶ {name}"));
+                            progress::emit(&types::ProgressBlock::Text(format!(
+                                "▶ subagent: {name}"
+                            )));
+                        }
+                        child_progress::NodeEvent::ToolEnd { name, is_error } => {
+                            panels::node_line(
+                                SUBAGENT_PANEL,
+                                &format!("{} {name}", if is_error { "✖" } else { "✔" }),
+                            );
+                        }
+                        child_progress::NodeEvent::Message { text, input, output: out } => {
+                            if let Some(text) = text {
+                                output = text;
+                            }
+                            if input > 0 || out > 0 {
+                                panels::node_line(SUBAGENT_PANEL, &format!("↑{input} ↓{out}"));
+                            }
+                        }
+                        child_progress::NodeEvent::Final { outcome, text } => {
+                            if let Some(text) = text {
+                                output = text;
+                            }
+                            if outcome != "completed" {
+                                panels::node_line(
+                                    SUBAGENT_PANEL,
+                                    &format!("result: {outcome}"),
+                                );
+                            }
+                        }
+                        child_progress::NodeEvent::Ignore => {}
+                    }
+                } else {
+                    output.push_str(&line);
+                    output.push('\n');
+                    panels::node_line(SUBAGENT_PANEL, &line);
+                }
             }
             // stdout ended: collect the exit status.
             Ok(None) => break,
@@ -962,10 +1002,48 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
             }
             match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
                 Ok(Some(line)) => {
-                    let buffer = outputs.entry(handle).or_default();
-                    buffer.push_str(&line);
-                    buffer.push('\n');
-                    panels::node_line(&id, &line);
+                    if wave_program == DEFAULT_PROGRAM {
+                        // `--mode json`: the child streams its agent events; the
+                        // rail shows the tool it is running and what it spends,
+                        // and the node's answer is the last assistant text (or
+                        // the terminal `result` line).
+                        match child_progress::parse(&line) {
+                            child_progress::NodeEvent::ToolStart(name) => {
+                                panels::node_line(&id, &format!("▶ {name}"));
+                                progress::emit(&types::ProgressBlock::Text(format!(
+                                    "▶ {id}: {name}"
+                                )));
+                            }
+                            child_progress::NodeEvent::ToolEnd { name, is_error } => {
+                                panels::node_line(
+                                    &id,
+                                    &format!("{} {name}", if is_error { "✖" } else { "✔" }),
+                                );
+                            }
+                            child_progress::NodeEvent::Message { text, input, output } => {
+                                if let Some(text) = text {
+                                    outputs.insert(handle, text);
+                                }
+                                if input > 0 || output > 0 {
+                                    panels::node_line(&id, &format!("↑{input} ↓{output}"));
+                                }
+                            }
+                            child_progress::NodeEvent::Final { outcome, text } => {
+                                if let Some(text) = text {
+                                    outputs.insert(handle, text);
+                                }
+                                if outcome != "completed" {
+                                    panels::node_line(&id, &format!("result: {outcome}"));
+                                }
+                            }
+                            child_progress::NodeEvent::Ignore => {}
+                        }
+                    } else {
+                        let buffer = outputs.entry(handle).or_default();
+                        buffer.push_str(&line);
+                        buffer.push('\n');
+                        panels::node_line(&id, &line);
+                    }
                 }
                 Ok(None) => {
                     // EOF: the child has stopped producing. Give it a short
@@ -1089,6 +1167,10 @@ fn spawn_node(node: &Node, program: &str) -> Result<u32, String> {
     let mut args: Vec<String> = if program == DEFAULT_PROGRAM {
         vec![
             "-p".into(),
+            // JSONL agent events: the rail shows the node's current tool and
+            // token usage while it runs, not just its final answer.
+            "--mode".into(),
+            "json".into(),
             "--no-session".into(),
             "--exclude-tools".into(),
             EXCLUDED_TOOLS.into(),

@@ -247,6 +247,16 @@ pub(super) struct TuiState {
     /// long-running call is visible, not just the ones an extension chooses to
     /// publish (goal, dispatch, subagent).
     pub(super) running_tool_calls: std::sync::Mutex<Vec<(String, String, std::time::Instant)>>,
+    /// Cumulative LLM usage for this session: `(turns, input, output,
+    /// cache_read)`. Mirrors what the footer renders, and is what the rail's
+    /// `model` panel shows at a glance.
+    pub(super) llm_usage: std::sync::Mutex<(u64, u64, u64, u64)>,
+    /// The `todo` tool's current list, as rail lines (`✔/▶/·` + text).
+    ///
+    /// Rebuilt from the tool result's `details`, which is where the extension
+    /// keeps its state across fork/switch — the host reads the same source
+    /// instead of keeping a second copy that could drift.
+    pub(super) todo_lines: std::sync::Mutex<Vec<String>>,
     /// Extension-provided editor currently occupying the input slot.
     pub(super) active_extension_editor: std::sync::Mutex<Option<Arc<Editor>>>,
     /// Single-line input currently occupying the input slot for an extension.
@@ -1377,6 +1387,26 @@ impl TuiState {
 
     pub(super) fn clear_ask_user_dialog(&self) {
         *self.ask_user_dialog_id.lock().unwrap() = None;
+    }
+
+    pub(super) fn record_llm_usage(&self, input: i64, output: i64, cache_read: i64) {
+        let mut usage = self.llm_usage.lock().unwrap();
+        usage.0 += 1;
+        usage.1 += input.max(0) as u64;
+        usage.2 += output.max(0) as u64;
+        usage.3 += cache_read.max(0) as u64;
+    }
+
+    pub(super) fn llm_usage_snapshot(&self) -> (u64, u64, u64, u64) {
+        *self.llm_usage.lock().unwrap()
+    }
+
+    pub(super) fn set_todos(&self, lines: Vec<String>) {
+        *self.todo_lines.lock().unwrap() = lines;
+    }
+
+    pub(super) fn todo_snapshot(&self) -> Vec<String> {
+        self.todo_lines.lock().unwrap().clone()
     }
 
     /// Record a tool call that just started; duplicates are ignored so a

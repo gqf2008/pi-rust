@@ -643,6 +643,7 @@ pub(super) async fn handle_agent_event(
                 // model change) and prices the miss when known.
                 let usage = &a.usage;
                 // Footer usage totals + cache hit rate (pi footer.ts).
+                state.record_llm_usage(usage.input, usage.output, usage.cache_read);
                 state.footer.add_usage(
                     usage.input,
                     usage.output,
@@ -742,6 +743,30 @@ pub(super) async fn handle_agent_event(
             is_error,
         } => {
             state.tool_finished(&tool_call_id);
+            if tool_name == "todo" {
+                if let Some(todos) = result.details.get("todos").and_then(|v| v.as_array()) {
+                    let lines = todos
+                        .iter()
+                        .map(|todo| {
+                            let text = todo
+                                .get("text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("(untitled)");
+                            let status = todo
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("pending");
+                            let mark = match status {
+                                "completed" => "✔",
+                                "in_progress" => "▶",
+                                _ => "·",
+                            };
+                            format!("{mark} {text}")
+                        })
+                        .collect();
+                    state.set_todos(lines);
+                }
+            }
             state.transcript_view().apply(
                 &UiEvent::ToolEnd {
                     id: tool_call_id,
