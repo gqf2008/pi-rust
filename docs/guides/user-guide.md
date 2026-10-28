@@ -129,6 +129,8 @@ ki --provider gateway --model custom-claude -p "hello"
 
 不传 `--model` 时，ki 优先使用已保存的模型选择；没有保存选择时，按 `models.json` 的声明顺序选择第一个已认证的自定义模型，再回退到已认证的内置默认模型。只配置一个自定义 provider、模型和凭据即可直接使用，不需要再设置环境变量或 `defaultProvider/defaultModel`。`contextWindow` 和 `maxTokens` 保持可选，未配置即不设置：OpenAI 系协议不发送对应参数；Anthropic 协议的 `max_tokens` 为必填字段，未配置时由 ki 代填默认值。
 
+`input` 仅作为 models.json 的兼容元数据保留，ki 不根据它过滤文本、图片或工具图片；多模态请求是否兼容由 provider 决定并返回错误。配置向导不再询问图片支持，模型列表也不显示 images 能力列。
+
 Anthropic 的兼容网关还可以使用：
 
 ```text

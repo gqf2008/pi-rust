@@ -11,6 +11,14 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **多模态输入不再由 ki 做能力门禁。** Anthropic 与 OpenAI Responses 的用户文本、
+  图片及工具图片按原内容发送；删除不支持图片时的占位降级，兼容性错误由
+  provider 返回。`input` 仅保留为 models.json 兼容元数据，配置向导不再询问
+  图片支持，模型列表不再显示误导性的 images 列。新增测试覆盖工具图片原样
+  转发和文本/图片顺序保持。
+
 ## [0.4.3] - 2026-10-28
 
 ### Fixed

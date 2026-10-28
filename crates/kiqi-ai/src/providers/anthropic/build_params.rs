@@ -14,8 +14,7 @@ use crate::model::{AnthropicMessagesCompat, Model, StreamingProtocolCompat};
 use crate::provider::SimpleStreamOptions;
 use crate::strict_schema::make_strict_json_schema;
 use crate::types::{
-    AssistantMessage, Content, ImageContent, InputModality, Message, ThinkingLevel, Tool,
-    ToolResultMessage,
+    AssistantMessage, Content, ImageContent, Message, ThinkingLevel, Tool, ToolResultMessage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -251,13 +250,13 @@ fn is_same_model(msg: &AssistantMessage, model: &Model) -> bool {
 /// synthetic tool results for orphans, and skipping of errored/aborted
 /// assistant messages. Mirrors `transform-messages.ts::transformMessages`.
 ///
-/// `normalize_tool_call_id` is the Anthropic normalizer; `model.input` drives
-/// the image-downgrade branch. The out `Vec<Message>` is what `convert_messages`
-/// then serializes.
+/// `normalize_tool_call_id` is the Anthropic normalizer. Input content is
+/// preserved: capability negotiation belongs to the provider, not to silent
+/// client-side image downgrades. The out `Vec<Message>` is what
+/// `convert_messages` then serializes.
 pub fn transform_messages(messages: &[Message], model: &Model) -> Vec<Message> {
-    // 0.8.1: 不再做 input modality 前置检查——用户给什么就组什么包，
-    // API 不支持时返回的错误比静默降级更有用。
-    let supports_images = true;
+    // Input modality is not a client-side gate: user content is forwarded
+    // verbatim and the provider reports any incompatibility.
     let mut tool_call_id_map: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
 
@@ -267,12 +266,7 @@ pub fn transform_messages(messages: &[Message], model: &Model) -> Vec<Message> {
     for msg in messages {
         match msg {
             Message::User(u) => {
-                if supports_images {
-                    transformed.push(Message::User(u.clone()));
-                } else {
-                    let downgraded = downgrade_user_images(u);
-                    transformed.push(Message::User(downgraded));
-                }
+                transformed.push(Message::User(u.clone()));
             }
             Message::ToolResult(tr) => {
                 // Normalize toolCallId via the map built in the assistant pass.
@@ -281,9 +275,6 @@ pub fn transform_messages(messages: &[Message], model: &Model) -> Vec<Message> {
                     if remapped != &tr.tool_call_id {
                         tr.tool_call_id = remapped.clone();
                     }
-                }
-                if !supports_images {
-                    tr.content = downgrade_tool_result_images(&tr.content);
                 }
                 transformed.push(Message::ToolResult(Box::new(tr)));
             }
@@ -431,50 +422,6 @@ pub fn transform_messages(messages: &[Message], model: &Model) -> Vec<Message> {
         &mut result,
     );
     result
-}
-
-/// Replace consecutive unsupported images with a single placeholder text block
-/// in a user message. Mirrors `replaceImagesWithPlaceholder`.
-fn replace_images_with_placeholder(content: &[Content], placeholder: &str) -> Vec<Content> {
-    let mut out = Vec::new();
-    let mut previous_was_placeholder = false;
-    for block in content {
-        match block {
-            Content::Image(_) => {
-                if !previous_was_placeholder {
-                    out.push(Content::text(placeholder));
-                }
-                previous_was_placeholder = true;
-            }
-            Content::Text(t) => {
-                out.push(block.clone());
-                previous_was_placeholder = t.text == placeholder;
-            }
-            _ => {
-                out.push(block.clone());
-                previous_was_placeholder = false;
-            }
-        }
-    }
-    out
-}
-
-fn downgrade_user_images(u: &crate::types::UserMessage) -> crate::types::UserMessage {
-    let placeholder = "(image omitted: model does not support images)";
-    match &u.content {
-        crate::types::UserContent::Text(_) => u.clone(),
-        crate::types::UserContent::Blocks(blocks) => {
-            let replaced = replace_images_with_placeholder(blocks, placeholder);
-            let mut new_u = u.clone();
-            new_u.content = crate::types::UserContent::Blocks(replaced);
-            new_u
-        }
-    }
-}
-
-fn downgrade_tool_result_images(content: &[Content]) -> Vec<Content> {
-    let placeholder = "(tool image omitted: model does not support images)";
-    replace_images_with_placeholder(content, placeholder)
 }
 
 // ----------------------------------------------------------------------------

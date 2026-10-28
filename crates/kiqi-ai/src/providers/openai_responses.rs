@@ -2008,7 +2008,7 @@ fn base36(mut value: u32) -> String {
     out.iter().rev().collect()
 }
 
-fn responses_tool_result_output(model: &Model, content: &[Content]) -> Value {
+fn responses_tool_result_output(_model: &Model, content: &[Content]) -> Value {
     let images: Vec<&ImageContent> = content
         .iter()
         .filter_map(|item| match item {
@@ -2022,37 +2022,6 @@ fn responses_tool_result_output(model: &Model, content: &[Content]) -> Value {
             "(no tool output)".to_string()
         } else {
             text
-        });
-    }
-    if !model.input.contains(&InputModality::Image) {
-        // Match `transformMessages`' non-vision downgrade: preserve the image
-        // position as a tool-specific text placeholder and collapse adjacent
-        // images into one placeholder. Dropping the image here would make a
-        // tool result's textual description look complete when it is not.
-        const PLACEHOLDER: &str = "(tool image omitted: model does not support images)";
-        let mut parts = Vec::new();
-        let mut previous_was_placeholder = false;
-        for item in content {
-            match item {
-                Content::Image(_) => {
-                    if !previous_was_placeholder {
-                        parts.push(PLACEHOLDER.to_string());
-                    }
-                    previous_was_placeholder = true;
-                }
-                Content::Text(text) => {
-                    parts.push(text.text.clone());
-                    previous_was_placeholder = text.text == PLACEHOLDER;
-                }
-                _ => {
-                    previous_was_placeholder = false;
-                }
-            }
-        }
-        return Value::String(if parts.is_empty() {
-            "(no tool output)".to_string()
-        } else {
-            parts.join("\n")
         });
     }
     // Keep text and image blocks in their original order. Responses accepts an
@@ -2091,39 +2060,24 @@ fn responses_tool_result_output(model: &Model, content: &[Content]) -> Value {
     Value::Array(output)
 }
 
-fn user_content_for_model(c: &UserContent, model: &Model) -> Value {
+fn user_content_for_model(c: &UserContent, _model: &Model) -> Value {
     match c {
         UserContent::Text(s) => Value::String(s.clone()),
         UserContent::Blocks(blocks) => {
-            let supports_images = true; // 0.8.1: 无条件携带图片
             let mut content = Vec::with_capacity(blocks.len());
-            let mut previous_image = false;
             for item in blocks {
                 match item {
                     Content::Text(text) => {
                         content.push(json!({"type":"input_text","text":text.text}));
-                        previous_image = false;
                     }
-                    Content::Image(image) if supports_images => {
+                    Content::Image(image) => {
                         content.push(json!({
                             "type":"input_image",
                             "detail":"auto",
                             "image_url": format!("data:{};base64,{}", image.mime_type, image.data),
                         }));
-                        previous_image = false;
                     }
-                    Content::Image(_) => {
-                        if !previous_image {
-                            content.push(json!({
-                                "type":"input_text",
-                                "text":"(image omitted: model does not support images)"
-                            }));
-                        }
-                        previous_image = true;
-                    }
-                    _ => {
-                        previous_image = false;
-                    }
+                    _ => {}
                 }
             }
             if content.is_empty() {
@@ -3032,7 +2986,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_tool_images_are_preserved_with_tool_placeholder() {
+    fn tool_images_are_forwarded_without_a_modality_downgrade() {
         let content = vec![
             Content::text("before"),
             Content::Image(ImageContent {
@@ -3049,14 +3003,17 @@ mod tests {
         ];
         assert_eq!(
             responses_tool_result_output(&model(), &content),
-            json!("before\n(tool image omitted: model does not support images)\nafter")
+            json!([
+                {"type":"input_text","text":"before"},
+                {"type":"input_image","detail":"auto","image_url":"data:image/png;base64,aGVsbG8="},
+                {"type":"input_image","detail":"auto","image_url":"data:image/png;base64,d29ybGQ="},
+                {"type":"input_text","text":"after"}
+            ])
         );
     }
 
     #[test]
     fn vision_tool_result_preserves_text_and_image_order() {
-        let mut vision_model = model();
-        vision_model.input.push(InputModality::Image);
         let content = vec![
             Content::text("before"),
             Content::Image(ImageContent {
@@ -3067,7 +3024,7 @@ mod tests {
             Content::text("after"),
         ];
 
-        let output = responses_tool_result_output(&vision_model, &content);
+        let output = responses_tool_result_output(&model(), &content);
         let blocks = output.as_array().expect("vision output should be blocks");
         assert_eq!(blocks.len(), 3);
         assert_eq!(blocks[0]["type"], "input_text");

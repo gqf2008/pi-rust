@@ -318,7 +318,7 @@ fn wizard_add_model() -> Result<String, String> {
     let context_window = ask_count("Context window", None)?;
     let max_tokens = ask_count("Max output tokens", None)?;
     let reasoning = ask_yes_no("Does this model accept a reasoning/thinking budget?", false)?;
-    let images = ask_yes_no("Does this model accept image attachments?", false)?;
+    // Multimodal input is forwarded to the provider; no client-side capability gate.
 
     provider_config::save_model(&ModelDraft {
         mode: DraftMode::Add,
@@ -328,7 +328,7 @@ fn wizard_add_model() -> Result<String, String> {
         context_window,
         max_tokens,
         reasoning,
-        images,
+        images: true,
         ..Default::default()
     })
 }
@@ -354,12 +354,11 @@ fn wizard_edit_model() -> Result<String, String> {
         "Does this model accept a reasoning/thinking budget?",
         def.reasoning.unwrap_or(false),
     )?;
-    let images = ask_yes_no(
-        "Does this model accept image attachments?",
-        def.input
-            .as_ref()
-            .is_some_and(|list| list.iter().any(|s| s.eq_ignore_ascii_case("image"))),
-    )?;
+    // Preserve the old metadata without asking a question ki does not enforce.
+    let images = def
+        .input
+        .as_ref()
+        .is_some_and(|list| list.iter().any(|s| s.eq_ignore_ascii_case("image")));
 
     provider_config::save_model(&ModelDraft {
         mode: DraftMode::Edit,

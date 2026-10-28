@@ -644,17 +644,12 @@ async fn list_models(search: &str) -> i32 {
     let rows: Vec<_> = models
         .drain(..)
         .map(|model| {
-            let images = model
-                .input
-                .iter()
-                .any(|input| matches!(input, kiqi_ai::InputModality::Image));
             (
                 model.provider,
                 model.id,
                 format_tokens(model.context_window),
                 format_tokens(model.max_tokens),
                 if model.reasoning { "yes" } else { "no" }.to_string(),
-                if images { "yes" } else { "no" }.to_string(),
             )
         })
         .collect();
@@ -664,38 +659,33 @@ async fn list_models(search: &str) -> i32 {
         rows.iter().map(|r| r.2.len()).max().unwrap_or(7).max(7),
         rows.iter().map(|r| r.3.len()).max().unwrap_or(7).max(7),
         rows.iter().map(|r| r.4.len()).max().unwrap_or(8).max(8),
-        rows.iter().map(|r| r.5.len()).max().unwrap_or(6).max(6),
     );
     println!(
-        "{:provider$}  {:model$}  {:context$}  {:max_out$}  {:thinking$}  {:images$}",
+        "{:provider$}  {:model$}  {:context$}  {:max_out$}  {:thinking$}",
         "provider",
         "model",
         "context",
         "max-out",
         "thinking",
-        "images",
         provider = widths.0,
         model = widths.1,
         context = widths.2,
         max_out = widths.3,
         thinking = widths.4,
-        images = widths.5,
     );
     for row in rows {
         println!(
-            "{:provider$}  {:model$}  {:context$}  {:max_out$}  {:thinking$}  {:images$}",
+            "{:provider$}  {:model$}  {:context$}  {:max_out$}  {:thinking$}",
             row.0,
             row.1,
             row.2,
             row.3,
             row.4,
-            row.5,
             provider = widths.0,
             model = widths.1,
             context = widths.2,
             max_out = widths.3,
             thinking = widths.4,
-            images = widths.5,
         );
     }
     0
