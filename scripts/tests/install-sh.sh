@@ -194,7 +194,7 @@ cp "$FAKE_FIXTURES/$(basename "$url")" "$dest"
 SHIM
 chmod +x "$nosec/curl"
 rm -rf "$tmp/out6"
-if out=$(PATH="$nosec:/usr/bin:/bin" FAKE_FIXTURES="$fixtures" FAKE_OS=Darwin FAKE_ARCH=arm64 \
+if out=$(PATH="$nosec:$tmp/bin:/usr/bin:/bin" FAKE_FIXTURES="$fixtures" FAKE_OS=Darwin FAKE_ARCH=arm64 \
         sh "$INSTALL" --version "$VERSION" --dir "$tmp/out6" 2>&1); then
     echo "FAIL: installed without a published checksum" >&2
     status=1
@@ -212,10 +212,13 @@ if command -v env >/dev/null 2>&1; then
     # `command -v` skips non-executable files, so these shadow nothing but are also not
     # found anywhere else: /usr/bin is excluded from PATH below.
     for tool in sha256sum shasum openssl; do : > "$nover/$tool"; done
-    for tool in sh dirname sed head mkdir rm cp tar chmod cut uname env mktemp cat printf ls mv; do
+    # `uname` must come from the shim, not the host: the fixture archive is named for
+    # Darwin/arm64, so a host `uname` on Linux would resolve a different target and 404.
+    for tool in sh dirname sed head mkdir rm cp tar chmod cut env mktemp cat printf ls mv; do
         real=$(command -v "$tool") || continue
         ln -sf "$real" "$nover/$tool" 2>/dev/null || true
     done
+    ln -sf "$tmp/bin/uname" "$nover/uname"
     ln -sf "$tmp/bin/curl" "$nover/curl"
     rm -rf "$tmp/out3"
     if out=$(PATH="$nover" FAKE_FIXTURES="$fixtures" FAKE_OS=Darwin FAKE_ARCH=arm64 \
@@ -237,10 +240,11 @@ if command -v env >/dev/null 2>&1; then
     ossl="$tmp/ossl"
     mkdir -p "$ossl"
     for tool in sha256sum shasum; do : > "$ossl/$tool"; done
-    for tool in sh dirname sed head mkdir rm cp tar chmod cut uname env mktemp cat printf ls mv; do
+    for tool in sh dirname sed head mkdir rm cp tar chmod cut env mktemp cat printf ls mv; do
         real=$(command -v "$tool") || continue
         ln -sf "$real" "$ossl/$tool" 2>/dev/null || true
     done
+    ln -sf "$tmp/bin/uname" "$ossl/uname"
     ln -sf "$tmp/bin/curl" "$ossl/curl"
     real_openssl=$(command -v openssl || true)
     if [ -n "$real_openssl" ]; then
