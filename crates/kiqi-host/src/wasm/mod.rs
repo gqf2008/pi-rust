@@ -1769,6 +1769,25 @@ fn truncate_chars(text: &str, max_bytes: u64) -> String {
     text[..end].to_string()
 }
 
+/// Opt-in trace for the `proc` lifecycle (`KI_PROC_TRACE=1`).
+///
+/// A wave whose children never consumed their prompt left no evidence at all on
+/// 2026-10-28: the only trace was a pair of idle child processes. Spawn, write,
+/// close-stdin and kill are the four facts that separate "the host never sent
+/// it" from "the child never read it", so record them when the operator asks.
+fn proc_trace(event: &str) {
+    if std::env::var_os("KI_PROC_TRACE").is_some() {
+        eprintln!("[ki proc] {event}");
+    }
+}
+
+/// Whether the host abandoned the calling tool call (Esc soft interrupt, run
+/// abort). Blocking host imports poll this so a guest parked on a child learns
+/// about the interrupt instead of waiting out its own budget.
+fn call_cancelled() -> bool {
+    with_caps_context(|caps| caps.cancel.is_some_and(|probe| probe.is_cancelled())).unwrap_or(false)
+}
+
 /// Interactive children: `spawn` / `write` / `read-line` / `read-stderr` /
 /// `wait` / `kill`.
 ///
@@ -1937,6 +1956,7 @@ impl crate::wasm::kiqi::extension::proc::Host for HostState {
                 deadline,
             },
         );
+        proc_trace(&format!("spawn `{cmd}` args={args:?} handle={handle}"));
         Ok(handle)
     }
 
@@ -1966,13 +1986,19 @@ impl crate::wasm::kiqi::extension::proc::Host for HostState {
         let mut pending = bytes;
         loop {
             match stdin.try_send(pending) {
-                Ok(()) => return Ok(len),
+                Ok(()) => {
+                    proc_trace(&format!("write {len} bytes to handle={handle}"));
+                    return Ok(len);
+                }
                 Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
                     return Err(CapabilityError::Failed(
                         "the child's stdin is gone (it exited?)".to_string(),
                     ))
                 }
                 Err(std::sync::mpsc::TrySendError::Full(returned)) => pending = returned,
+            }
+            if call_cancelled() {
+                return Err(CapabilityError::Failed("cancelled by the host".to_string()));
             }
             if std::time::Instant::now() >= deadline {
                 return Err(CapabilityError::Failed(
@@ -2046,6 +2072,9 @@ impl crate::wasm::kiqi::extension::proc::Host for HostState {
                     return Err(CapabilityError::Failed(format!("wait on child: {error}")))
                 }
             }
+            if call_cancelled() {
+                return Err(CapabilityError::Failed("cancelled by the host".to_string()));
+            }
             if std::time::Instant::now() >= deadline {
                 return Ok(None);
             }
@@ -2065,6 +2094,7 @@ impl crate::wasm::kiqi::extension::proc::Host for HostState {
         // the child observes EOF. Unknown handle = already closed (idempotent).
         if let Some(child) = self.procs.get_mut(&handle) {
             child.stdin = None;
+            proc_trace(&format!("close-stdin handle={handle}"));
         }
         Ok(())
     }

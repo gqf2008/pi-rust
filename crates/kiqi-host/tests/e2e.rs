@@ -2616,6 +2616,61 @@ fn proc_round_trips_a_line_through_the_host() {
     assert!(dir.path().join("data").is_dir());
 }
 
+/// `dispatch` must deliver each node's task and then **close the child's
+/// stdin**. With `cat` as the wave program the only way a node can finish is by
+/// reading its task to EOF, so a missing `close-stdin` shows up as a node that
+/// never completes instead of a child that silently waits forever — which is
+/// exactly what an unattended `dispatch` wave looked like on 2026-10-28 (two
+/// `ki -p` children, 0 % CPU, no files opened, no sockets, 21 minutes old).
+#[test]
+fn dispatch_delivers_each_task_and_closes_the_child_stdin() {
+    use kiqi_host::wasm::ProcGrant;
+
+    let wasm = build_guest("kiqi-orchestrator", "kiqi_orchestrator.wasm");
+    let extension = WasmExtension::load_with_grants(
+        "kiqi-orchestrator",
+        &wasm,
+        Grants {
+            proc: Some(ProcGrant {
+                commands: vec!["cat".to_string()],
+                ..ProcGrant::default()
+            }),
+            ..Grants::default()
+        },
+    )
+    .expect("load the orchestrator guest");
+    let log = NullLog;
+    let caps = HostCaps::observer(&log);
+    let sink = RecordingSink {
+        blocks: Mutex::new(Vec::new()),
+    };
+
+    extension
+        .call(
+            "plan",
+            &serde_json::json!({
+                "action": "set",
+                "nodes": [{"id": "a", "task": "hello-from-node-a"}]
+            }),
+            &caps,
+            &sink,
+        )
+        .expect("plan");
+    let outcome = extension
+        .call(
+            "dispatch",
+            &serde_json::json!({ "program": "cat", "waitSeconds": 10 }),
+            &caps,
+            &sink,
+        )
+        .expect("dispatch");
+    let text = text_of(&outcome);
+    assert!(
+        text.contains("[x] a"),
+        "the node must finish, not wait for a stdin EOF that never comes: {text}"
+    );
+}
+
 /// `proc` is gated exactly like `exec`: no grant, a command outside the
 /// allow-list, and a cwd that leaves the scope are each refused.
 #[test]
