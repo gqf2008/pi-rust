@@ -163,7 +163,10 @@ phase_validate() {
   # The version bump is not committed until `phase_commit`, so the helper must
   # tolerate a dirty tree here. `task publish` re-runs the strict clean-tree
   # check after the commit.
-  step task release:validate-dirty RELEASE_VERSION="$release_version"
+  local helper
+  helper=$(git rev-parse --git-path kiqi-release-helper.exe)
+  step rustc --edition=2021 release-helper.rs -o "$helper"
+  step "$helper" validate "$release_version" --allow-dirty
 }
 
 phase_commit() {
