@@ -151,6 +151,28 @@ pub(super) fn reconcile_streamed_assistant_completion(
 /// `AgentEvent` drain task renders the response live and the completed outcome
 /// reconciles its final snapshot. When false (no `event_rx`), this falls back
 /// to the blocking await-final-text path.
+/// Start a run on its own task.
+///
+/// **Principle: the UI loop never awaits agent work.** While a run was awaited
+/// inline, a single wedged tool call — a `dispatch` wave waiting on a child that
+/// never received its prompt — also froze every other message the loop owns:
+/// queued input, cron injections, goal continuation, and the post-run
+/// reconciliation. Runs are serialized by the lane, so the loop only *starts*
+/// one and reacts to the broadcast events the drain task already delivers.
+pub(super) fn spawn_run(
+    lane: Arc<dyn AgentLane>,
+    prompt: String,
+    resume: bool,
+    tui: Arc<TuiAltScreen>,
+    state: Arc<TuiState>,
+    streaming: bool,
+    images: Vec<kiqi_ai::types::ImageContent>,
+) {
+    tokio::spawn(async move {
+        run_prompt_streaming(&lane, &prompt, resume, &tui, &state, streaming, images).await;
+    });
+}
+
 pub(super) async fn run_prompt_streaming(
     lane: &Arc<dyn AgentLane>,
     prompt: &str,

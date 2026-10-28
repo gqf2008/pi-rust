@@ -1743,6 +1743,44 @@ pub async fn interactive_tui(
         .unwrap_or_else(|| "tree".to_string())
         .to_ascii_lowercase();
 
+    // Watchdog for the one failure the user can see but the loop cannot: the
+    // key reader wedged on a lock. Every key press is a heartbeat; a stalled
+    // reader means "typing does nothing", so say it in the log instead of
+    // leaving a silently dead UI.
+    let last_key_tick = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let stalled_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let tick = last_key_tick.clone();
+        let stalled = stalled_flag.clone();
+        let state_probe = state.clone();
+        tokio::spawn(async move {
+            const STALL: u64 = 5_000;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                if *state_probe.status.lock().unwrap() == RunStatus::Idle {
+                    // An idle session may legitimately park the reader briefly;
+                    // only a run in flight makes a stall user-visible.
+                    continue;
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let last = tick.load(std::sync::atomic::Ordering::Relaxed);
+                let stale = now.saturating_sub(last) > STALL;
+                if stale && !stalled.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    diagnostic_log(&format!(
+                        "[ki tui] key reader stalled {}s while a run is active; input is not being processed",
+                        now.saturating_sub(last) / 1000
+                    ));
+                } else if !stale {
+                    stalled.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        });
+    }
+    let key_tick = last_key_tick.clone();
+
     let key_handle = tokio::task::spawn_blocking(move || {
         // Fires on the normal path too, where `Exit` has already been sent and a
         // second one is ignored; its job is the unwind path (see the type's doc).
@@ -1773,6 +1811,13 @@ pub async fn interactive_tui(
             ));
         }
         loop {
+            key_tick.store(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             if !*running_key.lock().unwrap() {
                 break;
             }
@@ -2912,16 +2957,15 @@ pub async fn interactive_tui(
                         &format!("Attached {} image(s) to this prompt.", prompt_images.len()),
                     );
                 }
-                run_prompt_streaming(
-                    &lane,
-                    &prompt,
+                spawn_run(
+                    lane.clone(),
+                    prompt.clone(),
                     false,
-                    &tui,
-                    &state,
+                    tui.clone(),
+                    state.clone(),
                     drain_handle.is_some(),
                     prompt_images,
-                )
-                .await;
+                );
             }
             Some(TuiMessage::CronInject(prompt)) => {
                 // 定时任务不是用户出场：不清编辑器，也不重置 signal 链。
@@ -2939,16 +2983,15 @@ pub async fn interactive_tui(
                 }
                 add_user_message(&chat_container, &prompt);
                 tui.request_render(false);
-                run_prompt_streaming(
-                    &lane,
-                    &prompt,
+                spawn_run(
+                    lane.clone(),
+                    prompt.clone(),
                     false,
-                    &tui,
-                    &state,
+                    tui.clone(),
+                    state.clone(),
                     drain_handle.is_some(),
                     Vec::new(),
-                )
-                .await;
+                );
             }
             Some(TuiMessage::InvokeSkill(text)) => {
                 // User-invoked skill: same run path as a submitted prompt, but
@@ -3063,16 +3106,15 @@ pub async fn interactive_tui(
                 }
                 add_user_message(&chat_container, &format!("/skill {command}"));
                 tui.request_render(false);
-                run_prompt_streaming(
-                    &lane,
-                    &prompt,
+                spawn_run(
+                    lane.clone(),
+                    prompt.clone(),
                     false,
-                    &tui,
-                    &state,
+                    tui.clone(),
+                    state.clone(),
                     drain_handle.is_some(),
                     Vec::new(),
-                )
-                .await;
+                );
             }
             Some(TuiMessage::McpInput) => {
                 // MUI input: drain at the same kind of boundary as terminal
@@ -3104,16 +3146,15 @@ pub async fn interactive_tui(
                 }
                 state.set_goal_driven();
                 add_user_message(&chat_container, &prompt);
-                run_prompt_streaming(
-                    &lane,
-                    &prompt,
+                spawn_run(
+                    lane.clone(),
+                    prompt.clone(),
                     false,
-                    &tui,
-                    &state,
+                    tui.clone(),
+                    state.clone(),
                     drain_handle.is_some(),
                     Vec::new(),
-                )
-                .await;
+                );
             }
             Some(TuiMessage::SignalWake(prompt)) => {
                 // User priority (design §5.3): a staged steering/follow-up
@@ -3140,16 +3181,15 @@ pub async fn interactive_tui(
                 // prompt, so the trigger bubble is rendered here (same reason as
                 // the initial `-p` prompts).
                 add_user_message(&chat_container, &prompt);
-                run_prompt_streaming(
-                    &lane,
-                    &prompt,
+                spawn_run(
+                    lane.clone(),
+                    prompt.clone(),
                     false,
-                    &tui,
-                    &state,
+                    tui.clone(),
+                    state.clone(),
                     drain_handle.is_some(),
                     Vec::new(),
-                )
-                .await;
+                );
             }
             Some(TuiMessage::ExternalEditorResult(result)) => {
                 match result {
