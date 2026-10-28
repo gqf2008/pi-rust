@@ -240,7 +240,10 @@ if command -v env >/dev/null 2>&1; then
     # to be a safety net.
     ossl="$tmp/ossl"
     mkdir -p "$ossl"
-    for tool in sh dirname sed head mkdir rm cp tar chmod cut env mktemp cat printf ls mv; do
+    # `gzip` is not optional here: GNU tar shells out to it for `-z`, while bsdtar
+    # (macOS) decompresses internally -- without it this PATH passes on macOS and fails
+    # on Linux with "tar (child): gzip: Cannot exec".
+    for tool in sh dirname sed head mkdir rm cp tar gzip chmod cut env mktemp cat printf ls mv; do
         real=$(command -v "$tool") || continue
         ln -sf "$real" "$ossl/$tool" 2>/dev/null || true
     done
