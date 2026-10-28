@@ -40,6 +40,16 @@ pub(crate) struct ActiveGoal {
     pub done_when_cmd: Option<String>,
 }
 
+/// Whether a command turned a non-active (or a different) goal into the active
+/// one: the trigger for starting its first run from an idle session.
+///
+/// `show`/`list`/`update` leave the key untouched and must stay passive, while
+/// `start` (new key) and `resume` (no active goal before) begin working
+/// immediately — the user asking for a goal *is* the request to execute it.
+pub(crate) fn goal_became_active(before: Option<&str>, after: Option<&str>) -> bool {
+    after.is_some() && after != before
+}
+
 impl ActiveGoal {
     /// A stable key for one goal: a new goal (title or start time changed)
     /// resets the host's continuation counter.
@@ -183,6 +193,21 @@ mod tests {
     fn write_goal(dir: &Path, value: serde_json::Value) {
         std::fs::create_dir_all(dir.join(".ki")).unwrap();
         std::fs::write(dir.join(GOAL_FILE), value.to_string()).unwrap();
+    }
+
+    #[test]
+    fn only_a_new_or_resumed_goal_starts_a_run() {
+        assert!(goal_became_active(None, Some("t@1")), "start from idle");
+        assert!(
+            goal_became_active(Some("old@1"), Some("new@2")),
+            "a new goal replaces the old one"
+        );
+        assert!(
+            !goal_became_active(Some("t@1"), Some("t@1")),
+            "show/list/update must not start a run"
+        );
+        assert!(!goal_became_active(Some("t@1"), None), "stop/pause");
+        assert!(!goal_became_active(None, None), "no goal at all");
     }
 
     #[test]

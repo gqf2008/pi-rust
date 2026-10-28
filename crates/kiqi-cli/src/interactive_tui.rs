@@ -625,6 +625,10 @@ enum TuiMessage {
     /// An active goal still has budget after a run ended: start the next run
     /// without waiting for the user. The goal itself is already in context.
     GoalContinue(String),
+    /// The unbounded-goal auto-continue budget ran out: the session is idle
+    /// again and only user input restarts it. Shown as a transcript note —
+    /// without one the goal just looks silently stuck.
+    GoalAutoContinueStopped(String),
     /// An MCP resource signal passed the host's arousal budget and should start
     /// a run. The batch's detailed notice entry is already in the transcript;
     /// this is the short external-signal trigger built by `signal_wake`.
@@ -3536,7 +3540,32 @@ pub async fn interactive_tui(
                 tui.request_render(false);
             }
             Some(TuiMessage::ExtensionCommandDone(outcome)) => {
+                // `/goal <task>` (and `resume`) only writes the goal file. The
+                // auto-continue hook fires at AgentEnd, and an idle session has
+                // no run to end — so without this an explicit `/goal` sat idle
+                // until the user typed something, which reads as "my goal was
+                // ignored". A command that leaves a *newly* active goal starts
+                // its first run right here; bookkeeping commands (`show`,
+                // `list`, `update`) leave the key unchanged and stay passive.
+                let goal_before = crate::goal_drive::active_goal(&cwd).map(|goal| goal.key());
                 handle_command_outcome(&ctx, outcome);
+                let goal_after = crate::goal_drive::active_goal(&cwd).map(|goal| goal.key());
+                if crate::goal_drive::goal_became_active(
+                    goal_before.as_deref(),
+                    goal_after.as_deref(),
+                ) && *state.status.lock().unwrap() == RunStatus::Idle
+                {
+                    // An explicit `/goal` is user intent, so it also lifts the
+                    // abort mute (`record_abort` otherwise suppresses goal
+                    // continuation until the user speaks) and gives the new
+                    // goal a fresh auto-continue budget.
+                    signal_wake.record_user_input();
+                    maybe_continue_goal(&lane, &signal_wake, &tx).await;
+                }
+            }
+            Some(TuiMessage::GoalAutoContinueStopped(note)) => {
+                add_note_message(&chat_container, &note);
+                tui.request_render(false);
             }
             None => break,
         }
