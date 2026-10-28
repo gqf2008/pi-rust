@@ -11,6 +11,25 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/goal <任务>` 立刻开始干活。** 之前该命令只写 `.ki/goals.json`，而自动续跑挂在
+  `AgentEnd` 上——空会话没有 run 可结束，于是目标建好后必须用户再说一句话才会动。
+  现在命令结束后若出现新 goal（或 resume 了旧 goal）且会话空闲，就直接起一次续跑；
+  `show`/`list`/`update` 这类记账命令保持被动。显式 `/goal` 同时解除 Esc 中断后的
+  续跑静音（`muted_until_input`），并给新目标一份全新的自动续跑预算。
+- **自动续跑到达上限时会说话。** 无预算 goal 的 20 次上限原先只写诊断日志，界面上
+  表现为「目标莫名停住」。现在会在对话里说明已到上限，并提示 `/goal resume` 继续或
+  `/goal stop` 结束旧目标再开新的（新目标有自己的预算）。
+
+### Added
+
+- **`plan` / `dispatch` 在右侧栏可见。** `kiqi-orchestrator` 通过 `ui.component`
+  向宿主的 `sidebar.right` 槽位发布面板：一个任务列表（`✔/▶/·/✖/–` + 完成计数），
+  以及每个节点一个带边框的 box（状态、已用时长、子进程输出尾部 8 行，400ms 节流）；
+  `subagent` 单次调用同样有自己的 box。工具输出流另发 `▶ id` / `✔ id` 进度行。
+  没有交互 UI 时（headless、单测）宿主返回 `denied`，wave 行为不变。
+
 ## [0.4.5] - 2026-10-28
 
 ### Fixed

@@ -407,6 +407,13 @@ pub(super) async fn maybe_continue_goal(
             "[ki goal] auto-continue stopped: unbounded goal reached {} host runs",
             crate::goal_drive::MAX_GOAL_AUTO_RUNS
         ));
+        // Say it in the transcript too: a cap that only exists in the log looks
+        // exactly like a goal that silently stalled.
+        let _ = tx.send(TuiMessage::GoalAutoContinueStopped(format!(
+            "goal「{}」已到 {} 次自动续跑上限，先停在这里。发一句话或 /goal resume 继续；             要换目标就先 /goal stop 结束它，再 /goal 新任务（新目标有自己的一轮预算）。",
+            goal.title,
+            crate::goal_drive::MAX_GOAL_AUTO_RUNS
+        )));
         return;
     }
     super::diagnostic_log(&format!(

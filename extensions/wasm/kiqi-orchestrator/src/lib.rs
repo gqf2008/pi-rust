@@ -24,7 +24,9 @@
 //! sees the guidance).
 
 use kiqi_wasm_bindings::bindings::exports::kiqi::extension::extension_api::Guest;
-use kiqi_wasm_bindings::bindings::kiqi::extension::{exec, fs, proc, types};
+use kiqi_wasm_bindings::bindings::kiqi::extension::{exec, fs, proc, progress, types};
+
+mod panels;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +59,8 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const MIN_TIMEOUT_SECS: u64 = 10;
 const MAX_TIMEOUT_SECS: u64 = 1800;
 const MAX_TASK_BYTES: usize = 20_000;
+/// Panel id of the single-subagent call (the dispatch wave uses per-node ids).
+const SUBAGENT_PANEL: &str = "subagent";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
@@ -457,6 +461,7 @@ fn plan(params: &Value) -> Result<types::ToolResult, String> {
             ))
         }
     }
+    panels::sync_plan(&guard);
     Ok(result_with_details(&guard.render(), guard.to_details()))
 }
 
@@ -736,6 +741,10 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut output = String::new();
+    // The single-subagent call gets its own right-rail box too, so a long child
+    // is observable without expanding the tool block.
+    panels::node_started(SUBAGENT_PANEL, 0);
+    progress::emit(&types::ProgressBlock::Text("▶ subagent".to_string()));
     loop {
         // Esc while the child runs: kill it and return instead of waiting out
         // `timeoutSeconds` (up to 1800 s) while this call holds the extension's
@@ -744,12 +753,14 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         // `kill` is idempotent.
         if proc::cancel_requested() {
             let _ = proc::kill(handle);
+            panels::node_finished(SUBAGENT_PANEL, Status::Failed);
             return Err("cancelled by the host".into());
         }
         match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
             Ok(Some(line)) => {
                 output.push_str(&line);
                 output.push('\n');
+                panels::node_line(SUBAGENT_PANEL, &line);
             }
             // stdout ended: collect the exit status.
             Ok(None) => break,
@@ -758,6 +769,7 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         }
         if Instant::now() >= deadline {
             let _ = proc::kill(handle);
+            panels::node_finished(SUBAGENT_PANEL, Status::Failed);
             return Err(format!("subagent timed out after {timeout_secs}s"));
         }
     }
@@ -774,6 +786,14 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         Err(error) => return Err(capability_reason(error)),
     };
     let text = truncate_output(output);
+    panels::node_finished(
+        SUBAGENT_PANEL,
+        if status == 0 { Status::Done } else { Status::Failed },
+    );
+    progress::emit(&types::ProgressBlock::Text(format!(
+        "{} subagent",
+        if status == 0 { "✔" } else { "✖" }
+    )));
     if status != 0 {
         return Err(format!("subagent exited with {status}:\n{}", text.trim()));
     }
@@ -883,6 +903,15 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                 handle,
                 deadline,
             ));
+            // Observability: one right-rail box per node, plus the first line of
+            // the transcript's tool output. Both are best-effort.
+            let index = graph
+                .nodes
+                .iter()
+                .position(|node| node.id == id)
+                .unwrap_or_default();
+            panels::node_started(&id, index);
+            progress::emit(&types::ProgressBlock::Text(format!("▶ {id}")));
             started.push(id);
         }
         started
@@ -927,6 +956,8 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .retain(|(node_id, _, _)| node_id != &id);
+                panels::node_finished(&id, Status::Failed);
+                progress::emit(&types::ProgressBlock::Text(format!("✖ {id} (timeout)")));
                 continue;
             }
             match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
@@ -934,6 +965,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                     let buffer = outputs.entry(handle).or_default();
                     buffer.push_str(&line);
                     buffer.push('\n');
+                    panels::node_line(&id, &line);
                 }
                 Ok(None) => {
                     // EOF: the child has stopped producing. Give it a short
@@ -976,6 +1008,15 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .retain(|(node_id, _, _)| node_id != &id);
+                    let status = graph
+                        .get(&id)
+                        .map(|node| node.status)
+                        .unwrap_or(Status::Failed);
+                    panels::node_finished(&id, status);
+                    progress::emit(&types::ProgressBlock::Text(format!(
+                        "{} {id}",
+                        if status == Status::Done { "✔" } else { "✖" }
+                    )));
                 }
                 Err(_) => {}
             }
@@ -994,6 +1035,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
         .iter()
         .map(|(id, _, _)| id.clone())
         .collect();
+    panels::sync_plan(&graph);
     let mut text = format!(
         "started {} · running {}\n",
         started.len(),
@@ -1146,7 +1188,11 @@ impl Guest for KiOrchestrator {
         ID.to_string()
     }
 
-    fn shutdown() {}
+    fn shutdown() {
+        // The right rail outlives this instance; leaving boxes behind would
+        // show a dead wave as if it were still running.
+        panels::clear_all();
+    }
 
     fn list_tools() -> Vec<types::ToolSpec> {
         tools()
