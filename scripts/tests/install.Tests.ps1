@@ -122,7 +122,7 @@ function Assert-Preview {
 }
 
 function Assert-FailedBeforeExtraction([string] $Message) {
-    Assert-True ($TestState.Failure -like "*$Message*") "Expected '$Message', got '$TestState.Failure'."
+    Assert-True ($TestState.Failure -like "*$Message*") "Expected '$Message', got '$($TestState.Failure)'."
     Assert-True ($TestState.Extractions -eq 0) 'Installer extracted an unverified archive.'
     Assert-True (-not (Test-Path -LiteralPath $TestState.InstallDir)) 'Failed installation created an installation directory.'
 }
@@ -184,12 +184,12 @@ try {
         Invoke-Test "unsupported-$Architecture" {
             $env:PROCESSOR_ARCHITECTURE = $Architecture
         } {
-            Assert-FailedBeforeExtraction 'cargo install kiqi-cli'
+            Assert-FailedBeforeExtraction 'cargo build --release'
             Assert-True ($TestState.Downloads.Count -eq 0 -and $TestState.ApiCalls.Count -eq 0) 'Unsupported platform accessed the network.'
         }
     }
     Invoke-Test 'missing-asset' { $TestState.Mode = 'MissingAsset' } {
-        Assert-FailedBeforeExtraction 'cargo install kiqi-cli'
+        Assert-FailedBeforeExtraction 'Build from source with'
     }
     Invoke-Test 'checksum-mismatch' { $TestState.Mode = 'Mismatch' } {
         Assert-FailedBeforeExtraction 'Checksum verification failed'

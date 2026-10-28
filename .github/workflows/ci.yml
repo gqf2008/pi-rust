@@ -96,7 +96,14 @@ jobs:
       # machine, whose uncommitted `.cargo/config.toml` sets `offline = true`) fails
       # with what looks like a local misconfiguration.
       - name: Verify the lock file covers every feature offline
-        run: sh scripts/check-offline-lock.sh
+        run: |
+          # Seed the registry cache before the offline check: a runner that has
+          # never downloaded a newly added crate cannot resolve it with
+          # `--offline`. `fetch --locked` downloads exactly what the lock names,
+          # so it cannot paper over a missing entry — the check below still fails
+          # when the lock is incomplete.
+          cargo fetch --locked
+          sh scripts/check-offline-lock.sh
 
       # `install.sh` is the `curl | sh` entry point and had no test in any job: the
       # PowerShell twin is covered by `scripts/tests/install.Tests.ps1` in the
