@@ -3,8 +3,8 @@
 # 方案：ask_user 兜底与 JEV 决策顾问
 
 > 状态：**阶段 1a 已落地（2026-10-20，`886aac7` + `6e2b890` + `20eed47`）**；1b（goal 自动授权）与阶段 2/3 待做。
-> 目标：人不在时 `ask_user` 不再无限挂起；
-> 超时后由宿主执行**保守兜底**，并可调用 TypeSafe Jev 决策模型给出**建议**。
+> 目标（2026-10-28 修订）：非 goal 的 `ask_user` 默认等待人工，只有显式 `timeout`
+> 才执行**保守兜底**；goal active 不等人工。Jev 决策模型只提供**建议**。
 > Jev 只建议，不代替人授权。
 > 关联：`soft-interrupt.md`（Esc 软中断）、`signal-driven-agent.md`（MUI 输入）、
 > `docs/design/extension-abi-handover.md`（插件面）。
@@ -19,15 +19,15 @@
   不回答就一直等（`extensions/kiqi-ask-user/src/lib.rs` 的 poll 循环）。
 - 观测到的事实：2026-10-19 19:56 的删除授权问题把整轮 run 阻塞了约 43 分钟，
   会话文件没有任何新条目；人回来后回答，run 才继续。
-- 目标：**人不在时流程不能无限挂起**。非 goal 模式不自动授权危险动作；
-  goal 模式只在 goal 范围 + 既有权限策略内自动授权，边界外交给 Jev，Jev 判断不了就
-  `unanswered` + 保守兜底。
+- 修订后的目标：非 goal 模式把人工决策点留给人，不自动授权危险动作；只有模型显式
+  `timeout` 到期才走 `unanswered` + 保守兜底。goal 模式只在 goal 范围 + 既有权限策略内
+  自动授权，边界外交给 Jev，Jev 判断不了就走同样的保守兜底。
 
 ## 2. 目标 / 非目标
 
 | | 项 | 本方案 |
 |---|---|---|
-| ✅ | `ask_user` 有宿主级 TTL：非 goal **60 秒**；goal active **不等人工** | 阶段 1 |
+| ✅ | `ask_user` 等待策略：非 goal 默认不限时、显式 `timeout` 生效；goal active **不等人工** | 阶段 1（2026-10-28 修订） |
 | ✅ | goal active 在 goal 范围 + 权限策略内自动授权；范围外走 Jev | 阶段 1/2 |
 | ✅ | 非 goal 超时、或 goal 边界外 Jev 判断不了 → `unanswered` + 保守兜底 | 阶段 1 |
 | ✅ | 超时/提问前可由 Jev 给出建议 + 概率 + confidence | 阶段 2 |
@@ -54,17 +54,17 @@ TypeSafe Jev（System One）是结构化决策模型，不是聊天模型：
 
 ## 4. 分层设计
 
-### 4.1 宿主 TTL（阶段 1）
+### 4.1 人工等待与显式 TTL（阶段 1，2026-10-28 修订）
 
 `ask_user` 按会话模式走不同路径：
 
 | 模式 | 行为 |
 |---|---|
-| **非 goal** | 最多等 **60 秒**；超时返回 `unanswered`，执行保守兜底 |
+| **非 goal** | 默认无限期等人；只有模型显式传 `timeout` 才限时，超时返回 `unanswered`，执行保守兜底 |
 | **goal active** | **不等人工**：先按 goal 范围与既有权限策略自动授权；不在范围内交给 Jev；Jev 判断不了就走 `unanswered` |
 
-- 模型可显式传更短的 `timeout`；宿主上限是 60 秒（非 goal）。
-- 超时后宿主关闭对话框，插件返回结构化结果：
+- 模型可显式传 `timeout`；**宿主不设默认上限**（理由见 §9）。
+- 超时后宿主关闭对话框并提示用户该问题已关闭，插件返回结构化结果：
   ```json
   {"status":"unanswered","reason":"timeout","fallback":"keep"}
   ```
@@ -110,7 +110,7 @@ TypeSafe Jev（System One）是结构化决策模型，不是聊天模型：
 
 | 条件 | 行为 |
 |---|---|
-| 等待 60 秒内人工回答 | 用人工答案 |
+| 在显式 `timeout` 到期前人工回答（无 `timeout` 则不限时） | 用人工答案 |
 | 超时，且 `risk.noul` 低、`confidence ≥ 阈值`、选项在白名单 | 应用 Jev 建议，并记录“Jev 建议+置信度” |
 | 超时，`risk.noul` 高 / `confidence < 阈值` / Jev 失败 | `unanswered` + 保守兜底，写入 pending decision |
 | 同一输入摘要已决策过 | 使用缓存，不重复调用 |
@@ -223,13 +223,14 @@ Jev 的答案只作为决策依据，不能绕过权限门。删除/合并类如
 | `extensions/wasm/kiqi-ask-user/src/lib.rs` | 同样三处逐一对应；`ask_one` 返回 `AskOne::{Answered, Unanswered}`，超时不进 `Err` |
 | `crates/kiqi-host/tests/e2e.rs` | `ask_user_honours_timeout` 从「断言 `is_error` + 文案含 timed out」改为「断言非错误 + `details.status==unanswered` + 无 `answer` 键」 |
 
-两条**不可回退**的判断：
+两条当时的**不可回退**判断（第 2 条已于 2026-10-28 由 §9 修订）：
 
 1. **超时必须是结果，不是错误。** 它改变模型的后续行为：`Err` 会让模型以为工具坏了并可能重试，
    结构化 `unanswered` 让它带着 `keep` 继续。载荷里**没有** `answer` 键——超时不是同意，
    省略键是模型唯一无法误读的形式。
-2. **`deadline` 不能退回 `Option<Instant>`。** 类型上允许 `None` 就允许“无限等”，而“用户在场”
-   是很强的假设；做成 `Instant` 后，任何未来改动想恢复无限等都必须显式改类型，会被评审看见。
+2. **历史约束，已修订**：阶段 1a 曾要求 `deadline` 不得退回 `Option<Instant>`，以类型禁止
+   “无限等”。现行 `answer_deadline` 有意返回 `Option<Instant>`：`None` 表示非 goal 默认等待人工，
+   只有模型显式 `timeout` 才构造截止时间。
 
 ### 8.3 阶段 1b 为何未做
 
@@ -248,7 +249,13 @@ Jev 的答案只作为决策依据，不能绕过权限门。删除/合并类如
 
 **已定（2026-10-19）**
 
-1. 非 goal 模式：`ask_user` 最多等 **60 秒**。
+1. ~~非 goal 模式：`ask_user` 最多等 **60 秒**。~~ **2026-10-28 修订为默认不限时。**
+   实测（walgit 会话 2026-10-28T06-36）：用户读一份删除清单超过 60 秒，guest 已按 TTL 返回
+   `unanswered` + `keep` 并让 run 结束，而 TUI 的选择框还开着；用户随后点击的答案被送进一个
+   已 cancel 的请求、`respond` 的 `Err` 被 `let _ =` 丢掉，于是表现为「我选完了 ki 不动」。
+   人工决策点不该由宿主替人作答：默认等到人回答或 Esc 取消，不靠虚构答案。无人值守的 goal
+   仍需驱动方的模式化拒绝或中止来落实“不等人工”，该能力不能由本次非 goal 默认策略代替。
+   同时修了两处配套缺陷：请求失效时 TUI 主动关窗并提示、迟到的回答不再静默丢弃。
 2. goal active：**不等人工**。goal 范围 + 既有权限策略内自动授权；范围外交给 Jev；
    Jev 判断不了（低置信/高风险/失败）→ `unanswered` + 保守兜底。
 3. 阈值初值：`riskThreshold = 0.5`、`confidenceThreshold = 0.8`。
@@ -261,3 +268,5 @@ Jev 的答案只作为决策依据，不能绕过权限门。删除/合并类如
 2. pending decision 的查看/回答入口：`/decisions` 命令 vs 下一条聊天消息。
 3. goal 自建的 worktree/分支清理是否算“范围内”：倾向于算，但仍要求 Jev 低风险 + 高置信，
    否则 `unanswered`。
+4. attached RPC/goal 运行中的模式化拒绝或中止：当前 goal budget 只在两次 run 之间检查，
+   不能打断正在等待的无 `timeout` 对话框；需在 goal 驱动层落地“不等人工”，而非恢复非 goal TTL。

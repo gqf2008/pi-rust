@@ -297,6 +297,7 @@ fn test_tui_state() -> Arc<TuiState> {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
+        goal_driven_run: std::sync::atomic::AtomicBool::new(false),
         ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
         editor_text: kiqi_host::EditorTextMailbox::new(),
@@ -315,6 +316,7 @@ fn test_tui_state() -> Arc<TuiState> {
         active_selector: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
+        ask_user_dialog_id: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
         pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
@@ -1373,6 +1375,7 @@ fn test_agent_event_mapping_creates_assistant_and_tool() {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
+        goal_driven_run: std::sync::atomic::AtomicBool::new(false),
         ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
         editor_text: kiqi_host::EditorTextMailbox::new(),
@@ -1391,6 +1394,7 @@ fn test_agent_event_mapping_creates_assistant_and_tool() {
         active_selector: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
+        ask_user_dialog_id: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
         pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
@@ -1850,6 +1854,7 @@ fn test_autocomplete_slash_suggestions_render() {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
+        goal_driven_run: std::sync::atomic::AtomicBool::new(false),
         ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
         editor_text: kiqi_host::EditorTextMailbox::new(),
@@ -1868,6 +1873,7 @@ fn test_autocomplete_slash_suggestions_render() {
         active_selector: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
+        ask_user_dialog_id: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
         pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
@@ -1937,6 +1943,7 @@ fn test_select_list_swap_restores_editor() {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
+        goal_driven_run: std::sync::atomic::AtomicBool::new(false),
         ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
         editor_text: kiqi_host::EditorTextMailbox::new(),
@@ -1955,6 +1962,7 @@ fn test_select_list_swap_restores_editor() {
         active_selector: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
+        ask_user_dialog_id: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
         pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
@@ -2027,6 +2035,7 @@ fn test_message_history_browse_restores_draft() {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
+        goal_driven_run: std::sync::atomic::AtomicBool::new(false),
         ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
         editor_text: kiqi_host::EditorTextMailbox::new(),
@@ -2045,6 +2054,7 @@ fn test_message_history_browse_restores_draft() {
         active_selector: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
+        ask_user_dialog_id: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
         pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
@@ -2120,6 +2130,7 @@ fn test_accept_top_suggestion_replaces_prefix() {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
+        goal_driven_run: std::sync::atomic::AtomicBool::new(false),
         ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
         editor_text: kiqi_host::EditorTextMailbox::new(),
@@ -2138,6 +2149,7 @@ fn test_accept_top_suggestion_replaces_prefix() {
         active_selector: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
+        ask_user_dialog_id: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
         pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
@@ -2199,6 +2211,7 @@ fn autocomplete_test_state(max_visible: usize) -> Arc<TuiState> {
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(false)),
         show_terminal_progress: true,
         status: std::sync::Mutex::new(RunStatus::Idle),
+        goal_driven_run: std::sync::atomic::AtomicBool::new(false),
         ext_status: kiqi_host::ExtensionStatusMailbox::new(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
         editor_text: kiqi_host::EditorTextMailbox::new(),
@@ -2217,6 +2230,7 @@ fn autocomplete_test_state(max_visible: usize) -> Arc<TuiState> {
         active_selector: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
+        ask_user_dialog_id: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
         pending_command_flow: std::sync::Mutex::new(None),
         autocomplete: AutocompleteManager::new(),
@@ -2735,7 +2749,9 @@ fn ask_user_bridge_answers_and_cancels_by_request_id() {
         bridge.take_pending().is_none(),
         "only one request occupies the input slot"
     );
-    bridge.respond("r1", serde_json::json!({"text": "7897"}));
+    bridge
+        .respond("r1", serde_json::json!({"text": "7897"}))
+        .expect("the guest is still waiting");
     assert_eq!(mailbox.poll("r1").unwrap()["answer"]["text"], "7897");
 
     let second = bridge.take_pending().expect("r2 visible");
@@ -2907,4 +2923,84 @@ fn esc_cancels_the_pending_flow() {
         .take_command_flow("flow-host", "cmd", "esc", CommandFlowKind::Editor)
         .is_none());
     assert!(state.cancel_command_flow().is_none());
+}
+
+/// A guest that stops waiting (explicit `timeout`, abort) must not leave an open
+/// dialog silently swallowing the user's click: the bridge reports the request
+/// as no longer pending, and a late answer comes back as an error the UI shows.
+#[test]
+fn ask_user_bridge_reports_a_late_answer_instead_of_dropping_it() {
+    let mailbox = kiqi_host::UiDialogMailbox::new();
+    mailbox.attach();
+    let bridge = AskUserBridge::new(mailbox.clone());
+    mailbox
+        .handle(serde_json::json!({
+            "op": "open", "requestId": "r1", "toolCallId": "call-r1",
+            "ui": {"kind": "selector", "question": "Delete?", "options": ["Yes", "No"]}
+        }))
+        .unwrap();
+    assert_eq!(bridge.take_pending().unwrap().request_id, "r1");
+    assert_eq!(
+        bridge.take_finished_visible(),
+        None,
+        "a pending request keeps its input slot"
+    );
+
+    // The guest's timeout path cancels the request, then stops polling.
+    mailbox.cancel("r1").unwrap();
+    assert_eq!(
+        bridge.take_finished_visible().as_deref(),
+        Some("r1"),
+        "the key loop takes and clears a dialog whose request is gone"
+    );
+    assert_eq!(
+        bridge.take_finished_visible(),
+        None,
+        "a finished request is taken only once"
+    );
+    assert!(
+        bridge
+            .respond("r1", serde_json::json!({"values": ["Yes"]}))
+            .is_err(),
+        "a late answer must surface as an error, not vanish"
+    );
+}
+
+/// The input slot is shared with extension command flows, so the expired-
+/// question sweep may only close a dialog the question itself opened.
+#[test]
+fn ask_user_dialog_ownership_tracks_who_opened_the_slot() {
+    let state = test_tui_state();
+    state.set_ask_user_dialog("q1");
+    assert!(state.ask_user_owns_dialog("q1"));
+    assert!(!state.ask_user_owns_dialog("q2"));
+
+    // Another flow taking the slot clears the ownership marker.
+    state.clear_ask_user_dialog();
+    assert!(!state.ask_user_owns_dialog("q1"));
+}
+
+/// Goal continuation runs unattended: the marker survives the run and is
+/// cleared both when the run goes idle and when any other run starts.
+#[test]
+fn goal_driven_marker_is_scoped_to_its_own_run() {
+    let state = test_tui_state();
+    assert!(!state.is_goal_driven());
+    assert!(state.try_start_working());
+    state.set_goal_driven();
+    assert!(state.is_goal_driven());
+
+    state.set_status(RunStatus::Idle);
+    assert!(!state.is_goal_driven(), "idle clears the marker");
+
+    assert!(state.try_start_working());
+    state.set_goal_driven();
+    assert!(state.is_goal_driven());
+    state.set_status(RunStatus::Idle);
+    assert!(state.try_start_working());
+    assert!(
+        !state.is_goal_driven(),
+        "a human-driven run start clears a stale marker"
+    );
+    state.set_status(RunStatus::Idle);
 }

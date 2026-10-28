@@ -122,7 +122,17 @@ pub(crate) fn apply_outcome(
                 .and_then(|index| titles.get(index));
             match chosen {
                 Some(title) => {
-                    let _ = mailbox.respond(request_id, serde_json::json!({ "values": [title] }));
+                    if mailbox
+                        .respond(request_id, serde_json::json!({ "values": [title] }))
+                        .is_err()
+                    {
+                        // The extension already timed out or was aborted. Log
+                        // it: a silently discarded answer is indistinguishable
+                        // from a hang for whoever just clicked.
+                        diag::diagln!(
+                            "answer for {request_id} arrived after the extension stopped waiting; discarded"
+                        );
+                    }
                 }
                 None => {
                     let _ = mailbox.cancel(request_id);
@@ -193,14 +203,30 @@ async fn dialog_work(
     // `block_task`): this runs on a dedicated per-dialog task, never inline in
     // a handler. Dropping an unanswered request on abort auto-sends
     // `$/cancel_request`, so cancelling this task is protocol-clean.
-    match cx.send_request(dialog.request).block_task().await {
-        Ok(response) => apply_outcome(
+    // Race the client against the extension's own lifecycle: a guest `timeout`
+    // (or an abort) cancels the mailbox entry, and the client prompt must close
+    // with it. Dropping the in-flight request sends `$/cancel_request`, so the
+    // user is never left answering a question the agent already walked away
+    // from — the ACP twin of the TUI's "clicked and nothing happened" defect.
+    let closed = wait_until_closed(mailbox, &request.request_id);
+    tokio::pin!(closed);
+    match tokio::select! {
+        outcome = cx.send_request(dialog.request).block_task() => Some(outcome),
+        _ = &mut closed => None,
+    } {
+        Some(Ok(response)) => apply_outcome(
             &request.request_id,
             mailbox,
             response.outcome,
             &dialog.titles,
         ),
-        Err(error) => {
+        None => {
+            diag::diagln!(
+                "dialog {} closed by the extension; cancelled the client prompt",
+                request.request_id
+            );
+        }
+        Some(Err(error)) => {
             // The connection is closing (or answered uncleanly): the extension
             // must never hang on a dead client.
             diag::diagln!(
@@ -209,6 +235,18 @@ async fn dialog_work(
             );
             let _ = mailbox.cancel(&request.request_id);
         }
+    }
+}
+
+/// Resolve once the extension stops waiting for this request (guest timeout,
+/// abort, or session close). The client side is cancelled by dropping the
+/// in-flight `request_permission` future in the caller's `select!`.
+async fn wait_until_closed(mailbox: &UiDialogMailbox, request_id: &str) {
+    loop {
+        if !mailbox.is_pending(request_id) {
+            return;
+        }
+        tokio::time::sleep(DIALOG_TICK).await;
     }
 }
 
@@ -353,6 +391,36 @@ mod tests {
             },
             SessionId::from("ki-test"),
         )
+    }
+
+    // ---- extension-side closure cancels the client prompt ----
+
+    #[tokio::test]
+    async fn wait_until_closed_resolves_only_after_the_extension_stops_waiting() {
+        let mailbox = UiDialogMailbox::new();
+        mailbox.attach();
+        mailbox
+            .handle(serde_json::json!({
+                "op": "open", "requestId": "q1", "toolCallId": "call-1",
+                "ui": permission_ui(),
+            }))
+            .unwrap();
+        let pending = mailbox.take_pending().expect("request queued");
+        assert_eq!(pending.request_id, "q1");
+
+        // Still waiting: the watcher must not resolve (the client prompt stays).
+        assert!(
+            tokio::time::timeout(3 * DIALOG_TICK, wait_until_closed(&mailbox, "q1"))
+                .await
+                .is_err()
+        );
+
+        // Guest timeout / abort: the watcher resolves, so the caller drops the
+        // in-flight request and the client is sent `$/cancel_request`.
+        mailbox.cancel("q1").unwrap();
+        tokio::time::timeout(5 * DIALOG_TICK, wait_until_closed(&mailbox, "q1"))
+            .await
+            .expect("a cancelled request closes the client prompt");
     }
 
     // ---- kiqi-acp race property ①: generic questions are never relabelled ----

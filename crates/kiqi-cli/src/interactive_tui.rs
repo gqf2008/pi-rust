@@ -1202,6 +1202,7 @@ pub async fn interactive_tui(
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(tool_outputs_expanded)),
         show_terminal_progress,
         status: std::sync::Mutex::new(RunStatus::Idle),
+        goal_driven_run: std::sync::atomic::AtomicBool::new(false),
         ext_status: reload_context.ext_status.clone(),
         ext_status_revision: std::sync::atomic::AtomicU64::new(u64::MAX),
         editor_text: reload_context.editor_text.clone(),
@@ -1220,6 +1221,7 @@ pub async fn interactive_tui(
         active_selector: std::sync::Mutex::new(None),
         active_extension_editor: std::sync::Mutex::new(None),
         active_extension_input: std::sync::Mutex::new(None),
+        ask_user_dialog_id: std::sync::Mutex::new(None),
         active_extension_cancel: std::sync::Mutex::new(None),
         pending_command_flow: std::sync::Mutex::new(None),
         autocomplete,
@@ -1772,7 +1774,53 @@ pub async fn interactive_tui(
             }
             if !state_for_key.selector_open() && !state_for_key.extension_dialog_open() {
                 if let Some(request) = ask_user_for_key.take_pending() {
-                    open_ask_user_dialog(&ctx_for_key, ask_user_for_key.clone(), request);
+                    if state_for_key.is_goal_driven() {
+                        // A goal continuation runs unattended by contract: it
+                        // must not park on a dialog. Cancel the question (the
+                        // guest reports "ask cancelled") rather than inventing
+                        // an answer, and say so in the transcript.
+                        ask_user_for_key.cancel(&request.request_id);
+                        add_note_message(
+                            &state_for_key.chat_container,
+                            "goal 自动续跑不等人工回答，已取消这次 ask_user 提问；需要人工决定时请暂停 goal。",
+                        );
+                        tui_for_key.request_render(false);
+                    } else {
+                        open_ask_user_dialog(&ctx_for_key, ask_user_for_key.clone(), request);
+                    }
+                }
+            }
+            // The guest can stop waiting on its own — an explicit `timeout` in
+            // the tool arguments, or an abort. Close the dialog it left behind
+            // and say why: a selector that stays on screen after its request is
+            // gone invites an answer that cannot be delivered, which is exactly
+            // what "I clicked and ki never continued" looked like.
+            if let Some(finished) = ask_user_for_key.take_finished_visible() {
+                // Another extension command may have taken the input slot since
+                // this question opened; closing whatever is there now would
+                // destroy that flow's UI. Only close what we still own.
+                if state_for_key.ask_user_owns_dialog(&finished) {
+                    if state_for_key.selector_open() {
+                        close_selector(
+                            &state_for_key,
+                            &ctx_for_key.editor_container,
+                            &editor_for_key,
+                            &tui_for_key,
+                        );
+                    } else if state_for_key.extension_dialog_open() {
+                        close_extension_editor(
+                            &state_for_key,
+                            &ctx_for_key.editor_container,
+                            &editor_for_key,
+                            &tui_for_key,
+                        );
+                    }
+                    state_for_key.clear_ask_user_dialog();
+                    add_note_message(
+                        &state_for_key.chat_container,
+                        "这个问题已关闭（超时或已取消），agent 已继续；请直接回复你的决定。",
+                    );
+                    tui_for_key.request_render(false);
                 }
             }
             let ev = if let Some(ev) = pending_event.take() {
@@ -3050,6 +3098,7 @@ pub async fn interactive_tui(
                 if !state.try_start_working() {
                     continue;
                 }
+                state.set_goal_driven();
                 add_user_message(&chat_container, &prompt);
                 run_prompt_streaming(
                     &lane,

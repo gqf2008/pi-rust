@@ -186,8 +186,12 @@ impl ShellDialogs {
         }
     }
 
-    pub(super) fn close(&mut self, request_id: &str) {
+    /// Close a still-visible or queued request. Returns false for a duplicate
+    /// server notification after a successful local answer already closed it.
+    pub(super) fn close(&mut self, request_id: &str) -> bool {
+        let pending_before = self.pending.len();
         self.pending.retain(|r| r.request_id != request_id);
+        let mut closed = self.pending.len() != pending_before;
         if self
             .active
             .as_ref()
@@ -196,7 +200,9 @@ impl ShellDialogs {
             self.active = None;
             self.dirty = true;
             self.advance();
+            closed = true;
         }
+        closed
     }
 
     pub(super) fn clear(&mut self) -> Vec<DriverCommand> {
@@ -410,7 +416,11 @@ mod tests {
         ));
         dialogs.push(request("next", json!({"kind":"input"})));
         key(&dialogs, KeyCode::Enter);
-        dialogs.close("expired");
+        assert!(dialogs.close("expired"));
+        assert!(
+            !dialogs.close("expired"),
+            "a duplicate close after local teardown is not a new timeout"
+        );
         assert!(dialogs.action(rx.try_recv().unwrap()).is_none());
         assert_eq!(dialogs.active.as_ref().unwrap().request_id, "next");
         dialogs.push(request("queued", json!({"kind":"input"})));

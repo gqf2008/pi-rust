@@ -6,10 +6,12 @@
 //! so the dialog is a straight open → poll → answer loop, with cancellation and
 //! `timeout` handled inline.
 //!
-//! Both channels wait at most `effective_timeout_secs(question.timeout)` — the
-//! model's own `timeout`, capped at [`DEFAULT_ANSWER_TIMEOUT_SECS`] — and both
-//! answer a timeout with the same structured `unanswered` result plus the
-//! conservative `keep` fallback. Only cancellation is still an error.
+//! A question with no explicit `timeout` waits for the human indefinitely: the
+//! person reading the dialog is the only one who can answer it, and an answer
+//! that arrives after a host-imposed deadline used to be dropped on the floor
+//! (the run had already continued with a fallback, so clicking an option did
+//! nothing). Only the model's own `timeout` bounds the wait, and it produces the
+//! structured `unanswered` result plus the conservative `keep` fallback.
 //!
 //! ## Why there is no `KI_DEBUG_DECISION` audit here
 //!
@@ -26,7 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use kiqi_wasm_bindings::bindings::exports::kiqi::extension::extension_api::Guest;
-use kiqi_wasm_bindings::bindings::kiqi::extension::{types, ui};
+use kiqi_wasm_bindings::bindings::kiqi::extension::{proc, types, ui};
 use serde_json::{json, Value};
 
 const TOOL: &str = "ask_user";
@@ -37,24 +39,25 @@ const SCHEMA: &str = r#"{"type":"object","properties":{"question":{"type":"strin
 /// How long a poll sleeps before re-checking the host for an answer.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-/// Upper bound on how long `ask_user` waits for a human when the model does
-/// not name a shorter timeout. Without this the wait is unbounded.
-///
-/// **Threshold change (2026-10-19).** Old value: no upper bound — `deadline`
-/// came only from the model's `timeout`, so a question without one never timed
-/// out (one deletion-authorization question blocked a run for ~43 minutes).
-/// New value: 60 s, a ceiling only; a shorter model `timeout` still wins. 60 s
-/// covers a human answering an on-screen dialog while staying short enough for
-/// unattended flows. See `docs/design/decision-fallback.md` §9 item 1.
-const DEFAULT_ANSWER_TIMEOUT_SECS: u64 = 60;
+/// Cap idle polling backoff so a long human wait does not burn wasm/host calls.
+const MAX_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// How long this question may stay open: the model's `timeout`, capped at
-/// [`DEFAULT_ANSWER_TIMEOUT_SECS`]. A question without an explicit `timeout`
-/// used to park here forever, which is what this function exists to prevent.
-fn effective_timeout_secs(requested: Option<u64>) -> u64 {
-    requested
-        .unwrap_or(DEFAULT_ANSWER_TIMEOUT_SECS)
-        .min(DEFAULT_ANSWER_TIMEOUT_SECS)
+/// How long this question may stay open before the guest answers `unanswered`.
+///
+/// **No default (2026-10-28).** There used to be a 60 s ceiling, added so an
+/// unattended run could not park on a dialog forever. In an interactive session
+/// that ceiling is wrong: a human reading a list of options routinely needs
+/// more than a minute, and when it fired the dialog stayed on screen while the
+/// run went on with the `keep` fallback — so the user's eventual click was
+/// answered into a cancelled request and silently discarded, which looks
+/// exactly like "ki stopped after I answered". A run with nobody to ask needs no
+/// TTL either: without an attached interactive UI the host rejects `open`
+/// outright ("ask_user requires an interactive UI"), so a headless/goal run
+/// fails the call immediately instead of parking on it.
+fn answer_deadline(requested: Option<u64>) -> Option<Instant> {
+    // A duration beyond `Instant`'s representable range is effectively an
+    // unbounded wait, not a reason to trap after opening the dialog.
+    requested.and_then(|secs| Instant::now().checked_add(Duration::from_secs(secs)))
 }
 
 // ---------------------------------------------------------------------------
@@ -83,8 +86,13 @@ struct AskQuestion {
 }
 
 enum AskPlan {
-    Confirm { summary: String },
-    Questions { questions: Vec<AskQuestion> },
+    Confirm {
+        summary: String,
+        timeout: Option<u64>,
+    },
+    Questions {
+        questions: Vec<AskQuestion>,
+    },
 }
 
 impl AskQuestion {
@@ -244,7 +252,11 @@ fn ask(params: &Value) -> Result<AskPlan, String> {
     if kind == "confirm" {
         let summary = opt_string(params, &["summary", "question"])
             .ok_or("summary is required for confirm")?;
-        return Ok(AskPlan::Confirm { summary });
+        let timeout = params.get("timeout").and_then(Value::as_u64);
+        if timeout == Some(0) {
+            return Err("timeout must be a positive integer".into());
+        }
+        return Ok(AskPlan::Confirm { summary, timeout });
     }
 
     let top_context = opt_string(params, &["context"]);
@@ -274,7 +286,7 @@ fn ask(params: &Value) -> Result<AskPlan, String> {
 
 fn plan_display_text(plan: &AskPlan) -> String {
     match plan {
-        AskPlan::Confirm { summary } => format!("Confirmation requested: {summary}"),
+        AskPlan::Confirm { summary, .. } => format!("Confirmation requested: {summary}"),
         AskPlan::Questions { questions } => {
             let mut lines = Vec::new();
             for question in questions {
@@ -387,6 +399,16 @@ fn unanswered_result(question: &AskQuestion) -> types::ToolResult {
     }
 }
 
+/// Best-effort terminal transition followed by the poll that reclaims the
+/// mailbox entry. Cancellation itself deliberately leaves the terminal state
+/// for one poll; returning without that poll would retain every timed-out ID.
+fn cancel_and_reap(request_id: &str) {
+    let cancel = json!({ "op": "cancel", "requestId": request_id }).to_string();
+    let _ = ui::dialog(&cancel);
+    let poll = json!({ "op": "poll", "requestId": request_id }).to_string();
+    let _ = ui::dialog(&poll);
+}
+
 /// Open one question and wait for its answer. `Err` on cancel (unchanged); a
 /// timeout comes back as [`AskOne::Unanswered`], not an error.
 fn ask_one(question: &AskQuestion) -> Result<AskOne, String> {
@@ -400,13 +422,20 @@ fn ask_one(question: &AskQuestion) -> Result<AskOne, String> {
     .to_string();
     ui::dialog(&open).map_err(capability_reason)?;
 
-    let deadline = Instant::now() + Duration::from_secs(effective_timeout_secs(question.timeout));
+    let deadline = answer_deadline(question.timeout);
+    let mut poll_interval = POLL_INTERVAL;
     loop {
-        if Instant::now() >= deadline {
-            let cancel = json!({ "op": "cancel", "requestId": request_id }).to_string();
-            let _ = ui::dialog(&cancel);
-            return Ok(AskOne::Unanswered);
+        // Host abort is advisory: a guest that blocks in `call_tool` must poll
+        // it explicitly or RPC/TUI cancellation cannot settle the run.
+        if proc::cancel_requested() {
+            cancel_and_reap(&request_id);
+            return Err("ask cancelled by the host".to_string());
         }
+
+        // Even after the deadline, poll once before cancelling. An answer
+        // recorded during the last sleep but before the deadline is already in
+        // the mailbox; cancelling first would erase that timely answer.
+        let timed_out = deadline.is_some_and(|deadline| Instant::now() >= deadline);
         let poll = json!({ "op": "poll", "requestId": request_id }).to_string();
         let response = ui::dialog(&poll).map_err(capability_reason)?;
         let response: Value = serde_json::from_str(&response).unwrap_or(Value::Null);
@@ -440,12 +469,23 @@ fn ask_one(question: &AskQuestion) -> Result<AskOne, String> {
                 }));
             }
             "cancelled" => return Err("ask cancelled".to_string()),
-            _ => std::thread::sleep(POLL_INTERVAL),
+            _ if timed_out => {
+                cancel_and_reap(&request_id);
+                return Ok(AskOne::Unanswered);
+            }
+            _ => {
+                let mut sleep_for = poll_interval;
+                if let Some(deadline) = deadline {
+                    sleep_for = sleep_for.min(deadline.saturating_duration_since(Instant::now()));
+                }
+                std::thread::sleep(sleep_for);
+                poll_interval = (poll_interval * 2).min(MAX_POLL_INTERVAL);
+            }
         }
     }
 }
 
-fn confirm_question(summary: &str) -> AskQuestion {
+fn confirm_question(summary: &str, timeout: Option<u64>) -> AskQuestion {
     AskQuestion {
         id: "confirm".to_string(),
         question: summary.to_string(),
@@ -466,13 +506,13 @@ fn confirm_question(summary: &str) -> AskQuestion {
         allow_comment: false,
         suggest: None,
         display_mode: None,
-        timeout: None,
+        timeout,
     }
 }
 
 fn answer_summary(plan: &AskPlan, answers: &[AskAnswer]) -> String {
     match plan {
-        AskPlan::Confirm { summary } => {
+        AskPlan::Confirm { summary, .. } => {
             let confirmed = answers
                 .first()
                 .and_then(|answer| answer.confirmed)
@@ -563,7 +603,7 @@ impl Guest for AskUserExtension {
         let plan = ask(&params).map_err(types::ExtensionError::InvalidArguments)?;
 
         let questions = match &plan {
-            AskPlan::Confirm { summary } => vec![confirm_question(summary)],
+            AskPlan::Confirm { summary, timeout } => vec![confirm_question(summary, *timeout)],
             AskPlan::Questions { questions } => questions.clone(),
         };
         let mut answers = Vec::new();
@@ -646,3 +686,33 @@ kiqi_wasm_bindings::bindings::export!(AskUserExtension with_types_in kiqi_wasm_b
 
 // The 0.8.0 contribution exports are mandatory world exports; deny them all.
 kiqi_wasm_bindings::deny_contribution_exports!(AskUserExtension);
+
+#[cfg(test)]
+mod tests {
+    use super::{answer_deadline, ask, confirm_question, AskPlan};
+    use serde_json::json;
+
+    #[test]
+    fn a_question_without_a_timeout_waits_for_the_human() {
+        assert!(answer_deadline(None).is_none());
+        assert!(answer_deadline(Some(5)).is_some());
+        assert!(
+            answer_deadline(Some(u64::MAX)).is_none(),
+            "an unrepresentably distant deadline is effectively unbounded, not a panic"
+        );
+    }
+
+    #[test]
+    fn a_confirm_preserves_its_explicit_timeout() {
+        let plan = ask(&json!({"type": "confirm", "summary": "Deploy?", "timeout": 5}))
+            .expect("valid confirmation");
+        let AskPlan::Confirm { summary, timeout } = plan else {
+            panic!("expected a confirmation");
+        };
+        assert_eq!(summary, "Deploy?");
+        assert_eq!(timeout, Some(5));
+        assert_eq!(confirm_question(&summary, timeout).timeout, Some(5));
+
+        assert!(ask(&json!({"type": "confirm", "summary": "Deploy?", "timeout": 0})).is_err());
+    }
+}

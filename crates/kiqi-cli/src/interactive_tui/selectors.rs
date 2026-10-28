@@ -75,6 +75,7 @@ pub(super) fn open_selector_with_view<V: Component + 'static>(
     view: Arc<V>,
     kind: SelectorKind,
 ) {
+    state.clear_ask_user_dialog();
     // Dispatch ui_prompt_start event
     dispatch_ui_prompt_event(state);
 
@@ -100,6 +101,7 @@ pub(super) fn close_selector(
     editor: &Arc<Editor>,
     tui: &Arc<TuiAltScreen>,
 ) {
+    state.clear_ask_user_dialog();
     // Dispatch ui_prompt_end event
     dispatch_ui_prompt_event_end(state);
 

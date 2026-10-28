@@ -53,6 +53,7 @@ pub(super) fn close_extension_editor(
     editor: &Arc<Editor>,
     tui: &Arc<TuiAltScreen>,
 ) {
+    state.clear_ask_user_dialog();
     editor_container.clear();
     editor_container.add_child(editor.clone());
     state.autocomplete_container.clear();
@@ -113,9 +114,28 @@ impl AskUserBridge {
     }
 
     /// Record an answer for `id` and release the input slot.
-    pub(super) fn respond(&self, id: &str, answer: serde_json::Value) {
-        let _ = self.mailbox.respond(id, answer);
+    ///
+    /// The mailbox error is returned, not swallowed: answering a request the
+    /// guest already cancelled (an explicit `timeout`, an abort) must be told to
+    /// the user. Dropping it was the "I clicked and ki just sat there" symptom —
+    /// the run had already continued without the answer.
+    pub(super) fn respond(&self, id: &str, answer: serde_json::Value) -> Result<(), String> {
+        let result = self.mailbox.respond(id, answer);
         self.clear_visible(id);
+        result
+    }
+
+    /// Take the visible request if its guest has stopped waiting. Holding the
+    /// visible lock through the mailbox check keeps the check-and-clear
+    /// transition atomic with `take_pending`, and avoids cloning a live ID on
+    /// every key-loop pass.
+    pub(super) fn take_finished_visible(&self) -> Option<String> {
+        let mut visible = self.visible.lock().ok()?;
+        let id = visible.as_ref()?;
+        if self.mailbox.is_pending(id) {
+            return None;
+        }
+        visible.take()
     }
 
     /// Cancel `id` and release the input slot.
@@ -296,6 +316,26 @@ pub(crate) fn ask_user_frame(
     frame
 }
 
+/// Answer an `ask_user` request, and say so in the transcript when the answer
+/// could not be delivered (the guest stopped waiting). A silent drop here reads
+/// as a hung session: the dialog closes, nothing happens, and only a fresh user
+/// message moves the run along.
+fn respond_with_note(
+    bridge: &AskUserBridge,
+    state: &Arc<TuiState>,
+    tui: &Arc<TuiAltScreen>,
+    request_id: &str,
+    answer: serde_json::Value,
+) {
+    if bridge.respond(request_id, answer).is_err() {
+        add_note_message(
+            &state.chat_container,
+            "这个问题已经关闭（超时或已取消），刚才的选择没有生效；请直接回复你的决定。",
+        );
+        tui.request_render(false);
+    }
+}
+
 /// Open one `ask_user` request in the TUI input slot.
 pub(super) fn open_ask_user_dialog(
     ctx: &CommandContext,
@@ -374,7 +414,10 @@ pub(super) fn open_ask_user_selector(
             );
             return;
         }
-        bridge_select.respond(
+        respond_with_note(
+            &bridge_select,
+            &state_select,
+            &tui_select,
             &request_id,
             serde_json::json!({
                 "values": [item.display_value()],
@@ -396,7 +439,10 @@ pub(super) fn open_ask_user_selector(
                 .iter()
                 .map(|item| item.display_value().to_string())
                 .collect();
-            bridge_multi.respond(
+            respond_with_note(
+                &bridge_multi,
+                &state_multi,
+                &tui_multi,
                 &request_id_multi,
                 serde_json::json!({"values": values, "kind": "selector"}),
             );
@@ -430,6 +476,7 @@ pub(super) fn open_ask_user_selector(
         frame,
         SelectorKind::Extension,
     );
+    state.set_ask_user_dialog(&request.request_id);
 }
 
 pub(super) fn open_ask_user_input(
@@ -447,6 +494,7 @@ pub(super) fn open_ask_user_input(
 
     let frame = ask_user_frame(&prompt, input.clone(), "Enter submit · Esc cancel");
     *ctx.state.active_extension_editor.lock().unwrap() = None;
+    ctx.state.set_ask_user_dialog(&request.request_id);
     *ctx.state.active_extension_input.lock().unwrap() = Some(input.clone());
     ctx.editor_container.clear();
     ctx.editor_container.add_child(frame);
@@ -460,7 +508,10 @@ pub(super) fn open_ask_user_input(
     let bridge_submit = bridge.clone();
     let request_id = request.request_id.clone();
     input.on_submit(Arc::new(move |text: &str| {
-        bridge_submit.respond(
+        respond_with_note(
+            &bridge_submit,
+            &state,
+            &tui,
             &request_id,
             serde_json::json!({
                 "values": [text],

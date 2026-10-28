@@ -170,7 +170,13 @@ async fn run_loop<D: SessionDriver>(
                 let Some(event) = maybe_event else { break };
                 match event {
                     DriverEvent::UiDialog(request) => dialogs.push(request),
-                    DriverEvent::UiDialogClosed(id) => dialogs.close(&id),
+                    DriverEvent::UiDialogClosed(id) => {
+                        if dialogs.close(&id) {
+                            view.add_notice(
+                                "这个问题已关闭（超时或已取消），刚才的选择没有生效；请直接回复你的决定。",
+                            );
+                        }
+                    }
                     DriverEvent::Ui(ui) => {
                         if matches!(ui, crate::transcript_view::UiEvent::AgentEnd) { let _ = dialogs.clear(); }
                         view.apply(&ui, tui.width());
@@ -242,7 +248,9 @@ async fn run_loop<D: SessionDriver>(
             Some(action) = dialog_rx.recv() => {
                 if let Some((id, command)) = dialogs.action(action) {
                     match driver.send(command).await {
-                        Ok(()) => dialogs.close(&id),
+                        Ok(()) => {
+                            dialogs.close(&id);
+                        }
                         Err(error) => view.add_notice(&format!("error: {error}")),
                     }
                 }

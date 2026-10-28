@@ -245,6 +245,19 @@ pub(super) struct TuiState {
     pub(super) active_extension_editor: std::sync::Mutex<Option<Arc<Editor>>>,
     /// Single-line input currently occupying the input slot for an extension.
     pub(super) active_extension_input: std::sync::Mutex<Option<Arc<Input>>>,
+    /// Which `ask_user` request owns the dialog in the input slot right now.
+    ///
+    /// The slot is shared with extension command flows, so "an `ask_user`
+    /// request is still visible" does not imply "the dialog on screen is that
+    /// request's". Every other opener clears this, which is what stops the
+    /// expired-question sweep from closing somebody else's dialog.
+    pub(super) ask_user_dialog_id: std::sync::Mutex<Option<String>>,
+    /// Whether the run in flight was started by goal auto-continuation.
+    ///
+    /// A goal-driven run must not wait for a human (decision-fallback §4.1):
+    /// `ask_user` has no default deadline any more, so the TUI cancels those
+    /// questions instead of opening a dialog nobody may be watching.
+    pub(super) goal_driven_run: std::sync::atomic::AtomicBool,
     /// Callback used to resolve an extension dialog with a cancellation action.
     pub(super) active_extension_cancel: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// The one pending extension command flow (selector/editor/prompt), if any.
@@ -1000,7 +1013,23 @@ impl TuiState {
 
     pub(super) fn set_status(&self, status: RunStatus) {
         *self.status.lock().unwrap() = status;
+        if status == RunStatus::Idle {
+            self.goal_driven_run
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
         self.apply_status(status);
+    }
+
+    /// Mark the run started by goal auto-continuation (cleared on Idle and on
+    /// any other run start).
+    pub(super) fn set_goal_driven(&self) {
+        self.goal_driven_run
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(super) fn is_goal_driven(&self) -> bool {
+        self.goal_driven_run
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The dock container listing queued messages (upstream's
@@ -1064,6 +1093,10 @@ impl TuiState {
         }
         *status = RunStatus::Working;
         drop(status);
+        // Any run start defaults to human-driven; the goal continuation marks
+        // itself right after this call.
+        self.goal_driven_run
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         self.apply_status(RunStatus::Working);
         true
     }
@@ -1325,6 +1358,19 @@ impl TuiState {
 
     pub(super) fn extension_input_open(&self) -> bool {
         self.active_extension_input.lock().unwrap().is_some()
+    }
+
+    /// Whether the dialog in the input slot belongs to this `ask_user` request.
+    pub(super) fn ask_user_owns_dialog(&self, request_id: &str) -> bool {
+        self.ask_user_dialog_id.lock().unwrap().as_deref() == Some(request_id)
+    }
+
+    pub(super) fn set_ask_user_dialog(&self, request_id: &str) {
+        *self.ask_user_dialog_id.lock().unwrap() = Some(request_id.to_string());
+    }
+
+    pub(super) fn clear_ask_user_dialog(&self) {
+        *self.ask_user_dialog_id.lock().unwrap() = None;
     }
 
     pub(super) fn extension_dialog_open(&self) -> bool {

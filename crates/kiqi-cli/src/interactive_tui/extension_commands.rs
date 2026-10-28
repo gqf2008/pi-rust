@@ -382,6 +382,7 @@ fn open_prompt_flow(ctx: &CommandContext, flow: FlowContext, spec: kiqi_host::Pr
     frame.add_child(Arc::new(DynamicBorder::new()));
 
     *ctx.state.active_extension_editor.lock().unwrap() = None;
+    ctx.state.clear_ask_user_dialog();
     *ctx.state.active_extension_input.lock().unwrap() = Some(input.clone());
     ctx.editor_container.clear();
     ctx.editor_container.add_child(frame);
