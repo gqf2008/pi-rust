@@ -15,6 +15,8 @@ pub(super) fn sync_model(
     mailbox: &kiqi_host::ExtensionStatusMailbox,
     model: &str,
     usage: (u64, u64, u64, u64),
+    live: Option<(u64, u64)>,
+    last: Option<(u64, u64)>,
     shown: &mut bool,
 ) {
     let (turns, input, output, cache_read) = usage;
@@ -45,12 +47,16 @@ pub(super) fn sync_model(
         1_000..=999_999 => format!("{:.1}k", value as f64 / 1_000.0),
         _ => format!("{:.1}M", value as f64 / 1_000_000.0),
     };
-    let text = format!(
-        "model {model}\nturns {turns}\n↑{} ↓{}\ncache R{}",
-        compact(input),
-        compact(output),
-        compact(cache_read)
-    );
+    let mut lines = vec![format!("model {model}")];
+    if let Some((secs, chars)) = live {
+        lines.push(format!("▶ {secs}s  {} ch", compact(chars)));
+    } else if let Some((ms, tokens)) = last {
+        lines.push(format!("last {:.1}s  {tokens} tok", ms as f64 / 1000.0));
+    }
+    lines.push(format!("turns {turns}"));
+    lines.push(format!("↑{} ↓{}", compact(input), compact(output)));
+    lines.push(format!("cache R{}", compact(cache_read)));
+    let text = lines.join("\n");
     let _ = mailbox.component(
         0,
         serde_json::json!({ "op": "update", "id": MODEL_ID, "title": "llm", "text": text }),
@@ -111,7 +117,7 @@ const RUNNING_HEIGHT: usize = 12;
 
 pub(super) fn sync_running(
     mailbox: &kiqi_host::ExtensionStatusMailbox,
-    rows: &[(String, u64)],
+    rows: &[(String, u64, String, Vec<String>)],
     shown: &mut bool,
 ) {
     if rows.is_empty() {
@@ -138,13 +144,20 @@ pub(super) fn sync_running(
     );
     let text = rows
         .iter()
-        .map(|(name, secs)| {
+        .map(|(name, secs, detail, tail)| {
             let elapsed = match secs {
                 0..=59 => format!("{secs}s"),
                 60..=3599 => format!("{}m{:02}s", secs / 60, secs % 60),
                 _ => format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60),
             };
-            format!("▶ {name}  {elapsed}")
+            let mut lines = vec![format!("▶ {name}  {elapsed}")];
+            if !detail.is_empty() {
+                lines.push(format!("  {detail}"));
+            }
+            for line in tail {
+                lines.push(format!("  │ {line}"));
+            }
+            lines.join("\n")
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -569,6 +582,8 @@ mod tests {
             &mailbox,
             "deepseek/flash",
             (2, 1_200, 345, 8_000),
+            None,
+            Some((2_100, 345)),
             &mut model_shown,
         );
         let llm = mailbox

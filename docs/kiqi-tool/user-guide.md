@@ -170,7 +170,7 @@ ANTHROPIC_AUTH_TOKEN=token
 --list-models [search]  列出可用模型（可带模糊搜索）
 --offline               禁用启动时的网络检查
 --export <session.jsonl>  把会话导出为 HTML（参数是**输入**文件；输出路径取第一个位置参数，默认写到当前目录）
---tui-mode <mode>       TUI buffer：regular 或 fullscreen
+--tui-mode <mode>       TUI buffer：fullscreen（默认，右侧面板列）或 regular（原生滚动回看）
 --system-prompt <text>  替换默认系统提示词
 --append-system-prompt <text>  追加系统提示词（可重复）
 --debug-system-prompt   把解析后的系统提示词各段打印到 stderr

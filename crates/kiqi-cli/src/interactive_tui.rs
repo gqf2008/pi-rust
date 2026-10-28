@@ -1204,6 +1204,8 @@ pub async fn interactive_tui(
         running_tool_calls: std::sync::Mutex::new(Vec::new()),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
+        llm_live: std::sync::Mutex::new(None),
+        llm_last: std::sync::Mutex::new(None),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(hide_thinking)),
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(tool_outputs_expanded)),
@@ -1684,7 +1686,7 @@ pub async fn interactive_tui(
                 running_at = std::time::Instant::now();
                 let mut rows = state_tick.running_snapshot();
                 if state_tick.user_bash_running() {
-                    rows.push(("!command".to_string(), 0));
+                    rows.push(("!command".to_string(), 0, String::new(), Vec::new()));
                 }
                 panels::sync_running(&state_tick.ext_status, &rows, &mut running_shown);
                 let todos = state_tick.todo_snapshot();
@@ -1693,6 +1695,8 @@ pub async fn interactive_tui(
                     &state_tick.ext_status,
                     &state_tick.current_model_id(),
                     state_tick.llm_usage_snapshot(),
+                    state_tick.llm_live_snapshot(),
+                    state_tick.llm_last_snapshot(),
                     &mut model_shown,
                 );
             }
