@@ -26,9 +26,9 @@ set -euo pipefail
 REPO="gqf2008/pi-rust"
 
 # Git remote that receives the release commit and tag. `origin` in this clone is
-# bigfish1913/pi-rust, which AGENTS.md forbids pushing to; `fork` is
-# gqf2008/pi-rust. Override with `KI_RELEASE_REMOTE` when a clone names it
-# differently.
+# gqf2008/pi-rust, the project's GitHub mirror/release target. The project has
+# no upstream relationship; override with KI_RELEASE_REMOTE only when a clone
+# intentionally names the same target differently.
 PUSH_REMOTE="${KI_RELEASE_REMOTE:-origin}"
 # `<target>:<archive extension>` — must mirror the `archive:` column of the
 # release-binaries matrix. Each target publishes exactly ONE archive (plus its
