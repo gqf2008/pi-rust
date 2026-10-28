@@ -20,7 +20,12 @@ done
 [ "$count" -ge 1 ] || { echo "count must be >= 1" >&2; exit 2; }
 
 command -v git >/dev/null || { echo "git is required" >&2; exit 1; }
-command -v walgit >/dev/null || { echo "walgit is required" >&2; exit 1; }
+# `--dry-run` only prints the commands, so it must not demand the walgit CLI: CI (which
+# checks the printed plan) has no walgit, and a plan is exactly what you want before
+# installing anything.
+if [ "$dry" -ne 1 ]; then
+    command -v walgit >/dev/null || { echo "walgit is required" >&2; exit 1; }
+fi
 
 i=1
 while [ "$i" -le "$count" ]; do
