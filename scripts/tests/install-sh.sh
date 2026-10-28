@@ -209,9 +209,10 @@ fi
 if command -v env >/dev/null 2>&1; then
     nover="$tmp/nover"
     mkdir -p "$nover"
-    # `command -v` skips non-executable files, so these shadow nothing but are also not
-    # found anywhere else: /usr/bin is excluded from PATH below.
-    for tool in sha256sum shasum openssl; do : > "$nover/$tool"; done
+    # /usr/bin is excluded from PATH below, so sha256sum/shasum/openssl are simply absent.
+    # Do not park empty placeholder files here to "shadow" them: dash's `command -v`
+    # reports a non-executable path as found, so install.sh would select `$nover/sha256sum`
+    # and die with "Permission denied" instead of reaching the no-tool branch.
     # `uname` must come from the shim, not the host: the fixture archive is named for
     # Darwin/arm64, so a host `uname` on Linux would resolve a different target and 404.
     for tool in sh dirname sed head mkdir rm cp tar chmod cut env mktemp cat printf ls mv; do
@@ -239,7 +240,6 @@ if command -v env >/dev/null 2>&1; then
     # to be a safety net.
     ossl="$tmp/ossl"
     mkdir -p "$ossl"
-    for tool in sha256sum shasum; do : > "$ossl/$tool"; done
     for tool in sh dirname sed head mkdir rm cp tar chmod cut env mktemp cat printf ls mv; do
         real=$(command -v "$tool") || continue
         ln -sf "$real" "$ossl/$tool" 2>/dev/null || true
@@ -250,14 +250,11 @@ if command -v env >/dev/null 2>&1; then
     if [ -n "$real_openssl" ]; then
         ln -sf "$real_openssl" "$ossl/openssl"
         rm -rf "$tmp/out4"
-        if PATH="$ossl" FAKE_FIXTURES="$fixtures" FAKE_OS=Darwin FAKE_ARCH=arm64 \
-                sh "$INSTALL" --version "$VERSION" --dir "$tmp/out4" >/dev/null 2>&1 \
-                && [ -x "$tmp/out4/ki" ]; then
-            echo "ok: openssl fallback verifies and installs"
-        else
-            echo "FAIL: the openssl fallback could not install a good archive" >&2
-            status=1
-        fi
+        out=$(PATH="$ossl" FAKE_FIXTURES="$fixtures" FAKE_OS=Darwin FAKE_ARCH=arm64 \
+                sh "$INSTALL" --version "$VERSION" --dir "$tmp/out4" 2>&1) \
+            && [ -x "$tmp/out4/ki" ] \
+            && echo "ok: openssl fallback verifies and installs" \
+            || { echo "FAIL: the openssl fallback could not install a good archive: $out" >&2; status=1; }
 
         cp "$tmp/pristine.tar.gz" "$fixtures/$asset"
         printf 'corrupted' >> "$fixtures/$asset"
