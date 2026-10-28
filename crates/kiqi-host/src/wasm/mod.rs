@@ -189,24 +189,30 @@ fn clear_context() {
 }
 
 fn emit_progress(progress: Progress) {
-    CURRENT.with(|slot| {
-        if let Some(pointer) = slot.borrow().as_ref().and_then(|context| context.sink) {
-            // SAFETY: `install_context` set this for the guest call; it is
-            // cleared before the borrow ends.
-            let sink = unsafe { &*pointer };
-            sink.progress(progress);
-        }
-    });
+    // Copy the pointer out and *release* the borrow before calling out: a
+    // progress sink is host code (the CLI's tool-update path) and may re-enter
+    // an extension entry point, which calls `install_context_kind` and takes
+    // `borrow_mut`. Holding the `RefCell` borrow across that call panicked with
+    // "RefCell already borrowed" (observed from a `subagent` call on
+    // 2026-10-28).
+    // SAFETY: `install_context` set this for the guest call; it is cleared
+    // before the borrow ends.
+    let pointer = CURRENT.with(|slot| slot.borrow().as_ref().and_then(|context| context.sink));
+    if let Some(pointer) = pointer {
+        let sink = unsafe { &*pointer };
+        sink.progress(progress);
+    }
 }
 
 /// Run `f` with the capabilities of the current call, if there is one.
 fn with_caps_context<R>(f: impl FnOnce(&HostCaps<'_>) -> R) -> Option<R> {
-    CURRENT.with(|slot| {
-        let borrowed = slot.borrow();
-        let context = (*borrowed)?;
-        // SAFETY: `install_context` set this for the guest call.
-        Some(f(unsafe { &*context.caps }))
-    })
+    // Same rule as `emit_progress`: never run the callback under the borrow.
+    // Capability implementations call host code (a sink, a mailbox, an inject
+    // API); any of them may re-enter an extension entry point, which needs
+    // `borrow_mut` for `install_context_kind`.
+    // SAFETY: `install_context` set this for the guest call.
+    let caps = CURRENT.with(|slot| slot.borrow().as_ref().map(|context| context.caps))?;
+    Some(f(unsafe { &*caps }))
 }
 
 fn with_session<R>(f: impl FnOnce(&dyn crate::SessionRead) -> R) -> Option<R> {
@@ -5382,5 +5388,42 @@ mod guest_error_sink_tests {
                 .any(|line| line == "test-extension/list-commands/boom"),
             "sink must capture the diagnostic verbatim: {got:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod context_reentrancy_tests {
+    use super::*;
+
+    struct Silent;
+
+    impl crate::Log for Silent {
+        fn log(&self, _level: crate::LogLevel, _message: &str) {}
+    }
+
+    /// A progress sink is host code and may re-enter an entry point (the CLI's
+    /// tool-update path feeds back into the harness). Installing a context from
+    /// inside `progress()` used to panic with "RefCell already borrowed"
+    /// because `emit_progress` held the borrow across the call — observed from a
+    /// `subagent` call on 2026-10-28.
+    struct ReentrantSink;
+
+    impl crate::ProgressSink for ReentrantSink {
+        fn progress(&self, _progress: crate::Progress) {
+            let log = Silent;
+            let caps = HostCaps::observer(&log);
+            let _inner = install_context_kind(None, &caps, CallKind::Tool, None);
+            clear_context();
+        }
+    }
+
+    #[test]
+    fn a_reentrant_sink_does_not_trip_the_context_borrow() {
+        let log = Silent;
+        let caps = HostCaps::observer(&log);
+        let sink = ReentrantSink;
+        let _context = install_context_kind(Some(&sink), &caps, CallKind::Tool, None);
+        emit_progress(crate::Progress::Text("hello".to_string()));
+        clear_context();
     }
 }
