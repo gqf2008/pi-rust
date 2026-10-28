@@ -1,12 +1,12 @@
 {
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Rust-native, library-first coding-agent runtime and terminal CLI",
   "homepage": "https://ki.laofu.online/",
   "license": "MIT",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/gqf2008/pi-rust/releases/download/v0.4.3/ki-v0.4.3-x86_64-pc-windows-msvc.zip",
-      "hash": "24ed6f728974c5b733000cfa0975053c1487732a09c3a7dc3c21242186875a78"
+      "url": "https://github.com/gqf2008/pi-rust/releases/download/v0.4.4/ki-v0.4.4-x86_64-pc-windows-msvc.zip",
+      "hash": "2015c81921867a106ac79fc2721af6d28eb4010f7148c77dbd4283065c659307"
     }
   },
   "bin": "ki.exe",
