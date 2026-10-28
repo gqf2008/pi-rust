@@ -11,6 +11,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-10-28
+
 ### Changed
 
 - **多模态输入不再由 ki 做能力门禁。** Anthropic 与 OpenAI Responses 的用户文本、
