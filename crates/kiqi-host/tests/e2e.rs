@@ -2679,6 +2679,7 @@ fn dispatch_delivers_each_task_and_closes_the_child_stdin() {
 /// (`--ignored --test-threads=1`). It exists to separate "the host never
 /// delivered + closed stdin" from "the child never read it" the next time a
 /// wave stalls.
+#[cfg(unix)]
 #[test]
 #[ignore = "diagnostic: mutates PATH; run with --ignored --test-threads=1"]
 fn a_ki_shaped_child_receives_its_task_and_an_eof() {
