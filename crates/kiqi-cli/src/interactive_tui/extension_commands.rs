@@ -113,15 +113,16 @@ fn spawn_call(
     // so a `/reload` swap is picked up and a guest in this session can only
     // act on this session.
     let session_cell = std::sync::Arc::clone(&ctx.reload_context.extension_session);
+    // The goal snapshot must be read from the same directory the caller
+    // compares against (`CommandContext::cwd` is the startup snapshot; the
+    // process cwd can have been moved by an extension).
+    let command_cwd = ctx.cwd.clone();
     let spawned = std::thread::Builder::new()
         .name(format!("extension-command {name}"))
         .spawn(move || {
             let caps = crate::extensions::session_caps_from_cell(&session_cell);
             let host_caps = caps.host_caps();
-            let goal_before = std::env::current_dir()
-                .ok()
-                .and_then(|cwd| crate::goal_drive::active_goal(&cwd))
-                .map(|goal| goal.key());
+            let goal_before = crate::goal_drive::active_goal(&command_cwd).map(|goal| goal.key());
             let result = match continuation {
                 Some((flow_id, reply)) => thread_host
                     .continue_command(&thread_name, &flow_id, reply, &host_caps)

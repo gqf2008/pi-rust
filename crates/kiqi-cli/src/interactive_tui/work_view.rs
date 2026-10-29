@@ -50,13 +50,17 @@ fn pane_rows(node: &NodeRow, width: usize) -> Vec<String> {
     for event in shown.into_iter().rev() {
         rows.push(format!("│ {event}"));
     }
-    if node.events.is_empty() {
-        if let Some(text) = &node.text {
-            let lines: Vec<&str> = text.lines().collect();
-            let start = lines.len().saturating_sub(4);
-            for line in &lines[start..] {
-                rows.push(format!("│ {line}"));
-            }
+    // The child's own words. Shown even when it already ran tools: the raw
+    // progress rows no longer appear in the transcript, so this box is the only
+    // live view of what the subagent is saying.
+    if let Some(text) = &node.text {
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        let start = lines.len().saturating_sub(4);
+        for line in &lines[start..] {
+            rows.push(format!("│ {line}"));
         }
     }
     rows.into_iter()
@@ -241,6 +245,14 @@ impl Component for WorkView {
                     line.push_str(&format!(" · ▶ {tool}"));
                 }
                 lines.push(line);
+                if let Some(text) = node
+                    .text
+                    .as_deref()
+                    .and_then(|text| text.lines().rev().find(|line| !line.trim().is_empty()))
+                {
+                    let text = kiqi_tui::utils::truncate_to_width(text.trim(), 72, "…");
+                    lines.push(format!("    │ {text}"));
+                }
             }
         }
         let (turns, input, output, _cache) = self.state.llm_usage_snapshot();

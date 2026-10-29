@@ -763,6 +763,10 @@ pub(super) async fn handle_agent_event(
             is_error,
         } => {
             state.tool_finished(&tool_call_id);
+            // A final result can carry a node's last snapshot even though
+            // progress normally arrives as updates; absorb it before the strip
+            // below removes it from the transcript.
+            absorb_node_progress(state, &result);
             if tool_name == "todo" {
                 if let Some(lines) = todo_lines_from_details(&result.details) {
                     state.set_todos(lines);
@@ -915,26 +919,45 @@ mod tests {
     /// the raw protocol JSON next to the boxes.
     #[test]
     fn child_rows_are_kept_out_of_the_transcript() {
-        let mut result = kiqi_agent::types::AgentToolResult::default();
-        result
-            .content
-            .push(kiqi_agent::types::TextContentOrImage::text(
-                "started 2\n{\"ki\":\"node\",\"id\":\"a\",\"state\":\"running\"}\n\u{2714} a",
-            ));
-        let text = super::without_node_rows(&result)
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                kiqi_agent::types::TextContentOrImage::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!text.contains("\"ki\""), "{text}");
-        assert!(text.contains("started 2"), "{text}");
-        assert!(text.contains("\u{2714} a"), "{text}");
+        let result = kiqi_agent::types::AgentToolResult::text(
+            "started 2\n{\"ki\":\"node\",\"id\":\"a\",\"state\":\"running\"}\n\u{2714} a",
+        );
+        let visible = super::without_node_rows(&result);
+        let text = crate::transcript_view::tool_result_text(
+            &crate::remote::protocol::tool_result_json(&visible),
+        );
+        assert_eq!(text, "started 2\n\u{2714} a", "{text}");
         assert!(super::is_node_row("  {\"ki\":\"node\",\"id\":\"b\"}"));
         assert!(!super::is_node_row("plain tool output"));
+
+        // A block that held nothing but rows is dropped instead of becoming an
+        // empty text block, so a mixed result keeps its paragraphs without the
+        // blank line the emptied block would have added.
+        let mixed = kiqi_agent::types::AgentToolResult {
+            content: vec![
+                kiqi_agent::types::TextContentOrImage::text("summary"),
+                kiqi_agent::types::TextContentOrImage::text(
+                    "{\"ki\":\"node\",\"id\":\"a\",\"state\":\"done\"}",
+                ),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::transcript_view::tool_result_text(&crate::remote::protocol::tool_result_json(
+                &super::without_node_rows(&mixed)
+            )),
+            "summary"
+        );
+        // A row the work view cannot consume (no id) and JSON that merely
+        // mentions `ki` are left alone, and a clean result is not copied.
+        let untouched = kiqi_agent::types::AgentToolResult::text(
+            "{\"ki\":\"other\",\"id\":\"x\"}\n{\"ki\":\"node\",\"state\":\"done\"}",
+        );
+        let visible = super::without_node_rows(&untouched);
+        assert!(
+            matches!(&visible, std::borrow::Cow::Borrowed(_)),
+            "a result with no node rows must not be copied"
+        );
     }
 
     #[tokio::test]
@@ -976,23 +999,30 @@ fn partial_text_line(result: &kiqi_agent::types::AgentToolResult) -> Option<Stri
     last
 }
 
+/// The parsed form of a tool-result line that is one of the extension's
+/// `{"ki":"node",…}` child rows.
+///
+/// A row also has to carry a string `id`: that is what the work view needs to
+/// build a box, so a line the work view cannot consume stays in the transcript
+/// instead of being silently deleted.
+fn node_row(line: &str) -> Option<serde_json::Value> {
+    let line = line.trim();
+    if !line.starts_with('{') || !line.contains("\"ki\"") {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    let is_node = value.get("ki").and_then(serde_json::Value::as_str) == Some("node");
+    let has_id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .is_some();
+    (is_node && has_id).then_some(value)
+}
+
 /// Whether a tool-result line is one of the extension's `{"ki":"node",…}`
 /// child rows.
 fn is_node_row(line: &str) -> bool {
-    let line = line.trim();
-    if !line.starts_with('{') || !line.contains("\"ki\"") {
-        return false;
-    }
-    serde_json::from_str::<serde_json::Value>(line)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("ki")
-                .and_then(|kind| kind.as_str())
-                .map(str::to_string)
-        })
-        .as_deref()
-        == Some("node")
+    node_row(line).is_some()
 }
 
 /// A tool result with the child rows removed, for the transcript.
@@ -1004,23 +1034,47 @@ fn is_node_row(line: &str) -> bool {
 /// own text.
 fn without_node_rows(
     result: &kiqi_agent::types::AgentToolResult,
-) -> kiqi_agent::types::AgentToolResult {
-    let mut visible = result.clone();
-    for block in &mut visible.content {
-        let kiqi_agent::types::TextContentOrImage::Text(text) = block else {
-            continue;
-        };
-        if !text.text.contains("\"ki\"") {
-            continue;
-        }
-        let kept: Vec<&str> = text
-            .text
-            .lines()
-            .filter(|line| !is_node_row(line))
-            .collect();
-        text.text = kept.join("\n");
+) -> std::borrow::Cow<'_, kiqi_agent::types::AgentToolResult> {
+    let strips = |text: &kiqi_ai::types::TextContent| {
+        text.text.contains("\"ki\"") && text.text.lines().any(is_node_row)
+    };
+    let touched = result.content.iter().any(|block| match block {
+        kiqi_agent::types::TextContentOrImage::Text(text) => strips(text),
+        _ => false,
+    });
+    if !touched {
+        return std::borrow::Cow::Borrowed(result);
     }
-    visible
+    let content = result
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            kiqi_agent::types::TextContentOrImage::Text(text) if strips(text) => {
+                let kept = text
+                    .text
+                    .lines()
+                    .filter(|line| !is_node_row(line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                // A block that held nothing but rows must not leave an empty
+                // text block (and a blank line) behind in the tool panel.
+                (!kept.is_empty()).then(|| {
+                    kiqi_agent::types::TextContentOrImage::Text(kiqi_ai::types::TextContent {
+                        text: kept,
+                        ..text.clone()
+                    })
+                })
+            }
+            block => Some(block.clone()),
+        })
+        .collect();
+    std::borrow::Cow::Owned(kiqi_agent::types::AgentToolResult {
+        content,
+        details: result.details.clone(),
+        usage: result.usage.clone(),
+        added_tool_names: result.added_tool_names.clone(),
+        terminate: result.terminate,
+    })
 }
 
 /// Read `{"ki":"node",…}` rows an extension emits for its children (the
@@ -1032,16 +1086,9 @@ fn absorb_node_progress(state: &TuiState, result: &kiqi_agent::types::AgentToolR
             continue;
         };
         for line in text.text.lines() {
-            let line = line.trim();
-            if !line.starts_with('{') || !line.contains("\"ki\"") {
-                continue;
-            }
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            let Some(value) = node_row(line) else {
                 continue;
             };
-            if value.get("ki").and_then(|kind| kind.as_str()) != Some("node") {
-                continue;
-            }
             let Some(id) = value.get("id").and_then(|id| id.as_str()) else {
                 continue;
             };

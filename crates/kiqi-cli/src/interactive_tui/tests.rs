@@ -3113,6 +3113,9 @@ fn work_view_defaults_on_and_each_subagent_gets_a_box() {
     assert!(text.contains("task    ship the release"), "{text}");
     assert!(text.contains("▶ edit"), "{text}");
     assert!(text.contains('┌'), "{text}");
+    // The child's streamed words stay visible next to its tool events: the raw
+    // progress rows are no longer echoed into the transcript.
+    assert!(text.contains("scanning files"), "{text}");
     // The overlay summary is only the non-subagent part; each box carries its
     // own task and events.
     let overlay = super::work_view::WorkView {
