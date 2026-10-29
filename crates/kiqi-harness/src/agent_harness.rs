@@ -1214,6 +1214,73 @@ impl AgentHarness {
 
     /// `appendMessage(message)` — persist an out-of-band message entry on the
     /// lane without running the agent. Mirrors TS `AgentHarness.appendMessage`.
+    /// Heal a session whose transcript has an assistant message with
+    /// `tool_calls` but no result for some of them.
+    ///
+    /// An abort that lands between persisting the assistant turn and running
+    /// its tools leaves exactly that shape, and every provider rejects the next
+    /// request ("insufficient tool messages following tool_calls message").
+    /// Returns how many synthetic results were appended.
+    pub async fn repair_dangling_tool_calls(&self) -> HarnessResult<usize> {
+        let tree = self.session().view("main");
+        let entries = tree
+            .find_entries(&EntryQuery {
+                entry_type: None,
+                custom_type: None,
+                order: Some(EntryOrder::OldestFirst),
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .map_err(session_to_harness_err)?;
+        let mut pending: Vec<(String, String)> = Vec::new();
+        for entry in entries {
+            let Entry::Message(message) = entry else {
+                continue;
+            };
+            match &message.message {
+                AgentMessage::Assistant(assistant) => {
+                    for block in &assistant.content {
+                        if let kiqi_ai::types::Content::ToolCall(call) = block {
+                            pending.push((call.id.clone(), call.name.clone()));
+                        }
+                    }
+                }
+                AgentMessage::ToolResult(result) => {
+                    pending.retain(|(id, _)| id != &result.tool_call_id);
+                }
+                _ => {}
+            }
+        }
+        let mut repaired = 0;
+        for (tool_call_id, tool_name) in pending {
+            let text = kiqi_ai::types::Content::Text(kiqi_ai::types::TextContent {
+                kind: Default::default(),
+                text: "Tool execution was interrupted before its result was recorded.".to_string(),
+                text_signature: None,
+            });
+            self.append_message(AgentMessage::ToolResult(Box::new(
+                kiqi_ai::types::ToolResultMessage {
+                    role: kiqi_ai::types::ToolResultRole,
+                    tool_call_id,
+                    tool_name,
+                    content: vec![text],
+                    details: None,
+                    usage: None,
+                    added_tool_names: Vec::new(),
+                    is_error: true,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                },
+            )))
+            .await?;
+            repaired += 1;
+        }
+        Ok(repaired)
+    }
+
     pub async fn append_message(&self, message: AgentMessage) -> HarnessResult<String> {
         self.view()
             .append_message(message)
@@ -3226,6 +3293,13 @@ impl AgentHarness {
         prompts: Vec<AgentMessage>,
         window: StartingGuard<'_>,
     ) -> HarnessResult<RunResult> {
+        // Heal a transcript whose aborted turn left a `tool_calls` message
+        // without a result for every call: every provider rejects the next
+        // request until each `tool_call_id` is answered, and `/clear` does not
+        // rewrite history — so this runs before every run, not just on resume.
+        if let Err(error) = self.repair_dangling_tool_calls().await {
+            tracing::warn!(%error, "could not repair dangling tool calls");
+        }
         let mut normalized = Vec::with_capacity(prompts.len());
         for prompt in prompts {
             normalized.push(normalize_user_images(prompt).await?);
@@ -5934,6 +6008,58 @@ mod starting_window_tests {
 /// staged from outside the crate — `tests/harness_run_e2e.rs` covers that path
 /// through a real run + real tool instead. These pin the three-state contract
 /// and the invariant that a soft interrupt never kills the run.
+#[cfg(test)]
+mod repair_tests {
+    use super::starting_window_tests::opts;
+    use super::*;
+
+    fn assistant_with_tool_call(id: &str, name: &str) -> AgentMessage {
+        use kiqi_ai::types::*;
+        AgentMessage::Assistant(Box::new(AssistantMessage {
+            role: AssistantRole,
+            content: vec![Content::ToolCall(ToolCall {
+                kind: ToolCallType,
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: serde_json::json!({}),
+                thought_signature: None,
+                namespace: None,
+            })],
+            api: Api::Faux,
+            provider: "faux".to_string().into(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            usage: Usage::zero(),
+            stop_reason: StopReason::ToolUse,
+            deferred: None,
+            error_message: None,
+            raw_stop_reason: None,
+            end_turn: None,
+            timestamp: 0,
+        }))
+    }
+
+    #[tokio::test]
+    async fn a_dangling_tool_call_gets_a_synthetic_result() {
+        let harness = AgentHarness::create(opts()).await.unwrap();
+        harness
+            .append_message(assistant_with_tool_call("call-1", "bash"))
+            .await
+            .unwrap();
+        assert_eq!(
+            harness.repair_dangling_tool_calls().await.unwrap(),
+            1,
+            "the unanswered call is repaired"
+        );
+        assert_eq!(
+            harness.repair_dangling_tool_calls().await.unwrap(),
+            0,
+            "repair is idempotent"
+        );
+    }
+}
+
 #[cfg(test)]
 mod soft_interrupt_tests {
     use super::starting_window_tests::opts;

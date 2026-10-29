@@ -1053,6 +1053,16 @@ pub async fn interactive_tui(
     // another/project harness. Only explicit restore/fork modes render prior
     // conversation history. This fixes stale prompts appearing every startup.
     if launch_restores_history(args) {
+        // A session whose abort landed between the assistant turn and its tool
+        // results cannot be sent to a provider ("insufficient tool messages").
+        // Heal it before the first request.
+        match harness.repair_dangling_tool_calls().await {
+            Ok(0) => {}
+            Ok(repaired) => diagnostic_log(&format!(
+                "[ki repair] appended {repaired} missing tool result(s)"
+            )),
+            Err(error) => diagnostic_log(&format!("[ki repair] failed: {error}")),
+        }
         render_session_history(
             &harness,
             &chat_container,

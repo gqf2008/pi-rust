@@ -830,6 +830,31 @@ async fn execute_tool_calls_sequential(
         }
     }
 
+    // A cancelled run must not leave an assistant `tool_calls` message with
+    // fewer results: every provider rejects that on the next request
+    // ("insufficient tool messages following tool_calls message"). Calls the
+    // abort reached before they ran get a synthetic result.
+    for tool_call in tool_calls.iter().skip(messages.len()) {
+        let result = create_error_tool_result("Operation aborted before this tool call ran");
+        emit_tool_execution_end(
+            emit,
+            &FinalizedToolCall {
+                tool_call: tool_call.clone(),
+                result: result.clone(),
+                is_error: true,
+            },
+        )
+        .await;
+        let trm = create_tool_result_message(tool_call, &result, true);
+        emit_tool_result_message(emit, &trm).await;
+        messages.push(trm);
+        finalized_calls.push(FinalizedToolCall {
+            tool_call: tool_call.clone(),
+            result,
+            is_error: true,
+        });
+    }
+
     Ok(ExecutedToolBatch {
         messages,
         terminate: should_terminate_tool_batch(&finalized_calls),
@@ -900,6 +925,26 @@ async fn execute_tool_calls_parallel(
             }
         }
         if config.signal.is_cancelled() {
+            // Same invariant as the sequential path: the calls this abort
+            // reached before preparing them still need a result.
+            for tool_call in tool_calls.iter().skip(entries.len()) {
+                let result =
+                    create_error_tool_result("Operation aborted before this tool call ran");
+                emit_tool_execution_end(
+                    emit,
+                    &FinalizedToolCall {
+                        tool_call: tool_call.clone(),
+                        result: result.clone(),
+                        is_error: true,
+                    },
+                )
+                .await;
+                entries.push(Entry::Done(FinalizedToolCall {
+                    tool_call: tool_call.clone(),
+                    result,
+                    is_error: true,
+                }));
+            }
             break;
         }
     }
