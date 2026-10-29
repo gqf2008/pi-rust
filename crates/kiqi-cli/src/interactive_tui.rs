@@ -2168,14 +2168,24 @@ pub async fn interactive_tui(
                         // every later selection drag) while moving an old box.
                         state_for_key.end_node_drag();
                         state_for_key.end_work_drag();
-                        if begin_box_drag(
-                            &state_for_key,
-                            &work_node_overlays_for_key,
-                            &work_overlay_for_key,
-                            m.column,
-                            m.row,
-                            screen_width,
-                        ) {
+                        // Boxes move only with Alt/Ctrl held: a plain press is
+                        // text selection, and the default-on work view must not
+                        // take the top of the screen (and every box the right
+                        // edge) away from copy/paste.
+                        let wants_move =
+                            m.modifiers.intersects(crossterm::event::KeyModifiers::ALT)
+                                || m.modifiers
+                                    .intersects(crossterm::event::KeyModifiers::CONTROL);
+                        if wants_move
+                            && begin_box_drag(
+                                &state_for_key,
+                                &work_node_overlays_for_key,
+                                &work_overlay_for_key,
+                                m.column,
+                                m.row,
+                                screen_width,
+                            )
+                        {
                             continue;
                         }
                     }
