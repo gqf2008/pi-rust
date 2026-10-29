@@ -67,6 +67,53 @@ impl SlashCommand for WorkCommand {
     }
 }
 
+/// `/agents` — background subagents are processes the session owns, so they
+/// need a way to be seen and stopped without quitting `ki`.
+pub(super) struct AgentsCommand;
+impl SlashCommand for AgentsCommand {
+    fn name(&self) -> &'static str {
+        "/agents"
+    }
+    fn description(&self) -> &'static str {
+        "List background subagents; `/agents kill <id|all>` stops one"
+    }
+    fn execute(&self, ctx: &CommandContext, args: &str) {
+        let agents = crate::background_agents::global();
+        let args = args.trim();
+        if let Some(target) = args.strip_prefix("kill") {
+            let target = target.trim();
+            let note = if target == "all" {
+                let ids = agents.running_ids();
+                for id in &ids {
+                    agents.cancel(id);
+                }
+                if ids.is_empty() {
+                    "no background subagents running".to_string()
+                } else {
+                    format!("cancelling {}", ids.join(", "))
+                }
+            } else if target.is_empty() {
+                "usage: /agents kill <id|all>".to_string()
+            } else if agents.cancel(target) {
+                format!("cancelling {target}")
+            } else {
+                format!("no running background subagent named {target}")
+            };
+            add_note_message(&ctx.chat, &note);
+            ctx.tui.request_render(false);
+            return;
+        }
+        let ids = agents.running_ids();
+        let note = if ids.is_empty() {
+            "no background subagents running".to_string()
+        } else {
+            format!("background subagents running: {}", ids.join(", "))
+        };
+        add_note_message(&ctx.chat, &note);
+        ctx.tui.request_render(false);
+    }
+}
+
 pub(super) struct ClearChatCommand;
 impl SlashCommand for ClearChatCommand {
     fn name(&self) -> &'static str {
@@ -824,6 +871,7 @@ pub(super) fn build_builtin_registry() -> CommandRegistry {
     r.register(Arc::new(HelpCommand));
     r.register(Arc::new(ClearChatCommand));
     r.register(Arc::new(WorkCommand));
+    r.register(Arc::new(AgentsCommand));
     r.register(Arc::new(ExitCommand));
     r.register(Arc::new(VersionCommand));
     r.register(Arc::new(ChangelogCommand));

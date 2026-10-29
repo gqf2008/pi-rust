@@ -31,6 +31,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **`/agents` 查看与停止后台子代理。** 无参数列出正在跑的后台代理，`/agents kill <id|all>`
+  停止它们（会话退出时也会统一杀掉）。
 - **`subagent` 改为后台执行。** 之前它是 wasm 扩展里的阻塞调用：一个扩展同一时刻只执行一个
   调用，所以一批 `subagent` 严格串行，主会话被关在一个工具调用里直到最慢的子代理结束。
   现在工具由宿主实现，`execute` 起完子进程就返回（`Started background subagent#N`），
