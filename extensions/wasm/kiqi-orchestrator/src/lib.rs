@@ -741,7 +741,8 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let started_at = Instant::now();
     let mut last_report = Instant::now();
-    emit_node_progress("subagent", "running", 0, timeout_secs * 1000);
+    let mut subagent_tool: Option<String> = None;
+    publish_subagent_snapshot(started_at, timeout_secs, None, Status::Running);
     let mut output = String::new();
     // The single-subagent call gets its own right-rail box too, so a long child
     // is observable without expanding the tool block.
@@ -758,11 +759,11 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         }
         if last_report.elapsed() >= Duration::from_millis(1000) {
             last_report = Instant::now();
-            emit_node_progress(
-                "subagent",
-                "running",
-                started_at.elapsed().as_millis() as u64,
-                timeout_secs * 1000,
+            publish_subagent_snapshot(
+                started_at,
+                timeout_secs,
+                subagent_tool.as_deref(),
+                Status::Running,
             );
         }
         match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
@@ -770,24 +771,25 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
                 if is_ki {
                     match child_progress::parse(&line) {
                         child_progress::NodeEvent::ToolStart(name) => {
-                            progress::emit(&types::ProgressBlock::Text(format!(
-                                "▶ subagent: {name}"
-                            )));
+                            subagent_tool = Some(name);
+                            publish_subagent_snapshot(
+                                started_at,
+                                timeout_secs,
+                                subagent_tool.as_deref(),
+                                Status::Running,
+                            );
                         }
-                        child_progress::NodeEvent::ToolEnd { name, is_error } => {
+                        child_progress::NodeEvent::ToolEnd { .. } => {
+                            subagent_tool = None;
                         }
-                        child_progress::NodeEvent::Message { text, input, output: out } => {
+                        child_progress::NodeEvent::Message { text, .. } => {
                             if let Some(text) = text {
                                 output = text;
                             }
-                            if input > 0 || out > 0 {
-                            }
                         }
-                        child_progress::NodeEvent::Final { outcome, text } => {
+                        child_progress::NodeEvent::Final { text, .. } => {
                             if let Some(text) = text {
                                 output = text;
-                            }
-                            if outcome != "completed" {
                             }
                         }
                         child_progress::NodeEvent::Ignore => {}
@@ -820,6 +822,12 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         Err(error) => return Err(capability_reason(error)),
     };
     let text = truncate_output(output);
+    publish_subagent_snapshot(
+        started_at,
+        timeout_secs,
+        None,
+        if status == 0 { Status::Done } else { Status::Failed },
+    );
     progress::emit(&types::ProgressBlock::Text(format!(
         "{} subagent",
         if status == 0 { "✔" } else { "✖" }
@@ -955,9 +963,11 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
     let mut node_started: HashMap<String, Instant> = HashMap::new();
     for id in &started {
         node_started.insert(id.clone(), Instant::now());
-        emit_node_progress(id, "running", 0, node_budget_ms(id));
     }
+    // Which tool each child is running right now, for its bar's label.
+    let mut current_tool: HashMap<String, String> = HashMap::new();
     let mut last_node_report = Instant::now();
+    publish_wave_snapshot(&node_started, &current_tool);
     let mut outputs: HashMap<u32, String> = HashMap::new();
     'wave: loop {
         if proc::cancel_requested() {
@@ -966,13 +976,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
         }
         if last_node_report.elapsed() >= Duration::from_millis(1000) {
             last_node_report = Instant::now();
-            for (id, _, _) in running().lock().unwrap_or_else(|p| p.into_inner()).clone() {
-                let elapsed = node_started
-                    .get(&id)
-                    .map(|started| started.elapsed().as_millis() as u64)
-                    .unwrap_or(0);
-                emit_node_progress(&id, "running", elapsed, node_budget_ms(&id));
-            }
+            publish_wave_snapshot(&node_started, &current_tool);
         }
         // Poll every live child each round. Polling only the head of the list
         // strands siblings: one that finishes while an earlier node is still
@@ -1002,36 +1006,33 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .retain(|(node_id, _, _)| node_id != &id);
-                progress::emit(&types::ProgressBlock::Text(format!("✖ {id} (timeout)")));
+                publish_wave_snapshot(&node_started, &current_tool);
                 continue;
             }
             match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
                 Ok(Some(line)) => {
                     if wave_program == DEFAULT_PROGRAM {
-                        // `--mode json`: the child streams its agent events; the
-                        // rail shows the tool it is running and what it spends,
-                        // and the node's answer is the last assistant text (or
-                        // the terminal `result` line).
+                        // `--mode json`: the child streams its agent events. The
+                        // wave snapshot shows each node's bar and the tool it is
+                        // running; the node's answer is the last assistant text
+                        // (or the terminal `result` line).
                         match child_progress::parse(&line) {
                             child_progress::NodeEvent::ToolStart(name) => {
-                                progress::emit(&types::ProgressBlock::Text(format!(
-                                    "▶ {id}: {name}"
-                                )));
+                                current_tool.insert(id.clone(), name);
+                                publish_wave_snapshot(&node_started, &current_tool);
                             }
-                            child_progress::NodeEvent::ToolEnd { name, is_error } => {
+                            child_progress::NodeEvent::ToolEnd { .. } => {
+                                current_tool.remove(&id);
+                                publish_wave_snapshot(&node_started, &current_tool);
                             }
-                            child_progress::NodeEvent::Message { text, input, output } => {
+                            child_progress::NodeEvent::Message { text, .. } => {
                                 if let Some(text) = text {
                                     outputs.insert(handle, text);
                                 }
-                                if input > 0 || output > 0 {
-                                }
                             }
-                            child_progress::NodeEvent::Final { outcome, text } => {
+                            child_progress::NodeEvent::Final { text, .. } => {
                                 if let Some(text) = text {
                                     outputs.insert(handle, text);
-                                }
-                                if outcome != "completed" {
                                 }
                             }
                             child_progress::NodeEvent::Ignore => {}
@@ -1091,12 +1092,6 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                         .get(&id)
                         .map(|started| started.elapsed().as_millis() as u64)
                         .unwrap_or(0);
-                    emit_node_progress(
-                        &id,
-                        if status == Status::Done { "done" } else { "failed" },
-                        elapsed,
-                        node_budget_ms(&id),
-                    );
                     progress::emit(&types::ProgressBlock::Text(format!(
                         "{} {id}",
                         if status == Status::Done { "✔" } else { "✖" }
@@ -1167,29 +1162,90 @@ fn fail_remaining(reason: &str) {
     running().lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
 
-/// The node's own timeout, in milliseconds — the budget its bar measures
-/// against.
-fn node_budget_ms(id: &str) -> u64 {
-    graph_state()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get(id)
-        .map(|node| node.timeout_secs * 1000)
-        .unwrap_or(0)
+/// Publish the single-subagent call's bar (same text shape as a dispatch node).
+fn publish_subagent_snapshot(
+    started: Instant,
+    budget_secs: u64,
+    tool: Option<&str>,
+    status: Status,
+) {
+    let mut line = node_bar(
+        "subagent",
+        status,
+        started.elapsed(),
+        budget_secs.saturating_mul(1000),
+    );
+    if let Some(tool) = tool {
+        line.push_str(&format!("  · {tool}"));
+    }
+    progress::emit(&types::ProgressBlock::Text(line));
 }
 
-/// Publish one node row for the host's live block (`{"ki":"node",…}`).
-fn emit_node_progress(id: &str, state: &str, elapsed_ms: u64, budget_ms: u64) {
-    progress::emit(&types::ProgressBlock::Json(
-        json!({
-            "ki": "node",
-            "id": id,
-            "state": state,
-            "elapsedMs": elapsed_ms,
-            "budgetMs": budget_ms,
-        })
-        .to_string(),
-    ));
+/// One-line bar for a node the host's tool block renders.
+fn node_bar(id: &str, status: Status, elapsed: Duration, budget_ms: u64) -> String {
+    match status {
+        Status::Done | Status::Failed | Status::Skipped => {
+            let mark = match status {
+                Status::Done => "✔",
+                Status::Failed => "✖",
+                _ => "–",
+            };
+            format!("{mark} {id} {} {}", status.as_str(), human(elapsed))
+        }
+        _ => {
+            if budget_ms == 0 {
+                return format!("▶ {id} {}", human(elapsed));
+            }
+            let fraction = (elapsed.as_millis() as f64 / budget_ms as f64).clamp(0.0, 1.0);
+            let filled = (fraction * 10.0).round() as usize;
+            let bar: String = (0..10)
+                .map(|cell| if cell < filled { '█' } else { '░' })
+                .collect();
+            format!(
+                "▶ {id} {bar} {:>3.0}%  {} / {}",
+                fraction * 100.0,
+                human(elapsed),
+                human(Duration::from_millis(budget_ms))
+            )
+        }
+    }
+}
+
+/// `12s` / `1m20s` / `1h02m`.
+fn human(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m{:02}s", secs / 60, secs % 60),
+        _ => format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
+/// Publish the wave's progress as one text block. The host's tool component
+/// *replaces* its body on every update (only `bash` appends), so this is a
+/// snapshot, not a log: one block, rewritten at most once a second.
+fn publish_wave_snapshot(
+    started: &HashMap<String, Instant>,
+    current_tool: &HashMap<String, String>,
+) {
+    let graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
+    let mut lines = Vec::new();
+    for node in &graph.nodes {
+        let elapsed = started
+            .get(&node.id)
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        let mut line = node_bar(&node.id, node.status, elapsed, node.timeout_secs * 1000);
+        if node.status == Status::Running {
+            if let Some(tool) = current_tool.get(&node.id) {
+                line.push_str(&format!("  · {tool}"));
+            }
+        }
+        lines.push(line);
+    }
+    if !lines.is_empty() {
+        progress::emit(&types::ProgressBlock::Text(lines.join("\n")));
+    }
 }
 
 fn spawn_node(node: &Node, program: &str) -> Result<u32, String> {

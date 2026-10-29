@@ -36,59 +36,22 @@ fn compact_tokens(value: u64) -> String {
 
 /// The rows the block shows right now, uncoloured and untruncated. Shared with
 /// the tick's change detection so a repaint happens exactly when the text does.
-/// `███░░░░░ 62%  4m19s / 30m` for a running node, `✔ a done 2m10s` for a
-/// finished one. Unknown budgets animate instead of pretending to be a
-/// fraction of something we do not know.
-fn node_row_line(row: &NodeRow) -> String {
-    const CELLS: usize = 10;
-    if row.state != "running" {
-        let mark = if row.state == "done" { "✔" } else { "✖" };
-        return format!(
-            "{mark} {} {}  {}",
-            row.id,
-            row.state,
-            live_elapsed(row.elapsed_ms / 1000)
-        );
-    }
-    let secs = live_elapsed(row.elapsed_ms / 1000);
-    if row.budget_ms == 0 {
-        // No budget given: a moving bar, not a fake percentage.
-        let head = (row.elapsed_ms / 250) as usize % CELLS;
-        let bar: String = (0..CELLS)
-            .map(|cell| if cell == head { '▓' } else { '░' })
-            .collect();
-        return format!("{} {bar}  {secs}", row.id);
-    }
-    let fraction = (row.elapsed_ms as f64 / row.budget_ms as f64).clamp(0.0, 1.0);
-    let filled = (fraction * CELLS as f64).round() as usize;
-    let bar: String = (0..CELLS)
-        .map(|cell| if cell < filled { '█' } else { '░' })
-        .collect();
-    format!(
-        "{} {bar} {:>3.0}%  {secs} / {}",
-        row.id,
-        fraction * 100.0,
-        live_elapsed(row.budget_ms / 1000)
-    )
-}
-
 pub(super) fn live_rows(state: &TuiState) -> Vec<String> {
+    // One summary line: what is running (each tool's own block carries the
+    // detail and progress now) plus the session's LLM usage.
     let mut rows = Vec::new();
-    for node in state.node_snapshot() {
-        rows.push(node_row_line(&node));
-    }
-    for (name, secs, detail, tail) in state.running_snapshot() {
-        rows.push(format!("● {name}  {}", live_elapsed(secs)));
-        if !detail.is_empty() {
-            rows.push(format!("  {detail}"));
-        }
-        for line in tail {
-            rows.push(format!("  │ {line}"));
-        }
-    }
-    let todos = state.todo_snapshot();
-    if !todos.is_empty() {
-        rows.extend(todos.into_iter().take(8));
+    let running = state.running_snapshot();
+    if !running.is_empty() {
+        let names: Vec<String> = running
+            .iter()
+            .take(4)
+            .map(|(name, secs, _, _)| format!("{name} {}", live_elapsed(*secs)))
+            .collect();
+        rows.push(format!(
+            "● {} running · {}",
+            running.len(),
+            names.join(" · ")
+        ));
     }
     let (turns, input, output, cache_read) = state.llm_usage_snapshot();
     if turns > 0 {

@@ -13,11 +13,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
-- **回显区内的实时状态块。** 输入框上方新增一段随状态更新的内容：每个子代理一行
-  进度条（已用时间 / 该节点 `timeoutSeconds`，无预算的任务用移动游标）、每个在飞
-  工具（名称、已用时长、命令/参数、最近几行输出）、`todo` 列表、以及一行 LLM 用量
-  （model、轮次、↑↓ token、cache、进行中请求的时长与流式字数）。没有内容时不占行。
-  右侧栏方案已删除——两侧分栏在实际使用中不易读，改为直接回显。
+- **进度回到工具块里，状态行只留汇总。** 参照 Claude Code / Codex 的做法：
+  `dispatch`/`subagent` 的工具块内每秒重绘一次快照，每个节点一行进度条
+  （已用时间 / 该节点 `timeoutSeconds`，无预算时用移动游标），并标出它当前在调用的
+  工具；输入框上方只保留一行汇总（`● N running · 各工具耗时`）与一行 LLM 用量
+  （model、轮次、↑↓、cache、进行中请求时长与流式字数）。右侧栏方案已删除。
 - **子代理进度。** orchestrator 用 `ki -p --mode json` 启动子进程，逐行解析其
   agent 事件：工具开始/结束与 token 用量进入工具输出流（`▶ 工具名`、`↑1.2k ↓345`），
   `result.finalText` 作为节点摘要与结果。
