@@ -3054,17 +3054,13 @@ fn goal_driven_marker_is_scoped_to_its_own_run() {
     state.set_status(RunStatus::Idle);
 }
 
-/// The work view renders nothing until `/work`, then one pane per subagent.
+/// The work view shows a hint when idle and one pane per subagent when busy.
 #[test]
 fn work_view_is_opt_in_and_renders_a_pane_per_subagent() {
     let state = test_tui_state();
     let view = super::work_view::WorkView {
         state: state.clone(),
-        inline: true,
     };
-    assert!(view.render(80).is_empty(), "off by default");
-
-    state.toggle_work_view();
     let empty = view.render(80);
     assert!(
         empty.iter().any(|row| row.contains("no background work")),

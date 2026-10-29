@@ -1328,16 +1328,7 @@ pub async fn interactive_tui(
     let editor_container = Arc::new(Container::new());
     editor_container.add_child(editor.clone());
 
-    // Inline work view: todo + one pane per subagent, above the input. Empty
-    // (zero rows) unless `/work` turned it on, so the normal transcript is
-    // untouched by default.
-    let work_container = Arc::new(Container::new());
-    work_container.add_child(Arc::new(work_view::WorkView {
-        state: state.clone(),
-        inline: true,
-    }));
     let dock = Arc::new(VStack::from_children(vec![
-        StackChild::Entry(StackEntry::new(work_container.clone())),
         StackChild::Entry(StackEntry::new(Arc::new(panels::RegularPanels {
             mailbox: reload_context.ext_status.clone(),
             enabled: matches!(args.tui_mode, crate::args::TuiMode::Regular),
@@ -1381,6 +1372,12 @@ pub async fn interactive_tui(
     ]);
 
     tui.set_layout_root(Some(Arc::new(root)));
+
+    // `/work` draws over the output area as a non-capturing overlay: the
+    // transcript keeps its layout (nothing is pushed aside), the input stays
+    // usable. `Percent` in overlay sizes is a 0..1 fraction.
+    let work_overlay: Arc<std::sync::Mutex<Option<Arc<dyn kiqi_tui::tui::OverlayHandle>>>> =
+        Arc::new(std::sync::Mutex::new(None));
     tui.set_focus(Some(editor.clone()));
     editor.set_focused(true);
 
@@ -1653,6 +1650,7 @@ pub async fn interactive_tui(
     // The `Loader` only advances its frame on render; without a periodic
     // `request_render` the spinner visibly freezes between events.
     let tui_tick = tui.clone();
+    let work_overlay_tick = work_overlay.clone();
     let state_tick = state.clone();
     // The tick, not the key loop, drives the voice-draft auto-send: it must
     // fire even when the user types nothing.
@@ -1689,6 +1687,34 @@ pub async fn interactive_tui(
             if now_mtime != models_mtime {
                 models_mtime = now_mtime;
                 let _ = tx_tick.send(TuiMessage::ReloadModels);
+            }
+            // `/work` overlay: created on demand, hidden when toggled off.
+            {
+                let want = state_tick.work_view_enabled();
+                let mut slot = work_overlay_tick.lock().unwrap();
+                if want && slot.is_none() {
+                    let options = kiqi_tui::OverlayOptions {
+                        anchor: kiqi_tui::OverlayAnchor::TopLeft,
+                        width: Some(kiqi_tui::tui::SizeValue::Percent(1.0)),
+                        max_height: Some(kiqi_tui::tui::SizeValue::Percent(1.0)),
+                        non_capturing: true,
+                        margin: Some(kiqi_tui::tui::OverlayMargin {
+                            bottom: 6,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    };
+                    *slot = Some(tui_tick.show_overlay(
+                        Arc::new(work_view::WorkView {
+                            state: state_tick.clone(),
+                        }),
+                        Some(options),
+                    ));
+                } else if !want {
+                    if let Some(handle) = slot.take() {
+                        handle.hide();
+                    }
+                }
             }
             // Extension status (langfuse ✓ …, …) — cheap revision check, and the
             // only reason an idle session repaints its footer.
