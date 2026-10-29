@@ -3333,7 +3333,10 @@ impl AgentHarness {
             // or an abort that predates the pre-run repair). Heal and retry
             // once instead of surfacing a dead-end 400 to the user.
             let is_dangling_tools = msg.contains("tool messages following tool_calls")
-                || msg.contains("must be followed by tool messages");
+                || msg.contains("must be followed by tool messages")
+                // OpenAI-compatible gateways phrase the same defect from the
+                // other side: a `tool` message with no `tool_calls` in front.
+                || msg.contains("must be a response to a preceding message");
             if is_dangling_tools {
                 tracing::warn!(
                     "dangling tool call rejected by the provider; repairing and retrying"

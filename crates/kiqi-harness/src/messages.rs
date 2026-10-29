@@ -510,7 +510,7 @@ pub fn convert_to_llm(messages: Vec<AgentMessage>) -> Vec<Message> {
             "repaired orphaned tool calls while building provider context"
         );
     }
-    messages
+    let messages: Vec<Message> = messages
         .into_iter()
         .filter_map(|m| match m {
             AgentMessage::User(u) => Some(Message::User(u)),
@@ -518,7 +518,58 @@ pub fn convert_to_llm(messages: Vec<AgentMessage>) -> Vec<Message> {
             AgentMessage::ToolResult(t) => Some(Message::ToolResult(t)),
             AgentMessage::Custom(c) => convert_custom_to_llm(c),
         })
-        .collect()
+        .collect();
+    drop_unanchored_tool_results(messages)
+}
+
+/// Drop tool results that are not directly anchored to a preceding assistant
+/// `tool_calls` message.
+///
+/// Strict OpenAI-compatible gateways reject the whole request with
+/// `Messages with role 'tool' must be a response to a preceding message with
+/// 'tool_calls'`. The id-keyed repair above keeps a result as long as *some*
+/// assistant declared its id, which is not the same as the result sitting
+/// directly behind that assistant: an empty/aborted assistant dropped by the
+/// provider's own conversion, a compaction boundary, or a user message wedged
+/// between them all produce exactly this shape. This pass is structural — it is
+/// the exact property the gateway checks — so it holds regardless of how the
+/// history got into that state.
+fn drop_unanchored_tool_results(messages: Vec<Message>) -> Vec<Message> {
+    let mut anchored: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(messages.len());
+    for message in messages {
+        match &message {
+            Message::Assistant(assistant) => {
+                anchored = assistant
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        kiqi_ai::types::Content::ToolCall(call) => Some(call.id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                out.push(message);
+            }
+            Message::ToolResult(result) => {
+                if anchored.contains(&result.tool_call_id) {
+                    out.push(message);
+                } else {
+                    tracing::warn!(
+                        tool_call_id = %result.tool_call_id,
+                        tool = %result.tool_name,
+                        "dropped a tool result with no preceding tool_calls message"
+                    );
+                }
+            }
+            _ => {
+                // Only an assistant turn declares tool calls; anything else
+                // ends the anchor window.
+                anchored.clear();
+                out.push(message);
+            }
+        }
+    }
+    out
 }
 
 fn convert_custom_to_llm(c: CustomMessage) -> Option<Message> {
@@ -595,6 +646,51 @@ mod tests {
             is_error: false,
             timestamp: 43,
         }))
+    }
+
+    /// A tool result that is not directly behind its `tool_calls` message is
+    /// what strict gateways reject with "Messages with role 'tool' must be a
+    /// response to a preceding message with 'tool_calls'".
+    #[test]
+    fn a_tool_result_without_its_tool_calls_in_front_is_dropped() {
+        // A user message wedged between the assistant turn and its result — the
+        // shape steering/background-agent delivery can produce.
+        let interleaved = vec![
+            assistant_with_calls(&[("call-1", "bash")]),
+            AgentMessage::User(kiqi_ai::types::UserMessage::new("继续", 44)),
+            tool_result("call-1", "bash"),
+        ];
+        let converted = convert_to_llm(interleaved);
+        let shape: Vec<&str> = converted
+            .iter()
+            .map(|message| match message {
+                Message::Assistant(_) => "assistant",
+                Message::ToolResult(_) => "tool",
+                Message::User(_) => "user",
+            })
+            .collect();
+        // The repair moves the result back behind its turn; the anchor pass
+        // then has nothing left to drop.
+        assert_eq!(shape, vec!["assistant", "tool", "user"], "{shape:?}");
+
+        // Same for a result whose declaring assistant never made it into the
+        // context at all.
+        let orphan = vec![tool_result("call-9", "bash")];
+        assert!(convert_to_llm(orphan).is_empty());
+
+        // The healthy shape survives untouched.
+        let healthy = vec![
+            assistant_with_calls(&[("call-1", "bash")]),
+            tool_result("call-1", "bash"),
+        ];
+        let converted = convert_to_llm(healthy);
+        assert_eq!(
+            converted
+                .iter()
+                .filter(|message| matches!(message, Message::ToolResult(_)))
+                .count(),
+            1
+        );
     }
 
     /// A retried turn can reuse a `tool_call_id`. Each occurrence needs its own
