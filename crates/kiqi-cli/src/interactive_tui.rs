@@ -3877,7 +3877,7 @@ pub async fn interactive_tui(
                 // ignored". A command that leaves a *newly* active goal starts
                 // its first run right here; bookkeeping commands (`show`,
                 // `list`, `update`) leave the key unchanged and stay passive.
-                let goal_before = crate::goal_drive::active_goal(&cwd).map(|goal| goal.key());
+                let goal_before = outcome.goal_before.clone();
                 handle_command_outcome(&ctx, outcome);
                 let goal_after = crate::goal_drive::active_goal(&cwd).map(|goal| goal.key());
                 if crate::goal_drive::goal_became_active(

@@ -22,6 +22,13 @@ pub(super) struct ExtensionCommandOutcome {
     pub(super) host: Arc<crate::extensions::ExtensionHost>,
     pub(super) name: String,
     pub(super) result: Result<CommandResult, String>,
+    /// The active goal *before* the command ran.
+    ///
+    /// `/goal <task>` writes the goal file from inside the command, so a caller
+    /// that snapshots after the call can never see "a goal appeared": by then
+    /// the file already holds the new goal, which is why an explicit `/goal` sat
+    /// idle until the user typed something.
+    pub(super) goal_before: Option<String>,
 }
 
 /// The pure routing decision for a command result.
@@ -111,6 +118,10 @@ fn spawn_call(
         .spawn(move || {
             let caps = crate::extensions::session_caps_from_cell(&session_cell);
             let host_caps = caps.host_caps();
+            let goal_before = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| crate::goal_drive::active_goal(&cwd))
+                .map(|goal| goal.key());
             let result = match continuation {
                 Some((flow_id, reply)) => thread_host
                     .continue_command(&thread_name, &flow_id, reply, &host_caps)
@@ -123,6 +134,7 @@ fn spawn_call(
                 host: thread_host,
                 name: thread_name,
                 result,
+                goal_before,
             }));
         });
     if let Err(error) = spawned {

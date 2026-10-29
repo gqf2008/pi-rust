@@ -42,6 +42,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **`/goal <任务>` 真的立刻开跑。** 自动开跑的判定是"命令跑完之后是否出现了一个新
+  goal"，但快照取在命令返回之后——`/goal` 在命令内部就把 goals.json 写好了，于是"之前"
+  和"之后"永远是同一个 key，判定恒为 false，目标只能等用户再发一句话才动。现在快照在
+  命令执行前取（随 `ExtensionCommandDone` 带回来）。pty 实测：`/goal 把测试跑绿` 之后
+  立刻产生 provider 请求与 `[ki goal] auto-continue` 日志。
 - **子代理进度不再写进 transcript。** 节点行是工作视图的数据，宿主却把原始协议 JSON
   （`{"budgetMs":…,"id":"a",…}`）同时渲染进 `● dispatch` 工具块，同一份信息出现两次，
   而且是不可读的那一份。现在工具块只保留工具自己的文本，进度只以盒子呈现。
