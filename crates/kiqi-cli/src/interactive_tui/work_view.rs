@@ -73,6 +73,35 @@ fn boxed(title: &str, rows: &[String], width: usize) -> Vec<String> {
     out
 }
 
+/// Draw `body` inside a titled box.
+///
+/// A terminal has no alpha, so "floating" means exactly this: a bounded
+/// rectangle that replaces only its own cells. The overlay itself is sized to
+/// the box (auto width), not to the screen.
+fn frame(body: &[String], width: usize) -> Vec<String> {
+    const TITLE: &str = "WORK · /work to close";
+    const MAX_WIDTH: usize = 100;
+    let visible = |row: &str| kiqi_tui::ansi::visible_width(row);
+    let inner = body
+        .iter()
+        .map(|row| visible(row))
+        .max()
+        .unwrap_or(0)
+        .max(TITLE.len() + 1)
+        .min(width.saturating_sub(6).min(MAX_WIDTH));
+    let mut rows = Vec::with_capacity(body.len() + 2);
+    let head = format!("┌─ {TITLE} ");
+    let fill = (inner + 4).saturating_sub(head.len() + 1).max(1);
+    rows.push(format!("{head}{}┐", "─".repeat(fill)));
+    for row in body {
+        let row = kiqi_tui::utils::truncate_to_width(row, inner, "…");
+        let pad = inner.saturating_sub(visible(&row));
+        rows.push(format!("│ {row}{} │", " ".repeat(pad)));
+    }
+    rows.push(format!("└{}┘", "─".repeat(inner + 2)));
+    rows
+}
+
 pub(super) struct WorkView {
     pub state: Arc<TuiState>,
     /// Dock rendering (regular mode) hides itself when `/work` is off; the
@@ -159,7 +188,7 @@ impl Component for WorkView {
                 self.state.current_model_id()
             )));
         }
-        lines
+        frame(&lines, width)
     }
 
     fn invalidate(&self) {}

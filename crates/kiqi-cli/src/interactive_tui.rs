@@ -1719,11 +1719,15 @@ pub async fn interactive_tui(
                 let mut slot = work_overlay_tick.lock().unwrap();
                 if want && slot.is_none() {
                     let options = kiqi_tui::OverlayOptions {
-                        anchor: kiqi_tui::OverlayAnchor::TopLeft,
-                        width: Some(kiqi_tui::tui::SizeValue::Percent(1.0)),
+                        // Sized to the box's own content (auto width), floating
+                        // in the top-right corner; the rest of the screen keeps
+                        // rendering the transcript untouched.
+                        anchor: kiqi_tui::OverlayAnchor::TopRight,
                         max_height: Some(kiqi_tui::tui::SizeValue::Percent(1.0)),
                         non_capturing: true,
                         margin: Some(kiqi_tui::tui::OverlayMargin {
+                            top: 1,
+                            right: 1,
                             bottom: 6,
                             ..Default::default()
                         }),
