@@ -316,29 +316,36 @@ const RECOVERY_TOOL_RESULT: &str = concat!(
 pub fn repair_orphaned_tool_calls(
     messages: Vec<AgentMessage>,
 ) -> (Vec<AgentMessage>, ToolCallRepairReport) {
+    use std::collections::HashMap;
     // A result counts only when some assistant *preceding* it declared the
     // call. A result before any such assistant is orphaned (the usual shape
     // after a resume from a branch whose assistant message was never written)
     // and must not reach the provider.
     let mut declared: HashSet<String> = HashSet::new();
-    let existing_results: HashSet<String> = messages
-        .iter()
-        .filter_map(|message| match message {
+    // Counts, not a set: a repeated `tool_call_id` needs one result per
+    // occurrence, so a call whose only result was already consumed earlier in
+    // the transcript still needs its own.
+    let mut declared_calls: HashMap<String, usize> = HashMap::new();
+    let mut existing_results: HashMap<String, usize> = HashMap::new();
+    for message in &messages {
+        match message {
             AgentMessage::Assistant(assistant) => {
                 for content in &assistant.content {
                     if let Content::ToolCall(call) = content {
                         declared.insert(call.id.clone());
+                        *declared_calls.entry(call.id.clone()).or_insert(0) += 1;
                     }
                 }
-                None
             }
             AgentMessage::ToolResult(result) if declared.contains(&result.tool_call_id) => {
-                Some(result.tool_call_id.clone())
+                *existing_results
+                    .entry(result.tool_call_id.clone())
+                    .or_insert(0) += 1;
             }
-            _ => None,
-        })
-        .collect();
-    let mut kept_results: HashSet<String> = HashSet::new();
+            _ => {}
+        }
+    }
+    let mut kept_results: HashMap<String, usize> = HashMap::new();
     let mut repaired = Vec::new();
     let mut report = ToolCallRepairReport::default();
     let mut pending_calls: Vec<(String, String, i64)> = Vec::new();
@@ -369,7 +376,9 @@ pub fn repair_orphaned_tool_calls(
                     .content
                     .iter()
                     .filter_map(|content| match content {
-                        Content::ToolCall(call) if !existing_results.contains(&call.id) => {
+                        Content::ToolCall(call)
+                            if existing_results.get(&call.id).copied().unwrap_or(0) == 0 =>
+                        {
                             Some((call.id.clone(), call.name.clone(), assistant.timestamp))
                         }
                         _ => None,
@@ -382,12 +391,29 @@ pub fn repair_orphaned_tool_calls(
             AgentMessage::ToolResult(result) => {
                 // No assistant before it declared this call, or a second result
                 // for one call: providers reject both shapes.
-                if !existing_results.contains(&result.tool_call_id)
-                    || !kept_results.insert(result.tool_call_id.clone())
-                {
+                // Keep at most as many results as there are calls for that id:
+                // duplicates beyond that are exactly what providers reject.
+                let kept = {
+                    let kept = kept_results.entry(result.tool_call_id.clone()).or_insert(0);
+                    let calls = declared_calls
+                        .get(&result.tool_call_id)
+                        .copied()
+                        .unwrap_or(0);
+                    if *kept < calls {
+                        *kept += 1;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if !kept {
                     report.dropped_result_ids.push(result.tool_call_id.clone());
                     continue;
                 }
+                // This result answers exactly one occurrence of the call.
+                *existing_results
+                    .get_mut(&result.tool_call_id)
+                    .expect("counted above") -= 1;
                 if let Some(index) = pending_calls
                     .iter()
                     .position(|(id, _, _)| id == &result.tool_call_id)
@@ -421,12 +447,17 @@ pub fn repair_orphaned_tool_calls(
 fn ensure_tool_results_adjacent(messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
     use std::collections::HashMap;
 
-    let mut result_index: HashMap<&str, usize> = HashMap::new();
+    // One slot per result, not per id: a transcript can repeat a
+    // `tool_call_id` (a retried turn), and each occurrence of the call needs its
+    // own tool message. A set would give both occurrences the same result and
+    // leave the second unanswered, which providers reject.
+    let mut result_index: HashMap<&str, std::collections::VecDeque<usize>> = HashMap::new();
     for (index, message) in messages.iter().enumerate() {
         if let AgentMessage::ToolResult(result) = message {
             result_index
                 .entry(result.tool_call_id.as_str())
-                .or_insert(index);
+                .or_default()
+                .push_back(index);
         }
     }
 
@@ -443,11 +474,16 @@ fn ensure_tool_results_adjacent(messages: Vec<AgentMessage>) -> Vec<AgentMessage
                 out.push(message.clone());
                 for content in &assistant.content {
                     if let Content::ToolCall(call) = content {
-                        if let Some(&result_at) = result_index.get(call.id.as_str()) {
-                            if !consumed[result_at] {
-                                consumed[result_at] = true;
-                                out.push(messages[result_at].clone());
+                        while let Some(result_at) = result_index
+                            .get_mut(call.id.as_str())
+                            .and_then(|queue| queue.pop_front())
+                        {
+                            if consumed[result_at] {
+                                continue;
                             }
+                            consumed[result_at] = true;
+                            out.push(messages[result_at].clone());
+                            break;
                         }
                     }
                 }
@@ -559,6 +595,32 @@ mod tests {
             is_error: false,
             timestamp: 43,
         }))
+    }
+
+    /// A retried turn can reuse a `tool_call_id`. Each occurrence needs its own
+    /// tool message immediately after it, or strict providers reject the whole
+    /// request ("insufficient tool messages following tool_calls message").
+    #[test]
+    fn a_repeated_tool_call_id_gets_its_own_result() {
+        let original = vec![
+            assistant_with_calls(&[("call-1", "bash")]),
+            tool_result("call-1", "bash"),
+            assistant_with_calls(&[("call-1", "bash")]),
+        ];
+        let converted = convert_to_llm(original);
+        let shape: Vec<&str> = converted
+            .iter()
+            .map(|message| match message {
+                Message::Assistant(_) => "assistant",
+                Message::ToolResult(_) => "tool",
+                Message::User(_) => "user",
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec!["assistant", "tool", "assistant", "tool"],
+            "{shape:?}"
+        );
     }
 
     #[test]

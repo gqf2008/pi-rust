@@ -3335,7 +3335,9 @@ impl AgentHarness {
             let is_dangling_tools = msg.contains("tool messages following tool_calls")
                 || msg.contains("must be followed by tool messages");
             if is_dangling_tools {
-                tracing::warn!("dangling tool call rejected by the provider; repairing and retrying");
+                tracing::warn!(
+                    "dangling tool call rejected by the provider; repairing and retrying"
+                );
                 let _ = self.repair_dangling_tool_calls().await?;
                 let retry_window = StartingGuard::try_new(self)?;
                 return self
