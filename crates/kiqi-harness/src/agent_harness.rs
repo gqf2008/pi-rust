@@ -3328,6 +3328,20 @@ impl AgentHarness {
                     .run_core_with_entry(normalized, false, retry_window)
                     .await;
             }
+            // A provider rejected the transcript because a `tool_calls` message
+            // has no matching result after it (a repeated tool-call id mid-run,
+            // or an abort that predates the pre-run repair). Heal and retry
+            // once instead of surfacing a dead-end 400 to the user.
+            let is_dangling_tools = msg.contains("tool messages following tool_calls")
+                || msg.contains("must be followed by tool messages");
+            if is_dangling_tools {
+                tracing::warn!("dangling tool call rejected by the provider; repairing and retrying");
+                let _ = self.repair_dangling_tool_calls().await?;
+                let retry_window = StartingGuard::try_new(self)?;
+                return self
+                    .run_core_with_entry(normalized, false, retry_window)
+                    .await;
+            }
         }
         Ok(result)
     }
