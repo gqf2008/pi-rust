@@ -3196,6 +3196,21 @@ pub async fn interactive_tui(
                 }
             }
             Some(TuiMessage::GoalContinue(prompt)) => {
+                // `AgentEnd` is emitted just before the run's future releases
+                // its lane operation, so an immediate continuation can be
+                // refused with "already has an active run operation". Wait
+                // briefly for the lane to actually be free.
+                for _ in 0..20 {
+                    let busy = lane
+                        .snapshot()
+                        .await
+                        .map(|snapshot| snapshot.active.is_some())
+                        .unwrap_or(false);
+                    if !busy {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
                 // Same user-priority rule as a signal wake: a queued user
                 // message is the next turn; the goal stays active and will be
                 // continued after that run.
