@@ -624,6 +624,54 @@ mod tests {
         );
     }
 
+    /// Starting a child is not serialized: two agents are up at the same time.
+    /// This is the property the old wasm tool could not provide.
+    #[tokio::test]
+    async fn two_agents_run_at_the_same_time() {
+        let marker = std::env::temp_dir().join(format!(
+            "ki-bg-parallel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let script = scratch_script(
+            "parallel",
+            &format!(
+                "cat >/dev/null\necho started >> {}\nsleep 2\necho finished >> {}",
+                marker.display(),
+                marker.display()
+            ),
+        );
+        let agents = BackgroundAgents::new();
+        let recorder = Arc::new(Recorder::default());
+        agents.attach(recorder.clone());
+        let spec = || StartSpec {
+            task: "parallel task".into(),
+            timeout_secs: 30,
+            provider: None,
+            model: None,
+            program: Some(script.clone()),
+        };
+        agents.start(spec()).await.expect("first");
+        agents.start(spec()).await.expect("second");
+
+        // Both must be mid-flight: two "started" lines, no "finished" yet.
+        let mut both = false;
+        for _ in 0..80 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let body = std::fs::read_to_string(&marker).unwrap_or_default();
+            if body.lines().filter(|line| *line == "started").count() == 2 {
+                assert!(!body.contains("finished"), "{body}");
+                both = true;
+                break;
+            }
+        }
+        assert!(both, "both children must be running before either finishes");
+        let _ = std::fs::remove_file(&marker);
+    }
+
     #[tokio::test]
     async fn cancelling_a_background_agent_kills_its_child() {
         let script = scratch_script("cancel", "cat >/dev/null\nsleep 30");
