@@ -11,21 +11,6 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
-### Changed
-
-- **默认 TUI 缓冲改为 fullscreen（alt-screen）。** 右侧面板列（`running` / `todo` /
-  `llm` 以及扩展的 plan、节点与子代理 box）需要 ki 自己持有缓冲区；`regular`
-  使用终端原生滚动区，面板只能渲染在输入框上方。`--tui-mode regular` 仍可选择
-  原生滚动回看。
-
-### Added
-
-- **右栏可观测性。** `running` 面板列出每个在飞工具的命令/参数与最近几行输出；
-  `todo` 面板显示 `todo` 工具的任务列表；`llm` 面板显示当前请求的进行时间与流式
-  字数、上一次请求的耗时与输出 token、累计 ↑↓ 与 cache 读取；orchestrator 用
-  `ki -p --mode json` 启动子代理，节点 box 实时显示它在调用的工具、token 用量
-  与最终答案。
-
 ### Fixed
 
 - **`/goal <任务>` 立刻开始干活。** 之前该命令只写 `.ki/goals.json`，而自动续跑挂在

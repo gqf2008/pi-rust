@@ -169,18 +169,6 @@ pub(super) fn auto_send_step(
     }
 }
 
-/// One tool call in flight, as the rail displays it.
-pub(super) struct RunningTool {
-    pub(super) id: String,
-    pub(super) name: String,
-    pub(super) started: std::time::Instant,
-    /// Argument summary: a bash command line, or a short JSON snippet.
-    pub(super) detail: String,
-    /// Last few streamed output lines.
-    pub(super) tail: Vec<String>,
-    pub(super) last_update: std::time::Instant,
-}
-
 pub(super) struct TuiState {
     /// The in-flight streaming assistant message (cleared on finalize).
     /// `Arc`-shared with the [`TranscriptView`] the event drain renders through,
@@ -258,12 +246,7 @@ pub(super) struct TuiState {
     /// The host's own right-rail "running" panel is fed from this, so *any*
     /// long-running call is visible, not just the ones an extension chooses to
     /// publish (goal, dispatch, subagent).
-    pub(super) running_tool_calls: std::sync::Mutex<Vec<RunningTool>>,
-    /// The provider request in flight: when it started and how many characters
-    /// have streamed so far.
-    pub(super) llm_live: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
-    /// The last completed request: `(elapsed, output tokens)`.
-    pub(super) llm_last: std::sync::Mutex<Option<(std::time::Duration, u64)>>,
+    pub(super) running_tool_calls: std::sync::Mutex<Vec<(String, String, std::time::Instant)>>,
     /// Cumulative LLM usage for this session: `(turns, input, output,
     /// cache_read)`. Mirrors what the footer renders, and is what the rail's
     /// `model` panel shows at a glance.
@@ -1428,94 +1411,26 @@ impl TuiState {
 
     /// Record a tool call that just started; duplicates are ignored so a
     /// retried start cannot show the same call twice.
-    pub(super) fn tool_started(&self, id: &str, name: &str, detail: String) {
+    pub(super) fn tool_started(&self, id: &str, name: &str) {
         let mut running = self.running_tool_calls.lock().unwrap();
-        if running.iter().any(|tool| tool.id == id) {
+        if running.iter().any(|(call_id, _, _)| call_id == id) {
             return;
         }
-        running.push(RunningTool {
-            id: id.to_string(),
-            name: name.to_string(),
-            started: std::time::Instant::now(),
-            detail,
-            tail: Vec::new(),
-            last_update: std::time::Instant::now(),
-        });
-    }
-
-    /// One streamed partial line of a running call, throttled so a chatty tool
-    /// cannot force a repaint per chunk.
-    pub(super) fn tool_output(&self, id: &str, line: &str) {
-        let mut running = self.running_tool_calls.lock().unwrap();
-        let Some(tool) = running.iter_mut().find(|tool| tool.id == id) else {
-            return;
-        };
-        let line = line.trim_end();
-        if line.is_empty() || tool.last_update.elapsed() < std::time::Duration::from_millis(500) {
-            return;
-        }
-        tool.last_update = std::time::Instant::now();
-        let line: String = line.chars().take(160).collect();
-        if tool.tail.last() == Some(&line) {
-            return;
-        }
-        tool.tail.push(line);
-        while tool.tail.len() > 3 {
-            tool.tail.remove(0);
-        }
+        running.push((id.to_string(), name.to_string(), std::time::Instant::now()));
     }
 
     pub(super) fn tool_finished(&self, id: &str) {
         let mut running = self.running_tool_calls.lock().unwrap();
-        running.retain(|tool| tool.id != id);
+        running.retain(|(call_id, _, _)| call_id != id);
     }
 
-    /// Every call still in flight, oldest first: `(name, elapsed_seconds,
-    /// detail, tail)`.
-    pub(super) fn running_snapshot(&self) -> Vec<(String, u64, String, Vec<String>)> {
+    /// `(name, elapsed_seconds)` for every call still in flight, oldest first.
+    pub(super) fn running_snapshot(&self) -> Vec<(String, u64)> {
         let running = self.running_tool_calls.lock().unwrap();
         running
             .iter()
-            .map(|tool| {
-                (
-                    tool.name.clone(),
-                    tool.started.elapsed().as_secs(),
-                    tool.detail.clone(),
-                    tool.tail.clone(),
-                )
-            })
+            .map(|(_, name, started)| (name.clone(), started.elapsed().as_secs()))
             .collect()
-    }
-
-    pub(super) fn llm_request_started(&self) {
-        *self.llm_live.lock().unwrap() = Some((std::time::Instant::now(), 0));
-    }
-
-    pub(super) fn llm_streamed(&self, chars: u64) {
-        if let Some((_, streamed)) = self.llm_live.lock().unwrap().as_mut() {
-            *streamed = chars;
-        }
-    }
-
-    pub(super) fn llm_request_finished(&self, output_tokens: u64) {
-        let mut live = self.llm_live.lock().unwrap();
-        if let Some((started, _)) = live.take() {
-            *self.llm_last.lock().unwrap() = Some((started.elapsed(), output_tokens));
-        }
-    }
-
-    pub(super) fn llm_live_snapshot(&self) -> Option<(u64, u64)> {
-        self.llm_live
-            .lock()
-            .unwrap()
-            .map(|(started, chars)| (started.elapsed().as_secs(), chars))
-    }
-
-    pub(super) fn llm_last_snapshot(&self) -> Option<(u64, u64)> {
-        self.llm_last
-            .lock()
-            .unwrap()
-            .map(|(elapsed, tokens)| (elapsed.as_millis() as u64, tokens))
     }
 
     pub(super) fn extension_dialog_open(&self) -> bool {
