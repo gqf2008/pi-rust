@@ -7,99 +7,6 @@ use kiqi_tui::{OverlayAnchor, OverlayOptions};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Session-level LLM usage: turns, tokens and cache reads.
-const MODEL_ID: &str = "ki.model";
-const MODEL_ORDER: i32 = 7;
-
-pub(super) fn sync_model(
-    mailbox: &kiqi_host::ExtensionStatusMailbox,
-    model: &str,
-    usage: (u64, u64, u64, u64),
-    shown: &mut bool,
-) {
-    let (turns, input, output, cache_read) = usage;
-    if turns == 0 {
-        if *shown {
-            let _ = mailbox.component(0, serde_json::json!({ "op": "remove", "id": MODEL_ID }));
-            *shown = false;
-        }
-        return;
-    }
-    *shown = true;
-    let _ = mailbox.component(
-        0,
-        serde_json::json!({
-            "op": "register",
-            "id": MODEL_ID,
-            "type": "text",
-            "slot": "sidebar.right",
-            "order": MODEL_ORDER,
-            "width": RUNNING_WIDTH,
-            "maxHeight": 6,
-            "border": true,
-            "minScreenWidth": 80,
-        }),
-    );
-    let compact = |value: u64| match value {
-        0..=999 => format!("{value}"),
-        1_000..=999_999 => format!("{:.1}k", value as f64 / 1_000.0),
-        _ => format!("{:.1}M", value as f64 / 1_000_000.0),
-    };
-    let text = format!(
-        "model {model}\nturns {turns}\n↑{} ↓{}\ncache R{}",
-        compact(input),
-        compact(output),
-        compact(cache_read)
-    );
-    let _ = mailbox.component(
-        0,
-        serde_json::json!({ "op": "update", "id": MODEL_ID, "title": "llm", "text": text }),
-    );
-}
-
-/// The `todo` tool's list, above the extension panels and below `running`.
-const TODO_ID: &str = "ki.todo";
-const TODO_ORDER: i32 = 5;
-const TODO_HEIGHT: usize = 16;
-
-pub(super) fn sync_todo(
-    mailbox: &kiqi_host::ExtensionStatusMailbox,
-    lines: &[String],
-    shown: &mut bool,
-) {
-    if lines.is_empty() {
-        if *shown {
-            let _ = mailbox.component(0, serde_json::json!({ "op": "remove", "id": TODO_ID }));
-            *shown = false;
-        }
-        return;
-    }
-    *shown = true;
-    let _ = mailbox.component(
-        0,
-        serde_json::json!({
-            "op": "register",
-            "id": TODO_ID,
-            "type": "text",
-            "slot": "sidebar.right",
-            "order": TODO_ORDER,
-            "width": RUNNING_WIDTH,
-            "maxHeight": TODO_HEIGHT,
-            "border": true,
-            "minScreenWidth": 80,
-        }),
-    );
-    let _ = mailbox.component(
-        0,
-        serde_json::json!({
-            "op": "update",
-            "id": TODO_ID,
-            "title": "todo",
-            "text": lines.join("\n"),
-        }),
-    );
-}
-
 /// The host's own "running" panel: every tool call in flight, not just the
 /// ones an extension publishes. Fed from `TuiState::running_snapshot`, so a
 /// long `bash`, an MCP call, a `subagent` or a `dispatch` wave all show up
@@ -561,38 +468,6 @@ mod tests {
     }
 
     use super::*;
-    #[test]
-    fn model_and_todo_panels_publish_and_remove_themselves() {
-        let mailbox = kiqi_host::ExtensionStatusMailbox::new();
-        let mut model_shown = false;
-        sync_model(
-            &mailbox,
-            "deepseek/flash",
-            (2, 1_200, 345, 8_000),
-            &mut model_shown,
-        );
-        let llm = mailbox
-            .panels()
-            .into_values()
-            .find(|panel| panel.title == "llm")
-            .expect("llm panel published");
-        assert!(
-            llm.lines.iter().any(|line| line.contains("↑1.2k")),
-            "{:?}",
-            llm.lines
-        );
-        assert!(llm.lines.iter().any(|line| line.contains("deepseek/flash")));
-
-        let mut todo_shown = false;
-        sync_todo(&mailbox, &["✔ ship it".to_string()], &mut todo_shown);
-        assert!(mailbox.panels().values().any(|panel| panel.title == "todo"));
-        sync_todo(&mailbox, &[], &mut todo_shown);
-        assert!(
-            !mailbox.panels().values().any(|panel| panel.title == "todo"),
-            "an empty list removes the panel"
-        );
-    }
-
     #[test]
     fn footer_monitor_follows_usage_row_and_hides_without_taking_sidebar_space() {
         let mailbox = kiqi_host::ExtensionStatusMailbox::new();
