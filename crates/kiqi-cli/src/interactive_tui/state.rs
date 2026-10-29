@@ -287,18 +287,19 @@ pub(super) struct TuiState {
     /// `model` panel shows at a glance.
     pub(super) llm_usage: std::sync::Mutex<(u64, u64, u64, u64)>,
     /// Live subagent rows, fed by `{"ki":"node",…}` progress events from the
-    /// orchestrator. The work view renders one pane per row.
+    /// orchestrator. Each row is its own box in the work view.
     pub(super) nodes: std::sync::Mutex<Vec<NodeRow>>,
-    /// Whether the work view is showing (Ctrl+T).
-    /// Work view state; **on by default** (the user toggles it off with `/work`).
+    /// Whether the work view is showing; **on by default** (`/work` toggles it).
     pub(super) work_view: std::sync::atomic::AtomicBool,
     /// Where the user dragged the work box: `(offset_x, offset_y)` from its
     /// anchor (top-right). Persisted for the session.
     pub(super) work_offset: std::sync::Mutex<(i32, i32)>,
-    /// Size of the last rendered work box: `(width, height)` in cells.
-    pub(super) work_box_size: std::sync::Mutex<(u16, u16)>,
     /// An in-flight drag: mouse start cell and the offset at that moment.
     pub(super) work_drag: std::sync::Mutex<Option<((u16, u16), (i32, i32))>>,
+    /// Per-subagent box offsets — every subagent is its own draggable box.
+    pub(super) work_node_offsets: std::sync::Mutex<std::collections::HashMap<String, (i32, i32)>>,
+    /// An in-flight subagent-box drag.
+    pub(super) work_node_drag: std::sync::Mutex<Option<(String, (u16, u16), (i32, i32))>>,
     /// The `todo` tool's current list, as rail lines (`✔/▶/·` + text).
     ///
     /// Rebuilt from the tool result's `details`, which is where the extension
@@ -1449,11 +1450,6 @@ impl TuiState {
         *self.llm_usage.lock().unwrap()
     }
 
-    /// Replace the whole usage counter (restored sessions seed it from history).
-    pub(super) fn set_llm_usage(&self, usage: (u64, u64, u64, u64)) {
-        *self.llm_usage.lock().unwrap() = usage;
-    }
-
     pub(super) fn upsert_node(&self, row: NodeRow) {
         let mut nodes = self.nodes.lock().unwrap();
         match nodes.iter_mut().find(|node| node.id == row.id) {
@@ -1503,38 +1499,25 @@ impl TuiState {
         *self.work_offset.lock().unwrap() = offset;
     }
 
-    pub(super) fn set_work_box_size(&self, size: (u16, u16)) {
-        *self.work_box_size.lock().unwrap() = size;
-    }
-
-    pub(super) fn work_box_size(&self) -> (u16, u16) {
-        *self.work_box_size.lock().unwrap()
-    }
-
-    /// Start dragging if `(column, row)` is inside the box. Returns whether the
-    /// press was captured.
-    pub(super) fn begin_work_drag(&self, column: u16, row: u16, screen_width: u16) -> bool {
-        let (width, height) = self.work_box_size();
-        if width == 0 || height == 0 {
+    /// Start dragging the work box: the painted rectangle says where it really
+    /// is (passive overlays get nudged apart), the cursor anchors the drag.
+    pub(super) fn begin_work_drag_at(
+        &self,
+        rect: (u16, u16, u16, u16),
+        start: (u16, u16),
+        screen_width: u16,
+    ) -> bool {
+        if !cell_inside(rect, start) {
             return false;
         }
-        let (offset_x, offset_y) = self.work_offset();
-        let x = screen_width as i32 - 1 - width as i32 + offset_x;
-        let y = 1 + offset_y;
-        let inside = (column as i32) >= x
-            && (column as i32) < x + width as i32
-            && (row as i32) >= y
-            && (row as i32) < y + height as i32;
-        if inside {
-            *self.work_drag.lock().unwrap() = Some(((column, row), (offset_x, offset_y)));
-        }
-        inside
+        *self.work_drag.lock().unwrap() = Some((start, offset_for_rect(rect, screen_width)));
+        true
     }
 
     /// Move the box with the pointer. Returns true when a drag is active (the
     /// caller then repaints).
     pub(super) fn drag_work_box(&self, column: u16, row: u16) -> bool {
-        let mut drag = self.work_drag.lock().unwrap();
+        let drag = self.work_drag.lock().unwrap();
         let Some(((start_col, start_row), (base_x, base_y))) = *drag else {
             return false;
         };
@@ -1549,6 +1532,54 @@ impl TuiState {
 
     pub(super) fn end_work_drag(&self) {
         *self.work_drag.lock().unwrap() = None;
+    }
+
+    /// Where the user dragged a subagent box, if they have dragged it at all.
+    pub(super) fn node_offset(&self, id: &str) -> Option<(i32, i32)> {
+        self.work_node_offsets.lock().unwrap().get(id).copied()
+    }
+
+    pub(super) fn set_node_offset(&self, id: &str, offset: (i32, i32)) {
+        self.work_node_offsets
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), offset);
+    }
+
+    /// Start dragging a subagent box, given its painted rectangle.
+    pub(super) fn begin_node_drag_at(
+        &self,
+        id: &str,
+        rect: (u16, u16, u16, u16),
+        start: (u16, u16),
+        screen_width: u16,
+    ) -> bool {
+        if !cell_inside(rect, start) {
+            return false;
+        }
+        *self.work_node_drag.lock().unwrap() =
+            Some((id.to_string(), start, offset_for_rect(rect, screen_width)));
+        true
+    }
+
+    pub(super) fn drag_node_box(&self, column: u16, row: u16) -> bool {
+        let drag = self.work_node_drag.lock().unwrap();
+        // The base stays the offset recorded at press: every motion event is a
+        // delta from the press cell, so moving the base would accumulate.
+        let Some((id, (start_col, start_row), (base_x, base_y))) = drag.clone() else {
+            return false;
+        };
+        drop(drag);
+        let next = (
+            base_x + column as i32 - start_col as i32,
+            base_y + row as i32 - start_row as i32,
+        );
+        self.set_node_offset(&id, next);
+        true
+    }
+
+    pub(super) fn end_node_drag(&self) {
+        *self.work_node_drag.lock().unwrap() = None;
     }
 
     pub(super) fn work_view_enabled(&self) -> bool {
@@ -1842,4 +1873,27 @@ pub(super) fn todo_lines_from_details(details: &serde_json::Value) -> Option<Vec
             })
             .collect(),
     )
+}
+
+/// Whether a screen cell `(column, row)` falls inside a painted rectangle.
+fn cell_inside(rect: (u16, u16, u16, u16), cell: (u16, u16)) -> bool {
+    let (x, y, width, height) = rect;
+    let (column, row) = cell;
+    column >= x
+        && (column as u32) < x as u32 + width as u32
+        && row >= y
+        && (row as u32) < y as u32 + height as u32
+}
+
+/// The offset that recreates `rect` for an overlay anchored top-right with a
+/// one-column right margin and a one-row top margin.
+///
+/// The renderer resolves `x = screen_width - 1 - width + offset_x` and
+/// `y = margin_top + offset_y`, then nudges `y` to keep passive overlays apart.
+/// Inverting both keeps a drag anchored where the box was actually painted
+/// instead of snapping back to its requested position.
+fn offset_for_rect(rect: (u16, u16, u16, u16), screen_width: u16) -> (i32, i32) {
+    let (x, y, width, _height) = rect;
+    let free_x = screen_width as i32 - 1 - width as i32;
+    (x as i32 - free_x, y as i32 - 1)
 }

@@ -1367,6 +1367,10 @@ impl OverlayHandle for ManagedOverlayHandle {
     fn is_focused(&self) -> bool {
         self.focused.lock().map(|focused| *focused).unwrap_or(false)
     }
+
+    fn rect(&self) -> Option<(u16, u16, u16, u16)> {
+        self.handle.rect()
+    }
 }
 
 /// Shared terminal proxy exposed through [`TUI::terminal`]. The TUI owns the

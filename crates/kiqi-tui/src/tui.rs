@@ -92,6 +92,13 @@ pub trait OverlayHandle: Send + Sync {
 
     /// Check if this overlay has focus.
     fn is_focused(&self) -> bool;
+
+    /// Where the overlay was last painted, `(x, y, width, height)` in screen
+    /// cells. Passive overlays are nudged to avoid each other at paint time, so
+    /// this is the only reliable source for hit-testing a drawn box.
+    fn rect(&self) -> Option<(u16, u16, u16, u16)> {
+        None
+    }
 }
 
 /// Options for stopping the TUI.

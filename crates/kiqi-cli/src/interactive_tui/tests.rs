@@ -299,8 +299,9 @@ fn test_tui_state() -> Arc<TuiState> {
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
         work_offset: std::sync::Mutex::new((0, 0)),
-        work_box_size: std::sync::Mutex::new((0, 0)),
         work_drag: std::sync::Mutex::new(None),
+        work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
+        work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -1387,8 +1388,9 @@ fn test_agent_event_mapping_creates_assistant_and_tool() {
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
         work_offset: std::sync::Mutex::new((0, 0)),
-        work_box_size: std::sync::Mutex::new((0, 0)),
         work_drag: std::sync::Mutex::new(None),
+        work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
+        work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -1876,8 +1878,9 @@ fn test_autocomplete_slash_suggestions_render() {
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
         work_offset: std::sync::Mutex::new((0, 0)),
-        work_box_size: std::sync::Mutex::new((0, 0)),
         work_drag: std::sync::Mutex::new(None),
+        work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
+        work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -1975,8 +1978,9 @@ fn test_select_list_swap_restores_editor() {
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
         work_offset: std::sync::Mutex::new((0, 0)),
-        work_box_size: std::sync::Mutex::new((0, 0)),
         work_drag: std::sync::Mutex::new(None),
+        work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
+        work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -2077,8 +2081,9 @@ fn test_message_history_browse_restores_draft() {
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
         work_offset: std::sync::Mutex::new((0, 0)),
-        work_box_size: std::sync::Mutex::new((0, 0)),
         work_drag: std::sync::Mutex::new(None),
+        work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
+        work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -2182,8 +2187,9 @@ fn test_accept_top_suggestion_replaces_prefix() {
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
         work_offset: std::sync::Mutex::new((0, 0)),
-        work_box_size: std::sync::Mutex::new((0, 0)),
         work_drag: std::sync::Mutex::new(None),
+        work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
+        work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -2273,8 +2279,9 @@ fn autocomplete_test_state(max_visible: usize) -> Arc<TuiState> {
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
         work_offset: std::sync::Mutex::new((0, 0)),
-        work_box_size: std::sync::Mutex::new((0, 0)),
         work_drag: std::sync::Mutex::new(None),
+        work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
+        work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -3075,20 +3082,17 @@ fn goal_driven_marker_is_scoped_to_its_own_run() {
     state.set_status(RunStatus::Idle);
 }
 
-/// The work view is on by default, renders nothing while idle, and shows one
-/// pane per subagent (task name + event stream) once work exists.
+/// The work view is on by default. The summary box stays out of the way while
+/// idle; each subagent is its own draggable box showing task + events.
 #[test]
-fn work_view_is_on_by_default_and_renders_task_and_events() {
+fn work_view_defaults_on_and_each_subagent_gets_a_box() {
     let state = test_tui_state();
     assert!(state.work_view_enabled(), "on unless the user turns it off");
-    let view = super::work_view::WorkView {
+    let summary = super::work_view::WorkView {
         state: state.clone(),
         inline: true,
     };
-    assert!(
-        view.render(80).is_empty(),
-        "idle work view stays out of the way"
-    );
+    assert!(summary.render(80).is_empty(), "idle summary stays hidden");
 
     state.upsert_node(super::NodeRow {
         id: "a".into(),
@@ -3100,33 +3104,88 @@ fn work_view_is_on_by_default_and_renders_task_and_events() {
         task: Some("ship the release".into()),
         events: vec!["▶ bash".into(), "✔ bash".into(), "▶ edit".into()],
     });
-    let rows = view.render(80);
-    let text = rows.join("\n");
-    assert!(text.contains("WORK · /work to close"), "{text}");
+    let pane = super::work_view::NodeBox {
+        state: state.clone(),
+        id: "a".into(),
+    };
+    let text = pane.render(80).join("\n");
     assert!(text.contains("a · running 1m05s"), "{text}");
     assert!(text.contains("task    ship the release"), "{text}");
     assert!(text.contains("▶ edit"), "{text}");
     assert!(text.contains('┌'), "{text}");
+    // The overlay summary is only the non-subagent part; each box carries its
+    // own task and events.
+    let overlay = super::work_view::WorkView {
+        state: state.clone(),
+        inline: false,
+    };
+    assert!(
+        overlay
+            .render(80)
+            .iter()
+            .all(|row| !row.contains("ship the release")),
+        "the overlay summary must not repeat subagent panes"
+    );
+    assert!(
+        overlay.render(80).is_empty(),
+        "only subagents are running, so the overlay summary stays hidden"
+    );
+    // `regular` mode has no compositing layer, so the dock lists one compact
+    // line per subagent instead of drawing boxes.
+    let dock = summary.render(80).join("\n");
+    assert!(dock.contains("agents"), "{dock}");
+    assert!(
+        dock.contains("a · running 1m05s · ship the release"),
+        "{dock}"
+    );
 
     state.toggle_work_view();
-    assert!(view.render(80).is_empty(), "toggled off");
+    assert!(!state.work_view_enabled(), "toggled off");
 }
 
-/// Dragging: a press inside the box starts a drag, motion moves it by the
-/// pointer delta, release ends it; a press outside is ignored.
+/// Dragging: a press inside the painted box starts a drag, motion moves it by
+/// the pointer delta, release ends it; a press outside is ignored.
 #[test]
 fn work_box_can_be_dragged_by_its_body() {
     let state = test_tui_state();
-    // 100 columns wide screen, box 40x6 anchored top-right (x = 59..99, y = 1..7).
-    state.set_work_box_size((40, 6));
+    // 100 columns, box 40x6 anchored top-right at its default slot: x = 59, y = 1.
+    let rect = (59, 1, 40, 6);
     state.set_work_offset((0, 0));
 
-    assert!(!state.begin_work_drag(10, 3, 100), "outside the box");
-    assert!(state.begin_work_drag(70, 3, 100), "inside the box");
+    assert!(
+        !state.begin_work_drag_at(rect, (10, 3), 100),
+        "outside the box"
+    );
+    assert!(
+        state.begin_work_drag_at(rect, (70, 3), 100),
+        "inside the box"
+    );
 
     assert!(state.drag_work_box(60, 8), "drag is active");
     assert_eq!(state.work_offset(), (-10, 5), "moved by the pointer delta");
 
     state.end_work_drag();
     assert!(!state.drag_work_box(50, 9), "a release ends the drag");
+}
+
+/// Each subagent box moves independently by its own pointer delta.
+#[test]
+fn each_subagent_box_drags_on_its_own() {
+    let state = test_tui_state();
+    state.set_node_offset("a", (0, 12));
+    state.set_node_offset("b", (0, 20));
+
+    // Painted rectangles: `a` sits at y 12..18, `b` at y 20..27, both right-aligned.
+    let a = (61, 12, 68, 7);
+    assert!(state.begin_node_drag_at("a", a, (70, 14), 130));
+
+    // Successive motion events must not accumulate: each is relative to the press.
+    assert!(state.drag_node_box(80, 18));
+    assert_eq!(state.node_offset("a"), Some((10, 15)));
+    assert!(state.drag_node_box(75, 20));
+    assert_eq!(state.node_offset("a"), Some((5, 17)));
+
+    assert_eq!(state.node_offset("b"), Some((0, 20)), "`b` is untouched");
+    state.end_node_drag();
+    assert!(!state.drag_node_box(10, 10), "a release ends the drag");
 }

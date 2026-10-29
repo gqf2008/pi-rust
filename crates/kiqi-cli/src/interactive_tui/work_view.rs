@@ -1,6 +1,6 @@
 //! The work view: what the agents are doing, over the transcript.
 //!
-//! Ctrl+T overlays this on the output area (the input stays visible). It is not
+//! `/work` overlays this on the output area (the input stays visible). It is not
 //! a second transcript: the point is to *watch work* — the todo list, one pane
 //! per subagent with its state, elapsed time, current tool and last words, and
 //! a summary line. With nothing running it says so rather than showing empty
@@ -74,22 +74,23 @@ fn human_ms(ms: u64) -> String {
 }
 
 /// A bordered box around `rows`, `width` columns wide (including borders).
+/// Every row is exactly `width` cells so the frame lines up.
 fn boxed(title: &str, rows: &[String], width: usize) -> Vec<String> {
-    let inner = width.saturating_sub(4);
-    let title = kiqi_tui::utils::truncate_to_width(title, width.saturating_sub(4), "…");
-    let mut out = Vec::new();
+    let width = width.max(12);
+    let inner = width - 4;
+    let title = kiqi_tui::utils::truncate_to_width(title, inner, "…");
+    let title_width = kiqi_tui::ansi::visible_width(&title);
+    let mut out = Vec::with_capacity(rows.len() + 2);
     out.push(format!(
-        "┌─ {title} {}",
-        "─".repeat(width.saturating_sub(title.len() + 4).max(1))
+        "┌─ {title} {}┐",
+        "─".repeat(width.saturating_sub(title_width + 5))
     ));
     for row in rows {
         let row = kiqi_tui::utils::truncate_to_width(row, inner, "…");
-        out.push(format!(
-            "│ {row}{}│",
-            " ".repeat(inner.saturating_sub(row.chars().count()))
-        ));
+        let pad = inner.saturating_sub(kiqi_tui::ansi::visible_width(&row));
+        out.push(format!("│ {row}{} │", " ".repeat(pad)));
     }
-    out.push(format!("└{}┘", "─".repeat(width.saturating_sub(2))));
+    out.push(format!("└{}┘", "─".repeat(width - 2)));
     out
 }
 
@@ -148,81 +149,114 @@ impl Component for WorkView {
             lines.push(String::new());
         }
 
-        let nodes = self.state.node_snapshot();
         let running = self.state.running_snapshot();
-        // Nothing to observe: show nothing at all rather than a permanent
-        // "idle" box (the view is on by default).
-        if nodes.is_empty() && running.is_empty() && todos.is_empty() {
+        let streaming = self.state.llm_live_snapshot();
+        // Subagents are their own draggable boxes in fullscreen (`NodeBox`);
+        // the dock used by `--tui-mode regular` has no compositing layer, so it
+        // lists them as one compact line each instead. The box stays out of the
+        // way when nothing is happening: a finished turn is not "happening".
+        let dock_nodes = if self.inline {
+            self.state.node_snapshot()
+        } else {
+            Vec::new()
+        };
+        if running.is_empty() && todos.is_empty() && streaming.is_none() && dock_nodes.is_empty() {
             return Vec::new();
         }
-        if nodes.is_empty() && running.is_empty() {
-            lines.push(
-                colors
-                    .muted
-                    .fg("no background work right now · /work closes this view"),
-            );
-        } else {
-            let columns = if width >= 140 {
-                3
-            } else if width >= 80 {
-                2
-            } else {
-                1
-            };
-            let gap = 2;
-            let pane_width = (width.saturating_sub(gap * (columns - 1))) / columns;
-            for chunk in nodes.chunks(columns) {
-                let mut panes: Vec<Vec<String>> = Vec::new();
-                for node in chunk {
-                    let title =
-                        format!("{} · {} {}", node.id, node.state, human_ms(node.elapsed_ms));
-                    panes.push(boxed(
-                        &title,
-                        &pane_rows(&self.state, node, pane_width),
-                        pane_width,
-                    ));
+        if !running.is_empty() {
+            lines.push(colors.accent.fg("running"));
+            for (name, secs, detail, tail) in running {
+                lines.push(format!("  ▶ {name} {secs}s  {detail}"));
+                for line in tail {
+                    lines.push(format!("    │ {line}"));
                 }
-                let height = panes.iter().map(Vec::len).max().unwrap_or(0);
-                for row in 0..height {
-                    let mut line = String::new();
-                    for (index, pane) in panes.iter().enumerate() {
-                        if index > 0 {
-                            line.push_str(&" ".repeat(gap));
-                        }
-                        line.push_str(pane.get(row).map(String::as_str).unwrap_or(""));
-                    }
-                    lines.push(line);
-                }
+            }
+        }
+        if !dock_nodes.is_empty() {
+            if !lines.is_empty() {
                 lines.push(String::new());
             }
-            if nodes.is_empty() {
-                // No subagents: still show what the host sees in flight.
-                lines.push(colors.accent.fg("running"));
-                for (name, secs, detail, tail) in running {
-                    lines.push(format!("  ▶ {name} {secs}s  {detail}"));
-                    for line in tail {
-                        lines.push(format!("    │ {line}"));
-                    }
+            lines.push(colors.accent.fg("agents"));
+            for node in &dock_nodes {
+                let mut line = format!(
+                    "  {} · {} {}",
+                    node.id,
+                    node.state,
+                    human_ms(node.elapsed_ms)
+                );
+                if let Some(task) = node
+                    .task
+                    .as_deref()
+                    .and_then(|task| task.lines().next())
+                    .filter(|task| !task.is_empty())
+                {
+                    line.push_str(&format!(" · {task}"));
+                } else if let Some(tool) = node.tool.as_deref() {
+                    line.push_str(&format!(" · ▶ {tool}"));
                 }
+                lines.push(line);
             }
         }
-
         let (turns, input, output, _cache) = self.state.llm_usage_snapshot();
-        if turns > 0 {
+        if turns > 0 || streaming.is_some() {
             lines.push(String::new());
-            lines.push(colors.muted.fg(&format!(
-                "llm {} · turns {turns} · ↑{input} ↓{output}",
-                self.state.current_model_id()
-            )));
+            if let Some((secs, chars)) = streaming {
+                lines.push(
+                    colors
+                        .accent
+                        .fg(&format!("llm streaming {secs}s · {chars} chars")),
+                );
+            }
+            if turns > 0 {
+                lines.push(colors.muted.fg(&format!(
+                    "llm {} · turns {turns} · ↑{input} ↓{output}",
+                    self.state.current_model_id()
+                )));
+            }
+            if let Some((ms, tokens)) = self.state.llm_last_snapshot() {
+                lines.push(colors.muted.fg(&format!(
+                    "last turn {:.1}s · ↓{tokens} tok",
+                    ms as f64 / 1000.0
+                )));
+            }
         }
-        let rows = frame(&lines, width);
-        if let Some(row) = rows.first() {
-            self.state
-                .set_work_box_size((kiqi_tui::ansi::visible_width(row) as u16, rows.len() as u16));
-        }
-        rows
+        frame(&lines, width)
     }
 
+    fn invalidate(&self) {}
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// One subagent, as its own draggable box.
+pub(super) struct NodeBox {
+    pub state: Arc<TuiState>,
+    pub id: String,
+}
+
+impl Component for NodeBox {
+    fn render(&self, width: usize) -> Vec<String> {
+        let Some(node) = self
+            .state
+            .node_snapshot()
+            .into_iter()
+            .find(|node| node.id == self.id)
+        else {
+            return Vec::new();
+        };
+        // A pane per subagent, not a full-width band: several agents share the
+        // right edge, so the box stays narrow enough to stack.
+        const NODE_MIN_WIDTH: usize = 48;
+        const NODE_MAX_WIDTH: usize = 68;
+        let width = width.clamp(NODE_MIN_WIDTH, NODE_MAX_WIDTH);
+        let rows = pane_rows(&self.state, &node, width.saturating_sub(4));
+        boxed(
+            &format!("{} · {} {}", node.id, node.state, human_ms(node.elapsed_ms)),
+            &rows,
+            width,
+        )
+    }
     fn invalidate(&self) {}
     fn as_any(&self) -> &dyn std::any::Any {
         self

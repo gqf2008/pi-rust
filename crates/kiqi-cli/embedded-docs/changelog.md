@@ -13,10 +13,14 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
-- **工作视图（`/work`）。** 按需把回显区换成「agent 正在做什么」：`todo` 列表与每个
-  子代理一个 pane（状态、已用时间/预算进度条、当前工具、LLM 流式文本）。默认关闭，
-  `/work` 打开或关闭。子代理用 `ki -p --mode json` 运行，宿主逐行解析
-  `tool_execution_*` 与 `message_update` 事件；没有后台工作时显示一行提示，不占屏。
+- **工作视图（`/work`），默认打开。** 在回显区右上角叠加「agent 正在做什么」：一个汇总
+  盒子（`todo` 列表、正在运行的工具、LLM 回合与 token，流式时显示已接收字符数）和
+  **每个子代理一个独立盒子**（任务名、状态、已用时间/预算进度条、当前工具、最近事件）。
+  盒子靠右对齐、自上而下排列，按住正文即可用鼠标拖动，放下位置即最终位置；两者都没
+  有内容时整个视图不占屏。`/work` 打开或关闭，Esc 中断后随 run 一起消失。盒子只在
+  `--tui-mode fullscreen`（默认）下存在，`regular` 模式改为在工作块里给每个子代理列
+  一行。子代理用 `ki -p --mode json` 运行，宿主逐行解析 `tool_execution_*` /
+  `message_update` / `result` 事件。
 
 ### Fixed
 
@@ -29,13 +33,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   表现为「目标莫名停住」。现在会在对话里说明已到上限，并提示 `/goal resume` 继续或
   `/goal stop` 结束旧目标再开新的（新目标有自己的预算）。
 
-### Added
-
-- **`plan` / `dispatch` 在右侧栏可见。** `kiqi-orchestrator` 通过 `ui.component`
-  向宿主的 `sidebar.right` 槽位发布面板：一个任务列表（`✔/▶/·/✖/–` + 完成计数），
-  以及每个节点一个带边框的 box（状态、已用时长、子进程输出尾部 8 行，400ms 节流）；
-  `subagent` 单次调用同样有自己的 box。工具输出流另发 `▶ id` / `✔ id` 进度行。
-  没有交互 UI 时（headless、单测）宿主返回 `denied`，wave 行为不变。
+- **`plan` / `dispatch` 的进度变成节点行。** `kiqi-orchestrator` 以
+  `{"ki":"node","id","state","elapsedMs","budgetMs","tool","text","task","events"}`
+  上报每个节点（含 `subagent` 单次调用），宿主合并到同一行并画成工作视图里的盒子；
+  工具输出流另发 `▶ id` / `✔ id` 进度行。没有交互 UI 时（headless、单测）上报被忽略，
+  wave 行为不变。
 
 ## [0.4.5] - 2026-10-28
 

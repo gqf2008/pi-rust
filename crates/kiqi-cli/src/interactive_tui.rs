@@ -871,6 +871,41 @@ pub(crate) fn diagnostic_log(message: &str) {
     let _ = writeln!(file, "{secs} {message}");
 }
 
+/// Begin dragging the floating box under `(column, row)`.
+///
+/// Hit-testing uses each overlay's *painted* rectangle: passive overlays are
+/// nudged apart at paint time, so the requested offset is not where the box
+/// is. Subagent boxes are tried first (newest last, so the top one wins), then
+/// the work summary box.
+fn begin_box_drag(
+    state: &TuiState,
+    nodes: &std::sync::Mutex<
+        std::collections::HashMap<String, (i32, i32, Arc<dyn kiqi_tui::tui::OverlayHandle>)>,
+    >,
+    work: &std::sync::Mutex<Option<Arc<dyn kiqi_tui::tui::OverlayHandle>>>,
+    column: u16,
+    row: u16,
+    screen_width: u16,
+) -> bool {
+    for node in state.node_snapshot().iter().rev() {
+        let handle = nodes
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&node.id).map(|(_, _, handle)| handle.clone()));
+        let Some(rect) = handle.and_then(|handle| handle.rect()) else {
+            continue;
+        };
+        if state.begin_node_drag_at(&node.id, rect, (column, row), screen_width) {
+            return true;
+        }
+    }
+    let handle = work.lock().ok().and_then(|slot| slot.clone());
+    let Some(rect) = handle.and_then(|handle| handle.rect()) else {
+        return false;
+    };
+    state.begin_work_drag_at(rect, (column, row), screen_width)
+}
+
 pub async fn interactive_tui(
     // Borrow the session owner's `Arc` (not `&AgentHarness`): `/reload` passes
     // it straight to `reload_extension_resources`, which needs the strong handle
@@ -1221,8 +1256,9 @@ pub async fn interactive_tui(
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
         work_offset: std::sync::Mutex::new((0, 0)),
-        work_box_size: std::sync::Mutex::new((0, 0)),
         work_drag: std::sync::Mutex::new(None),
+        work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
+        work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(hide_thinking)),
@@ -1404,6 +1440,12 @@ pub async fn interactive_tui(
     // usable. `Percent` in overlay sizes is a 0..1 fraction.
     let work_overlay: Arc<std::sync::Mutex<Option<Arc<dyn kiqi_tui::tui::OverlayHandle>>>> =
         Arc::new(std::sync::Mutex::new(None));
+    // One overlay per subagent: each is an independent, draggable box.
+    let work_node_overlays: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, (i32, i32, Arc<dyn kiqi_tui::tui::OverlayHandle>)>,
+        >,
+    > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     tui.set_focus(Some(editor.clone()));
     editor.set_focused(true);
 
@@ -1677,6 +1719,7 @@ pub async fn interactive_tui(
     // `request_render` the spinner visibly freezes between events.
     let tui_tick = tui.clone();
     let work_overlay_tick = work_overlay.clone();
+    let work_node_overlays_tick = work_node_overlays.clone();
     let mut applied_work_offset: (i32, i32) = (0, 0);
     // Overlays are composited only by the alt screen; `regular` uses the dock.
     let page_overlays = matches!(args.tui_mode, crate::args::TuiMode::Fullscreen);
@@ -1759,6 +1802,78 @@ pub async fn interactive_tui(
                     }
                 }
             }
+            if page_overlays {
+                let want = state_tick.work_view_enabled();
+                let nodes = state_tick.node_snapshot();
+                // Boxes are user-positioned, so they are *not* passive: a drag
+                // lands exactly where it was released instead of being nudged
+                // by the anti-overlap pass. The default layout therefore has to
+                // place them apart itself: one row per subagent, right below
+                // the summary box, each below the previous one's painted
+                // height.
+                let work_bottom = work_overlay_tick
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().and_then(|handle| handle.rect()))
+                    .map(|(_, y, _, height)| y as i32 + height as i32)
+                    .unwrap_or(1);
+                let mut next_y = work_bottom.max(1);
+                let mut overlays = work_node_overlays_tick.lock().unwrap();
+                // Drop boxes whose node is gone (or whose view was closed).
+                overlays.retain(|id, entry| {
+                    let keep = want && nodes.iter().any(|node| &node.id == id);
+                    if !keep {
+                        entry.2.hide();
+                    }
+                    keep
+                });
+                if want {
+                    for node in nodes.iter() {
+                        let height = overlays
+                            .get(&node.id)
+                            .and_then(|(_, _, handle)| handle.rect())
+                            .map(|(_, _, _, height)| height as i32)
+                            .unwrap_or(8);
+                        let offset = state_tick.node_offset(&node.id).unwrap_or((0, next_y));
+                        next_y += height + 1;
+                        let stale = overlays
+                            .get(&node.id)
+                            .map(|(x, y, _)| (*x, *y))
+                            .is_some_and(|applied| applied != offset);
+                        if stale {
+                            if let Some((_, _, handle)) = overlays.remove(&node.id) {
+                                handle.hide();
+                            }
+                        }
+                        if !overlays.contains_key(&node.id) {
+                            let options = kiqi_tui::OverlayOptions {
+                                anchor: kiqi_tui::OverlayAnchor::TopRight,
+                                offset_x: offset.0,
+                                offset_y: offset.1,
+                                max_height: Some(kiqi_tui::tui::SizeValue::Percent(1.0)),
+                                // Not passive: `non_capturing` also opts the
+                                // overlay into the paint-time anti-overlap pass.
+                                non_capturing: false,
+                                margin: Some(kiqi_tui::tui::OverlayMargin {
+                                    top: 1,
+                                    right: 1,
+                                    bottom: 6,
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            };
+                            let handle = tui_tick.show_overlay(
+                                Arc::new(work_view::NodeBox {
+                                    state: state_tick.clone(),
+                                    id: node.id.clone(),
+                                }),
+                                Some(options),
+                            );
+                            overlays.insert(node.id.clone(), (offset.0, offset.1, handle));
+                        }
+                    }
+                }
+            }
             // Extension status (langfuse ✓ …, …) — cheap revision check, and the
             // only reason an idle session repaints its footer.
             let panels_changed = extension_panels.sync(tui_tick.as_ref(), &state_tick.ext_status);
@@ -1817,6 +1932,8 @@ pub async fn interactive_tui(
     let scroll_for_key = scroll_view.clone();
     let lane_for_key = lane.clone();
     let state_for_key = state.clone();
+    let work_overlay_for_key = work_overlay.clone();
+    let work_node_overlays_for_key = work_node_overlays.clone();
     let model_catalog_for_key = model_catalog_arc.clone();
     let ask_user_for_key = ask_user_bridge.clone();
     // Ctrl+L routes through the same registry as `/model` (one path, not two),
@@ -2012,17 +2129,27 @@ pub async fn interactive_tui(
                 let screen_width = tui_for_key.width() as u16;
                 match m.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        if state_for_key.begin_work_drag(m.column, m.row, screen_width) {
+                        if begin_box_drag(
+                            &state_for_key,
+                            &work_node_overlays_for_key,
+                            &work_overlay_for_key,
+                            m.column,
+                            m.row,
+                            screen_width,
+                        ) {
                             continue;
                         }
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
-                        if state_for_key.drag_work_box(m.column, m.row) {
+                        if state_for_key.drag_node_box(m.column, m.row)
+                            || state_for_key.drag_work_box(m.column, m.row)
+                        {
                             tui_for_key.request_render(false);
                             continue;
                         }
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
+                        state_for_key.end_node_drag();
                         state_for_key.end_work_drag();
                     }
                     _ => {}

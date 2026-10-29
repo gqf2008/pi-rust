@@ -668,6 +668,11 @@ mod tests {
     async fn tee_emitter_fans_out_to_every_child() {
         use kiqi_agent::events::{AgentEmitter, CollectorEmitter};
 
+        // The tee includes an `ExtensionEmitter`, which falls back to the
+        // process-global sink: without the lock its event leaks into whichever
+        // test is inspecting that sink at the same time.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let (collector_a, events_a) = CollectorEmitter::new();
         let (collector_b, events_b) = CollectorEmitter::new();
 

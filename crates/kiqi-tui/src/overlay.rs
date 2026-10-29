@@ -3,6 +3,7 @@
 //! Provides overlay components that can be shown on top of the main content.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::component::Component;
@@ -100,6 +101,10 @@ pub(crate) fn render_overlay(
 pub struct OverlayManager {
     overlays: Arc<Mutex<Vec<OverlayEntry>>>,
     next_id: Arc<Mutex<usize>>,
+    /// Where each overlay was last painted, keyed by overlay id. Passive
+    /// overlays are nudged apart at paint time, so the requested position is
+    /// not the visible one; hit-testing (dragging a box) reads this instead.
+    applied: Arc<Mutex<HashMap<usize, (usize, usize, usize, usize)>>>,
 }
 
 struct OverlayEntry {
@@ -127,6 +132,7 @@ impl OverlayManager {
         Self {
             overlays: Arc::new(Mutex::new(Vec::new())),
             next_id: Arc::new(Mutex::new(0)),
+            applied: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -176,6 +182,25 @@ impl OverlayManager {
         }
     }
 
+    /// Visible overlays with their ids, in paint order.
+    fn visible_entries(&self) -> Vec<(usize, Arc<dyn Component>, OverlayOptions)> {
+        self.overlays
+            .lock()
+            .map(|overlays| {
+                overlays
+                    .iter()
+                    .filter(|e| e.visible)
+                    .map(|e| (e.z_index, e.component.clone(), e.options.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The rectangle an overlay was last painted at, in screen cells.
+    pub(crate) fn applied_rect(&self, id: usize) -> Option<(usize, usize, usize, usize)> {
+        self.applied.lock().ok()?.get(&id).copied()
+    }
+
     /// Get visible overlays sorted by z-index.
     pub fn get_visible(&self) -> Vec<(Arc<dyn Component>, OverlayOptions)> {
         self.overlays
@@ -195,7 +220,8 @@ impl OverlayManager {
     pub(crate) fn render_visible(&self, width: usize, height: usize) -> Vec<RenderedOverlay> {
         let mut passive = Vec::<(usize, usize, usize, usize)>::new();
         let mut rendered = Vec::new();
-        for (component, options) in self.get_visible() {
+        let mut applied = HashMap::new();
+        for (id, component, options) in self.visible_entries() {
             let Some(mut overlay) = render_overlay(component.as_ref(), &options, width, height)
             else {
                 continue;
@@ -220,7 +246,14 @@ impl OverlayManager {
                 overlay.y = y;
                 passive.push((overlay.x, overlay.y, overlay.width, overlay.lines.len()));
             }
+            applied.insert(
+                id,
+                (overlay.x, overlay.y, overlay.width, overlay.lines.len()),
+            );
             rendered.push(overlay);
+        }
+        if let Ok(mut map) = self.applied.lock() {
+            *map = applied;
         }
         rendered
     }
@@ -241,6 +274,7 @@ impl OverlayManager {
         Self {
             overlays: Arc::clone(&self.overlays),
             next_id: Arc::clone(&self.next_id),
+            applied: Arc::clone(&self.applied),
         }
     }
 }
@@ -272,6 +306,19 @@ impl OverlayHandle {
     /// Set visibility.
     pub fn set_visible(&self, visible: bool) {
         self.manager.set_visible(self.id, visible);
+    }
+
+    /// Where the overlay was last painted, in screen cells: `(x, y, width,
+    /// height)`. `None` before the first paint or when it is not visible.
+    pub fn rect(&self) -> Option<(u16, u16, u16, u16)> {
+        self.manager.applied_rect(self.id).map(|(x, y, w, h)| {
+            (
+                x as u16,
+                y as u16,
+                w.min(u16::MAX as usize) as u16,
+                h.min(u16::MAX as usize) as u16,
+            )
+        })
     }
 
     /// Check if visible.
@@ -653,6 +700,28 @@ mod tests {
         let overlay = render_overlay(&content, &options, 20, 10).unwrap();
         assert_eq!((overlay.x, overlay.y), (0, 0));
         assert!(render_overlay(&content, &options, 20, 3).is_none());
+    }
+
+    #[test]
+    fn painted_rect_reports_where_a_passive_panel_actually_landed() {
+        let manager = OverlayManager::new();
+        let options = OverlayOptions {
+            anchor: OverlayAnchor::BottomRight,
+            width: Some(SizeValue::Absolute(12)),
+            non_capturing: true,
+            ..Default::default()
+        };
+        let first = manager.add(
+            Arc::new(crate::Text::new("first\nsecond", 0, 0)),
+            options.clone(),
+        );
+        let second = manager.add(Arc::new(crate::Text::new("other\nlast", 0, 0)), options);
+        assert_eq!(first.rect(), None, "nothing painted yet");
+        manager.render_visible(40, 8);
+        // Requested position for both is the bottom-right corner; the second is
+        // nudged above the first, and `rect` reports that, not the request.
+        assert_eq!(first.rect(), Some((28, 6, 12, 2)));
+        assert_eq!(second.rect(), Some((28, 3, 12, 2)));
     }
 
     #[test]

@@ -984,11 +984,6 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
             ));
             // Observability: one right-rail box per node, plus the first line of
             // the transcript's tool output. Both are best-effort.
-            let index = graph
-                .nodes
-                .iter()
-                .position(|node| node.id == id)
-                .unwrap_or_default();
             progress::emit(&types::ProgressBlock::Text(format!("▶ {id}")));
             started.push(id);
         }
@@ -1008,7 +1003,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
     let mut node_text: HashMap<String, String> = HashMap::new();
     let mut node_events: HashMap<String, Vec<String>> = HashMap::new();
     let mut last_report = Instant::now();
-    publish_wave_nodes(&node_started, &current_tool, &node_text);
+    publish_wave_nodes(&node_started, &current_tool, &node_text, &node_events);
     let mut outputs: HashMap<u32, String> = HashMap::new();
     'wave: loop {
         if proc::cancel_requested() {
@@ -1017,7 +1012,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
         }
         if last_report.elapsed() >= Duration::from_millis(1000) {
             last_report = Instant::now();
-            publish_wave_nodes(&node_started, &current_tool, &node_text);
+            publish_wave_nodes(&node_started, &current_tool, &node_text, &node_events);
         }
         // Poll every live child each round. Polling only the head of the list
         // strands siblings: one that finishes while an earlier node is still
@@ -1048,7 +1043,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                     .unwrap_or_else(|p| p.into_inner())
                     .retain(|(node_id, _, _)| node_id != &id);
                 drop(graph);
-                publish_wave_nodes(&node_started, &current_tool, &node_text);
+                publish_wave_nodes(&node_started, &current_tool, &node_text, &node_events);
                 continue;
             }
             match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
@@ -1062,7 +1057,12 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                                     events.remove(0);
                                 }
                                 current_tool.insert(id.clone(), name);
-                                publish_wave_nodes(&node_started, &current_tool, &node_text);
+                                publish_wave_nodes(
+                                    &node_started,
+                                    &current_tool,
+                                    &node_text,
+                                    &node_events,
+                                );
                             }
                             child_progress::NodeEvent::ToolEnd { name, is_error } => {
                                 let events = node_events.entry(id.clone()).or_default();
@@ -1083,6 +1083,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                                         &node_started,
                                         &current_tool,
                                         &node_text,
+                                        &node_events,
                                     );
                                 }
                             }
@@ -1147,7 +1148,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                         .unwrap_or_else(|p| p.into_inner())
                         .retain(|(node_id, _, _)| node_id != &id);
                     drop(graph);
-                    publish_wave_nodes(&node_started, &current_tool, &node_text);
+                    publish_wave_nodes(&node_started, &current_tool, &node_text, &node_events);
                 }
                 Err(_) => {}
             }
@@ -1219,6 +1220,7 @@ fn publish_wave_nodes(
     started: &HashMap<String, Instant>,
     tools: &HashMap<String, String>,
     texts: &HashMap<String, String>,
+    events: &HashMap<String, Vec<String>>,
 ) {
     let graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
     for node in &graph.nodes {
@@ -1226,13 +1228,24 @@ fn publish_wave_nodes(
             .get(&node.id)
             .map(|started| started.elapsed())
             .unwrap_or_default();
-        emit_node(
+        // The box's title line: what this agent was asked to do.
+        let task: String = node
+            .task
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(160)
+            .collect();
+        emit_node_full(
             &node.id,
             node.status.as_str(),
             elapsed,
             node.timeout_secs,
             tools.get(&node.id).map(String::as_str),
             texts.get(&node.id).map(String::as_str),
+            Some(task.as_str()),
+            events.get(&node.id).map(Vec::as_slice).unwrap_or(&[]),
         );
     }
 }
