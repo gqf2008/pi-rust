@@ -10,6 +10,7 @@ use super::*;
 
 /// One subagent pane's lines, without borders.
 fn pane_rows(state: &TuiState, node: &NodeRow, width: usize) -> Vec<String> {
+    let _ = state;
     let elapsed = human_ms(node.elapsed_ms);
     let budget = if node.budget_ms > 0 {
         human_ms(node.budget_ms)
@@ -17,6 +18,16 @@ fn pane_rows(state: &TuiState, node: &NodeRow, width: usize) -> Vec<String> {
         "—".to_string()
     };
     let mut rows = Vec::new();
+    if let Some(task) = &node.task {
+        let task: String = task
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(120)
+            .collect();
+        rows.push(format!("task    {task}"));
+    }
     match node.state.as_str() {
         "running" => {
             rows.push(format!("state   running {elapsed} / {budget}"));
@@ -34,9 +45,18 @@ fn pane_rows(state: &TuiState, node: &NodeRow, width: usize) -> Vec<String> {
     if let Some(tool) = &node.tool {
         rows.push(format!("tool    {tool}"));
     }
-    if let Some(text) = &node.text {
-        for line in text.lines().take(6) {
-            rows.push(format!("│ {line}"));
+    // The event stream: tool transitions, newest last.
+    let shown: Vec<&String> = node.events.iter().rev().take(10).collect();
+    for event in shown.into_iter().rev() {
+        rows.push(format!("│ {event}"));
+    }
+    if node.events.is_empty() {
+        if let Some(text) = &node.text {
+            let lines: Vec<&str> = text.lines().collect();
+            let start = lines.len().saturating_sub(4);
+            for line in &lines[start..] {
+                rows.push(format!("│ {line}"));
+            }
         }
     }
     rows.into_iter()
@@ -80,7 +100,8 @@ fn boxed(title: &str, rows: &[String], width: usize) -> Vec<String> {
 /// the box (auto width), not to the screen.
 fn frame(body: &[String], width: usize) -> Vec<String> {
     const TITLE: &str = "WORK · /work to close";
-    const MAX_WIDTH: usize = 100;
+    const MAX_WIDTH: usize = 140;
+    const MIN_WIDTH: usize = 60;
     let visible = |row: &str| kiqi_tui::ansi::visible_width(row);
     let inner = body
         .iter()
@@ -88,6 +109,7 @@ fn frame(body: &[String], width: usize) -> Vec<String> {
         .max()
         .unwrap_or(0)
         .max(TITLE.len() + 1)
+        .max(MIN_WIDTH)
         .min(width.saturating_sub(6).min(MAX_WIDTH));
     let mut rows = Vec::with_capacity(body.len() + 2);
     let head = format!("┌─ {TITLE} ");
@@ -128,6 +150,11 @@ impl Component for WorkView {
 
         let nodes = self.state.node_snapshot();
         let running = self.state.running_snapshot();
+        // Nothing to observe: show nothing at all rather than a permanent
+        // "idle" box (the view is on by default).
+        if nodes.is_empty() && running.is_empty() && todos.is_empty() {
+            return Vec::new();
+        }
         if nodes.is_empty() && running.is_empty() {
             lines.push(
                 colors

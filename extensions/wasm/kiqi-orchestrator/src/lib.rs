@@ -745,8 +745,19 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     let started_at = Instant::now();
     let mut last_report = Instant::now();
     let mut subagent_tool: Option<String> = None;
+    let mut subagent_events: Vec<String> = Vec::new();
+    let subagent_task: String = task.lines().next().unwrap_or("").chars().take(160).collect();
     let mut output = String::new();
-    emit_node(SUBAGENT_ID, "running", started_at.elapsed(), timeout_secs, None, None);
+    emit_node_full(
+        SUBAGENT_ID,
+        "running",
+        started_at.elapsed(),
+        timeout_secs,
+        None,
+        None,
+        Some(subagent_task.as_str()),
+        &subagent_events,
+    );
     loop {
         // Esc while the child runs: kill it and return instead of waiting out
         // `timeoutSeconds` (up to 1800 s) while this call holds the extension's
@@ -760,13 +771,15 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         }
         if last_report.elapsed() >= Duration::from_millis(1000) {
             last_report = Instant::now();
-            emit_node(
+            emit_node_full(
                 SUBAGENT_ID,
                 "running",
                 started_at.elapsed(),
                 timeout_secs,
                 subagent_tool.as_deref(),
                 Some(output.as_str()).filter(|text| !text.trim().is_empty()),
+                Some(subagent_task.as_str()),
+                &subagent_events,
             );
         }
         match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
@@ -774,6 +787,10 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
                 if is_ki {
                     match child_progress::parse(&line) {
                         child_progress::NodeEvent::ToolStart(name) => {
+                            subagent_events.push(format!("▶ {name}"));
+                            if subagent_events.len() > 10 {
+                                subagent_events.remove(0);
+                            }
                             subagent_tool = Some(name);
                             emit_node(
                                 SUBAGENT_ID,
@@ -784,7 +801,14 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
                                 None,
                             );
                         }
-                        child_progress::NodeEvent::ToolEnd { .. } => {
+                        child_progress::NodeEvent::ToolEnd { name, is_error } => {
+                            subagent_events.push(format!(
+                                "{} {name}",
+                                if is_error { "✖" } else { "✔" }
+                            ));
+                            if subagent_events.len() > 10 {
+                                subagent_events.remove(0);
+                            }
                             subagent_tool = None;
                         }
                         child_progress::NodeEvent::PartialText(text) => {
@@ -982,6 +1006,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
     }
     let mut current_tool: HashMap<String, String> = HashMap::new();
     let mut node_text: HashMap<String, String> = HashMap::new();
+    let mut node_events: HashMap<String, Vec<String>> = HashMap::new();
     let mut last_report = Instant::now();
     publish_wave_nodes(&node_started, &current_tool, &node_text);
     let mut outputs: HashMap<u32, String> = HashMap::new();
@@ -1031,10 +1056,23 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                     if wave_program == DEFAULT_PROGRAM {
                         match child_progress::parse(&line) {
                             child_progress::NodeEvent::ToolStart(name) => {
+                                let events = node_events.entry(id.clone()).or_default();
+                                events.push(format!("▶ {name}"));
+                                if events.len() > 10 {
+                                    events.remove(0);
+                                }
                                 current_tool.insert(id.clone(), name);
                                 publish_wave_nodes(&node_started, &current_tool, &node_text);
                             }
-                            child_progress::NodeEvent::ToolEnd { .. } => {
+                            child_progress::NodeEvent::ToolEnd { name, is_error } => {
+                                let events = node_events.entry(id.clone()).or_default();
+                                events.push(format!(
+                                    "{} {name}",
+                                    if is_error { "✖" } else { "✔" }
+                                ));
+                                if events.len() > 10 {
+                                    events.remove(0);
+                                }
                                 current_tool.remove(&id);
                             }
                             child_progress::NodeEvent::PartialText(text) => {
@@ -1208,6 +1246,21 @@ fn emit_node(
     tool: Option<&str>,
     text: Option<&str>,
 ) {
+    emit_node_full(id, state, elapsed, budget_secs, tool, text, None, &[]);
+}
+
+/// The full row: adds the task the subagent was given and its recent events.
+#[allow(clippy::too_many_arguments)]
+fn emit_node_full(
+    id: &str,
+    state: &str,
+    elapsed: Duration,
+    budget_secs: u64,
+    tool: Option<&str>,
+    text: Option<&str>,
+    task: Option<&str>,
+    events: &[String],
+) {
     progress::emit(&types::ProgressBlock::Json(
         json!({
             "ki": "node",
@@ -1217,6 +1270,8 @@ fn emit_node(
             "budgetMs": budget_secs.saturating_mul(1000),
             "tool": tool,
             "text": text,
+            "task": task,
+            "events": events,
         })
         .to_string(),
     ));

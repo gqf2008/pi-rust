@@ -297,7 +297,7 @@ fn test_tui_state() -> Arc<TuiState> {
         llm_last: std::sync::Mutex::new(None),
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
-        work_view: std::sync::atomic::AtomicBool::new(false),
+        work_view: std::sync::atomic::AtomicBool::new(true),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -1382,7 +1382,7 @@ fn test_agent_event_mapping_creates_assistant_and_tool() {
         llm_last: std::sync::Mutex::new(None),
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
-        work_view: std::sync::atomic::AtomicBool::new(false),
+        work_view: std::sync::atomic::AtomicBool::new(true),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -1868,7 +1868,7 @@ fn test_autocomplete_slash_suggestions_render() {
         llm_last: std::sync::Mutex::new(None),
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
-        work_view: std::sync::atomic::AtomicBool::new(false),
+        work_view: std::sync::atomic::AtomicBool::new(true),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -1964,7 +1964,7 @@ fn test_select_list_swap_restores_editor() {
         llm_last: std::sync::Mutex::new(None),
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
-        work_view: std::sync::atomic::AtomicBool::new(false),
+        work_view: std::sync::atomic::AtomicBool::new(true),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -2063,7 +2063,7 @@ fn test_message_history_browse_restores_draft() {
         llm_last: std::sync::Mutex::new(None),
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
-        work_view: std::sync::atomic::AtomicBool::new(false),
+        work_view: std::sync::atomic::AtomicBool::new(true),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -2165,7 +2165,7 @@ fn test_accept_top_suggestion_replaces_prefix() {
         llm_last: std::sync::Mutex::new(None),
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
-        work_view: std::sync::atomic::AtomicBool::new(false),
+        work_view: std::sync::atomic::AtomicBool::new(true),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -2253,7 +2253,7 @@ fn autocomplete_test_state(max_visible: usize) -> Arc<TuiState> {
         llm_last: std::sync::Mutex::new(None),
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
-        work_view: std::sync::atomic::AtomicBool::new(false),
+        work_view: std::sync::atomic::AtomicBool::new(true),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -3054,20 +3054,19 @@ fn goal_driven_marker_is_scoped_to_its_own_run() {
     state.set_status(RunStatus::Idle);
 }
 
-/// The work view shows a hint when idle and one pane per subagent when busy.
+/// The work view is on by default, renders nothing while idle, and shows one
+/// pane per subagent (task name + event stream) once work exists.
 #[test]
-fn work_view_is_opt_in_and_renders_a_pane_per_subagent() {
+fn work_view_is_on_by_default_and_renders_task_and_events() {
     let state = test_tui_state();
+    assert!(state.work_view_enabled(), "on unless the user turns it off");
     let view = super::work_view::WorkView {
         state: state.clone(),
         inline: true,
     };
-    assert!(view.render(80).is_empty(), "off by default");
-    state.toggle_work_view();
-    let empty = view.render(80);
     assert!(
-        empty.iter().any(|row| row.contains("no background work")),
-        "{empty:?}"
+        view.render(80).is_empty(),
+        "idle work view stays out of the way"
     );
 
     state.upsert_node(super::NodeRow {
@@ -3077,11 +3076,17 @@ fn work_view_is_opt_in_and_renders_a_pane_per_subagent() {
         budget_ms: 300_000,
         tool: Some("bash".into()),
         text: Some("scanning files".into()),
+        task: Some("ship the release".into()),
+        events: vec!["▶ bash".into(), "✔ bash".into(), "▶ edit".into()],
     });
     let rows = view.render(80);
     let text = rows.join("\n");
+    assert!(text.contains("WORK · /work to close"), "{text}");
     assert!(text.contains("a · running 1m05s"), "{text}");
-    assert!(text.contains("tool    bash"), "{text}");
-    assert!(text.contains("scanning files"), "{text}");
+    assert!(text.contains("task    ship the release"), "{text}");
+    assert!(text.contains("▶ edit"), "{text}");
     assert!(text.contains('┌'), "{text}");
+
+    state.toggle_work_view();
+    assert!(view.render(80).is_empty(), "toggled off");
 }

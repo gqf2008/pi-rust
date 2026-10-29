@@ -181,6 +181,10 @@ pub(super) struct NodeRow {
     pub(super) tool: Option<String>,
     /// Its last assistant text, when one has been produced.
     pub(super) text: Option<String>,
+    /// The task the subagent was given (plan node task / subagent prompt).
+    pub(super) task: Option<String>,
+    /// Recent events, oldest first (`▶ bash`, `✔ bash`, streamed text…).
+    pub(super) events: Vec<String>,
 }
 
 /// One tool call in flight, as the rail displays it.
@@ -286,6 +290,7 @@ pub(super) struct TuiState {
     /// orchestrator. The work view renders one pane per row.
     pub(super) nodes: std::sync::Mutex<Vec<NodeRow>>,
     /// Whether the work view is showing (Ctrl+T).
+    /// Work view state; **on by default** (the user toggles it off with `/work`).
     pub(super) work_view: std::sync::atomic::AtomicBool,
     /// The `todo` tool's current list, as rail lines (`✔/▶/·` + text).
     ///
@@ -1446,16 +1451,23 @@ impl TuiState {
         let mut nodes = self.nodes.lock().unwrap();
         match nodes.iter_mut().find(|node| node.id == row.id) {
             Some(existing) => {
-                // Keep the first-seen position; a finished row must not lose its
-                // last text to a later snapshot that omits it.
-                if row.text.is_none() {
-                    existing.state = row.state;
-                    existing.elapsed_ms = row.elapsed_ms;
-                    existing.budget_ms = row.budget_ms;
-                    existing.tool = row.tool.clone().or(existing.tool.clone());
-                    return;
+                // Positional merge: late snapshots carry some fields and omit
+                // others; never let an omission erase what we already know.
+                existing.state = row.state;
+                existing.elapsed_ms = row.elapsed_ms;
+                existing.budget_ms = row.budget_ms;
+                if row.tool.is_some() {
+                    existing.tool = row.tool;
                 }
-                *existing = row;
+                if row.text.is_some() {
+                    existing.text = row.text;
+                }
+                if row.task.is_some() {
+                    existing.task = row.task;
+                }
+                if !row.events.is_empty() {
+                    existing.events = row.events;
+                }
             }
             None => nodes.push(row),
         }

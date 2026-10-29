@@ -988,6 +988,20 @@ fn absorb_node_progress(state: &TuiState, result: &kiqi_agent::types::AgentToolR
                     .get("text")
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
+                task: value
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                events: value
+                    .get("events")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             });
         }
     }

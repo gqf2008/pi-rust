@@ -1219,7 +1219,7 @@ pub async fn interactive_tui(
         llm_last: std::sync::Mutex::new(None),
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
-        work_view: std::sync::atomic::AtomicBool::new(false),
+        work_view: std::sync::atomic::AtomicBool::new(true),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(hide_thinking)),
