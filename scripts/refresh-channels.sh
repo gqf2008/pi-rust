@@ -103,7 +103,7 @@ DATE=$(date -u +%Y-%m-%d)
 OLD_WINGET=$(grep -m1 -oE 'InstallerSha256: [0-9A-Fa-f]+' packaging/winget/gqf2008.ki.installer.yaml | grep -oE '[0-9A-Fa-f]{64}')
 [[ -n "$OLD_WINGET" ]] || die "could not read the winget InstallerSha256"
 WIN_UPPER=$(printf '%s' "$SHA_WIN_X64" | tr 'a-f' 'A-F')
-perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/; s/v$OLD/v$VERSION/g; s/$OLD_WINGET/$WIN_UPPER/; s/ReleaseDate: [0-9-]+/ReleaseDate: $DATE/" \
+perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/; s/v$OLD/v$VERSION/g; s/$OLD_WINGET/$WIN_UPPER/; s/ReleaseDate: [0-9-]+/ReleaseDate: \"$DATE\"/" \
   packaging/winget/gqf2008.ki.installer.yaml
 perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/; s/v$OLD/v$VERSION/g" \
   packaging/winget/gqf2008.ki.locale.en-US.yaml
