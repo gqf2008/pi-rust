@@ -735,6 +735,7 @@ pub(super) async fn handle_agent_event(
             if let Some(line) = partial_text_line(&partial_result) {
                 state.tool_output(&tool_call_id, &line);
             }
+            absorb_node_progress(state, &partial_result);
             state.transcript_view().apply(
                 &UiEvent::ToolUpdate {
                     id: tool_call_id,
@@ -755,6 +756,7 @@ pub(super) async fn handle_agent_event(
             is_error,
         } => {
             state.tool_finished(&tool_call_id);
+            state.clear_nodes();
             if tool_name == "todo" {
                 if let Some(lines) = todo_lines_from_details(&result.details) {
                     state.set_todos(lines);
@@ -940,4 +942,41 @@ fn partial_text_line(result: &kiqi_agent::types::AgentToolResult) -> Option<Stri
         }
     }
     last
+}
+
+/// Read `{"ki":"node",…}` progress lines an extension emits for its children
+/// (the orchestrator's dispatch wave and single `subagent` call) and keep the
+/// live block's per-node rows current.
+fn absorb_node_progress(state: &TuiState, result: &kiqi_agent::types::AgentToolResult) {
+    for block in &result.content {
+        let kiqi_agent::types::TextContentOrImage::Text(text) = block else {
+            continue;
+        };
+        for line in text.text.lines() {
+            let line = line.trim();
+            if !line.starts_with('{') || !line.contains("\"ki\"") {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if value.get("ki").and_then(|kind| kind.as_str()) != Some("node") {
+                continue;
+            }
+            let Some(id) = value.get("id").and_then(|id| id.as_str()) else {
+                continue;
+            };
+            let row = NodeRow {
+                id: id.to_string(),
+                state: value
+                    .get("state")
+                    .and_then(|state| state.as_str())
+                    .unwrap_or("running")
+                    .to_string(),
+                elapsed_ms: value.get("elapsedMs").and_then(|v| v.as_u64()).unwrap_or(0),
+                budget_ms: value.get("budgetMs").and_then(|v| v.as_u64()).unwrap_or(0),
+            };
+            state.upsert_node(row);
+        }
+    }
 }

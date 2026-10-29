@@ -1204,6 +1204,7 @@ pub async fn interactive_tui(
         running_tool_calls: std::sync::Mutex::new(Vec::new()),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
+        nodes: std::sync::Mutex::new(Vec::new()),
         llm_live: std::sync::Mutex::new(None),
         llm_last: std::sync::Mutex::new(None),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -1328,11 +1329,19 @@ pub async fn interactive_tui(
     let editor_container = Arc::new(Container::new());
     editor_container.add_child(editor.clone());
 
+    // Live status block: tool calls in flight, todo list, LLM usage — inline
+    // just above the input, not in a separate rail.
+    let live_container = Arc::new(Container::new());
+    live_container.add_child(Arc::new(panels::LiveBlock {
+        state: state.clone(),
+    }));
+
     let dock = Arc::new(VStack::from_children(vec![
         StackChild::Entry(StackEntry::new(Arc::new(panels::RegularPanels {
             mailbox: reload_context.ext_status.clone(),
             enabled: matches!(args.tui_mode, crate::args::TuiMode::Regular),
         }))),
+        StackChild::Entry(StackEntry::new(live_container.clone())),
         StackChild::Entry(StackEntry::new(state.pending_container().clone())),
         StackChild::Entry(StackEntry::new(status_container.clone())),
         StackChild::Entry(StackEntry::new(autocomplete_container.clone())),
@@ -1676,9 +1685,8 @@ pub async fn interactive_tui(
         let mut models_mtime = models_json_mtime();
         // The host-owned "running" panel: refreshed once a second so the
         // elapsed readout moves, not on every 80 ms frame.
-        let mut running_shown = false;
-        let mut todo_shown = false;
-        let mut model_shown = false;
+        // The inline live block repaints only when its text changes.
+        let mut live_sig: Vec<String> = Vec::new();
         let mut running_at = std::time::Instant::now();
         loop {
             interval.tick().await;
@@ -1689,21 +1697,11 @@ pub async fn interactive_tui(
             }
             if running_at.elapsed() >= std::time::Duration::from_secs(1) {
                 running_at = std::time::Instant::now();
-                let mut rows = state_tick.running_snapshot();
-                if state_tick.user_bash_running() {
-                    rows.push(("!command".to_string(), 0, String::new(), Vec::new()));
+                let rows = panels::live_rows(&state_tick);
+                if rows != live_sig {
+                    live_sig = rows;
+                    tui_tick.request_render_reusing_scroll_content();
                 }
-                panels::sync_running(&state_tick.ext_status, &rows, &mut running_shown);
-                let todos = state_tick.todo_snapshot();
-                panels::sync_todo(&state_tick.ext_status, &todos, &mut todo_shown);
-                panels::sync_model(
-                    &state_tick.ext_status,
-                    &state_tick.current_model_id(),
-                    state_tick.llm_usage_snapshot(),
-                    state_tick.llm_live_snapshot(),
-                    state_tick.llm_last_snapshot(),
-                    &mut model_shown,
-                );
             }
             // Extension status (langfuse ✓ …, …) — cheap revision check, and the
             // only reason an idle session repaints its footer.

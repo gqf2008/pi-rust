@@ -169,6 +169,16 @@ pub(super) fn auto_send_step(
     }
 }
 
+/// One subagent/node progress row.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct NodeRow {
+    pub(super) id: String,
+    /// `running`, `done` or `failed`.
+    pub(super) state: String,
+    pub(super) elapsed_ms: u64,
+    pub(super) budget_ms: u64,
+}
+
 /// One tool call in flight, as the rail displays it.
 pub(super) struct RunningTool {
     pub(super) id: String,
@@ -268,6 +278,9 @@ pub(super) struct TuiState {
     /// cache_read)`. Mirrors what the footer renders, and is what the rail's
     /// `model` panel shows at a glance.
     pub(super) llm_usage: std::sync::Mutex<(u64, u64, u64, u64)>,
+    /// Per-subagent progress reported by an extension (`{"ki":"node",…}` on the
+    /// tool's progress stream). The live block renders one bar per entry.
+    pub(super) nodes: std::sync::Mutex<Vec<NodeRow>>,
     /// The `todo` tool's current list, as rail lines (`✔/▶/·` + text).
     ///
     /// Rebuilt from the tool result's `details`, which is where the extension
@@ -1421,6 +1434,23 @@ impl TuiState {
     /// Replace the whole usage counter (restored sessions seed it from history).
     pub(super) fn set_llm_usage(&self, usage: (u64, u64, u64, u64)) {
         *self.llm_usage.lock().unwrap() = usage;
+    }
+
+    /// Upsert one node's progress row (order = first appearance).
+    pub(super) fn upsert_node(&self, row: NodeRow) {
+        let mut nodes = self.nodes.lock().unwrap();
+        match nodes.iter_mut().find(|node| node.id == row.id) {
+            Some(existing) => *existing = row,
+            None => nodes.push(row),
+        }
+    }
+
+    pub(super) fn clear_nodes(&self) {
+        self.nodes.lock().unwrap().clear();
+    }
+
+    pub(super) fn node_snapshot(&self) -> Vec<NodeRow> {
+        self.nodes.lock().unwrap().clone()
     }
 
     pub(super) fn set_todos(&self, lines: Vec<String>) {
