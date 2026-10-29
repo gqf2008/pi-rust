@@ -18,6 +18,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   （已用时间 / 该节点 `timeoutSeconds`，无预算时用移动游标），并标出它当前在调用的
   工具；输入框上方只保留一行汇总（`● N running · 各工具耗时`）与一行 LLM 用量
   （model、轮次、↑↓、cache、进行中请求时长与流式字数）。右侧栏方案已删除。
+
+### Fixed
+
+- **流式进度不再把工具标成「已完成」。** 工具的中间输出走 `set_partial`：正文替换、
+  状态保持 running、耗时继续走；此前用 `set_result`，长任务会显示 ✓ 且时间冻结。
+- **中止不再留下脏状态。** run 结束时清空在飞工具与进行中的 LLM 请求标记，abort
+  之后状态行不会永远显示 `▶`。
 - **子代理进度。** orchestrator 用 `ki -p --mode json` 启动子进程，逐行解析其
   agent 事件：工具开始/结束与 token 用量进入工具输出流（`▶ 工具名`、`↑1.2k ↓345`），
   `result.finalText` 作为节点摘要与结果。

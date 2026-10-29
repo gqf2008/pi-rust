@@ -1509,6 +1509,18 @@ impl TuiState {
         }
     }
 
+    /// A run ended without completing the request (abort, failure): drop the
+    /// in-flight marker so the summary does not keep counting forever.
+    pub(super) fn llm_request_aborted(&self) {
+        *self.llm_live.lock().unwrap() = None;
+    }
+
+    /// The run is over: nothing can still be in flight, so a tool that never
+    /// reported its end (aborted mid-call) must not linger in the summary.
+    pub(super) fn clear_running_tools(&self) {
+        self.running_tool_calls.lock().unwrap().clear();
+    }
+
     pub(super) fn llm_live_snapshot(&self) -> Option<(u64, u64)> {
         self.llm_live
             .lock()
