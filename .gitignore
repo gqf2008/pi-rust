@@ -44,3 +44,4 @@ publish-*.log
 # path is sometimes a CARGO_TARGET_DIR symlink, which a directory-only pattern
 # does not match and would leak into `git add -A`.
 extensions/wasm/target
+.worktrees/
