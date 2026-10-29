@@ -169,6 +169,32 @@ pub(super) fn auto_send_step(
     }
 }
 
+/// One subagent, as the work view shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct NodeRow {
+    pub(super) id: String,
+    /// `running`, `done` or `failed`.
+    pub(super) state: String,
+    pub(super) elapsed_ms: u64,
+    pub(super) budget_ms: u64,
+    /// The tool the child is calling right now, when it reported one.
+    pub(super) tool: Option<String>,
+    /// Its last assistant text, when one has been produced.
+    pub(super) text: Option<String>,
+}
+
+/// One tool call in flight, as the rail displays it.
+pub(super) struct RunningTool {
+    pub(super) id: String,
+    pub(super) name: String,
+    pub(super) started: std::time::Instant,
+    /// Argument summary: a bash command line, or a short JSON snippet.
+    pub(super) detail: String,
+    /// Last few streamed output lines.
+    pub(super) tail: Vec<String>,
+    pub(super) last_update: std::time::Instant,
+}
+
 pub(super) struct TuiState {
     /// The in-flight streaming assistant message (cleared on finalize).
     /// `Arc`-shared with the [`TranscriptView`] the event drain renders through,
@@ -241,6 +267,32 @@ pub(super) struct TuiState {
     /// a selector is open; the key loop routes to it first and restores the
     /// editor on done/cancel.
     pub(super) active_selector: std::sync::Mutex<Option<(SelectorView, SelectorKind)>>,
+    /// Tool calls in flight right now: `(tool_call_id, name, started)`.
+    ///
+    /// The host's own right-rail "running" panel is fed from this, so *any*
+    /// long-running call is visible, not just the ones an extension chooses to
+    /// publish (goal, dispatch, subagent).
+    pub(super) running_tool_calls: std::sync::Mutex<Vec<RunningTool>>,
+    /// The provider request in flight: when it started and how many characters
+    /// have streamed so far.
+    pub(super) llm_live: std::sync::Mutex<Option<(std::time::Instant, u64)>>,
+    /// The last completed request: `(elapsed, output tokens)`.
+    pub(super) llm_last: std::sync::Mutex<Option<(std::time::Duration, u64)>>,
+    /// Cumulative LLM usage for this session: `(turns, input, output,
+    /// cache_read)`. Mirrors what the footer renders, and is what the rail's
+    /// `model` panel shows at a glance.
+    pub(super) llm_usage: std::sync::Mutex<(u64, u64, u64, u64)>,
+    /// Live subagent rows, fed by `{"ki":"node",…}` progress events from the
+    /// orchestrator. The work view renders one pane per row.
+    pub(super) nodes: std::sync::Mutex<Vec<NodeRow>>,
+    /// Whether the work view is showing (Ctrl+T).
+    pub(super) work_view: std::sync::atomic::AtomicBool,
+    /// The `todo` tool's current list, as rail lines (`✔/▶/·` + text).
+    ///
+    /// Rebuilt from the tool result's `details`, which is where the extension
+    /// keeps its state across fork/switch — the host reads the same source
+    /// instead of keeping a second copy that could drift.
+    pub(super) todo_lines: std::sync::Mutex<Vec<String>>,
     /// Extension-provided editor currently occupying the input slot.
     pub(super) active_extension_editor: std::sync::Mutex<Option<Arc<Editor>>>,
     /// Single-line input currently occupying the input slot for an extension.
@@ -1373,6 +1425,175 @@ impl TuiState {
         *self.ask_user_dialog_id.lock().unwrap() = None;
     }
 
+    pub(super) fn record_llm_usage(&self, input: i64, output: i64, cache_read: i64) {
+        let mut usage = self.llm_usage.lock().unwrap();
+        usage.0 += 1;
+        usage.1 += input.max(0) as u64;
+        usage.2 += output.max(0) as u64;
+        usage.3 += cache_read.max(0) as u64;
+    }
+
+    pub(super) fn llm_usage_snapshot(&self) -> (u64, u64, u64, u64) {
+        *self.llm_usage.lock().unwrap()
+    }
+
+    /// Replace the whole usage counter (restored sessions seed it from history).
+    pub(super) fn set_llm_usage(&self, usage: (u64, u64, u64, u64)) {
+        *self.llm_usage.lock().unwrap() = usage;
+    }
+
+    pub(super) fn upsert_node(&self, row: NodeRow) {
+        let mut nodes = self.nodes.lock().unwrap();
+        match nodes.iter_mut().find(|node| node.id == row.id) {
+            Some(existing) => {
+                // Keep the first-seen position; a finished row must not lose its
+                // last text to a later snapshot that omits it.
+                if row.text.is_none() {
+                    existing.state = row.state;
+                    existing.elapsed_ms = row.elapsed_ms;
+                    existing.budget_ms = row.budget_ms;
+                    existing.tool = row.tool.clone().or(existing.tool.clone());
+                    return;
+                }
+                *existing = row;
+            }
+            None => nodes.push(row),
+        }
+    }
+
+    pub(super) fn clear_nodes(&self) {
+        self.nodes.lock().unwrap().clear();
+    }
+
+    pub(super) fn node_snapshot(&self) -> Vec<NodeRow> {
+        self.nodes.lock().unwrap().clone()
+    }
+
+    pub(super) fn toggle_work_view(&self) -> bool {
+        let next = !self
+            .work_view
+            .load(std::sync::atomic::Ordering::SeqCst);
+        self.work_view
+            .store(next, std::sync::atomic::Ordering::SeqCst);
+        next
+    }
+
+    pub(super) fn work_view_enabled(&self) -> bool {
+        self.work_view.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(super) fn set_todos(&self, lines: Vec<String>) {
+        *self.todo_lines.lock().unwrap() = lines;
+    }
+
+    pub(super) fn todo_snapshot(&self) -> Vec<String> {
+        self.todo_lines.lock().unwrap().clone()
+    }
+
+    /// Record a tool call that just started; duplicates are ignored so a
+    /// retried start cannot show the same call twice.
+    pub(super) fn tool_started(&self, id: &str, name: &str, detail: String) {
+        let mut running = self.running_tool_calls.lock().unwrap();
+        if running.iter().any(|tool| tool.id == id) {
+            return;
+        }
+        running.push(RunningTool {
+            id: id.to_string(),
+            name: name.to_string(),
+            started: std::time::Instant::now(),
+            detail,
+            tail: Vec::new(),
+            last_update: std::time::Instant::now(),
+        });
+    }
+
+    /// One streamed partial line of a running call, throttled so a chatty tool
+    /// cannot force a repaint per chunk.
+    pub(super) fn tool_output(&self, id: &str, line: &str) {
+        let mut running = self.running_tool_calls.lock().unwrap();
+        let Some(tool) = running.iter_mut().find(|tool| tool.id == id) else {
+            return;
+        };
+        let line = line.trim_end();
+        if line.is_empty() || tool.last_update.elapsed() < std::time::Duration::from_millis(500) {
+            return;
+        }
+        tool.last_update = std::time::Instant::now();
+        let line: String = line.chars().take(160).collect();
+        if tool.tail.last() == Some(&line) {
+            return;
+        }
+        tool.tail.push(line);
+        while tool.tail.len() > 3 {
+            tool.tail.remove(0);
+        }
+    }
+
+    pub(super) fn tool_finished(&self, id: &str) {
+        let mut running = self.running_tool_calls.lock().unwrap();
+        running.retain(|tool| tool.id != id);
+    }
+
+    /// Every call still in flight, oldest first: `(name, elapsed_seconds,
+    /// detail, tail)`.
+    pub(super) fn running_snapshot(&self) -> Vec<(String, u64, String, Vec<String>)> {
+        let running = self.running_tool_calls.lock().unwrap();
+        running
+            .iter()
+            .map(|tool| {
+                (
+                    tool.name.clone(),
+                    tool.started.elapsed().as_secs(),
+                    tool.detail.clone(),
+                    tool.tail.clone(),
+                )
+            })
+            .collect()
+    }
+
+    pub(super) fn llm_request_started(&self) {
+        *self.llm_live.lock().unwrap() = Some((std::time::Instant::now(), 0));
+    }
+
+    pub(super) fn llm_streamed(&self, chars: u64) {
+        if let Some((_, streamed)) = self.llm_live.lock().unwrap().as_mut() {
+            *streamed = chars;
+        }
+    }
+
+    pub(super) fn llm_request_finished(&self, output_tokens: u64) {
+        let mut live = self.llm_live.lock().unwrap();
+        if let Some((started, _)) = live.take() {
+            *self.llm_last.lock().unwrap() = Some((started.elapsed(), output_tokens));
+        }
+    }
+
+    /// A run ended without completing the request (abort, failure): drop the
+    /// in-flight marker so the summary does not keep counting forever.
+    pub(super) fn llm_request_aborted(&self) {
+        *self.llm_live.lock().unwrap() = None;
+    }
+
+    /// The run is over: nothing can still be in flight, so a tool that never
+    /// reported its end (aborted mid-call) must not linger in the summary.
+    pub(super) fn clear_running_tools(&self) {
+        self.running_tool_calls.lock().unwrap().clear();
+    }
+
+    pub(super) fn llm_live_snapshot(&self) -> Option<(u64, u64)> {
+        self.llm_live
+            .lock()
+            .unwrap()
+            .map(|(started, chars)| (started.elapsed().as_secs(), chars))
+    }
+
+    pub(super) fn llm_last_snapshot(&self) -> Option<(u64, u64)> {
+        self.llm_last
+            .lock()
+            .unwrap()
+            .map(|(elapsed, tokens)| (elapsed.as_millis() as u64, tokens))
+    }
+
     pub(super) fn extension_dialog_open(&self) -> bool {
         self.extension_editor_open() || self.extension_input_open()
     }
@@ -1521,4 +1742,31 @@ impl TuiState {
     pub(super) fn images_visible(&self) -> bool {
         *self.show_images.lock().unwrap()
     }
+}
+
+/// Rail lines for the `todo` tool's `details.todos`, or `None` when the payload
+/// is not a todo list. Shared by the live event path and session restore.
+pub(super) fn todo_lines_from_details(details: &serde_json::Value) -> Option<Vec<String>> {
+    let todos = details.get("todos")?.as_array()?;
+    Some(
+        todos
+            .iter()
+            .map(|todo| {
+                let text = todo
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("(untitled)");
+                let status = todo
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("pending");
+                let mark = match status {
+                    "completed" => "✔",
+                    "in_progress" => "▶",
+                    _ => "·",
+                };
+                format!("{mark} {text}")
+            })
+            .collect(),
+    )
 }

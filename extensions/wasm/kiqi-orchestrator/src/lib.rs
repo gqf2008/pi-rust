@@ -26,7 +26,8 @@
 use kiqi_wasm_bindings::bindings::exports::kiqi::extension::extension_api::Guest;
 use kiqi_wasm_bindings::bindings::kiqi::extension::{exec, fs, proc, progress, types};
 
-mod panels;
+mod child_progress;
+
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,8 +60,8 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const MIN_TIMEOUT_SECS: u64 = 10;
 const MAX_TIMEOUT_SECS: u64 = 1800;
 const MAX_TASK_BYTES: usize = 20_000;
-/// Panel id of the single-subagent call (the dispatch wave uses per-node ids).
-const SUBAGENT_PANEL: &str = "subagent";
+/// Id the work view uses for the single-subagent call.
+const SUBAGENT_ID: &str = "subagent";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
@@ -461,7 +462,6 @@ fn plan(params: &Value) -> Result<types::ToolResult, String> {
             ))
         }
     }
-    panels::sync_plan(&guard);
     Ok(result_with_details(&guard.render(), guard.to_details()))
 }
 
@@ -696,6 +696,8 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     let mut args: Vec<String> = if is_ki {
         vec![
             "-p".into(),
+            "--mode".into(),
+            "json".into(),
             "--no-session".into(),
             "--exclude-tools".into(),
             EXCLUDED_TOOLS.into(),
@@ -740,11 +742,11 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     let _ = proc::close_stdin(handle);
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let started_at = Instant::now();
+    let mut last_report = Instant::now();
+    let mut subagent_tool: Option<String> = None;
     let mut output = String::new();
-    // The single-subagent call gets its own right-rail box too, so a long child
-    // is observable without expanding the tool block.
-    panels::node_started(SUBAGENT_PANEL, 0);
-    progress::emit(&types::ProgressBlock::Text("▶ subagent".to_string()));
+    emit_node(SUBAGENT_ID, "running", started_at.elapsed(), timeout_secs, None, None);
     loop {
         // Esc while the child runs: kill it and return instead of waiting out
         // `timeoutSeconds` (up to 1800 s) while this call holds the extension's
@@ -753,14 +755,67 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         // `kill` is idempotent.
         if proc::cancel_requested() {
             let _ = proc::kill(handle);
-            panels::node_finished(SUBAGENT_PANEL, Status::Failed);
+            emit_node(SUBAGENT_ID, "failed", started_at.elapsed(), timeout_secs, None, None);
             return Err("cancelled by the host".into());
+        }
+        if last_report.elapsed() >= Duration::from_millis(1000) {
+            last_report = Instant::now();
+            emit_node(
+                SUBAGENT_ID,
+                "running",
+                started_at.elapsed(),
+                timeout_secs,
+                subagent_tool.as_deref(),
+                Some(output.as_str()).filter(|text| !text.trim().is_empty()),
+            );
         }
         match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
             Ok(Some(line)) => {
-                output.push_str(&line);
-                output.push('\n');
-                panels::node_line(SUBAGENT_PANEL, &line);
+                if is_ki {
+                    match child_progress::parse(&line) {
+                        child_progress::NodeEvent::ToolStart(name) => {
+                            subagent_tool = Some(name);
+                            emit_node(
+                                SUBAGENT_ID,
+                                "running",
+                                started_at.elapsed(),
+                                timeout_secs,
+                                subagent_tool.as_deref(),
+                                None,
+                            );
+                        }
+                        child_progress::NodeEvent::ToolEnd { .. } => {
+                            subagent_tool = None;
+                        }
+                        child_progress::NodeEvent::PartialText(text) => {
+                            if last_report.elapsed() >= Duration::from_millis(200) {
+                                last_report = Instant::now();
+                                emit_node(
+                                    SUBAGENT_ID,
+                                    "running",
+                                    started_at.elapsed(),
+                                    timeout_secs,
+                                    subagent_tool.as_deref(),
+                                    Some(text.as_str()),
+                                );
+                            }
+                        }
+                        child_progress::NodeEvent::Message { text, .. } => {
+                            if let Some(text) = text {
+                                output = text;
+                            }
+                        }
+                        child_progress::NodeEvent::Final { text, .. } => {
+                            if let Some(text) = text {
+                                output = text;
+                            }
+                        }
+                        child_progress::NodeEvent::Ignore => {}
+                    }
+                } else {
+                    output.push_str(&line);
+                    output.push('\n');
+                }
             }
             // stdout ended: collect the exit status.
             Ok(None) => break,
@@ -769,7 +824,7 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         }
         if Instant::now() >= deadline {
             let _ = proc::kill(handle);
-            panels::node_finished(SUBAGENT_PANEL, Status::Failed);
+            emit_node(SUBAGENT_ID, "failed", started_at.elapsed(), timeout_secs, None, None);
             return Err(format!("subagent timed out after {timeout_secs}s"));
         }
     }
@@ -786,14 +841,14 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         Err(error) => return Err(capability_reason(error)),
     };
     let text = truncate_output(output);
-    panels::node_finished(
-        SUBAGENT_PANEL,
-        if status == 0 { Status::Done } else { Status::Failed },
+    emit_node(
+        SUBAGENT_ID,
+        if status == 0 { "done" } else { "failed" },
+        started_at.elapsed(),
+        timeout_secs,
+        None,
+        Some(text.as_str()).filter(|text| !text.trim().is_empty()),
     );
-    progress::emit(&types::ProgressBlock::Text(format!(
-        "{} subagent",
-        if status == 0 { "✔" } else { "✖" }
-    )));
     if status != 0 {
         return Err(format!("subagent exited with {status}:\n{}", text.trim()));
     }
@@ -910,7 +965,6 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                 .iter()
                 .position(|node| node.id == id)
                 .unwrap_or_default();
-            panels::node_started(&id, index);
             progress::emit(&types::ProgressBlock::Text(format!("▶ {id}")));
             started.push(id);
         }
@@ -922,11 +976,23 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
     // passes is killed with its process group and the node fails (children
     // cannot outlive the call, so "leave them running" is not an option).
     let wave_deadline = wait_seconds.map(|secs| Instant::now() + Duration::from_secs(secs));
+    let mut node_started: HashMap<String, Instant> = HashMap::new();
+    for id in &started {
+        node_started.insert(id.clone(), Instant::now());
+    }
+    let mut current_tool: HashMap<String, String> = HashMap::new();
+    let mut node_text: HashMap<String, String> = HashMap::new();
+    let mut last_report = Instant::now();
+    publish_wave_nodes(&node_started, &current_tool, &node_text);
     let mut outputs: HashMap<u32, String> = HashMap::new();
     'wave: loop {
         if proc::cancel_requested() {
             fail_remaining("cancelled by the host");
             break 'wave;
+        }
+        if last_report.elapsed() >= Duration::from_millis(1000) {
+            last_report = Instant::now();
+            publish_wave_nodes(&node_started, &current_tool, &node_text);
         }
         // Poll every live child each round. Polling only the head of the list
         // strands siblings: one that finishes while an earlier node is still
@@ -956,16 +1022,50 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .retain(|(node_id, _, _)| node_id != &id);
-                panels::node_finished(&id, Status::Failed);
-                progress::emit(&types::ProgressBlock::Text(format!("✖ {id} (timeout)")));
+                drop(graph);
+                publish_wave_nodes(&node_started, &current_tool, &node_text);
                 continue;
             }
             match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
                 Ok(Some(line)) => {
-                    let buffer = outputs.entry(handle).or_default();
-                    buffer.push_str(&line);
-                    buffer.push('\n');
-                    panels::node_line(&id, &line);
+                    if wave_program == DEFAULT_PROGRAM {
+                        match child_progress::parse(&line) {
+                            child_progress::NodeEvent::ToolStart(name) => {
+                                current_tool.insert(id.clone(), name);
+                                publish_wave_nodes(&node_started, &current_tool, &node_text);
+                            }
+                            child_progress::NodeEvent::ToolEnd { .. } => {
+                                current_tool.remove(&id);
+                            }
+                            child_progress::NodeEvent::PartialText(text) => {
+                                node_text.insert(id.clone(), text);
+                                if last_report.elapsed() >= Duration::from_millis(200) {
+                                    last_report = Instant::now();
+                                    publish_wave_nodes(
+                                        &node_started,
+                                        &current_tool,
+                                        &node_text,
+                                    );
+                                }
+                            }
+                            child_progress::NodeEvent::Message { text, .. } => {
+                                if let Some(text) = text {
+                                    node_text.insert(id.clone(), text.clone());
+                                    outputs.insert(handle, text);
+                                }
+                            }
+                            child_progress::NodeEvent::Final { text, .. } => {
+                                if let Some(text) = text {
+                                    outputs.insert(handle, text);
+                                }
+                            }
+                            child_progress::NodeEvent::Ignore => {}
+                        }
+                    } else {
+                        let buffer = outputs.entry(handle).or_default();
+                        buffer.push_str(&line);
+                        buffer.push('\n');
+                    }
                 }
                 Ok(None) => {
                     // EOF: the child has stopped producing. Give it a short
@@ -1008,15 +1108,8 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .retain(|(node_id, _, _)| node_id != &id);
-                    let status = graph
-                        .get(&id)
-                        .map(|node| node.status)
-                        .unwrap_or(Status::Failed);
-                    panels::node_finished(&id, status);
-                    progress::emit(&types::ProgressBlock::Text(format!(
-                        "{} {id}",
-                        if status == Status::Done { "✔" } else { "✖" }
-                    )));
+                    drop(graph);
+                    publish_wave_nodes(&node_started, &current_tool, &node_text);
                 }
                 Err(_) => {}
             }
@@ -1035,7 +1128,6 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
         .iter()
         .map(|(id, _, _)| id.clone())
         .collect();
-    panels::sync_plan(&graph);
     let mut text = format!(
         "started {} · running {}\n",
         started.len(),
@@ -1084,11 +1176,59 @@ fn fail_remaining(reason: &str) {
     running().lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
 
+/// Emit one row per plan node for the host's work view (a full snapshot).
+fn publish_wave_nodes(
+    started: &HashMap<String, Instant>,
+    tools: &HashMap<String, String>,
+    texts: &HashMap<String, String>,
+) {
+    let graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
+    for node in &graph.nodes {
+        let elapsed = started
+            .get(&node.id)
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        emit_node(
+            &node.id,
+            node.status.as_str(),
+            elapsed,
+            node.timeout_secs,
+            tools.get(&node.id).map(String::as_str),
+            texts.get(&node.id).map(String::as_str),
+        );
+    }
+}
+
+/// Publish one subagent row for the host's work view.
+fn emit_node(
+    id: &str,
+    state: &str,
+    elapsed: Duration,
+    budget_secs: u64,
+    tool: Option<&str>,
+    text: Option<&str>,
+) {
+    progress::emit(&types::ProgressBlock::Json(
+        json!({
+            "ki": "node",
+            "id": id,
+            "state": state,
+            "elapsedMs": elapsed.as_millis() as u64,
+            "budgetMs": budget_secs.saturating_mul(1000),
+            "tool": tool,
+            "text": text,
+        })
+        .to_string(),
+    ));
+}
+
 fn spawn_node(node: &Node, program: &str) -> Result<u32, String> {
     // Same rule as run_subagent: ki-specific flags only for the default ki.
     let mut args: Vec<String> = if program == DEFAULT_PROGRAM {
         vec![
             "-p".into(),
+            "--mode".into(),
+            "json".into(),
             "--no-session".into(),
             "--exclude-tools".into(),
             EXCLUDED_TOOLS.into(),
@@ -1191,7 +1331,6 @@ impl Guest for KiOrchestrator {
     fn shutdown() {
         // The right rail outlives this instance; leaving boxes behind would
         // show a dead wave as if it were still running.
-        panels::clear_all();
     }
 
     fn list_tools() -> Vec<types::ToolSpec> {

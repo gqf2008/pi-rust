@@ -45,6 +45,28 @@ impl SlashCommand for SkillCommand {
     }
 }
 
+pub(super) struct WorkCommand;
+impl SlashCommand for WorkCommand {
+    fn name(&self) -> &'static str {
+        "/work"
+    }
+    fn description(&self) -> &'static str {
+        "Show or hide the work view: todo list and one pane per subagent"
+    }
+    fn execute(&self, ctx: &CommandContext, _args: &str) {
+        let enabled = ctx.state.toggle_work_view();
+        add_note_message(
+            &ctx.chat,
+            if enabled {
+                "work view on — /work (or F2) hides it"
+            } else {
+                "work view off"
+            },
+        );
+        ctx.tui.request_render(false);
+    }
+}
+
 pub(super) struct ClearChatCommand;
 impl SlashCommand for ClearChatCommand {
     fn name(&self) -> &'static str {
@@ -801,6 +823,7 @@ pub(super) fn build_builtin_registry() -> CommandRegistry {
     let mut r = CommandRegistry::new();
     r.register(Arc::new(HelpCommand));
     r.register(Arc::new(ClearChatCommand));
+    r.register(Arc::new(WorkCommand));
     r.register(Arc::new(ExitCommand));
     r.register(Arc::new(VersionCommand));
     r.register(Arc::new(ChangelogCommand));

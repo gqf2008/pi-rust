@@ -129,6 +129,25 @@ impl ToolExecutionComponent {
         self.bump();
     }
 
+    /// Replace the streamed body **without** declaring the call finished.
+    ///
+    /// `set_result` flips the header to ✓ and freezes `finished_at`; a tool that
+    /// streams progress (a dispatch wave rewriting its per-node bars) is still
+    /// running, so its header must keep the running state and its elapsed time
+    /// must keep moving.
+    pub fn set_partial(&self, text: &str) {
+        if let Ok(mut r) = self.result.lock() {
+            *r = Some(text.to_string());
+        }
+        if let Ok(mut s) = self.status.lock() {
+            *s = ToolStatus::Running;
+        }
+        if let Ok(mut f) = self.finished_at.lock() {
+            *f = None;
+        }
+        self.bump();
+    }
+
     /// Set the tool result.
     pub fn set_result(&self, result: &str, is_error: bool) {
         if let Ok(mut r) = self.result.lock() {

@@ -487,6 +487,12 @@ pub(super) async fn handle_agent_event(
         }
 
         AgentEvent::AgentEnd { .. } => {
+            // No tool can still be in flight once the run ended, and a request
+            // that never reached `MessageEnd` (abort mid-stream) must not keep
+            // its elapsed counter running in the summary.
+            state.clear_running_tools();
+            state.llm_request_aborted();
+            state.clear_nodes();
             // Finalize any still-streaming assistant message.
             state.transcript_view().finalize_assistant();
             state.set_status(RunStatus::Idle);
@@ -547,61 +553,68 @@ pub(super) async fn handle_agent_event(
             tui.request_render(false);
         }
 
-        AgentEvent::MessageStart { message } => match message {
-            AgentMessage::Assistant(a) => {
-                // The shared transcript view renders this through the same
-                // component path as the remote client. It installs the live
-                // markdown transformer + hide-thinking preference itself.
-                state.transcript_view().apply(
-                    &UiEvent::AssistantStart {
-                        blocks: assistant_blocks(&a),
-                    },
-                    tui.width(),
-                );
-                tui.request_render(false);
+        AgentEvent::MessageStart { message } => {
+            // A provider request begins with its assistant message: the rail's
+            // `llm` panel measures the in-flight request from here.
+            if matches!(message, AgentMessage::Assistant(_)) {
+                state.llm_request_started();
             }
-            AgentMessage::Custom(custom) => {
-                let payload = serde_json::json!({
-                    "customType": custom.role,
-                    "content": custom.content,
-                    "details": custom.data,
-                    "expanded": false,
-                    "outputPad": 1,
-                });
-                if let Some(component) = extension_message_component(
-                    &state.extension_session,
-                    &custom.role,
-                    &payload,
-                    state.markdown_transformer(),
-                ) {
-                    chat.add_child(component);
-                    chat.add_child(Arc::new(Spacer::new(1)));
-                    tui.request_render(false);
-                } else {
-                    add_note_message(chat, &custom_message_fallback(&custom));
+            match message {
+                AgentMessage::Assistant(a) => {
+                    // The shared transcript view renders this through the same
+                    // component path as the remote client. It installs the live
+                    // markdown transformer + hide-thinking preference itself.
+                    state.transcript_view().apply(
+                        &UiEvent::AssistantStart {
+                            blocks: assistant_blocks(&a),
+                        },
+                        tui.width(),
+                    );
                     tui.request_render(false);
                 }
+                AgentMessage::Custom(custom) => {
+                    let payload = serde_json::json!({
+                        "customType": custom.role,
+                        "content": custom.content,
+                        "details": custom.data,
+                        "expanded": false,
+                        "outputPad": 1,
+                    });
+                    if let Some(component) = extension_message_component(
+                        &state.extension_session,
+                        &custom.role,
+                        &payload,
+                        state.markdown_transformer(),
+                    ) {
+                        chat.add_child(component);
+                        chat.add_child(Arc::new(Spacer::new(1)));
+                        tui.request_render(false);
+                    } else {
+                        add_note_message(chat, &custom_message_fallback(&custom));
+                        tui.request_render(false);
+                    }
+                }
+                // Queued (steering / follow-up) user messages are rendered here,
+                // not at queue time, so a message that is still waiting never looks
+                // delivered. The loop drains those itself and emits
+                // `message_start` for them (`agent_loop.rs` pending-message drain).
+                //
+                // A DIRECTLY-sent prompt does NOT reach this arm: the harness
+                // persists it up front and runs the loop with an empty prompts vec,
+                // so no `message_start` is emitted for it — the submit handler
+                // renders that bubble instead.
+                AgentMessage::User(user) => {
+                    state.transcript_view().add_user(&user_message_text(&user));
+                    add_user_images(&state.chat_container, &user, state.images_visible());
+                    // A consumed entry must drop out of the pending display.
+                    refresh_pending_messages(state, lane).await;
+                    tui.request_render(false);
+                }
+                // ToolResult / other starts are echoed via the tool-execution
+                // components; ignore the dupes.
+                _ => {}
             }
-            // Queued (steering / follow-up) user messages are rendered here,
-            // not at queue time, so a message that is still waiting never looks
-            // delivered. The loop drains those itself and emits
-            // `message_start` for them (`agent_loop.rs` pending-message drain).
-            //
-            // A DIRECTLY-sent prompt does NOT reach this arm: the harness
-            // persists it up front and runs the loop with an empty prompts vec,
-            // so no `message_start` is emitted for it — the submit handler
-            // renders that bubble instead.
-            AgentMessage::User(user) => {
-                state.transcript_view().add_user(&user_message_text(&user));
-                add_user_images(&state.chat_container, &user, state.images_visible());
-                // A consumed entry must drop out of the pending display.
-                refresh_pending_messages(state, lane).await;
-                tui.request_render(false);
-            }
-            // ToolResult / other starts are echoed via the tool-execution
-            // components; ignore the dupes.
-            _ => {}
-        },
+        }
 
         AgentEvent::MessageUpdate {
             message,
@@ -622,6 +635,7 @@ pub(super) async fn handle_agent_event(
             );
             // A freshly-created bash panel hides the global `Working…` loader.
             state.sync_working_loader_with_bash();
+            state.llm_streamed(text.chars().count() as u64);
             *state.last_assistant_text.lock().unwrap() = text;
             tui.request_render(false);
         }
@@ -643,6 +657,8 @@ pub(super) async fn handle_agent_event(
                 // model change) and prices the miss when known.
                 let usage = &a.usage;
                 // Footer usage totals + cache hit rate (pi footer.ts).
+                state.llm_request_finished(usage.output.max(0) as u64);
+                state.record_llm_usage(usage.input, usage.output, usage.cache_read);
                 state.footer.add_usage(
                     usage.input,
                     usage.output,
@@ -703,6 +719,7 @@ pub(super) async fn handle_agent_event(
             tool_name,
             args,
         } => {
+            state.tool_started(&tool_call_id, &tool_name, tool_detail(&tool_name, &args));
             state.transcript_view().apply(
                 &UiEvent::ToolStart {
                     id: tool_call_id,
@@ -721,6 +738,10 @@ pub(super) async fn handle_agent_event(
             args,
             partial_result,
         } => {
+            if let Some(line) = partial_text_line(&partial_result) {
+                state.tool_output(&tool_call_id, &line);
+            }
+            absorb_node_progress(state, &partial_result);
             state.transcript_view().apply(
                 &UiEvent::ToolUpdate {
                     id: tool_call_id,
@@ -740,6 +761,12 @@ pub(super) async fn handle_agent_event(
             result,
             is_error,
         } => {
+            state.tool_finished(&tool_call_id);
+            if tool_name == "todo" {
+                if let Some(lines) = todo_lines_from_details(&result.details) {
+                    state.set_todos(lines);
+                }
+            }
             state.transcript_view().apply(
                 &UiEvent::ToolEnd {
                     id: tool_call_id,
@@ -889,5 +916,79 @@ mod tests {
         std::fs::write(dir.path().join("marker"), "x").unwrap();
         assert!(done_when_cmd_satisfied(dir.path(), "test -f marker").await);
         assert!(!done_when_cmd_satisfied(dir.path(), "test -f missing").await);
+    }
+}
+
+/// One-line summary of a tool call's arguments for the rail: a bash command
+/// line when there is one, otherwise a short JSON snippet.
+fn tool_detail(tool_name: &str, args: &serde_json::Value) -> String {
+    if let Some(command) = args.get("command").and_then(|value| value.as_str()) {
+        let first = command.lines().next().unwrap_or("").trim();
+        let truncated: String = first.chars().take(120).collect();
+        return format!("$ {truncated}");
+    }
+    let compact = args.to_string();
+    let truncated: String = compact.chars().take(100).collect();
+    if truncated.is_empty() {
+        tool_name.to_string()
+    } else {
+        truncated
+    }
+}
+
+/// The last non-empty line of a streamed partial tool result.
+fn partial_text_line(result: &kiqi_agent::types::AgentToolResult) -> Option<String> {
+    let mut last = None;
+    for block in &result.content {
+        if let kiqi_agent::types::TextContentOrImage::Text(text) = block {
+            if let Some(line) = text.text.lines().rev().find(|line| !line.trim().is_empty()) {
+                last = Some(line.trim_end().to_string());
+            }
+        }
+    }
+    last
+}
+
+/// Read `{"ki":"node",…}` rows an extension emits for its children (the
+/// orchestrator's `dispatch` wave and single `subagent` call) into the work
+/// view's node list.
+fn absorb_node_progress(state: &TuiState, result: &kiqi_agent::types::AgentToolResult) {
+    for block in &result.content {
+        let kiqi_agent::types::TextContentOrImage::Text(text) = block else {
+            continue;
+        };
+        for line in text.text.lines() {
+            let line = line.trim();
+            if !line.starts_with('{') || !line.contains("\"ki\"") {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if value.get("ki").and_then(|kind| kind.as_str()) != Some("node") {
+                continue;
+            }
+            let Some(id) = value.get("id").and_then(|id| id.as_str()) else {
+                continue;
+            };
+            state.upsert_node(NodeRow {
+                id: id.to_string(),
+                state: value
+                    .get("state")
+                    .and_then(|state| state.as_str())
+                    .unwrap_or("running")
+                    .to_string(),
+                elapsed_ms: value.get("elapsedMs").and_then(|v| v.as_u64()).unwrap_or(0),
+                budget_ms: value.get("budgetMs").and_then(|v| v.as_u64()).unwrap_or(0),
+                tool: value
+                    .get("tool")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                text: value
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            });
+        }
     }
 }
