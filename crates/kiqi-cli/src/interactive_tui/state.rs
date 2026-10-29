@@ -1418,11 +1418,6 @@ impl TuiState {
         *self.llm_usage.lock().unwrap()
     }
 
-    /// Replace the whole usage counter (restored sessions seed it from history).
-    pub(super) fn set_llm_usage(&self, usage: (u64, u64, u64, u64)) {
-        *self.llm_usage.lock().unwrap() = usage;
-    }
-
     pub(super) fn set_todos(&self, lines: Vec<String>) {
         *self.todo_lines.lock().unwrap() = lines;
     }
@@ -1671,31 +1666,4 @@ impl TuiState {
     pub(super) fn images_visible(&self) -> bool {
         *self.show_images.lock().unwrap()
     }
-}
-
-/// Rail lines for the `todo` tool's `details.todos`, or `None` when the payload
-/// is not a todo list. Shared by the live event path and session restore.
-pub(super) fn todo_lines_from_details(details: &serde_json::Value) -> Option<Vec<String>> {
-    let todos = details.get("todos")?.as_array()?;
-    Some(
-        todos
-            .iter()
-            .map(|todo| {
-                let text = todo
-                    .get("text")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("(untitled)");
-                let status = todo
-                    .get("status")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("pending");
-                let mark = match status {
-                    "completed" => "✔",
-                    "in_progress" => "▶",
-                    _ => "·",
-                };
-                format!("{mark} {text}")
-            })
-            .collect(),
-    )
 }

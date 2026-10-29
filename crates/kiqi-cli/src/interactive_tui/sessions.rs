@@ -299,49 +299,6 @@ pub(super) async fn fork_session(
 /// the identity path. Each restored assistant component installs it so replayed
 /// history renders through the same `register_markdown_transformer` handlers
 /// the live stream does.
-/// Seed the rail panels from a restored session: the last `todo` tool result is
-/// the task list, and the assistant messages' usage totals drive the `llm`
-/// panel. Without this a resumed session starts with an empty right column even
-/// though its history carries both.
-pub(super) async fn seed_panels_from_history(harness: &AgentHarness, state: &Arc<TuiState>) {
-    let tree = harness.session().view("main");
-    let Ok(entries) = tree
-        .find_entries(&EntryQuery {
-            entry_type: None,
-            custom_type: None,
-            order: Some(EntryOrder::OldestFirst),
-            limit: None,
-            cursor: None,
-        })
-        .await
-    else {
-        return;
-    };
-    let mut todos: Vec<String> = Vec::new();
-    let mut usage = (0u64, 0u64, 0u64, 0u64);
-    for entry in entries {
-        let Entry::Message(message_entry) = entry else {
-            continue;
-        };
-        match &message_entry.message {
-            AgentMessage::ToolResult(result) if result.tool_name == "todo" => {
-                if let Some(lines) = result.details.as_ref().and_then(todo_lines_from_details) {
-                    todos = lines;
-                }
-            }
-            AgentMessage::Assistant(assistant) => {
-                usage.0 += 1;
-                usage.1 += assistant.usage.input.max(0) as u64;
-                usage.2 += assistant.usage.output.max(0) as u64;
-                usage.3 += assistant.usage.cache_read.max(0) as u64;
-            }
-            _ => {}
-        }
-    }
-    state.set_todos(todos);
-    state.set_llm_usage(usage);
-}
-
 pub(super) async fn render_session_history(
     harness: &AgentHarness,
     chat: &Arc<Container>,

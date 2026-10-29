@@ -756,7 +756,26 @@ pub(super) async fn handle_agent_event(
         } => {
             state.tool_finished(&tool_call_id);
             if tool_name == "todo" {
-                if let Some(lines) = todo_lines_from_details(&result.details) {
+                if let Some(todos) = result.details.get("todos").and_then(|v| v.as_array()) {
+                    let lines = todos
+                        .iter()
+                        .map(|todo| {
+                            let text = todo
+                                .get("text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("(untitled)");
+                            let status = todo
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("pending");
+                            let mark = match status {
+                                "completed" => "✔",
+                                "in_progress" => "▶",
+                                _ => "·",
+                            };
+                            format!("{mark} {text}")
+                        })
+                        .collect();
                     state.set_todos(lines);
                 }
             }
