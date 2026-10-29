@@ -738,10 +738,11 @@ pub(super) async fn handle_agent_event(
             args,
             partial_result,
         } => {
+            absorb_node_progress(state, &partial_result);
+            let partial_result = without_node_rows(&partial_result);
             if let Some(line) = partial_text_line(&partial_result) {
                 state.tool_output(&tool_call_id, &line);
             }
-            absorb_node_progress(state, &partial_result);
             state.transcript_view().apply(
                 &UiEvent::ToolUpdate {
                     id: tool_call_id,
@@ -771,7 +772,7 @@ pub(super) async fn handle_agent_event(
                 &UiEvent::ToolEnd {
                     id: tool_call_id,
                     name: tool_name,
-                    result: crate::remote::protocol::tool_result_json(&result),
+                    result: crate::remote::protocol::tool_result_json(&without_node_rows(&result)),
                     is_error,
                 },
                 tui.width(),
@@ -910,6 +911,32 @@ mod tests {
         assert!(!done_when_cmd_satisfied(dir.path(), "exit 3").await);
     }
 
+    /// The child rows are the work view's data; the transcript must not echo
+    /// the raw protocol JSON next to the boxes.
+    #[test]
+    fn child_rows_are_kept_out_of_the_transcript() {
+        let mut result = kiqi_agent::types::AgentToolResult::default();
+        result
+            .content
+            .push(kiqi_agent::types::TextContentOrImage::text(
+                "started 2\n{\"ki\":\"node\",\"id\":\"a\",\"state\":\"running\"}\n\u{2714} a",
+            ));
+        let text = super::without_node_rows(&result)
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                kiqi_agent::types::TextContentOrImage::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("\"ki\""), "{text}");
+        assert!(text.contains("started 2"), "{text}");
+        assert!(text.contains("\u{2714} a"), "{text}");
+        assert!(super::is_node_row("  {\"ki\":\"node\",\"id\":\"b\"}"));
+        assert!(!super::is_node_row("plain tool output"));
+    }
+
     #[tokio::test]
     async fn the_done_command_runs_in_the_session_cwd() {
         let dir = tempfile::tempdir().unwrap();
@@ -947,6 +974,53 @@ fn partial_text_line(result: &kiqi_agent::types::AgentToolResult) -> Option<Stri
         }
     }
     last
+}
+
+/// Whether a tool-result line is one of the extension's `{"ki":"node",…}`
+/// child rows.
+fn is_node_row(line: &str) -> bool {
+    let line = line.trim();
+    if !line.starts_with('{') || !line.contains("\"ki\"") {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("ki")
+                .and_then(|kind| kind.as_str())
+                .map(str::to_string)
+        })
+        .as_deref()
+        == Some("node")
+}
+
+/// A tool result with the child rows removed, for the transcript.
+///
+/// Those rows are the work view's data: they become boxes over the output. The
+/// host used to render the raw protocol JSON into the tool block as well, so a
+/// wave showed up twice — once as boxes, once as `{"budgetMs":…}` lines in the
+/// transcript. The boxes are the readable copy; the transcript keeps the tool's
+/// own text.
+fn without_node_rows(
+    result: &kiqi_agent::types::AgentToolResult,
+) -> kiqi_agent::types::AgentToolResult {
+    let mut visible = result.clone();
+    for block in &mut visible.content {
+        let kiqi_agent::types::TextContentOrImage::Text(text) = block else {
+            continue;
+        };
+        if !text.text.contains("\"ki\"") {
+            continue;
+        }
+        let kept: Vec<&str> = text
+            .text
+            .lines()
+            .filter(|line| !is_node_row(line))
+            .collect();
+        text.text = kept.join("\n");
+    }
+    visible
 }
 
 /// Read `{"ki":"node",…}` rows an extension emits for its children (the

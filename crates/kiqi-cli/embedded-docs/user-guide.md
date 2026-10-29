@@ -223,6 +223,9 @@ macOS 的行为与 main-screen 的终端原生 scrollback 不同：alternate-scr
 内容被盖住，但盒子明确浮在回显区之上。按住盒子正文拖动即可移动，松开后停在放下的
 位置；盒子之间允许重叠，拖到汇总盒子上面会盖住它。Esc 中断后盒子随 run 结束消失。
 
+transcript 里的工具块只保留工具自己的文本：子代理进度（`{"ki":"node",…}` 行）只以
+上面的盒子呈现，不再重复一遍原始 JSON。
+
 一个 wasm 扩展同一时刻只执行一个调用，所以并行批里的多个 `subagent` 会依次进入
 guest：正在跑的有自己的盒子，还在排队的在汇总盒子里以
 `queued · waiting for a free extension call` 列出。需要真正并行时用 `plan` + `dispatch`。
