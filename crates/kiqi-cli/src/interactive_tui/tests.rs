@@ -3053,3 +3053,36 @@ fn goal_driven_marker_is_scoped_to_its_own_run() {
     );
     state.set_status(RunStatus::Idle);
 }
+
+/// The work view renders nothing until `/work`, then one pane per subagent.
+#[test]
+fn work_view_is_opt_in_and_renders_a_pane_per_subagent() {
+    let state = test_tui_state();
+    let view = super::work_view::WorkView {
+        state: state.clone(),
+        inline: true,
+    };
+    assert!(view.render(80).is_empty(), "off by default");
+
+    state.toggle_work_view();
+    let empty = view.render(80);
+    assert!(
+        empty.iter().any(|row| row.contains("no background work")),
+        "{empty:?}"
+    );
+
+    state.upsert_node(super::NodeRow {
+        id: "a".into(),
+        state: "running".into(),
+        elapsed_ms: 65_000,
+        budget_ms: 300_000,
+        tool: Some("bash".into()),
+        text: Some("scanning files".into()),
+    });
+    let rows = view.render(80);
+    let text = rows.join("\n");
+    assert!(text.contains("a · running 1m05s"), "{text}");
+    assert!(text.contains("tool    bash"), "{text}");
+    assert!(text.contains("scanning files"), "{text}");
+    assert!(text.contains('┌'), "{text}");
+}

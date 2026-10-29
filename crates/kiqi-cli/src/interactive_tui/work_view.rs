@@ -58,10 +58,16 @@ fn boxed(title: &str, rows: &[String], width: usize) -> Vec<String> {
     let inner = width.saturating_sub(4);
     let title = kiqi_tui::utils::truncate_to_width(title, width.saturating_sub(4), "…");
     let mut out = Vec::new();
-    out.push(format!("┌─ {title} {}", "─".repeat(width.saturating_sub(title.len() + 4).max(1))));
+    out.push(format!(
+        "┌─ {title} {}",
+        "─".repeat(width.saturating_sub(title.len() + 4).max(1))
+    ));
     for row in rows {
         let row = kiqi_tui::utils::truncate_to_width(row, inner, "…");
-        out.push(format!("│ {row}{}│", " ".repeat(inner.saturating_sub(row.chars().count()))));
+        out.push(format!(
+            "│ {row}{}│",
+            " ".repeat(inner.saturating_sub(row.chars().count()))
+        ));
     }
     out.push(format!("└{}┘", "─".repeat(width.saturating_sub(2))));
     out
@@ -69,10 +75,16 @@ fn boxed(title: &str, rows: &[String], width: usize) -> Vec<String> {
 
 pub(super) struct WorkView {
     pub state: Arc<TuiState>,
+    /// Inline (dock) rendering hides itself when `/work` is off; the overlay
+    /// (page) form is always visible.
+    pub inline: bool,
 }
 
 impl Component for WorkView {
     fn render(&self, width: usize) -> Vec<String> {
+        if self.inline && !self.state.work_view_enabled() {
+            return Vec::new();
+        }
         let colors = current_theme().colors;
         let mut lines: Vec<String> = Vec::new();
 
@@ -88,7 +100,11 @@ impl Component for WorkView {
         let nodes = self.state.node_snapshot();
         let running = self.state.running_snapshot();
         if nodes.is_empty() && running.is_empty() {
-            lines.push(colors.muted.fg("no background work right now · F2 closes this view"));
+            lines.push(
+                colors
+                    .muted
+                    .fg("no background work right now · /work closes this view"),
+            );
         } else {
             let columns = if width >= 140 {
                 3
@@ -102,13 +118,13 @@ impl Component for WorkView {
             for chunk in nodes.chunks(columns) {
                 let mut panes: Vec<Vec<String>> = Vec::new();
                 for node in chunk {
-                    let title = format!(
-                        "{} · {} {}",
-                        node.id,
-                        node.state,
-                        human_ms(node.elapsed_ms)
-                    );
-                    panes.push(boxed(&title, &pane_rows(&self.state, node, pane_width), pane_width));
+                    let title =
+                        format!("{} · {} {}", node.id, node.state, human_ms(node.elapsed_ms));
+                    panes.push(boxed(
+                        &title,
+                        &pane_rows(&self.state, node, pane_width),
+                        pane_width,
+                    ));
                 }
                 let height = panes.iter().map(Vec::len).max().unwrap_or(0);
                 for row in 0..height {

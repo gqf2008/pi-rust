@@ -58,7 +58,7 @@ impl SlashCommand for WorkCommand {
         add_note_message(
             &ctx.chat,
             if enabled {
-                "work view on — /work (or F2) hides it"
+                "work view on — /work hides it"
             } else {
                 "work view off"
             },

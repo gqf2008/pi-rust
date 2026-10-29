@@ -1470,9 +1470,7 @@ impl TuiState {
     }
 
     pub(super) fn toggle_work_view(&self) -> bool {
-        let next = !self
-            .work_view
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let next = !self.work_view.load(std::sync::atomic::Ordering::SeqCst);
         self.work_view
             .store(next, std::sync::atomic::Ordering::SeqCst);
         next

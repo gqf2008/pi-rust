@@ -52,8 +52,8 @@ use autocomplete::*;
 mod rendering;
 use rendering::*;
 mod panels;
-mod work_view;
 mod pet;
+mod work_view;
 
 #[cfg(test)]
 mod tests;
@@ -1328,7 +1328,16 @@ pub async fn interactive_tui(
     let editor_container = Arc::new(Container::new());
     editor_container.add_child(editor.clone());
 
+    // Inline work view: todo + one pane per subagent, above the input. Empty
+    // (zero rows) unless `/work` turned it on, so the normal transcript is
+    // untouched by default.
+    let work_container = Arc::new(Container::new());
+    work_container.add_child(Arc::new(work_view::WorkView {
+        state: state.clone(),
+        inline: true,
+    }));
     let dock = Arc::new(VStack::from_children(vec![
+        StackChild::Entry(StackEntry::new(work_container.clone())),
         StackChild::Entry(StackEntry::new(Arc::new(panels::RegularPanels {
             mailbox: reload_context.ext_status.clone(),
             enabled: matches!(args.tui_mode, crate::args::TuiMode::Regular),
@@ -1371,24 +1380,7 @@ pub async fn interactive_tui(
         StackChild::Entry(StackEntry::new(dock.clone()).shrink(1)),
     ]);
 
-    // The work view is a second page over the same dock: the output area is
-    // replaced (todo + one pane per subagent), the input/footer stay put.
-    let work_page = Arc::new(VStack::from_children(vec![
-        StackChild::Entry(
-            StackEntry::new(Arc::new(work_view::WorkView {
-                state: state.clone(),
-            }))
-            .basis(0)
-            .grow(1)
-            .shrink(1)
-            .min_size(1),
-        ),
-        StackChild::Entry(StackEntry::new(dock.clone()).shrink(1)),
-    ]));
-    let transcript_page = Arc::new(root);
-    let page_work = work_page.clone();
-    let page_transcript = transcript_page.clone();
-    tui.set_layout_root(Some(transcript_page));
+    tui.set_layout_root(Some(Arc::new(root)));
     tui.set_focus(Some(editor.clone()));
     editor.set_focused(true);
 
@@ -1674,7 +1666,6 @@ pub async fn interactive_tui(
     extension_panels.regular_mode = matches!(args.tui_mode, crate::args::TuiMode::Regular);
     extension_panels.sync(tui.as_ref(), &reload_context.ext_status);
     let scroll_tick = scroll_view.clone();
-    let mut page_on_work = false;
     let tick_handle = tokio::spawn(async move {
         // 80ms per frame — upstream's `DEFAULT_INTERVAL_MS`, i.e. a full
         // 10-frame cycle every 800ms. The tick only *requests a repaint*; the
@@ -1698,20 +1689,6 @@ pub async fn interactive_tui(
             if now_mtime != models_mtime {
                 models_mtime = now_mtime;
                 let _ = tx_tick.send(TuiMessage::ReloadModels);
-            }
-            // `/work` page switching.
-            {
-                let want = state_tick.work_view_enabled();
-                eprintln!("[ki workview] tick want={want} current={page_on_work}");
-                if want != page_on_work {
-                    page_on_work = want;
-                    tui_tick.set_layout_root(Some(if want {
-                        page_work.clone()
-                    } else {
-                        page_transcript.clone()
-                    }));
-                    tui_tick.request_render(false);
-                }
             }
             // Extension status (langfuse ✓ …, …) — cheap revision check, and the
             // only reason an idle session repaints its footer.

@@ -11,6 +11,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Added
+
+- **工作视图（`/work`）。** 按需把回显区换成「agent 正在做什么」：`todo` 列表与每个
+  子代理一个 pane（状态、已用时间/预算进度条、当前工具、LLM 流式文本）。默认关闭，
+  `/work` 打开或关闭。子代理用 `ki -p --mode json` 运行，宿主逐行解析
+  `tool_execution_*` 与 `message_update` 事件；没有后台工作时显示一行提示，不占屏。
+
 ### Fixed
 
 - **`/goal <任务>` 立刻开始干活。** 之前该命令只写 `.ki/goals.json`，而自动续跑挂在
