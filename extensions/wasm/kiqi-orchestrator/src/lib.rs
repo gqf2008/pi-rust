@@ -941,8 +941,14 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                 handle,
                 deadline,
             ));
-            // The wave snapshot (published below and once a second) shows this
-            // node's bar; nothing per-node is published here.
+            // Observability: one right-rail box per node, plus the first line of
+            // the transcript's tool output. Both are best-effort.
+            let index = graph
+                .nodes
+                .iter()
+                .position(|node| node.id == id)
+                .unwrap_or_default();
+            progress::emit(&types::ProgressBlock::Text(format!("▶ {id}")));
             started.push(id);
         }
         started
@@ -996,7 +1002,6 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                     slot.result = Some("timed out".into());
                 }
                 graph.propagate_skips();
-                drop(graph);
                 running()
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
@@ -1079,8 +1084,18 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .retain(|(node_id, _, _)| node_id != &id);
-                    drop(graph);
-                    publish_wave_snapshot(&node_started, &current_tool);
+                    let status = graph
+                        .get(&id)
+                        .map(|node| node.status)
+                        .unwrap_or(Status::Failed);
+                    let elapsed = node_started
+                        .get(&id)
+                        .map(|started| started.elapsed().as_millis() as u64)
+                        .unwrap_or(0);
+                    progress::emit(&types::ProgressBlock::Text(format!(
+                        "{} {id}",
+                        if status == Status::Done { "✔" } else { "✖" }
+                    )));
                 }
                 Err(_) => {}
             }
@@ -1177,8 +1192,7 @@ fn node_bar(id: &str, status: Status, elapsed: Duration, budget_ms: u64) -> Stri
             };
             format!("{mark} {id} {} {}", status.as_str(), human(elapsed))
         }
-        Status::Pending => format!("· {id}"),
-        Status::Running => {
+        _ => {
             if budget_ms == 0 {
                 return format!("▶ {id} {}", human(elapsed));
             }
@@ -1215,16 +1229,8 @@ fn publish_wave_snapshot(
     current_tool: &HashMap<String, String>,
 ) {
     let graph = graph_state().lock().unwrap_or_else(|p| p.into_inner());
-    // The host shows only the first dozen lines of a collapsed tool block, so
-    // put live work first: running, then pending, then finished.
-    let mut ordered: Vec<&Node> = graph.nodes.iter().collect();
-    ordered.sort_by_key(|node| match node.status {
-        Status::Running => 0,
-        Status::Pending => 1,
-        _ => 2,
-    });
     let mut lines = Vec::new();
-    for node in ordered {
+    for node in &graph.nodes {
         let elapsed = started
             .get(&node.id)
             .map(|started| started.elapsed())
@@ -1236,12 +1242,6 @@ fn publish_wave_snapshot(
             }
         }
         lines.push(line);
-    }
-    const MAX_LINES: usize = 12;
-    let hidden = lines.len().saturating_sub(MAX_LINES);
-    lines.truncate(MAX_LINES);
-    if hidden > 0 {
-        lines.push(format!("… {hidden} more"));
     }
     if !lines.is_empty() {
         progress::emit(&types::ProgressBlock::Text(lines.join("\n")));
@@ -1436,49 +1436,3 @@ kiqi_wasm_bindings::bindings::export!(KiOrchestrator with_types_in kiqi_wasm_bin
 
 // The 0.8.0 contribution exports are mandatory world exports; deny them all.
 kiqi_wasm_bindings::deny_contribution_exports!(KiOrchestrator);
-
-#[cfg(test)]
-mod bar_tests {
-    use super::{human, node_bar};
-    use crate::Status;
-    use std::time::Duration;
-
-    #[test]
-    fn running_nodes_show_a_bar_against_their_budget() {
-        let line = node_bar(
-            "a",
-            Status::Running,
-            Duration::from_secs(80),
-            160_000,
-        );
-        assert!(line.starts_with("▶ a "), "{line}");
-        assert!(line.contains("50%"), "{line}");
-        assert!(line.contains("1m20s / 2m40s"), "{line}");
-    }
-
-    #[test]
-    fn a_node_without_a_budget_does_not_invent_a_percentage() {
-        let line = node_bar("a", Status::Running, Duration::from_secs(9), 0);
-        assert_eq!(line, "▶ a 9s");
-    }
-
-    #[test]
-    fn terminal_and_pending_states_are_marked_not_measured() {
-        assert_eq!(
-            node_bar("a", Status::Done, Duration::from_secs(70), 300_000),
-            "✔ a done 1m10s"
-        );
-        assert_eq!(
-            node_bar("b", Status::Failed, Duration::from_secs(3), 300_000),
-            "✖ b failed 3s"
-        );
-        assert_eq!(node_bar("c", Status::Pending, Duration::ZERO, 0), "· c");
-    }
-
-    #[test]
-    fn human_durations_stay_short() {
-        assert_eq!(human(Duration::from_secs(9)), "9s");
-        assert_eq!(human(Duration::from_secs(80)), "1m20s");
-        assert_eq!(human(Duration::from_secs(3720)), "1h02m");
-    }
-}

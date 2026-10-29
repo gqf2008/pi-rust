@@ -482,7 +482,7 @@ impl TranscriptView {
                     comp.set_args(&args.to_string());
                 }
                 if tool_update_has_payload(&text, result) {
-                    comp.set_partial(&text);
+                    comp.set_result(&text, false);
                     if !ask_user {
                         apply_edit_diff(&comp, name, result.get("details"), width);
                     }
@@ -506,7 +506,7 @@ impl TranscriptView {
                     }
                     comp.set_expanded(self.expanded());
                     comp.set_running();
-                    comp.set_partial(&text);
+                    comp.set_result(&text, false);
                     if !ask_user {
                         apply_edit_diff(&comp, name, result.get("details"), width);
                     }

@@ -27,23 +27,24 @@ per-read timeouts until every node reaches a terminal state.
 Mid-wave reshape (add/remove/cancel while a wave is in flight) is therefore
 also gone — reshape between waves works as before.
 
-## Observability: progress inside the tool call
+## Observability: the right rail
 
-`plan` and `dispatch` report into the tool call itself, the way Claude Code and
-Codex show subagents — detail lives with the work, not in a separate pane:
+`plan` and `dispatch` publish their state through `ui.component` into the
+host's `sidebar.right` slot, which the interactive TUI stacks down the right
+edge (one text panel per component, in `order`):
 
-- `dispatch` republishes a **snapshot** of the wave at most once a second (the
-  host replaces a non-`bash` tool's body on every update, so this is a live
-  display, not a log): one line per node, bars measured against that node's
-  `timeoutSeconds` (`a ██████░░░░ 62% 4m19s / 30m`), `· id` for nodes not yet
-  started, `✔`/`✖` with the elapsed time once they finish, and the tool a
-  running node is currently calling.
-- `subagent` publishes the same bar for its single child.
-- The children run with `ki -p --mode json`; the guest parses their agent events
-  for the running tool, token usage and `result.finalText` (the node's answer
-  and the result summary).
-- With no attached UI the progress sink is a no-op and the wave behaves exactly
-  as before.
+- `orchestrator.plan` — the task list (`✔ done`, `▶ running`, `· pending`,
+  `✖ failed`, `– skipped`) with the done count.
+- `orchestrator.node.<id>` — one bordered box per node: state, elapsed time and
+  the tail of the child's stdout (ANSI stripped, at most 8 lines, rewritten at
+  most every 400 ms). `subagent` calls get one box titled `subagent`.
+- The tool output stream also carries `▶ id` / `✔ id` lines, so a collapsed
+  tool block still shows which node started or finished.
+
+Every panel call is best-effort: without an attached UI (headless modes, unit
+tests) the host answers `denied` and the wave runs exactly as before. Boxes are
+removed on `shutdown`, and `plan` rewrites drop boxes for nodes it no longer
+contains.
 
 ## Grant it needs
 

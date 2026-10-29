@@ -487,11 +487,6 @@ pub(super) async fn handle_agent_event(
         }
 
         AgentEvent::AgentEnd { .. } => {
-            // No tool can still be in flight once the run ended, and a request
-            // that never reached `MessageEnd` (abort mid-stream) must not keep
-            // its elapsed counter running in the summary.
-            state.clear_running_tools();
-            state.llm_request_aborted();
             // Finalize any still-streaming assistant message.
             state.transcript_view().finalize_assistant();
             state.set_status(RunStatus::Idle);

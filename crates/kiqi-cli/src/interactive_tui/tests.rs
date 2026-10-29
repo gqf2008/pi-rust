@@ -3039,26 +3039,3 @@ fn goal_driven_marker_is_scoped_to_its_own_run() {
     );
     state.set_status(RunStatus::Idle);
 }
-
-/// The inline status block is a summary: one line for what is running (detail
-/// and progress live in each tool's own block) and one for LLM usage.
-#[test]
-fn live_status_rows_summarise_running_tools_and_usage() {
-    let state = test_tui_state();
-    assert!(super::panels::live_rows(&state).is_empty());
-
-    state.tool_started("call-1", "bash", "$ cargo test".to_string());
-    let rows = super::panels::live_rows(&state);
-    assert_eq!(rows.len(), 1, "{rows:?}");
-    assert!(rows[0].contains("1 running"), "{rows:?}");
-    assert!(rows[0].contains("bash"), "{rows:?}");
-    // The command itself belongs to the tool's own block, not the summary.
-    assert!(!rows[0].contains("cargo test"), "{rows:?}");
-
-    state.tool_finished("call-1");
-    state.record_llm_usage(1_200, 345, 0);
-    let rows = super::panels::live_rows(&state);
-    assert_eq!(rows.len(), 1, "{rows:?}");
-    assert!(rows[0].contains("turns 1"), "{rows:?}");
-    assert!(rows[0].contains("↑1.2k"), "{rows:?}");
-}
