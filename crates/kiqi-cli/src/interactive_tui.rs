@@ -1204,6 +1204,7 @@ pub async fn interactive_tui(
         running_tool_calls: std::sync::Mutex::new(Vec::new()),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
+        nodes: std::sync::Mutex::new(Vec::new()),
         llm_live: std::sync::Mutex::new(None),
         llm_last: std::sync::Mutex::new(None),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
