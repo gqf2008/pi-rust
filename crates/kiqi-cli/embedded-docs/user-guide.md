@@ -199,6 +199,14 @@ macOS 的行为与 main-screen 的终端原生 scrollback 不同：alternate-scr
 
 如果 macOS 上滚轮无法滚动历史消息，应检查 `TuiAltScreen::start_readerless` 是否包含 alternate-screen 的鼠标追踪初始化，不要直接修改 macOS 的全局默认值。
 
+### 输入历史（↑ / ↓）
+
+输入框为空（或已经在历史里翻）时，`↑` 依次取出之前提交过的消息，`↓` 往回走；翻回最新一条
+后恢复你当时正在写的草稿。输入框里有内容时 `↑`/`↓` 仍然是光标移动，不会拿历史覆盖草稿。
+
+历史跨会话保留：提交的每条消息（含多行输入）追加到 `<agent_dir>/input-history.jsonl`，
+下次启动 `ki` 直接可用，保留最近 100 条，连续重复的只留一条。删除这个文件即清空记忆。
+
 ### 工作视图（`/work`）
 
 全屏 TUI 里 `/work` 打开或关闭工作视图，默认打开。它不替换 transcript，而是在回显区

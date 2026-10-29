@@ -897,19 +897,30 @@ pub(super) fn format_tokens(n: i64) -> String {
 /// Record a submitted message for ↑ recall (mirrors TS `addToHistory`):
 /// trims, skips empty + consecutive duplicates, caps at [`HISTORY_LIMIT`], and
 /// resets the browse state so a fresh prompt never resumes mid-history.
-pub(super) fn push_history(state: &Arc<TuiState>, text: &str) {
+pub(super) fn push_history(state: &Arc<TuiState>, text: &str) -> bool {
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
-        return;
+        return false;
     }
     let mut history = state.history.lock().unwrap();
     if history.first() == Some(&trimmed) {
-        return;
+        return false;
     }
     history.insert(0, trimmed);
     history.truncate(HISTORY_LIMIT);
     *state.history_index.lock().unwrap() = -1;
     *state.history_draft.lock().unwrap() = None;
+    true
+}
+
+/// [`push_history`] plus the durable copy: the prompt is also appended to
+/// `<agent_dir>/input-history.jsonl`, so the next `ki` starts with the memo
+/// instead of an empty list. Tests call `push_history` directly and never touch
+/// the disk.
+pub(super) fn remember_input(state: &Arc<TuiState>, text: &str) {
+    if push_history(state, text) {
+        super::input_history::append(text);
+    }
 }
 
 /// Submit a draft as a user prompt through the *same* path the Enter key takes:
@@ -933,7 +944,7 @@ pub(super) fn submit_draft(
         }
         tui.request_render(false);
     }
-    push_history(state, text);
+    remember_input(state, text);
     let _ = tx.send(TuiMessage::UserInput(
         text.to_string(),
         state.take_pending_images(),
@@ -1459,18 +1470,20 @@ impl TuiState {
                 existing.state = row.state;
                 existing.elapsed_ms = row.elapsed_ms;
                 existing.budget_ms = row.budget_ms;
-                if row.tool.is_some() {
-                    existing.tool = row.tool;
-                }
+                // `tool: null` is the extension saying "no tool is running"
+                // (a tool just ended), not a field it failed to report, so it
+                // must clear the row. Keeping the last tool made a finished
+                // box show `tool bash` right above its `✔ bash` event.
+                existing.tool = row.tool;
                 if row.text.is_some() {
                     existing.text = row.text;
                 }
                 if row.task.is_some() {
                     existing.task = row.task;
                 }
-                if !row.events.is_empty() {
-                    existing.events = row.events;
-                }
+                // `events` is always the node's full recent history: an empty
+                // array is a fresh call, not an omission.
+                existing.events = row.events;
             }
             None => nodes.push(row),
         }
@@ -1478,10 +1491,41 @@ impl TuiState {
 
     pub(super) fn clear_nodes(&self) {
         self.nodes.lock().unwrap().clear();
+        // Node ids are reused by later plans and by `subagent#N` counters that
+        // restart with the process; keeping their drag offsets would park a
+        // new run's box at the previous run's position.
+        self.work_node_offsets.lock().unwrap().clear();
+        *self.work_node_drag.lock().unwrap() = None;
     }
 
     pub(super) fn node_snapshot(&self) -> Vec<NodeRow> {
         self.nodes.lock().unwrap().clone()
+    }
+
+    /// One node row, cloned without cloning every other row.
+    pub(super) fn node_snapshot_of(&self, id: &str) -> Option<NodeRow> {
+        self.nodes
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|node| node.id == id)
+            .cloned()
+    }
+
+    /// Whether the fullscreen work summary has anything to show right now.
+    ///
+    /// The overlay is created only while this holds. An always-present overlay
+    /// would keep `TUI::has_overlay()` true even when `WorkView::render` draws
+    /// nothing, which suppresses the `↓ Jump to latest message` indicator for
+    /// the whole session. A finished run is not "happening", so a todo list
+    /// left over from the previous turn does not keep the box on screen.
+    pub(super) fn work_summary_active(&self) -> bool {
+        if *self.status.lock().unwrap() == RunStatus::Idle {
+            return false;
+        }
+        !self.todo_lines.lock().unwrap().is_empty()
+            || !self.running_tool_calls.lock().unwrap().is_empty()
+            || self.llm_live.lock().unwrap().is_some()
     }
 
     pub(super) fn toggle_work_view(&self) -> bool {
@@ -1876,7 +1920,7 @@ pub(super) fn todo_lines_from_details(details: &serde_json::Value) -> Option<Vec
 }
 
 /// Whether a screen cell `(column, row)` falls inside a painted rectangle.
-fn cell_inside(rect: (u16, u16, u16, u16), cell: (u16, u16)) -> bool {
+pub(super) fn cell_inside(rect: (u16, u16, u16, u16), cell: (u16, u16)) -> bool {
     let (x, y, width, height) = rect;
     let (column, row) = cell;
     column >= x

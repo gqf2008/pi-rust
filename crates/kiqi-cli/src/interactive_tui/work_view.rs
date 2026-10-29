@@ -1,16 +1,16 @@
 //! The work view: what the agents are doing, over the transcript.
 //!
-//! `/work` overlays this on the output area (the input stays visible). It is not
-//! a second transcript: the point is to *watch work* — the todo list, one pane
-//! per subagent with its state, elapsed time, current tool and last words, and
-//! a summary line. With nothing running it says so rather than showing empty
-//! panes. Toggling it off restores the normal scrolling transcript.
+//! `/work` overlays it on the output area (the input stays visible); it is on
+//! by default and draws nothing while there is no live work. It is not a
+//! second transcript: the point is to *watch work* — the todo list, running
+//! tools and LLM activity in one summary box, and one draggable box per
+//! subagent with its task, state, elapsed time, current tool and recent event
+//! stream.
 
 use super::*;
 
 /// One subagent pane's lines, without borders.
-fn pane_rows(state: &TuiState, node: &NodeRow, width: usize) -> Vec<String> {
-    let _ = state;
+fn pane_rows(node: &NodeRow, width: usize) -> Vec<String> {
     let elapsed = human_ms(node.elapsed_ms);
     let budget = if node.budget_ms > 0 {
         human_ms(node.budget_ms)
@@ -78,7 +78,9 @@ fn human_ms(ms: u64) -> String {
 fn boxed(title: &str, rows: &[String], width: usize) -> Vec<String> {
     let width = width.max(12);
     let inner = width - 4;
-    let title = kiqi_tui::utils::truncate_to_width(title, inner, "…");
+    // Leave one cell for the fill: `truncate_to_width` to `inner` alone would
+    // let a full-width title push the top-right corner past the side border.
+    let title = kiqi_tui::utils::truncate_to_width(title, inner.saturating_sub(1), "…");
     let title_width = kiqi_tui::ansi::visible_width(&title);
     let mut out = Vec::with_capacity(rows.len() + 2);
     out.push(format!(
@@ -109,12 +111,17 @@ fn frame(body: &[String], width: usize) -> Vec<String> {
         .map(|row| visible(row))
         .max()
         .unwrap_or(0)
-        .max(TITLE.len() + 1)
+        .max(visible(TITLE) + 1)
         .max(MIN_WIDTH)
         .min(width.saturating_sub(6).min(MAX_WIDTH));
     let mut rows = Vec::with_capacity(body.len() + 2);
-    let head = format!("┌─ {TITLE} ");
-    let fill = (inner + 4).saturating_sub(head.len() + 1).max(1);
+    // Widths are display cells, not bytes: the border glyphs are three bytes
+    // and the interpunct two, so `str::len()` here left the top border five
+    // cells short of the body. Leave a cell of fill so a narrow terminal cannot
+    // push the corner past the side border.
+    let title = kiqi_tui::utils::truncate_to_width(TITLE, inner.saturating_sub(2), "…");
+    let head = format!("┌─ {title} ");
+    let fill = (inner + 4).saturating_sub(visible(&head) + 1).max(1);
     rows.push(format!("{head}{}┐", "─".repeat(fill)));
     for row in body {
         let row = kiqi_tui::utils::truncate_to_width(row, inner, "…");
@@ -237,20 +244,16 @@ pub(super) struct NodeBox {
 
 impl Component for NodeBox {
     fn render(&self, width: usize) -> Vec<String> {
-        let Some(node) = self
-            .state
-            .node_snapshot()
-            .into_iter()
-            .find(|node| node.id == self.id)
-        else {
+        let Some(node) = self.state.node_snapshot_of(&self.id) else {
             return Vec::new();
         };
         // A pane per subagent, not a full-width band: several agents share the
-        // right edge, so the box stays narrow enough to stack.
-        const NODE_MIN_WIDTH: usize = 48;
+        // right edge, so the box stays narrow enough to stack. Never widen past
+        // the width the overlay manager allocated (a narrow terminal must
+        // shrink the box, not have the compositor cut its right border off).
         const NODE_MAX_WIDTH: usize = 68;
-        let width = width.clamp(NODE_MIN_WIDTH, NODE_MAX_WIDTH);
-        let rows = pane_rows(&self.state, &node, width.saturating_sub(4));
+        let width = width.min(NODE_MAX_WIDTH);
+        let rows = pane_rows(&node, width.saturating_sub(4));
         boxed(
             &format!("{} · {} {}", node.id, node.state, human_ms(node.elapsed_ms)),
             &rows,

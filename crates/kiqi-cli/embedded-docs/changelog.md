@@ -22,8 +22,22 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   一行。子代理用 `ki -p --mode json` 运行，宿主逐行解析 `tool_execution_*` /
   `message_update` / `result` 事件。
 
+### Added
+
+- **输入历史跨会话保留。** 之前 ↑/↓ 只能翻当前进程里提交过的消息，`ki` 一退出记忆就没了。
+  现在每条提交的消息（含多行输入）追加到 `<agent_dir>/input-history.jsonl`，启动时读回
+  最近 100 条，连续重复只留一条；↑/↓ 的翻找规则不变（输入框为空或已在翻历史时才取用，
+  翻回最新一条恢复草稿）。
+
 ### Fixed
 
+- **工作视图的一批审查修复。** 汇总盒子顶边框按字节数算填充，比盒身短 5 格；窄终端下
+  子代理盒子被截断右边框；两个盒子重叠时按下命中的是视觉上在下面那个；拖到屏幕边缘外
+  再回拉有一段死区；漏掉鼠标抬起后，下一次拖动会串到上一次的盒子；`/work` 即使没有内容
+  也常驻浮层，压掉了 `↓ Jump to latest message` 提示；节点 id 复用时继承上一轮的拖动
+  位置；`done` 的盒子用时还在继续涨；`dispatch` 被取消后盒子停在 running。
+- **节点行的合并语义。** `tool: null` 与 `events: []` 是扩展给出的权威值（工具已结束、
+  这是新一轮的事件），之前被当成"这轮没上报"而保留旧值——盒子会一直挂着 `tool bash`。
 - **并行的 `subagent` 调用各占一块盒子。** guest 用固定 id `subagent` 上报每次调用，
   宿主按 id 合并——两个同时在跑的调用被并成一个盒子，用时还被后开始的那次清零。现在
   每次调用各自拿 id（`subagent#1`…），并补齐 `task` / `events`。

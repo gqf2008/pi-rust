@@ -58,6 +58,7 @@ mod work_view;
 #[cfg(test)]
 mod tests;
 
+mod input_history;
 mod state;
 pub(crate) use state::configured_keybindings;
 use state::*;
@@ -875,8 +876,9 @@ pub(crate) fn diagnostic_log(message: &str) {
 ///
 /// Hit-testing uses each overlay's *painted* rectangle: passive overlays are
 /// nudged apart at paint time, so the requested offset is not where the box
-/// is. Subagent boxes are tried first (newest last, so the top one wins), then
-/// the work summary box.
+/// is. When boxes overlap, the one painted last (the largest overlay id, which
+/// is also the paint order) wins — node-list order is not paint order because
+/// moving a box may rebuild its overlay.
 fn begin_box_drag(
     state: &TuiState,
     nodes: &std::sync::Mutex<
@@ -887,23 +889,38 @@ fn begin_box_drag(
     row: u16,
     screen_width: u16,
 ) -> bool {
-    for node in state.node_snapshot().iter().rev() {
+    let mut top: Option<(usize, Option<String>, (u16, u16, u16, u16))> = None;
+    let mut consider = |handle: &Arc<dyn kiqi_tui::tui::OverlayHandle>, node_id: Option<&str>| {
+        let Some(rect) = handle.rect() else {
+            return;
+        };
+        if !state::cell_inside(rect, (column, row)) {
+            return;
+        }
+        let z = handle.overlay_id().unwrap_or(0);
+        if top.as_ref().is_none_or(|(top_z, _, _)| z >= *top_z) {
+            top = Some((z, node_id.map(str::to_string), rect));
+        }
+    };
+    for node in state.node_snapshot().iter() {
         let handle = nodes
             .lock()
             .ok()
             .and_then(|map| map.get(&node.id).map(|(_, _, handle)| handle.clone()));
-        let Some(rect) = handle.and_then(|handle| handle.rect()) else {
-            continue;
-        };
-        if state.begin_node_drag_at(&node.id, rect, (column, row), screen_width) {
-            return true;
+        if let Some(handle) = handle {
+            consider(&handle, Some(&node.id));
         }
     }
-    let handle = work.lock().ok().and_then(|slot| slot.clone());
-    let Some(rect) = handle.and_then(|handle| handle.rect()) else {
-        return false;
-    };
-    state.begin_work_drag_at(rect, (column, row), screen_width)
+    if let Some(handle) = work.lock().ok().and_then(|slot| slot.clone()) {
+        consider(&handle, None);
+    }
+    match top {
+        Some((_, Some(id), rect)) => {
+            state.begin_node_drag_at(&id, rect, (column, row), screen_width)
+        }
+        Some((_, None, rect)) => state.begin_work_drag_at(rect, (column, row), screen_width),
+        None => false,
+    }
 }
 
 pub async fn interactive_tui(
@@ -1297,7 +1314,8 @@ pub async fn interactive_tui(
         current_model_id: std::sync::Mutex::new(lane_model_id.clone()),
         show_images: std::sync::Mutex::new(show_images),
         cache_miss_notices: std::sync::Mutex::new(cache_miss_notices),
-        history: std::sync::Mutex::new(Vec::new()),
+        // Last session's prompts come back so ↑ recall survives a restart.
+        history: std::sync::Mutex::new(input_history::load()),
         history_index: std::sync::Mutex::new(-1),
         history_draft: std::sync::Mutex::new(None),
         cache_tracker: std::sync::Mutex::new(kiqi_harness::cache_stats::CacheMissTracker::new()),
@@ -1589,7 +1607,7 @@ pub async fn interactive_tui(
         ctx_for_cb.tui.request_render(false);
         // Remember the message for ↑ recall (slash commands are not part of
         // the replayable message history).
-        push_history(&ctx_for_cb.state, text);
+        remember_input(&ctx_for_cb.state, text);
         if ctx_for_cb
             .tx
             .send(TuiMessage::UserInput(
@@ -1760,14 +1778,22 @@ pub async fn interactive_tui(
                 models_mtime = now_mtime;
                 let _ = tx_tick.send(TuiMessage::ReloadModels);
             }
-            // `/work` overlay: created on demand, hidden when toggled off.
+            // `/work` overlay: created on demand, hidden when toggled off or
+            // when it would draw nothing. An always-present overlay would keep
+            // `TUI::has_overlay()` true and suppress the jump-to-latest
+            // indicator for the whole session.
             if page_overlays {
-                let want = state_tick.work_view_enabled();
+                let want = state_tick.work_view_enabled() && state_tick.work_summary_active();
                 let offset = state_tick.work_offset();
                 let mut slot = work_overlay_tick.lock().unwrap();
-                if slot.is_some() && applied_work_offset != offset {
-                    if let Some(handle) = slot.take() {
-                        handle.hide();
+                if let Some(handle) = slot.as_ref() {
+                    if applied_work_offset != offset {
+                        // Move it in place: rebuilding the overlay would bump
+                        // its paint order and report no rect until the next
+                        // frame.
+                        handle.set_offset(offset.0, offset.1);
+                        applied_work_offset = offset;
+                        tui_tick.request_render(false);
                     }
                 }
                 if want && slot.is_none() {
@@ -1781,6 +1807,9 @@ pub async fn interactive_tui(
                         offset_y: offset.1,
                         max_height: Some(kiqi_tui::tui::SizeValue::Percent(1.0)),
                         non_capturing: true,
+                        // The 6-row bottom margin keeps it off the input and
+                        // the jump-to-latest pill; do not count it as modal.
+                        non_blocking: true,
                         margin: Some(kiqi_tui::tui::OverlayMargin {
                             top: 1,
                             right: 1,
@@ -1836,16 +1865,16 @@ pub async fn interactive_tui(
                             .unwrap_or(8);
                         let offset = state_tick.node_offset(&node.id).unwrap_or((0, next_y));
                         next_y += height + 1;
-                        let stale = overlays
-                            .get(&node.id)
-                            .map(|(x, y, _)| (*x, *y))
-                            .is_some_and(|applied| applied != offset);
-                        if stale {
-                            if let Some((_, _, handle)) = overlays.remove(&node.id) {
-                                handle.hide();
+                        if let Some((x, y, handle)) = overlays.get_mut(&node.id) {
+                            if (*x, *y) != offset {
+                                // Reposition in place; recreating would change
+                                // the paint order and lose `rect()` for a frame.
+                                handle.set_offset(offset.0, offset.1);
+                                *x = offset.0;
+                                *y = offset.1;
+                                tui_tick.request_render(false);
                             }
-                        }
-                        if !overlays.contains_key(&node.id) {
+                        } else {
                             let options = kiqi_tui::OverlayOptions {
                                 anchor: kiqi_tui::OverlayAnchor::TopRight,
                                 offset_x: offset.0,
@@ -1854,6 +1883,10 @@ pub async fn interactive_tui(
                                 // Not passive: `non_capturing` also opts the
                                 // overlay into the paint-time anti-overlap pass.
                                 non_capturing: false,
+                                // Floating box with the same bottom margin as
+                                // the summary: it never hides the input or the
+                                // jump-to-latest pill.
+                                non_blocking: true,
                                 margin: Some(kiqi_tui::tui::OverlayMargin {
                                     top: 1,
                                     right: 1,
@@ -2129,6 +2162,12 @@ pub async fn interactive_tui(
                 let screen_width = tui_for_key.width() as u16;
                 match m.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
+                        // A press always starts a fresh interaction: a release
+                        // delivered outside the terminal can be missed, and a
+                        // stale drag would otherwise swallow this press (and
+                        // every later selection drag) while moving an old box.
+                        state_for_key.end_node_drag();
+                        state_for_key.end_work_drag();
                         if begin_box_drag(
                             &state_for_key,
                             &work_node_overlays_for_key,
@@ -2992,7 +3031,7 @@ pub async fn interactive_tui(
                         // for it, so render the bubble here (see the submit
                         // handler in `interactive_tui`).
                         add_user_message(&state_for_key.chat_container, &prompt);
-                        push_history(&state_for_key, &prompt);
+                        remember_input(&state_for_key, &prompt);
                         let _ = tx_for_key.send(TuiMessage::UserInput(
                             prompt,
                             state_for_key.take_pending_images(),

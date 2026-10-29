@@ -3175,17 +3175,105 @@ fn each_subagent_box_drags_on_its_own() {
     state.set_node_offset("a", (0, 12));
     state.set_node_offset("b", (0, 20));
 
-    // Painted rectangles: `a` sits at y 12..18, `b` at y 20..27, both right-aligned.
-    let a = (61, 12, 68, 7);
+    // Painted rectangles follow the renderer: `y = 1 + offset_y`, so offset 12
+    // paints at row 13. `a` covers rows 13..20, `b` 21..28, right-aligned.
+    let a = (61, 13, 68, 7);
     assert!(state.begin_node_drag_at("a", a, (70, 14), 130));
 
     // Successive motion events must not accumulate: each is relative to the press.
     assert!(state.drag_node_box(80, 18));
-    assert_eq!(state.node_offset("a"), Some((10, 15)));
+    assert_eq!(state.node_offset("a"), Some((10, 16)));
     assert!(state.drag_node_box(75, 20));
-    assert_eq!(state.node_offset("a"), Some((5, 17)));
+    assert_eq!(state.node_offset("a"), Some((5, 18)));
 
     assert_eq!(state.node_offset("b"), Some((0, 20)), "`b` is untouched");
     state.end_node_drag();
     assert!(!state.drag_node_box(10, 10), "a release ends the drag");
+}
+
+/// The fullscreen summary overlay must not exist while it would draw nothing:
+/// `TUI::has_overlay()` gates the jump-to-latest indicator, and an
+/// always-present empty overlay hid it for the whole session.
+#[test]
+fn work_summary_is_only_live_while_a_run_is_working() {
+    let state = test_tui_state();
+    assert!(
+        !state.work_summary_active(),
+        "idle session has nothing live"
+    );
+    state.set_todos(vec!["▶ one".into()]);
+    assert!(
+        !state.work_summary_active(),
+        "a todo list left by the previous turn is not live work"
+    );
+    state.set_status(RunStatus::Working);
+    assert!(state.work_summary_active());
+    state.set_status(RunStatus::Idle);
+    assert!(!state.work_summary_active());
+}
+
+/// `tool: null` and `events: []` are the extension reporting "nothing running"
+/// and "fresh call", not omitted fields: they must clear the row.
+#[test]
+fn node_merge_takes_tool_and_events_from_the_latest_snapshot() {
+    let state = test_tui_state();
+    state.upsert_node(super::NodeRow {
+        id: "n1".into(),
+        state: "running".into(),
+        elapsed_ms: 1_000,
+        budget_ms: 60_000,
+        tool: Some("bash".into()),
+        text: None,
+        task: Some("ship".into()),
+        events: vec!["▶ bash".into()],
+    });
+    state.upsert_node(super::NodeRow {
+        id: "n1".into(),
+        state: "done".into(),
+        elapsed_ms: 2_000,
+        budget_ms: 60_000,
+        tool: None,
+        text: Some("ok".into()),
+        task: None,
+        events: Vec::new(),
+    });
+    let node = state.node_snapshot_of("n1").expect("row");
+    assert_eq!(node.state, "done");
+    assert_eq!(node.tool, None, "a finished tool must not stay current");
+    assert!(
+        node.events.is_empty(),
+        "a fresh snapshot replaces the event history"
+    );
+    assert_eq!(
+        node.text.as_deref(),
+        Some("ok"),
+        "text is a high-water mark"
+    );
+    assert_eq!(
+        node.task.as_deref(),
+        Some("ship"),
+        "task is a high-water mark"
+    );
+}
+
+/// The summary box's border rows must be exactly as wide as its body rows;
+/// byte-length math here used to leave the top border five cells short.
+#[test]
+fn work_summary_box_borders_line_up() {
+    let state = test_tui_state();
+    state.set_todos(vec!["▶ one".into()]);
+    let view = super::work_view::WorkView {
+        state: state.clone(),
+        inline: false,
+    };
+    let rows = view.render(80);
+    assert!(rows.len() > 2, "{rows:?}");
+    let widths: Vec<usize> = rows
+        .iter()
+        .map(|row| kiqi_tui::ansi::visible_width(row))
+        .collect();
+    assert!(
+        widths.windows(2).all(|pair| pair[0] == pair[1]),
+        "ragged box: {widths:?} {rows:?}"
+    );
 }

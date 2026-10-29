@@ -74,6 +74,10 @@ pub struct OverlayOptions {
     pub visible: Option<fn(width: usize, height: usize) -> bool>,
     /// Don't capture keyboard focus.
     pub non_capturing: bool,
+    /// A floating box that never covers the input or the jump-to-latest pill.
+    /// Such overlays do not count as a modal overlay for `has_overlay`, so
+    /// the scroll indicator keeps working while the box is up.
+    pub non_blocking: bool,
 }
 
 /// Handle returned by show_overlay for controlling the overlay.
@@ -97,6 +101,16 @@ pub trait OverlayHandle: Send + Sync {
     /// cells. Passive overlays are nudged to avoid each other at paint time, so
     /// this is the only reliable source for hit-testing a drawn box.
     fn rect(&self) -> Option<(u16, u16, u16, u16)> {
+        None
+    }
+
+    /// Move the overlay in place, keeping its paint order. Moving by
+    /// hide-and-recreate would put it on top of everything added since.
+    fn set_offset(&self, _offset_x: i32, _offset_y: i32) {}
+
+    /// The overlay's paint-order id: larger ids are painted later (on top).
+    /// `None` for implementations that cannot report one.
+    fn overlay_id(&self) -> Option<usize> {
         None
     }
 }

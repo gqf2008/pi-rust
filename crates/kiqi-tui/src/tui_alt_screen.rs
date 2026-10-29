@@ -1161,7 +1161,10 @@ impl TUI for TuiAltScreen {
     }
 
     fn has_overlay(&self) -> bool {
-        !self.overlays.get_visible().is_empty()
+        self.overlays
+            .get_visible()
+            .iter()
+            .any(|(_, options)| !options.non_blocking)
     }
 
     fn start(&self) {
@@ -1370,6 +1373,14 @@ impl OverlayHandle for ManagedOverlayHandle {
 
     fn rect(&self) -> Option<(u16, u16, u16, u16)> {
         self.handle.rect()
+    }
+
+    fn set_offset(&self, offset_x: i32, offset_y: i32) {
+        self.handle.set_offset(offset_x, offset_y);
+    }
+
+    fn overlay_id(&self) -> Option<usize> {
+        Some(self.handle.id())
     }
 }
 

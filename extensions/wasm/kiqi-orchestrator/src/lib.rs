@@ -1042,6 +1042,9 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
     'wave: loop {
         if proc::cancel_requested() {
             fail_remaining("cancelled by the host");
+            // Report the failure: without this the host keeps the last
+            // `running` snapshot until the parent run ends.
+            publish_wave_nodes(&node_started, &current_tool, &node_text, &node_events);
             break 'wave;
         }
         if last_report.elapsed() >= Duration::from_millis(1000) {
@@ -1188,6 +1191,9 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
             }
             if wave_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 fail_remaining("the dispatch wave hit its waitSeconds bound");
+                // Report the failure: without this the host keeps the last
+                // `running` snapshot until the parent run ends.
+                publish_wave_nodes(&node_started, &current_tool, &node_text, &node_events);
                 break 'wave;
             }
         }

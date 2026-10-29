@@ -171,6 +171,11 @@ impl OverlayManager {
         if let Ok(mut overlays) = self.overlays.lock() {
             overlays.retain(|e| e.z_index != id);
         }
+        // Drop the last painted rect too: `rect()` promises `None` once the
+        // overlay is gone, and a stale rectangle would hit-test a ghost.
+        if let Ok(mut applied) = self.applied.lock() {
+            applied.remove(&id);
+        }
     }
 
     /// Set overlay visibility.
@@ -178,6 +183,22 @@ impl OverlayManager {
         if let Ok(mut overlays) = self.overlays.lock() {
             if let Some(entry) = overlays.iter_mut().find(|e| e.z_index == id) {
                 entry.visible = visible;
+            }
+        }
+        if !visible {
+            if let Ok(mut applied) = self.applied.lock() {
+                applied.remove(&id);
+            }
+        }
+    }
+
+    /// Move an overlay in place. Keeps the entry (and its paint order) so the
+    /// next paint lands at the new offset without a remove/add.
+    pub fn set_offset(&self, id: usize, offset_x: i32, offset_y: i32) {
+        if let Ok(mut overlays) = self.overlays.lock() {
+            if let Some(entry) = overlays.iter_mut().find(|e| e.z_index == id) {
+                entry.options.offset_x = offset_x;
+                entry.options.offset_y = offset_y;
             }
         }
     }
@@ -203,16 +224,10 @@ impl OverlayManager {
 
     /// Get visible overlays sorted by z-index.
     pub fn get_visible(&self) -> Vec<(Arc<dyn Component>, OverlayOptions)> {
-        self.overlays
-            .lock()
-            .map(|overlays| {
-                overlays
-                    .iter()
-                    .filter(|e| e.visible)
-                    .map(|e| (e.component.clone(), e.options.clone()))
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.visible_entries()
+            .into_iter()
+            .map(|(_, component, options)| (component, options))
+            .collect()
     }
 
     /// Passive panels share screen space without covering one another. Keep
@@ -306,6 +321,17 @@ impl OverlayHandle {
     /// Set visibility.
     pub fn set_visible(&self, visible: bool) {
         self.manager.set_visible(self.id, visible);
+    }
+
+    /// Move the overlay without recreating it: the paint order is unchanged
+    /// because the entry stays where it is in the vector.
+    pub fn set_offset(&self, offset_x: i32, offset_y: i32) {
+        self.manager.set_offset(self.id, offset_x, offset_y);
+    }
+
+    /// The overlay's paint-order id (also its z-index).
+    pub fn id(&self) -> usize {
+        self.id
     }
 
     /// Where the overlay was last painted, in screen cells: `(x, y, width,
@@ -722,6 +748,35 @@ mod tests {
         // nudged above the first, and `rect` reports that, not the request.
         assert_eq!(first.rect(), Some((28, 6, 12, 2)));
         assert_eq!(second.rect(), Some((28, 3, 12, 2)));
+    }
+
+    #[test]
+    fn set_offset_moves_the_painted_rect_without_reordering() {
+        let manager = OverlayManager::new();
+        let moving = manager.add(
+            Arc::new(crate::Text::new("one", 0, 0)),
+            OverlayOptions {
+                anchor: OverlayAnchor::TopLeft,
+                ..Default::default()
+            },
+        );
+        let other = manager.add(
+            Arc::new(crate::Text::new("two", 0, 0)),
+            OverlayOptions {
+                anchor: OverlayAnchor::TopLeft,
+                ..Default::default()
+            },
+        );
+        manager.render_visible(20, 5);
+        assert_eq!(moving.rect(), Some((0, 0, 3, 1)));
+
+        moving.set_offset(3, 2);
+        assert!(
+            moving.id() < other.id(),
+            "moving must not reorder the stack"
+        );
+        manager.render_visible(20, 5);
+        assert_eq!(moving.rect(), Some((3, 2, 3, 1)));
     }
 
     #[test]
