@@ -1201,7 +1201,6 @@ pub async fn interactive_tui(
     let state = Arc::new(TuiState {
         current_assistant: Arc::new(std::sync::Mutex::new(None)),
         tool_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        running_tool_calls: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(hide_thinking)),
         tool_outputs_expanded: Arc::new(std::sync::Mutex::new(tool_outputs_expanded)),
@@ -1665,24 +1664,12 @@ pub async fn interactive_tui(
                                // reloading here (instead of threading a channel through the form
                                // callbacks) also picks up edits made outside ki.
         let mut models_mtime = models_json_mtime();
-        // The host-owned "running" panel: refreshed once a second so the
-        // elapsed readout moves, not on every 80 ms frame.
-        let mut running_shown = false;
-        let mut running_at = std::time::Instant::now();
         loop {
             interval.tick().await;
             let now_mtime = models_json_mtime();
             if now_mtime != models_mtime {
                 models_mtime = now_mtime;
                 let _ = tx_tick.send(TuiMessage::ReloadModels);
-            }
-            if running_at.elapsed() >= std::time::Duration::from_secs(1) {
-                running_at = std::time::Instant::now();
-                let mut rows = state_tick.running_snapshot();
-                if state_tick.user_bash_running() {
-                    rows.push(("!command".to_string(), 0));
-                }
-                panels::sync_running(&state_tick.ext_status, &rows, &mut running_shown);
             }
             // Extension status (langfuse ✓ …, …) — cheap revision check, and the
             // only reason an idle session repaints its footer.
