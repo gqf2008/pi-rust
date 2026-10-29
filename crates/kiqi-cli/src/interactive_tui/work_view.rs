@@ -215,7 +215,12 @@ impl Component for WorkView {
                 self.state.current_model_id()
             )));
         }
-        frame(&lines, width)
+        let rows = frame(&lines, width);
+        if let Some(row) = rows.first() {
+            self.state
+                .set_work_box_size((kiqi_tui::ansi::visible_width(row) as u16, rows.len() as u16));
+        }
+        rows
     }
 
     fn invalidate(&self) {}

@@ -292,6 +292,13 @@ pub(super) struct TuiState {
     /// Whether the work view is showing (Ctrl+T).
     /// Work view state; **on by default** (the user toggles it off with `/work`).
     pub(super) work_view: std::sync::atomic::AtomicBool,
+    /// Where the user dragged the work box: `(offset_x, offset_y)` from its
+    /// anchor (top-right). Persisted for the session.
+    pub(super) work_offset: std::sync::Mutex<(i32, i32)>,
+    /// Size of the last rendered work box: `(width, height)` in cells.
+    pub(super) work_box_size: std::sync::Mutex<(u16, u16)>,
+    /// An in-flight drag: mouse start cell and the offset at that moment.
+    pub(super) work_drag: std::sync::Mutex<Option<((u16, u16), (i32, i32))>>,
     /// The `todo` tool's current list, as rail lines (`✔/▶/·` + text).
     ///
     /// Rebuilt from the tool result's `details`, which is where the extension
@@ -1486,6 +1493,62 @@ impl TuiState {
         self.work_view
             .store(next, std::sync::atomic::Ordering::SeqCst);
         next
+    }
+
+    pub(super) fn work_offset(&self) -> (i32, i32) {
+        *self.work_offset.lock().unwrap()
+    }
+
+    pub(super) fn set_work_offset(&self, offset: (i32, i32)) {
+        *self.work_offset.lock().unwrap() = offset;
+    }
+
+    pub(super) fn set_work_box_size(&self, size: (u16, u16)) {
+        *self.work_box_size.lock().unwrap() = size;
+    }
+
+    pub(super) fn work_box_size(&self) -> (u16, u16) {
+        *self.work_box_size.lock().unwrap()
+    }
+
+    /// Start dragging if `(column, row)` is inside the box. Returns whether the
+    /// press was captured.
+    pub(super) fn begin_work_drag(&self, column: u16, row: u16, screen_width: u16) -> bool {
+        let (width, height) = self.work_box_size();
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let (offset_x, offset_y) = self.work_offset();
+        let x = screen_width as i32 - 1 - width as i32 + offset_x;
+        let y = 1 + offset_y;
+        let inside = (column as i32) >= x
+            && (column as i32) < x + width as i32
+            && (row as i32) >= y
+            && (row as i32) < y + height as i32;
+        if inside {
+            *self.work_drag.lock().unwrap() = Some(((column, row), (offset_x, offset_y)));
+        }
+        inside
+    }
+
+    /// Move the box with the pointer. Returns true when a drag is active (the
+    /// caller then repaints).
+    pub(super) fn drag_work_box(&self, column: u16, row: u16) -> bool {
+        let mut drag = self.work_drag.lock().unwrap();
+        let Some(((start_col, start_row), (base_x, base_y))) = *drag else {
+            return false;
+        };
+        let next = (
+            base_x + column as i32 - start_col as i32,
+            base_y + row as i32 - start_row as i32,
+        );
+        drop(drag);
+        self.set_work_offset(next);
+        true
+    }
+
+    pub(super) fn end_work_drag(&self) {
+        *self.work_drag.lock().unwrap() = None;
     }
 
     pub(super) fn work_view_enabled(&self) -> bool {

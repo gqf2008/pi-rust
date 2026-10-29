@@ -1220,6 +1220,9 @@ pub async fn interactive_tui(
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
+        work_offset: std::sync::Mutex::new((0, 0)),
+        work_box_size: std::sync::Mutex::new((0, 0)),
+        work_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(hide_thinking)),
@@ -1674,6 +1677,7 @@ pub async fn interactive_tui(
     // `request_render` the spinner visibly freezes between events.
     let tui_tick = tui.clone();
     let work_overlay_tick = work_overlay.clone();
+    let mut applied_work_offset: (i32, i32) = (0, 0);
     // Overlays are composited only by the alt screen; `regular` uses the dock.
     let page_overlays = matches!(args.tui_mode, crate::args::TuiMode::Fullscreen);
     let state_tick = state.clone();
@@ -1716,13 +1720,22 @@ pub async fn interactive_tui(
             // `/work` overlay: created on demand, hidden when toggled off.
             if page_overlays {
                 let want = state_tick.work_view_enabled();
+                let offset = state_tick.work_offset();
                 let mut slot = work_overlay_tick.lock().unwrap();
+                if slot.is_some() && applied_work_offset != offset {
+                    if let Some(handle) = slot.take() {
+                        handle.hide();
+                    }
+                }
                 if want && slot.is_none() {
+                    applied_work_offset = offset;
                     let options = kiqi_tui::OverlayOptions {
                         // Sized to the box's own content (auto width), floating
                         // in the top-right corner; the rest of the screen keeps
                         // rendering the transcript untouched.
                         anchor: kiqi_tui::OverlayAnchor::TopRight,
+                        offset_x: offset.0,
+                        offset_y: offset.1,
                         max_height: Some(kiqi_tui::tui::SizeValue::Percent(1.0)),
                         non_capturing: true,
                         margin: Some(kiqi_tui::tui::OverlayMargin {
@@ -1993,12 +2006,33 @@ pub async fn interactive_tui(
             // scrolling). Previously every non-Key event was dropped, so a
             // wheel had zero effect
             if let Event::Mouse(m) = ev {
+                // Drag the work box by its body: press inside starts, motion
+                // moves, release ends. The overlay is rebuilt on the next tick
+                // when the offset changed.
+                let screen_width = tui_for_key.width() as u16;
+                match m.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if state_for_key.begin_work_drag(m.column, m.row, screen_width) {
+                            continue;
+                        }
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if state_for_key.drag_work_box(m.column, m.row) {
+                            tui_for_key.request_render(false);
+                            continue;
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        state_for_key.end_work_drag();
+                    }
+                    _ => {}
+                }
                 if tui_for_key.handle_scroll_to_end_indicator_mouse_event(&m) {
                     *state_for_key.selection_start.lock().unwrap() = None;
                     *state_for_key.selection_end.lock().unwrap() = None;
                     continue;
                 }
-                use crossterm::event::MouseEventKind;
+                use crossterm::event::{MouseButton, MouseEventKind};
                 match m.kind {
                     MouseEventKind::ScrollUp => {
                         let delta = -MOUSE_WHEEL_SCROLL_LINES;

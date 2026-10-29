@@ -298,6 +298,9 @@ fn test_tui_state() -> Arc<TuiState> {
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
+        work_offset: std::sync::Mutex::new((0, 0)),
+        work_box_size: std::sync::Mutex::new((0, 0)),
+        work_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -1383,6 +1386,9 @@ fn test_agent_event_mapping_creates_assistant_and_tool() {
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
+        work_offset: std::sync::Mutex::new((0, 0)),
+        work_box_size: std::sync::Mutex::new((0, 0)),
+        work_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -1869,6 +1875,9 @@ fn test_autocomplete_slash_suggestions_render() {
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
+        work_offset: std::sync::Mutex::new((0, 0)),
+        work_box_size: std::sync::Mutex::new((0, 0)),
+        work_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -1965,6 +1974,9 @@ fn test_select_list_swap_restores_editor() {
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
+        work_offset: std::sync::Mutex::new((0, 0)),
+        work_box_size: std::sync::Mutex::new((0, 0)),
+        work_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -2064,6 +2076,9 @@ fn test_message_history_browse_restores_draft() {
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
+        work_offset: std::sync::Mutex::new((0, 0)),
+        work_box_size: std::sync::Mutex::new((0, 0)),
+        work_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -2166,6 +2181,9 @@ fn test_accept_top_suggestion_replaces_prefix() {
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
+        work_offset: std::sync::Mutex::new((0, 0)),
+        work_box_size: std::sync::Mutex::new((0, 0)),
+        work_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -2254,6 +2272,9 @@ fn autocomplete_test_state(max_visible: usize) -> Arc<TuiState> {
         llm_usage: std::sync::Mutex::new((0, 0, 0, 0)),
         nodes: std::sync::Mutex::new(Vec::new()),
         work_view: std::sync::atomic::AtomicBool::new(true),
+        work_offset: std::sync::Mutex::new((0, 0)),
+        work_box_size: std::sync::Mutex::new((0, 0)),
+        work_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
         bash_components: Arc::new(std::sync::Mutex::new(HashMap::new())),
         hide_thinking: Arc::new(std::sync::Mutex::new(false)),
@@ -3089,4 +3110,23 @@ fn work_view_is_on_by_default_and_renders_task_and_events() {
 
     state.toggle_work_view();
     assert!(view.render(80).is_empty(), "toggled off");
+}
+
+/// Dragging: a press inside the box starts a drag, motion moves it by the
+/// pointer delta, release ends it; a press outside is ignored.
+#[test]
+fn work_box_can_be_dragged_by_its_body() {
+    let state = test_tui_state();
+    // 100 columns wide screen, box 40x6 anchored top-right (x = 59..99, y = 1..7).
+    state.set_work_box_size((40, 6));
+    state.set_work_offset((0, 0));
+
+    assert!(!state.begin_work_drag(10, 3, 100), "outside the box");
+    assert!(state.begin_work_drag(70, 3, 100), "inside the box");
+
+    assert!(state.drag_work_box(60, 8), "drag is active");
+    assert_eq!(state.work_offset(), (-10, 5), "moved by the pointer delta");
+
+    state.end_work_drag();
+    assert!(!state.drag_work_box(50, 9), "a release ends the drag");
 }
