@@ -60,8 +60,9 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const MIN_TIMEOUT_SECS: u64 = 10;
 const MAX_TIMEOUT_SECS: u64 = 1800;
 const MAX_TASK_BYTES: usize = 20_000;
-/// Id the work view uses for the single-subagent call.
-const SUBAGENT_ID: &str = "subagent";
+/// How many `subagent` calls this session has reported, so concurrent calls get
+/// one box each instead of collapsing onto a single row.
+static SUBAGENT_CALLS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
@@ -369,6 +370,14 @@ static LAST_SESSION_ID: Mutex<Option<String>> = Mutex::new(None);
 
 fn graph_state() -> &'static Mutex<Graph> {
     &GRAPH
+}
+
+/// The work-view id for one `subagent` call. Two calls run in parallel while
+/// the previous one is still streaming, so a fixed id would merge both rows
+/// (and reset the elapsed clock) into a single box.
+fn next_subagent_id() -> String {
+    let call = SUBAGENT_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    format!("subagent#{call}")
 }
 
 fn running() -> &'static Mutex<Vec<(String, u32, Instant)>> {
@@ -747,9 +756,10 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     let mut subagent_tool: Option<String> = None;
     let mut subagent_events: Vec<String> = Vec::new();
     let subagent_task: String = task.lines().next().unwrap_or("").chars().take(160).collect();
+    let subagent_id = next_subagent_id();
     let mut output = String::new();
     emit_node_full(
-        SUBAGENT_ID,
+        &subagent_id,
         "running",
         started_at.elapsed(),
         timeout_secs,
@@ -766,13 +776,22 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         // `kill` is idempotent.
         if proc::cancel_requested() {
             let _ = proc::kill(handle);
-            emit_node(SUBAGENT_ID, "failed", started_at.elapsed(), timeout_secs, None, None);
+            emit_node_full(
+                &subagent_id,
+                "failed",
+                started_at.elapsed(),
+                timeout_secs,
+                None,
+                None,
+                Some(subagent_task.as_str()),
+                &subagent_events,
+            );
             return Err("cancelled by the host".into());
         }
         if last_report.elapsed() >= Duration::from_millis(1000) {
             last_report = Instant::now();
             emit_node_full(
-                SUBAGENT_ID,
+                &subagent_id,
                 "running",
                 started_at.elapsed(),
                 timeout_secs,
@@ -792,13 +811,15 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
                                 subagent_events.remove(0);
                             }
                             subagent_tool = Some(name);
-                            emit_node(
-                                SUBAGENT_ID,
+                            emit_node_full(
+                                &subagent_id,
                                 "running",
                                 started_at.elapsed(),
                                 timeout_secs,
                                 subagent_tool.as_deref(),
                                 None,
+                                Some(subagent_task.as_str()),
+                                &subagent_events,
                             );
                         }
                         child_progress::NodeEvent::ToolEnd { name, is_error } => {
@@ -814,13 +835,15 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
                         child_progress::NodeEvent::PartialText(text) => {
                             if last_report.elapsed() >= Duration::from_millis(200) {
                                 last_report = Instant::now();
-                                emit_node(
-                                    SUBAGENT_ID,
+                                emit_node_full(
+                                    &subagent_id,
                                     "running",
                                     started_at.elapsed(),
                                     timeout_secs,
                                     subagent_tool.as_deref(),
                                     Some(text.as_str()),
+                                    Some(subagent_task.as_str()),
+                                    &subagent_events,
                                 );
                             }
                         }
@@ -848,7 +871,16 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         }
         if Instant::now() >= deadline {
             let _ = proc::kill(handle);
-            emit_node(SUBAGENT_ID, "failed", started_at.elapsed(), timeout_secs, None, None);
+            emit_node_full(
+                &subagent_id,
+                "failed",
+                started_at.elapsed(),
+                timeout_secs,
+                None,
+                None,
+                Some(subagent_task.as_str()),
+                &subagent_events,
+            );
             return Err(format!("subagent timed out after {timeout_secs}s"));
         }
     }
@@ -865,13 +897,15 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         Err(error) => return Err(capability_reason(error)),
     };
     let text = truncate_output(output);
-    emit_node(
-        SUBAGENT_ID,
+    emit_node_full(
+        &subagent_id,
         if status == 0 { "done" } else { "failed" },
         started_at.elapsed(),
         timeout_secs,
         None,
         Some(text.as_str()).filter(|text| !text.trim().is_empty()),
+        Some(subagent_task.as_str()),
+        &subagent_events,
     );
     if status != 0 {
         return Err(format!("subagent exited with {status}:\n{}", text.trim()));
@@ -1250,18 +1284,6 @@ fn publish_wave_nodes(
     }
 }
 
-/// Publish one subagent row for the host's work view.
-fn emit_node(
-    id: &str,
-    state: &str,
-    elapsed: Duration,
-    budget_secs: u64,
-    tool: Option<&str>,
-    text: Option<&str>,
-) {
-    emit_node_full(id, state, elapsed, budget_secs, tool, text, None, &[]);
-}
-
 /// The full row: adds the task the subagent was given and its recent events.
 #[allow(clippy::too_many_arguments)]
 fn emit_node_full(
@@ -1479,3 +1501,19 @@ kiqi_wasm_bindings::bindings::export!(KiOrchestrator with_types_in kiqi_wasm_bin
 
 // The 0.8.0 contribution exports are mandatory world exports; deny them all.
 kiqi_wasm_bindings::deny_contribution_exports!(KiOrchestrator);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each `subagent` call gets its own work-view row: two calls run in
+    /// parallel, and one shared id used to merge both into a single box (and
+    /// restart its elapsed clock).
+    #[test]
+    fn concurrent_subagent_calls_get_distinct_ids() {
+        let first = next_subagent_id();
+        let second = next_subagent_id();
+        assert_ne!(first, second);
+        assert!(first.starts_with("subagent#"), "{first}");
+    }
+}

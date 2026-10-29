@@ -24,6 +24,9 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **并行的 `subagent` 调用各占一块盒子。** guest 用固定 id `subagent` 上报每次调用，
+  宿主按 id 合并——两个同时在跑的调用被并成一个盒子，用时还被后开始的那次清零。现在
+  每次调用各自拿 id（`subagent#1`…），并补齐 `task` / `events`。
 - **`/goal <任务>` 立刻开始干活。** 之前该命令只写 `.ki/goals.json`，而自动续跑挂在
   `AgentEnd` 上——空会话没有 run 可结束，于是目标建好后必须用户再说一句话才会动。
   现在命令结束后若出现新 goal（或 resume 了旧 goal）且会话空闲，就直接起一次续跑；
