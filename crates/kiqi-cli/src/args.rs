@@ -87,12 +87,12 @@ pub enum TuiMode {
     Regular,
 }
 
-const fn default_tui_mode_for(is_macos: bool) -> TuiMode {
-    if is_macos {
-        TuiMode::Regular
-    } else {
-        TuiMode::Fullscreen
-    }
+/// Fullscreen (alt-screen) is the default everywhere, including macOS: it is
+/// the only mode with a compositing layer, so features drawn over the output
+/// (`/work`) exist only here. `--tui-mode regular` keeps native scrollback for
+/// people who prefer it.
+const fn default_tui_mode_for(_is_macos: bool) -> TuiMode {
+    TuiMode::Fullscreen
 }
 
 impl Default for TuiMode {
@@ -648,7 +648,7 @@ pub fn print_help() {
                                  (no local provider/tools/session; all agent work is remote)
   --token <token>                Auth token for `--connect` (printed by `--server`; may also
                                  be provided via the KI_SERVER_TOKEN env var)
-  --tui-mode <mode>              TUI buffer: regular or fullscreen (macOS default: regular)
+  --tui-mode <mode>              TUI buffer: fullscreen (default) or regular (native scrollback)
   --list-models [search]         List available models (with optional fuzzy search)
   --offline                      Disable startup network operations (same as KI_OFFLINE=1)
   --export <session.jsonl>       Export a session to HTML and exit. `<session.jsonl>` is
@@ -1402,8 +1402,8 @@ mod tests {
     }
 
     #[test]
-    fn tui_mode_default_preserves_native_macos_scrollback() {
-        assert_eq!(default_tui_mode_for(true), TuiMode::Regular);
+    fn tui_mode_defaults_to_fullscreen_everywhere() {
+        assert_eq!(default_tui_mode_for(true), TuiMode::Fullscreen);
         assert_eq!(default_tui_mode_for(false), TuiMode::Fullscreen);
     }
 

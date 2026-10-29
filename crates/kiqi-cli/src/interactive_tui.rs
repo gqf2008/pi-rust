@@ -1328,7 +1328,20 @@ pub async fn interactive_tui(
     let editor_container = Arc::new(Container::new());
     editor_container.add_child(editor.clone());
 
+    // In `regular` (native scrollback) mode there is no alt-screen compositing,
+    // so an overlay would never be painted: the work view goes in the dock,
+    // above the input. Fullscreen must NOT add this child — the overlay below is
+    // the only copy, otherwise the same view appears twice.
+    let dock_is_regular = matches!(args.tui_mode, crate::args::TuiMode::Regular);
+    let regular_work = Arc::new(Container::new());
+    if dock_is_regular {
+        regular_work.add_child(Arc::new(work_view::WorkView {
+            state: state.clone(),
+            inline: true,
+        }));
+    }
     let dock = Arc::new(VStack::from_children(vec![
+        StackChild::Entry(StackEntry::new(regular_work.clone())),
         StackChild::Entry(StackEntry::new(Arc::new(panels::RegularPanels {
             mailbox: reload_context.ext_status.clone(),
             enabled: matches!(args.tui_mode, crate::args::TuiMode::Regular),
@@ -1651,6 +1664,8 @@ pub async fn interactive_tui(
     // `request_render` the spinner visibly freezes between events.
     let tui_tick = tui.clone();
     let work_overlay_tick = work_overlay.clone();
+    // Overlays are composited only by the alt screen; `regular` uses the dock.
+    let page_overlays = matches!(args.tui_mode, crate::args::TuiMode::Fullscreen);
     let state_tick = state.clone();
     // The tick, not the key loop, drives the voice-draft auto-send: it must
     // fire even when the user types nothing.
@@ -1689,7 +1704,7 @@ pub async fn interactive_tui(
                 let _ = tx_tick.send(TuiMessage::ReloadModels);
             }
             // `/work` overlay: created on demand, hidden when toggled off.
-            {
+            if page_overlays {
                 let want = state_tick.work_view_enabled();
                 let mut slot = work_overlay_tick.lock().unwrap();
                 if want && slot.is_none() {
@@ -1707,6 +1722,7 @@ pub async fn interactive_tui(
                     *slot = Some(tui_tick.show_overlay(
                         Arc::new(work_view::WorkView {
                             state: state_tick.clone(),
+                            inline: false,
                         }),
                         Some(options),
                     ));

@@ -3060,7 +3060,10 @@ fn work_view_is_opt_in_and_renders_a_pane_per_subagent() {
     let state = test_tui_state();
     let view = super::work_view::WorkView {
         state: state.clone(),
+        inline: true,
     };
+    assert!(view.render(80).is_empty(), "off by default");
+    state.toggle_work_view();
     let empty = view.render(80);
     assert!(
         empty.iter().any(|row| row.contains("no background work")),

@@ -75,10 +75,16 @@ fn boxed(title: &str, rows: &[String], width: usize) -> Vec<String> {
 
 pub(super) struct WorkView {
     pub state: Arc<TuiState>,
+    /// Dock rendering (regular mode) hides itself when `/work` is off; the
+    /// overlay in fullscreen only exists while it is on.
+    pub inline: bool,
 }
 
 impl Component for WorkView {
     fn render(&self, width: usize) -> Vec<String> {
+        if self.inline && !self.state.work_view_enabled() {
+            return Vec::new();
+        }
         let colors = current_theme().colors;
         let mut lines: Vec<String> = Vec::new();
 
