@@ -989,7 +989,9 @@ pub async fn interactive_tui(
     ask_user_bridge.attach();
     tui.set_main_screen_mode(matches!(args.tui_mode, crate::args::TuiMode::Regular));
 
-    let chat_container = Arc::new(Container::new());
+    // Render only the recent tail: a long session must not make every frame
+    // proportional to its whole history (that starves the key reader).
+    let chat_container = Arc::new(Container::with_render_tail(400));
     let startup_context = if should_show_startup_listing(args.verbose, quiet_startup) {
         Some(add_welcome_message_with_capabilities(
             &chat_container,
