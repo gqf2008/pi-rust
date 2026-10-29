@@ -7,124 +7,164 @@ use kiqi_tui::{OverlayAnchor, OverlayOptions};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// The live status block, rendered inline in the transcript area (just above
-/// the editor) instead of a right-hand rail.
-///
-/// Shows, while they exist: every tool call in flight (name, elapsed, its
-/// command/arguments and the last few output lines), the `todo` list, and the
-/// LLM usage line. It reads the shared `TuiState` at render time, so it never
-/// goes stale and the tick only has to request a repaint when the text changes.
-pub(super) struct LiveBlock {
-    pub state: Arc<TuiState>,
-}
+/// Session-level LLM usage: turns, tokens and cache reads.
+const MODEL_ID: &str = "ki.model";
+const MODEL_ORDER: i32 = 7;
 
-fn live_elapsed(secs: u64) -> String {
-    match secs {
-        0..=59 => format!("{secs}s"),
-        60..=3599 => format!("{}m{:02}s", secs / 60, secs % 60),
-        _ => format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60),
+pub(super) fn sync_model(
+    mailbox: &kiqi_host::ExtensionStatusMailbox,
+    model: &str,
+    usage: (u64, u64, u64, u64),
+    live: Option<(u64, u64)>,
+    last: Option<(u64, u64)>,
+    shown: &mut bool,
+) {
+    let (turns, input, output, cache_read) = usage;
+    if turns == 0 {
+        if *shown {
+            let _ = mailbox.component(0, serde_json::json!({ "op": "remove", "id": MODEL_ID }));
+            *shown = false;
+        }
+        return;
     }
-}
-
-fn compact_tokens(value: u64) -> String {
-    match value {
+    *shown = true;
+    let _ = mailbox.component(
+        0,
+        serde_json::json!({
+            "op": "register",
+            "id": MODEL_ID,
+            "type": "text",
+            "slot": "sidebar.right",
+            "order": MODEL_ORDER,
+            "width": RUNNING_WIDTH,
+            "maxHeight": 6,
+            "border": true,
+            "minScreenWidth": 80,
+        }),
+    );
+    let compact = |value: u64| match value {
         0..=999 => format!("{value}"),
         1_000..=999_999 => format!("{:.1}k", value as f64 / 1_000.0),
         _ => format!("{:.1}M", value as f64 / 1_000_000.0),
+    };
+    let mut lines = vec![format!("model {model}")];
+    if let Some((secs, chars)) = live {
+        lines.push(format!("▶ {secs}s  {} ch", compact(chars)));
+    } else if let Some((ms, tokens)) = last {
+        lines.push(format!("last {:.1}s  {tokens} tok", ms as f64 / 1000.0));
     }
+    lines.push(format!("turns {turns}"));
+    lines.push(format!("↑{} ↓{}", compact(input), compact(output)));
+    lines.push(format!("cache R{}", compact(cache_read)));
+    let text = lines.join("\n");
+    let _ = mailbox.component(
+        0,
+        serde_json::json!({ "op": "update", "id": MODEL_ID, "title": "llm", "text": text }),
+    );
 }
 
-/// The rows the block shows right now, uncoloured and untruncated. Shared with
-/// the tick's change detection so a repaint happens exactly when the text does.
-/// `███░░░░░ 62%  4m19s / 30m` for a running node, `✔ a done 2m10s` for a
-/// finished one. Unknown budgets animate instead of pretending to be a
-/// fraction of something we do not know.
-fn node_row_line(row: &NodeRow) -> String {
-    const CELLS: usize = 10;
-    if row.state != "running" {
-        let mark = if row.state == "done" { "✔" } else { "✖" };
-        return format!(
-            "{mark} {} {}  {}",
-            row.id,
-            row.state,
-            live_elapsed(row.elapsed_ms / 1000)
-        );
+/// The `todo` tool's list, above the extension panels and below `running`.
+const TODO_ID: &str = "ki.todo";
+const TODO_ORDER: i32 = 5;
+const TODO_HEIGHT: usize = 16;
+
+pub(super) fn sync_todo(
+    mailbox: &kiqi_host::ExtensionStatusMailbox,
+    lines: &[String],
+    shown: &mut bool,
+) {
+    if lines.is_empty() {
+        if *shown {
+            let _ = mailbox.component(0, serde_json::json!({ "op": "remove", "id": TODO_ID }));
+            *shown = false;
+        }
+        return;
     }
-    let secs = live_elapsed(row.elapsed_ms / 1000);
-    if row.budget_ms == 0 {
-        // No budget given: a moving bar, not a fake percentage.
-        let head = (row.elapsed_ms / 250) as usize % CELLS;
-        let bar: String = (0..CELLS)
-            .map(|cell| if cell == head { '▓' } else { '░' })
-            .collect();
-        return format!("{} {bar}  {secs}", row.id);
-    }
-    let fraction = (row.elapsed_ms as f64 / row.budget_ms as f64).clamp(0.0, 1.0);
-    let filled = (fraction * CELLS as f64).round() as usize;
-    let bar: String = (0..CELLS)
-        .map(|cell| if cell < filled { '█' } else { '░' })
-        .collect();
-    format!(
-        "{} {bar} {:>3.0}%  {secs} / {}",
-        row.id,
-        fraction * 100.0,
-        live_elapsed(row.budget_ms / 1000)
-    )
+    *shown = true;
+    let _ = mailbox.component(
+        0,
+        serde_json::json!({
+            "op": "register",
+            "id": TODO_ID,
+            "type": "text",
+            "slot": "sidebar.right",
+            "order": TODO_ORDER,
+            "width": RUNNING_WIDTH,
+            "maxHeight": TODO_HEIGHT,
+            "border": true,
+            "minScreenWidth": 80,
+        }),
+    );
+    let _ = mailbox.component(
+        0,
+        serde_json::json!({
+            "op": "update",
+            "id": TODO_ID,
+            "title": "todo",
+            "text": lines.join("\n"),
+        }),
+    );
 }
 
-pub(super) fn live_rows(state: &TuiState) -> Vec<String> {
-    let mut rows = Vec::new();
-    for node in state.node_snapshot() {
-        rows.push(node_row_line(&node));
-    }
-    for (name, secs, detail, tail) in state.running_snapshot() {
-        rows.push(format!("● {name}  {}", live_elapsed(secs)));
-        if !detail.is_empty() {
-            rows.push(format!("  {detail}"));
-        }
-        for line in tail {
-            rows.push(format!("  │ {line}"));
-        }
-    }
-    let todos = state.todo_snapshot();
-    if !todos.is_empty() {
-        rows.extend(todos.into_iter().take(8));
-    }
-    let (turns, input, output, cache_read) = state.llm_usage_snapshot();
-    if turns > 0 {
-        let mut line = format!(
-            "llm {} · turns {turns} · ↑{} ↓{} · cache R{}",
-            state.current_model_id(),
-            compact_tokens(input),
-            compact_tokens(output),
-            compact_tokens(cache_read)
-        );
-        if let Some((secs, chars)) = state.llm_live_snapshot() {
-            line.push_str(&format!(" · ▶ {secs}s {} ch", compact_tokens(chars)));
-        } else if let Some((ms, tokens)) = state.llm_last_snapshot() {
-            line.push_str(&format!(" · last {:.1}s {tokens} tok", ms as f64 / 1000.0));
-        }
-        rows.push(line);
-    }
-    rows
-}
+/// The host's own "running" panel: every tool call in flight, not just the
+/// ones an extension publishes. Fed from `TuiState::running_snapshot`, so a
+/// long `bash`, an MCP call, a `subagent` or a `dispatch` wave all show up
+/// without each extension having to learn the component API.
+const RUNNING_ID: &str = "ki.tasks";
+const RUNNING_ORDER: i32 = 0;
+const RUNNING_WIDTH: usize = 38;
+const RUNNING_HEIGHT: usize = 12;
 
-impl Component for LiveBlock {
-    fn render(&self, width: usize) -> Vec<String> {
-        let colors = current_theme().colors;
-        live_rows(&self.state)
-            .into_iter()
-            .map(|row| {
-                colors
-                    .dim
-                    .fg(&kiqi_tui::utils::truncate_to_width(&clean(&row), width, ""))
-            })
-            .collect()
+pub(super) fn sync_running(
+    mailbox: &kiqi_host::ExtensionStatusMailbox,
+    rows: &[(String, u64, String, Vec<String>)],
+    shown: &mut bool,
+) {
+    if rows.is_empty() {
+        if *shown {
+            let _ = mailbox.component(0, serde_json::json!({ "op": "remove", "id": RUNNING_ID }));
+            *shown = false;
+        }
+        return;
     }
-    fn invalidate(&self) {}
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    *shown = true;
+    let _ = mailbox.component(
+        0,
+        serde_json::json!({
+            "op": "register",
+            "id": RUNNING_ID,
+            "type": "text",
+            "slot": "sidebar.right",
+            "order": RUNNING_ORDER,
+            "width": RUNNING_WIDTH,
+            "maxHeight": RUNNING_HEIGHT,
+            "border": true,
+            "minScreenWidth": 80,
+        }),
+    );
+    let text = rows
+        .iter()
+        .map(|(name, secs, detail, tail)| {
+            let elapsed = match secs {
+                0..=59 => format!("{secs}s"),
+                60..=3599 => format!("{}m{:02}s", secs / 60, secs % 60),
+                _ => format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60),
+            };
+            let mut lines = vec![format!("▶ {name}  {elapsed}")];
+            if !detail.is_empty() {
+                lines.push(format!("  {detail}"));
+            }
+            for line in tail {
+                lines.push(format!("  │ {line}"));
+            }
+            lines.join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = mailbox.component(
+        0,
+        serde_json::json!({ "op": "update", "id": RUNNING_ID, "title": "running", "text": text }),
+    );
 }
 
 struct Panel(Mutex<ExtensionPanel>);
@@ -534,6 +574,40 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn model_and_todo_panels_publish_and_remove_themselves() {
+        let mailbox = kiqi_host::ExtensionStatusMailbox::new();
+        let mut model_shown = false;
+        sync_model(
+            &mailbox,
+            "deepseek/flash",
+            (2, 1_200, 345, 8_000),
+            None,
+            Some((2_100, 345)),
+            &mut model_shown,
+        );
+        let llm = mailbox
+            .panels()
+            .into_values()
+            .find(|panel| panel.title == "llm")
+            .expect("llm panel published");
+        assert!(
+            llm.lines.iter().any(|line| line.contains("↑1.2k")),
+            "{:?}",
+            llm.lines
+        );
+        assert!(llm.lines.iter().any(|line| line.contains("deepseek/flash")));
+
+        let mut todo_shown = false;
+        sync_todo(&mailbox, &["✔ ship it".to_string()], &mut todo_shown);
+        assert!(mailbox.panels().values().any(|panel| panel.title == "todo"));
+        sync_todo(&mailbox, &[], &mut todo_shown);
+        assert!(
+            !mailbox.panels().values().any(|panel| panel.title == "todo"),
+            "an empty list removes the panel"
+        );
+    }
+
     #[test]
     fn footer_monitor_follows_usage_row_and_hides_without_taking_sidebar_space() {
         let mailbox = kiqi_host::ExtensionStatusMailbox::new();

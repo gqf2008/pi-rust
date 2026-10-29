@@ -27,6 +27,7 @@ use kiqi_wasm_bindings::bindings::exports::kiqi::extension::extension_api::Guest
 use kiqi_wasm_bindings::bindings::kiqi::extension::{exec, fs, proc, progress, types};
 
 mod child_progress;
+mod panels;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,6 +60,8 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const MIN_TIMEOUT_SECS: u64 = 10;
 const MAX_TIMEOUT_SECS: u64 = 1800;
 const MAX_TASK_BYTES: usize = 20_000;
+/// Panel id of the single-subagent call (the dispatch wave uses per-node ids).
+const SUBAGENT_PANEL: &str = "subagent";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
@@ -459,6 +462,7 @@ fn plan(params: &Value) -> Result<types::ToolResult, String> {
             ))
         }
     }
+    panels::sync_plan(&guard);
     Ok(result_with_details(&guard.render(), guard.to_details()))
 }
 
@@ -739,12 +743,10 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
     let _ = proc::close_stdin(handle);
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let started_at = Instant::now();
-    let mut last_report = Instant::now();
-    emit_node_progress("subagent", "running", 0, timeout_secs * 1000);
     let mut output = String::new();
     // The single-subagent call gets its own right-rail box too, so a long child
     // is observable without expanding the tool block.
+    panels::node_started(SUBAGENT_PANEL, 0);
     progress::emit(&types::ProgressBlock::Text("▶ subagent".to_string()));
     loop {
         // Esc while the child runs: kill it and return instead of waiting out
@@ -754,33 +756,31 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         // `kill` is idempotent.
         if proc::cancel_requested() {
             let _ = proc::kill(handle);
+            panels::node_finished(SUBAGENT_PANEL, Status::Failed);
             return Err("cancelled by the host".into());
-        }
-        if last_report.elapsed() >= Duration::from_millis(1000) {
-            last_report = Instant::now();
-            emit_node_progress(
-                "subagent",
-                "running",
-                started_at.elapsed().as_millis() as u64,
-                timeout_secs * 1000,
-            );
         }
         match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
             Ok(Some(line)) => {
                 if is_ki {
                     match child_progress::parse(&line) {
                         child_progress::NodeEvent::ToolStart(name) => {
+                            panels::node_line(SUBAGENT_PANEL, &format!("▶ {name}"));
                             progress::emit(&types::ProgressBlock::Text(format!(
                                 "▶ subagent: {name}"
                             )));
                         }
                         child_progress::NodeEvent::ToolEnd { name, is_error } => {
+                            panels::node_line(
+                                SUBAGENT_PANEL,
+                                &format!("{} {name}", if is_error { "✖" } else { "✔" }),
+                            );
                         }
                         child_progress::NodeEvent::Message { text, input, output: out } => {
                             if let Some(text) = text {
                                 output = text;
                             }
                             if input > 0 || out > 0 {
+                                panels::node_line(SUBAGENT_PANEL, &format!("↑{input} ↓{out}"));
                             }
                         }
                         child_progress::NodeEvent::Final { outcome, text } => {
@@ -788,6 +788,10 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
                                 output = text;
                             }
                             if outcome != "completed" {
+                                panels::node_line(
+                                    SUBAGENT_PANEL,
+                                    &format!("result: {outcome}"),
+                                );
                             }
                         }
                         child_progress::NodeEvent::Ignore => {}
@@ -795,6 +799,7 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
                 } else {
                     output.push_str(&line);
                     output.push('\n');
+                    panels::node_line(SUBAGENT_PANEL, &line);
                 }
             }
             // stdout ended: collect the exit status.
@@ -804,6 +809,7 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         }
         if Instant::now() >= deadline {
             let _ = proc::kill(handle);
+            panels::node_finished(SUBAGENT_PANEL, Status::Failed);
             return Err(format!("subagent timed out after {timeout_secs}s"));
         }
     }
@@ -820,6 +826,10 @@ fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
         Err(error) => return Err(capability_reason(error)),
     };
     let text = truncate_output(output);
+    panels::node_finished(
+        SUBAGENT_PANEL,
+        if status == 0 { Status::Done } else { Status::Failed },
+    );
     progress::emit(&types::ProgressBlock::Text(format!(
         "{} subagent",
         if status == 0 { "✔" } else { "✖" }
@@ -940,6 +950,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                 .iter()
                 .position(|node| node.id == id)
                 .unwrap_or_default();
+            panels::node_started(&id, index);
             progress::emit(&types::ProgressBlock::Text(format!("▶ {id}")));
             started.push(id);
         }
@@ -951,28 +962,11 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
     // passes is killed with its process group and the node fails (children
     // cannot outlive the call, so "leave them running" is not an option).
     let wave_deadline = wait_seconds.map(|secs| Instant::now() + Duration::from_secs(secs));
-    // Per-node start times for the progress rows the host renders as bars.
-    let mut node_started: HashMap<String, Instant> = HashMap::new();
-    for id in &started {
-        node_started.insert(id.clone(), Instant::now());
-        emit_node_progress(id, "running", 0, node_budget_ms(id));
-    }
-    let mut last_node_report = Instant::now();
     let mut outputs: HashMap<u32, String> = HashMap::new();
     'wave: loop {
         if proc::cancel_requested() {
             fail_remaining("cancelled by the host");
             break 'wave;
-        }
-        if last_node_report.elapsed() >= Duration::from_millis(1000) {
-            last_node_report = Instant::now();
-            for (id, _, _) in running().lock().unwrap_or_else(|p| p.into_inner()).clone() {
-                let elapsed = node_started
-                    .get(&id)
-                    .map(|started| started.elapsed().as_millis() as u64)
-                    .unwrap_or(0);
-                emit_node_progress(&id, "running", elapsed, node_budget_ms(&id));
-            }
         }
         // Poll every live child each round. Polling only the head of the list
         // strands siblings: one that finishes while an earlier node is still
@@ -1002,6 +996,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .retain(|(node_id, _, _)| node_id != &id);
+                panels::node_finished(&id, Status::Failed);
                 progress::emit(&types::ProgressBlock::Text(format!("✖ {id} (timeout)")));
                 continue;
             }
@@ -1014,17 +1009,23 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                         // the terminal `result` line).
                         match child_progress::parse(&line) {
                             child_progress::NodeEvent::ToolStart(name) => {
+                                panels::node_line(&id, &format!("▶ {name}"));
                                 progress::emit(&types::ProgressBlock::Text(format!(
                                     "▶ {id}: {name}"
                                 )));
                             }
                             child_progress::NodeEvent::ToolEnd { name, is_error } => {
+                                panels::node_line(
+                                    &id,
+                                    &format!("{} {name}", if is_error { "✖" } else { "✔" }),
+                                );
                             }
                             child_progress::NodeEvent::Message { text, input, output } => {
                                 if let Some(text) = text {
                                     outputs.insert(handle, text);
                                 }
                                 if input > 0 || output > 0 {
+                                    panels::node_line(&id, &format!("↑{input} ↓{output}"));
                                 }
                             }
                             child_progress::NodeEvent::Final { outcome, text } => {
@@ -1032,6 +1033,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                                     outputs.insert(handle, text);
                                 }
                                 if outcome != "completed" {
+                                    panels::node_line(&id, &format!("result: {outcome}"));
                                 }
                             }
                             child_progress::NodeEvent::Ignore => {}
@@ -1040,6 +1042,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                         let buffer = outputs.entry(handle).or_default();
                         buffer.push_str(&line);
                         buffer.push('\n');
+                        panels::node_line(&id, &line);
                     }
                 }
                 Ok(None) => {
@@ -1087,16 +1090,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
                         .get(&id)
                         .map(|node| node.status)
                         .unwrap_or(Status::Failed);
-                    let elapsed = node_started
-                        .get(&id)
-                        .map(|started| started.elapsed().as_millis() as u64)
-                        .unwrap_or(0);
-                    emit_node_progress(
-                        &id,
-                        if status == Status::Done { "done" } else { "failed" },
-                        elapsed,
-                        node_budget_ms(&id),
-                    );
+                    panels::node_finished(&id, status);
                     progress::emit(&types::ProgressBlock::Text(format!(
                         "{} {id}",
                         if status == Status::Done { "✔" } else { "✖" }
@@ -1119,6 +1113,7 @@ fn dispatch(params: &Value) -> Result<types::ToolResult, String> {
         .iter()
         .map(|(id, _, _)| id.clone())
         .collect();
+    panels::sync_plan(&graph);
     let mut text = format!(
         "started {} · running {}\n",
         started.len(),
@@ -1165,31 +1160,6 @@ fn fail_remaining(reason: &str) {
     }
     graph.propagate_skips();
     running().lock().unwrap_or_else(|p| p.into_inner()).clear();
-}
-
-/// The node's own timeout, in milliseconds — the budget its bar measures
-/// against.
-fn node_budget_ms(id: &str) -> u64 {
-    graph_state()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get(id)
-        .map(|node| node.timeout_secs * 1000)
-        .unwrap_or(0)
-}
-
-/// Publish one node row for the host's live block (`{"ki":"node",…}`).
-fn emit_node_progress(id: &str, state: &str, elapsed_ms: u64, budget_ms: u64) {
-    progress::emit(&types::ProgressBlock::Json(
-        json!({
-            "ki": "node",
-            "id": id,
-            "state": state,
-            "elapsedMs": elapsed_ms,
-            "budgetMs": budget_ms,
-        })
-        .to_string(),
-    ));
 }
 
 fn spawn_node(node: &Node, program: &str) -> Result<u32, String> {
@@ -1300,7 +1270,11 @@ impl Guest for KiOrchestrator {
         ID.to_string()
     }
 
-    fn shutdown() {}
+    fn shutdown() {
+        // The right rail outlives this instance; leaving boxes behind would
+        // show a dead wave as if it were still running.
+        panels::clear_all();
+    }
 
     fn list_tools() -> Vec<types::ToolSpec> {
         tools()

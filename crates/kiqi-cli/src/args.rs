@@ -87,12 +87,15 @@ pub enum TuiMode {
     Regular,
 }
 
-const fn default_tui_mode_for(is_macos: bool) -> TuiMode {
-    if is_macos {
-        TuiMode::Regular
-    } else {
-        TuiMode::Fullscreen
-    }
+/// Fullscreen (alt-screen) is the default everywhere, including macOS.
+///
+/// Native scrollback (`--tui-mode regular`) leaves the terminal's own history
+/// intact, but it also has no room for a column beside the transcript: tool,
+/// todo and subagent panels then render as rows above the editor. A right-hand
+/// column needs a buffer ki owns, so the default is the alt screen and
+/// `--tui-mode regular` stays available for people who prefer scrollback.
+const fn default_tui_mode_for(_is_macos: bool) -> TuiMode {
+    TuiMode::Fullscreen
 }
 
 impl Default for TuiMode {
@@ -648,7 +651,8 @@ pub fn print_help() {
                                  (no local provider/tools/session; all agent work is remote)
   --token <token>                Auth token for `--connect` (printed by `--server`; may also
                                  be provided via the KI_SERVER_TOKEN env var)
-  --tui-mode <mode>              TUI buffer: regular or fullscreen (macOS default: regular)
+  --tui-mode <mode>              TUI buffer: fullscreen (default: right-hand panel
+                                 column) or regular (native scrollback)
   --list-models [search]         List available models (with optional fuzzy search)
   --offline                      Disable startup network operations (same as KI_OFFLINE=1)
   --export <session.jsonl>       Export a session to HTML and exit. `<session.jsonl>` is
@@ -1402,8 +1406,10 @@ mod tests {
     }
 
     #[test]
-    fn tui_mode_default_preserves_native_macos_scrollback() {
-        assert_eq!(default_tui_mode_for(true), TuiMode::Regular);
+    fn tui_mode_defaults_to_the_fullscreen_buffer_everywhere() {
+        // The right-hand panel column needs a buffer ki owns; native scrollback
+        // is an explicit opt-in via `--tui-mode regular`.
+        assert_eq!(default_tui_mode_for(true), TuiMode::Fullscreen);
         assert_eq!(default_tui_mode_for(false), TuiMode::Fullscreen);
     }
 
