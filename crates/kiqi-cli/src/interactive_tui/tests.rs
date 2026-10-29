@@ -3143,6 +3143,96 @@ fn work_view_defaults_on_and_each_subagent_gets_a_box() {
     assert!(!state.work_view_enabled(), "toggled off");
 }
 
+/// A parallel batch of `subagent` calls enters the extension one at a time, so
+/// only the executing call has a node box. The rest must still be named, or a
+/// queued agent looks like a lost one.
+#[test]
+fn subagent_calls_waiting_for_the_extension_are_reported_as_queued() {
+    let state = test_tui_state();
+    state.tool_started("call_1", "subagent", "{\"task\":\"audit one\"}".into());
+    state.tool_started("call_2", "subagent", "{\"task\":\"audit two\"}".into());
+    state.upsert_node(super::NodeRow {
+        id: "subagent#1".into(),
+        state: "running".into(),
+        elapsed_ms: 2_000,
+        budget_ms: 60_000,
+        tool: None,
+        text: None,
+        task: Some("audit one".into()),
+        events: Vec::new(),
+    });
+
+    let queued = state.queued_agent_calls();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert_eq!(queued[0].0, "subagent");
+    assert!(queued[0].2.contains("audit two"), "{queued:?}");
+
+    // Once the second call reaches the guest both are executing: nothing queued.
+    state.upsert_node(super::NodeRow {
+        id: "subagent#2".into(),
+        state: "running".into(),
+        elapsed_ms: 0,
+        budget_ms: 60_000,
+        tool: None,
+        text: None,
+        task: Some("audit two".into()),
+        events: Vec::new(),
+    });
+    assert!(state.queued_agent_calls().is_empty());
+
+    // A finished node no longer occupies the slot.
+    state.upsert_node(super::NodeRow {
+        id: "subagent#1".into(),
+        state: "done".into(),
+        elapsed_ms: 30_000,
+        budget_ms: 60_000,
+        tool: None,
+        text: None,
+        task: Some("audit one".into()),
+        events: Vec::new(),
+    });
+    assert_eq!(state.queued_agent_calls().len(), 1);
+}
+
+/// The boxes are painted on the theme's surface colour: a terminal has no
+/// alpha, so a panel (not a see-through overlay) is what makes them read as a
+/// layer above the transcript.
+#[test]
+fn work_boxes_paint_the_panel_background_on_every_row() {
+    let state = test_tui_state();
+    state.upsert_node(super::NodeRow {
+        id: "a".into(),
+        state: "running".into(),
+        elapsed_ms: 3_000,
+        budget_ms: 60_000,
+        tool: Some("bash".into()),
+        text: None,
+        task: Some("paint the panel".into()),
+        events: vec!["▶ bash".into()],
+    });
+    let pane = super::work_view::NodeBox {
+        state: state.clone(),
+        id: "a".into(),
+    };
+    let rows = pane.render(80);
+    assert!(!rows.is_empty());
+    let background = super::current_theme().colors.surface.to_bg();
+    for row in &rows {
+        assert!(row.starts_with(&background), "{row:?}");
+        // A nested reset inside the body must not punch the terminal
+        // background back through the panel.
+        let after_reset = row.matches("\x1b[0m").count();
+        let reapplied = row.matches(&format!("\x1b[0m{background}")).count();
+        assert_eq!(after_reset, reapplied + 1, "{row:?}");
+    }
+    // The escapes are zero-width: the frame is still the requested width.
+    let widths: Vec<usize> = rows
+        .iter()
+        .map(|row| kiqi_tui::ansi::visible_width(row))
+        .collect();
+    assert!(widths.iter().all(|width| *width == widths[0]), "{widths:?}");
+}
+
 /// Dragging: a press inside the painted box starts a drag, motion moves it by
 /// the pointer delta, release ends it; a press outside is ignored.
 #[test]

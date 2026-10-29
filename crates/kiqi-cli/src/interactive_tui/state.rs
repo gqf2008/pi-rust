@@ -1699,6 +1699,38 @@ impl TuiState {
             .collect()
     }
 
+    /// `subagent` / `dispatch` calls that are waiting for the extension's call
+    /// slot.
+    ///
+    /// A wasm extension runs one call at a time, so a parallel batch of
+    /// `subagent` calls enters the guest one by one: only the executing call
+    /// has a node row, the rest are queued at the host. Naming them keeps the
+    /// work view honest instead of making the queued agents look lost.
+    pub(super) fn queued_agent_calls(&self) -> Vec<(String, u64, String)> {
+        let running = self.running_tool_calls.lock().unwrap();
+        let is_agent_call =
+            |tool: &&RunningTool| tool.name == "subagent" || tool.name == "dispatch";
+        let executing = self
+            .nodes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|node| node.state == "running")
+            .count();
+        running
+            .iter()
+            .filter(is_agent_call)
+            .skip(executing)
+            .map(|tool| {
+                (
+                    tool.name.clone(),
+                    tool.started.elapsed().as_secs(),
+                    tool.detail.clone(),
+                )
+            })
+            .collect()
+    }
+
     pub(super) fn llm_request_started(&self) {
         *self.llm_live.lock().unwrap() = Some((std::time::Instant::now(), 0));
     }

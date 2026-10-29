@@ -93,7 +93,26 @@ fn boxed(title: &str, rows: &[String], width: usize) -> Vec<String> {
         out.push(format!("│ {row}{} │", " ".repeat(pad)));
     }
     out.push(format!("└{}┘", "─".repeat(width - 2)));
-    out
+    out.into_iter().map(|row| on_panel(&row)).collect()
+}
+
+/// Paint a finished row on the panel surface.
+///
+/// Terminal cells have no alpha, so a truly see-through overlay turns into two
+/// interleaved texts. What reads as "frosted glass" instead is a panel: every
+/// cell of the box gets the theme's surface background and its paired
+/// foreground, so the transcript behind is replaced by a layer that clearly
+/// belongs to the box.
+///
+/// The background is re-applied after every nested reset: the body lines carry
+/// their own `accent`/`muted` spans, and a plain `\x1b[0m` inside one of them
+/// would otherwise punch the terminal background back through the row.
+fn on_panel(row: &str) -> String {
+    let colors = current_theme().colors;
+    let background = colors.surface.to_bg();
+    let foreground = colors.surface_text.to_fg();
+    let nested = row.replace("\x1b[0m", &format!("\x1b[0m{background}{foreground}"));
+    format!("{background}{foreground}{nested}\x1b[0m")
 }
 
 /// Draw `body` inside a titled box.
@@ -129,7 +148,7 @@ fn frame(body: &[String], width: usize) -> Vec<String> {
         rows.push(format!("│ {row}{} │", " ".repeat(pad)));
     }
     rows.push(format!("└{}┘", "─".repeat(inner + 2)));
-    rows
+    rows.into_iter().map(|row| on_panel(&row)).collect()
 }
 
 pub(super) struct WorkView {
@@ -167,7 +186,13 @@ impl Component for WorkView {
         } else {
             Vec::new()
         };
-        if running.is_empty() && todos.is_empty() && streaming.is_none() && dock_nodes.is_empty() {
+        let queued = self.state.queued_agent_calls();
+        if running.is_empty()
+            && todos.is_empty()
+            && streaming.is_none()
+            && dock_nodes.is_empty()
+            && queued.is_empty()
+        {
             return Vec::new();
         }
         if !running.is_empty() {
@@ -177,6 +202,20 @@ impl Component for WorkView {
                 for line in tail {
                     lines.push(format!("    │ {line}"));
                 }
+            }
+        }
+        if !queued.is_empty() {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(
+                colors
+                    .muted
+                    .fg("queued · waiting for a free extension call"),
+            );
+            for (name, secs, detail) in &queued {
+                let detail = kiqi_tui::utils::truncate_to_width(detail, 72, "…");
+                lines.push(format!("  ⏳ {name} {secs}s  {detail}"));
             }
         }
         if !dock_nodes.is_empty() {
