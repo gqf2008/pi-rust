@@ -2098,6 +2098,12 @@ fn build_tools(
                 signal_host,
             ))),
         ),
+        // Background subagents: returns as soon as the child is up, so a batch
+        // of them runs in parallel and the turn keeps moving.
+        (
+            "subagent",
+            HarnessTool::new(crate::subagent_tool::create_subagent_tool()),
+        ),
     ];
 
     // Progressive skill loading: the system prompt lists skills, this tool

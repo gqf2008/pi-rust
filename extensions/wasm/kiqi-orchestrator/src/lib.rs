@@ -50,7 +50,7 @@ const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
 const GOALS_FILE: &str = ".ki/goals.json";
 const GUIDE_HEADING: &str = "## Subagent orchestration";
 
-const GUIDE_SECTION: &str = "## Subagent orchestration\n\nFor work that has several steps, or steps that can run in parallel, use the\n`plan` and `dispatch` tools instead of doing everything inline:\n\n1. `plan` with action=set: write the task graph as nodes, each with an `id`, a\n   self-contained `task`, and its `deps`.\n2. `dispatch`: run the current ready wave. Nodes whose dependencies are done run\n   in parallel (up to `maxParallel`).\n3. Read the results, then `plan` with action=update (add/remove/re-dep/reset\n   nodes) and `dispatch` again until the goal is met.\n\nA subagent starts fresh and cannot see this conversation, so each node's `task`\nmust contain everything it needs. Prefer this over hand-rolling the whole\nworkflow with `bash`.\n\nTwo defaults are too tight for a real task and must be raised per node:\n\n- `timeoutSeconds` defaults to **300**. A node that runs a build or the full\n  test suite easily exceeds it, and the call then fails with\n  `subagent timed out after 300s`. Set it explicitly (up to 1800) when the task\ntouches cargo, a browser, or a long script.\n- `maxTurns` defaults to **8** (max 32). Reading code, editing, running gates,\n  checking mutations, and committing does not fit in 8 turns. A node that runs\nthe budget out stops halfway and reports unfinished work as if it were done.\n\nA node that exits early is therefore usually a budget problem, not a logic\nproblem: raise the two numbers before suspecting the task text.";
+const GUIDE_SECTION: &str = "## Subagent orchestration\n\nFor work that has several steps, or steps that can run in parallel, use the\n`plan` and `dispatch` tools instead of doing everything inline:\n\n1. `plan` with action=set: write the task graph as nodes, each with an `id`, a\n   self-contained `task`, and its `deps`.\n2. `dispatch`: run the current ready wave. Nodes whose dependencies are done run\n   in parallel (up to `maxParallel`).\n3. Read the results, then `plan` with action=update (add/remove/re-dep/reset\n   nodes) and `dispatch` again until the goal is met.\n\nA subagent starts fresh and cannot see this conversation, so each node's `task`\nmust contain everything it needs. Prefer this over hand-rolling the whole\nworkflow with `bash`.\n\nTwo defaults are too tight for a real task and must be raised per node:\n\n- `timeoutSeconds` defaults to **300**. A node that runs a build or the full\n  test suite easily exceeds it, and the call then fails with\n  `subagent timed out after 300s`. Set it explicitly (up to 1800) when the task\ntouches cargo, a browser, or a long script.\n- `maxTurns` defaults to **8** (max 32). Reading code, editing, running gates,\n  checking mutations, and committing does not fit in 8 turns. A node that runs\nthe budget out stops halfway and reports unfinished work as if it were done.\n\nA node that exits early is therefore usually a budget problem, not a logic\nproblem: raise the two numbers before suspecting the task text.\n\nFor independent tasks whose results you do NOT need in this turn, prefer the\n`subagent` tool: it starts a background agent and returns immediately, so\nseveral run in parallel and their answers arrive as follow-up messages. Use\nplan/dispatch when the work has dependencies or you must use the results now.";
 
 // ---------------------------------------------------------------------------
 // Graph (ported from the compile-time extension's graph.rs)
@@ -60,10 +60,6 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const MIN_TIMEOUT_SECS: u64 = 10;
 const MAX_TIMEOUT_SECS: u64 = 1800;
 const MAX_TASK_BYTES: usize = 20_000;
-/// How many `subagent` calls this session has reported, so concurrent calls get
-/// one box each instead of collapsing onto a single row.
-static SUBAGENT_CALLS: AtomicU64 = AtomicU64::new(0);
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
     Pending,
@@ -372,14 +368,6 @@ fn graph_state() -> &'static Mutex<Graph> {
     &GRAPH
 }
 
-/// The work-view id for one `subagent` call. Two calls run in parallel while
-/// the previous one is still streaming, so a fixed id would merge both rows
-/// (and reset the elapsed clock) into a single box.
-fn next_subagent_id() -> String {
-    let call = SUBAGENT_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
-    format!("subagent#{call}")
-}
-
 fn running() -> &'static Mutex<Vec<(String, u32, Instant)>> {
     &RUNNING
 }
@@ -598,17 +586,6 @@ fn parameters(properties: Map<String, Value>, required: &[&str]) -> String {
 fn tools() -> Vec<types::ToolSpec> {
     vec![
         types::ToolSpec {
-            name: "subagent".to_string(),
-            description: "Run one bounded task in a fresh child agent process and return its final answer.".to_string(),
-            parameters_schema: parameters(json!({
-                "task":{"type":"string","maxLength":20000},
-                "program":{"type":"string","description":"Child program; default ki (resolved from PATH)"},
-                "provider":{"type":"string"},"model":{"type":"string"},
-                "maxTurns":{"type":"integer","minimum":1,"maximum":32},
-                "timeoutSeconds":{"type":"integer","minimum":10,"maximum":1800}
-            }).as_object().unwrap().clone(), &["task"]),
-        },
-        types::ToolSpec {
             name: "plan".to_string(),
             description: "Author or edit the task DAG. action=set (replace with `nodes`), action=update (addNodes/removeIds/cancel/setDeps/reset), action=show.".to_string(),
             parameters_schema: parameters(json!({
@@ -670,262 +647,6 @@ fn capability_reason(error: types::CapabilityError) -> String {
         types::CapabilityError::Denied(reason) => reason,
         types::CapabilityError::Failed(reason) => format!("failed:{reason}"),
     }
-}
-
-// ---------------------------------------------------------------------------
-// subagent: one blocking child on `proc`
-// ---------------------------------------------------------------------------
-
-fn run_subagent(params: &Value) -> Result<types::ToolResult, String> {
-    let task = params
-        .get("task")
-        .and_then(Value::as_str)
-        .ok_or("missing string parameter `task`")?
-        .trim()
-        .to_string();
-    if task.is_empty() {
-        return Err("task must not be empty".into());
-    }
-    if task.len() > MAX_TASK_BYTES {
-        return Err(format!("task must be at most {MAX_TASK_BYTES} bytes"));
-    }
-    // Recorded for schema parity; on wasm the child's turn ceiling has no env
-    // knob, so it is not enforced (README, difference 3).
-    let max_turns = clamp(params.get("maxTurns").and_then(Value::as_u64), 8, 1, 32);
-    let timeout_secs = clamp(
-        params.get("timeoutSeconds").and_then(Value::as_u64),
-        300,
-        10,
-        1800,
-    );
-    let program = string_field(params, "program").unwrap_or_else(|| DEFAULT_PROGRAM.to_string());
-    // Only the default `ki` gets ki-specific flags; an overridden program
-    // (the hermetic seam) receives nothing but the task on stdin.
-    let is_ki = program == DEFAULT_PROGRAM;
-    let mut args: Vec<String> = if is_ki {
-        vec![
-            "-p".into(),
-            "--mode".into(),
-            "json".into(),
-            "--no-session".into(),
-            "--exclude-tools".into(),
-            EXCLUDED_TOOLS.into(),
-        ]
-    } else {
-        Vec::new()
-    };
-    if is_ki {
-        if let Some(provider) = string_field(params, "provider") {
-            args.push("--provider".into());
-            args.push(provider);
-        }
-        if let Some(model) = string_field(params, "model") {
-            args.push("--model".into());
-            args.push(model);
-        }
-    }
-
-    // Esc before we even start: do not spawn a child this call would have to
-    // abandon. Same guard (and message) as `dispatch`.
-    if proc::cancel_requested() {
-        return Err("cancelled by the host".into());
-    }
-
-    let handle = proc::spawn(&program, &args, None).map_err(|error| match error {
-        types::CapabilityError::Denied(reason) => format!(
-            "{reason} — the subagent child needs `ki extension grant {ID} proc \\
-             --command {program} --cwd project --timeout 1800`"
-        ),
-        types::CapabilityError::Failed(reason) => {
-            format!("failed to start subagent `{program}`: {reason}")
-        }
-    })?;
-    // The task rides stdin; EOF tells the child the prompt is complete.
-    if let Err(error) = proc::write(handle, task.as_bytes()) {
-        let _ = proc::kill(handle);
-        return Err(format!(
-            "failed to write the task: {}",
-            capability_reason(error)
-        ));
-    }
-    let _ = proc::close_stdin(handle);
-
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let started_at = Instant::now();
-    let mut last_report = Instant::now();
-    let mut subagent_tool: Option<String> = None;
-    let mut subagent_events: Vec<String> = Vec::new();
-    let subagent_task: String = task.lines().next().unwrap_or("").chars().take(160).collect();
-    let subagent_id = next_subagent_id();
-    let mut output = String::new();
-    emit_node_full(
-        &subagent_id,
-        "running",
-        started_at.elapsed(),
-        timeout_secs,
-        None,
-        None,
-        Some(subagent_task.as_str()),
-        &subagent_events,
-    );
-    loop {
-        // Esc while the child runs: kill it and return instead of waiting out
-        // `timeoutSeconds` (up to 1800 s) while this call holds the extension's
-        // call mutex. `read_line` slices at POLL_SLICE_MS, so a cancel is
-        // noticed within ~100 ms; the host reaps the group on call return and
-        // `kill` is idempotent.
-        if proc::cancel_requested() {
-            let _ = proc::kill(handle);
-            emit_node_full(
-                &subagent_id,
-                "failed",
-                started_at.elapsed(),
-                timeout_secs,
-                None,
-                None,
-                Some(subagent_task.as_str()),
-                &subagent_events,
-            );
-            return Err("cancelled by the host".into());
-        }
-        if last_report.elapsed() >= Duration::from_millis(1000) {
-            last_report = Instant::now();
-            emit_node_full(
-                &subagent_id,
-                "running",
-                started_at.elapsed(),
-                timeout_secs,
-                subagent_tool.as_deref(),
-                Some(output.as_str()).filter(|text| !text.trim().is_empty()),
-                Some(subagent_task.as_str()),
-                &subagent_events,
-            );
-        }
-        match proc::read_line(handle, MAX_LINE_BYTES, POLL_SLICE_MS) {
-            Ok(Some(line)) => {
-                if is_ki {
-                    match child_progress::parse(&line) {
-                        child_progress::NodeEvent::ToolStart(name) => {
-                            subagent_events.push(format!("▶ {name}"));
-                            if subagent_events.len() > 10 {
-                                subagent_events.remove(0);
-                            }
-                            subagent_tool = Some(name);
-                            emit_node_full(
-                                &subagent_id,
-                                "running",
-                                started_at.elapsed(),
-                                timeout_secs,
-                                subagent_tool.as_deref(),
-                                None,
-                                Some(subagent_task.as_str()),
-                                &subagent_events,
-                            );
-                        }
-                        child_progress::NodeEvent::ToolEnd { name, is_error } => {
-                            subagent_events.push(format!(
-                                "{} {name}",
-                                if is_error { "✖" } else { "✔" }
-                            ));
-                            if subagent_events.len() > 10 {
-                                subagent_events.remove(0);
-                            }
-                            subagent_tool = None;
-                        }
-                        child_progress::NodeEvent::PartialText(text) => {
-                            if last_report.elapsed() >= Duration::from_millis(200) {
-                                last_report = Instant::now();
-                                emit_node_full(
-                                    &subagent_id,
-                                    "running",
-                                    started_at.elapsed(),
-                                    timeout_secs,
-                                    subagent_tool.as_deref(),
-                                    Some(text.as_str()),
-                                    Some(subagent_task.as_str()),
-                                    &subagent_events,
-                                );
-                            }
-                        }
-                        child_progress::NodeEvent::Message { text, .. } => {
-                            if let Some(text) = text {
-                                output = text;
-                            }
-                        }
-                        child_progress::NodeEvent::Final { text, .. } => {
-                            if let Some(text) = text {
-                                output = text;
-                            }
-                        }
-                        child_progress::NodeEvent::Ignore => {}
-                    }
-                } else {
-                    output.push_str(&line);
-                    output.push('\n');
-                }
-            }
-            // stdout ended: collect the exit status.
-            Ok(None) => break,
-            // No output in this slice: keep polling until the budget runs out.
-            Err(_) => {}
-        }
-        if Instant::now() >= deadline {
-            let _ = proc::kill(handle);
-            emit_node_full(
-                &subagent_id,
-                "failed",
-                started_at.elapsed(),
-                timeout_secs,
-                None,
-                None,
-                Some(subagent_task.as_str()),
-                &subagent_events,
-            );
-            return Err(format!("subagent timed out after {timeout_secs}s"));
-        }
-    }
-    let status = match proc::wait(handle, 2_000) {
-        Ok(Some(code)) => code,
-        Ok(None) => {
-            // stdout is at EOF, so the child has finished producing; one that
-            // lingers past the grace window (flushing its session, say) is
-            // still finished — kill the leftover and score the complete
-            // output, instead of inventing a failure exit of -1.
-            let _ = proc::kill(handle);
-            0
-        }
-        Err(error) => return Err(capability_reason(error)),
-    };
-    let text = truncate_output(output);
-    emit_node_full(
-        &subagent_id,
-        if status == 0 { "done" } else { "failed" },
-        started_at.elapsed(),
-        timeout_secs,
-        None,
-        Some(text.as_str()).filter(|text| !text.trim().is_empty()),
-        Some(subagent_task.as_str()),
-        &subagent_events,
-    );
-    if status != 0 {
-        return Err(format!("subagent exited with {status}:\n{}", text.trim()));
-    }
-    // A zero exit with nothing on stdout is not a result this tool can use. A
-    // truncated run now exits non-zero (a budget stop maps to exit 1), so this is
-    // a backstop for a child that succeeds yet prints nothing at all: `ki -p`
-    // prints its answer once, at the end of the run, so empty stdout means no
-    // final message was ever produced.
-    if text.trim().is_empty() {
-        return Err(format!(
-            "subagent exited successfully but produced no output; the run may have \
-             hit its turn budget (maxTurns={max_turns})."
-        ));
-    }
-    Ok(types::ToolResult {
-        blocks: vec![types::ContentBlock::Text(text.trim().to_string())],
-        is_error: false,
-        details: "null".to_string(),
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1443,7 +1164,6 @@ impl Guest for KiOrchestrator {
         let params: Value = serde_json::from_str(&arguments)
             .map_err(|error| types::ExtensionError::InvalidArguments(error.to_string()))?;
         match name.as_str() {
-            "subagent" => run_subagent(&params).map(|result| result),
             "plan" => plan(&params),
             "dispatch" => dispatch(&params),
             other => Err(other.to_string()),
@@ -1512,14 +1232,11 @@ kiqi_wasm_bindings::deny_contribution_exports!(KiOrchestrator);
 mod tests {
     use super::*;
 
-    /// Each `subagent` call gets its own work-view row: two calls run in
-    /// parallel, and one shared id used to merge both into a single box (and
-    /// restart its elapsed clock).
+    /// The host owns `subagent` now; the guest must not advertise it again or
+    /// the model would get two tools with the same name.
     #[test]
-    fn concurrent_subagent_calls_get_distinct_ids() {
-        let first = next_subagent_id();
-        let second = next_subagent_id();
-        assert_ne!(first, second);
-        assert!(first.starts_with("subagent#"), "{first}");
+    fn the_guest_no_longer_offers_a_blocking_subagent() {
+        let names: Vec<String> = tools().into_iter().map(|tool| tool.name).collect();
+        assert_eq!(names, vec!["plan".to_string(), "dispatch".to_string()]);
     }
 }

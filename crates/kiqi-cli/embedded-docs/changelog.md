@@ -31,14 +31,19 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
+- **`subagent` 改为后台执行。** 之前它是 wasm 扩展里的阻塞调用：一个扩展同一时刻只执行一个
+  调用，所以一批 `subagent` 严格串行，主会话被关在一个工具调用里直到最慢的子代理结束。
+  现在工具由宿主实现，`execute` 起完子进程就返回（`Started background subagent#N`），
+  解析子进程 JSONL 的监督任务把进度写进工作视图，子代理结束时结果作为 follow-up 用户
+  消息回到会话（空闲起新轮、忙则排队）。`plan`+`dispatch` 仍是阻塞 wave。
 - **工作盒子铺毛玻璃底色。** 盒子（汇总盒子与每个子代理盒子）整块铺主题的 `surface`
   底色与配对的 `surface_text` 前景；正文里强调色的重置之后会重新铺底，所以盒子在回显区
   上读起来是一层浮起的面板。终端没有 alpha 通道，真透出会把两层文字绞在一起，这是
   「半透明感」能做到的程度。
-- **排队中的子代理会被点名。** 一个 wasm 扩展同一时刻只执行一个调用，并行批里还没进
-  guest 的 `subagent` 没有自己的盒子；汇总盒子现在列出
-  `queued · waiting for a free extension call` 与每个排队调用的任务摘要，同时指出
-  真正要并行应该用 `plan` + `dispatch`。
+- **排队中的调用会被点名。** 一个 wasm 扩展同一时刻只执行一个调用，并行批里还没进 guest
+  的 `dispatch` 没有自己的盒子；汇总盒子现在列出
+  `queued · waiting for a free extension call` 与每个排队调用的任务摘要。（`subagent`
+  已经不是扩展调用了——它是宿主侧的后台代理，见下一条。）
 
 ### Fixed
 

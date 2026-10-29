@@ -227,9 +227,14 @@ macOS 的行为与 main-screen 的终端原生 scrollback 不同：alternate-scr
 transcript 里的工具块只保留工具自己的文本：子代理进度（`{"ki":"node",…}` 行）只以
 上面的盒子呈现，不再重复一遍原始 JSON。
 
-一个 wasm 扩展同一时刻只执行一个调用，所以并行批里的多个 `subagent` 会依次进入
-guest：正在跑的有自己的盒子，还在排队的在汇总盒子里以
-`queued · waiting for a free extension call` 列出。需要真正并行时用 `plan` + `dispatch`。
+`subagent` 是**后台**的：调用立刻返回（结果里只有 `Started background subagent#N`），
+子代理在自己的进程里跑，多个调用真正并行，每个都有自己的盒子。它结束时结果会作为一条
+follow-up 用户消息回到会话里——空闲就起一轮，正在跑就排队（显示为 `Steering: …`）。
+调用 `subagent` 之后不要轮询，继续干别的或结束本轮即可。
+
+`plan` + `dispatch` 仍然是阻塞的 wave：一个调用内部并行跑子进程，调用返回时整波结束；
+并行批里的多个 `dispatch` 会因为同一个扩展一次只执行一个调用而排队（汇总盒子里以
+`queued · waiting for a free extension call` 列出）。
 
 盒子只在 `--tui-mode fullscreen`（默认）下存在：`regular` 模式没有合成层，改为在回显
 区底部的工作块里给每个子代理列一行（`id · 状态 用时 · 任务名`）。

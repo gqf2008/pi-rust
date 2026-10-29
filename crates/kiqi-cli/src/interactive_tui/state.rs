@@ -1489,6 +1489,24 @@ impl TuiState {
         }
     }
 
+    /// Merge one background-agent row into the work view.
+    ///
+    /// Background subagents are host processes, not extension calls, so their
+    /// rows never travel through `ToolExecutionUpdate`; the manager pushes them
+    /// straight in.
+    pub(crate) fn upsert_background_node(&self, update: &crate::background_agents::NodeUpdate) {
+        self.upsert_node(NodeRow {
+            id: update.id.clone(),
+            state: update.state.clone(),
+            elapsed_ms: update.elapsed_ms,
+            budget_ms: update.budget_ms,
+            tool: update.tool.clone(),
+            text: update.text.clone(),
+            task: update.task.clone(),
+            events: update.events.clone(),
+        });
+    }
+
     pub(super) fn clear_nodes(&self) {
         self.nodes.lock().unwrap().clear();
         // Node ids are reused by later plans and by `subagent#N` counters that

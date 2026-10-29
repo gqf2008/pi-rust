@@ -646,6 +646,10 @@ enum TuiMessage {
     /// `/skill <name>`: load one skill's instructions as this turn's user
     /// message (the explicit half of progressive skill disclosure).
     InvokeSkill(String),
+    /// A background subagent exited. Delivered on the main loop so it starts a
+    /// run when the session is idle and is steered (never dropped) when it is
+    /// not — the same contract as `CronInject`.
+    BackgroundAgentDone(crate::background_agents::FinishedAgent),
 }
 
 /// Terminal result of a user-initiated `!command` shell run.
@@ -870,6 +874,48 @@ pub(crate) fn diagnostic_log(message: &str) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let _ = writeln!(file, "{secs} {message}");
+}
+
+/// The TUI half of background agents: rows go into the work view, a finished
+/// agent becomes a follow-up message on the main loop.
+struct BackgroundUi {
+    state: Arc<TuiState>,
+    tx: mpsc::UnboundedSender<TuiMessage>,
+}
+
+impl crate::background_agents::AgentObserver for BackgroundUi {
+    fn node(&self, update: &crate::background_agents::NodeUpdate) {
+        self.state.upsert_background_node(update);
+        if let Some(tui) = &self.state.tui {
+            tui.request_render(false);
+        }
+    }
+
+    fn finished(&self, agent: &crate::background_agents::FinishedAgent) {
+        let _ = self.tx.send(TuiMessage::BackgroundAgentDone(agent.clone()));
+    }
+}
+
+/// What the model sees when a background agent lands in the conversation.
+fn background_agent_prompt(agent: &crate::background_agents::FinishedAgent) -> String {
+    let task: String = agent
+        .task
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect();
+    let mut prompt = if agent.ok {
+        format!("[后台子代理 {} 完成] 任务：{task}", agent.id)
+    } else {
+        format!("[后台子代理 {} 失败] 任务：{task}", agent.id)
+    };
+    prompt.push_str("\n\n");
+    prompt.push_str(agent.summary.trim());
+    prompt
+        .push_str("\n\n（这是后台子代理的结果：据此继续，或结束本轮。需要更多结果时不要再等它。）");
+    prompt
 }
 
 /// Begin dragging the floating box under `(column, row)`.
@@ -1333,6 +1379,12 @@ pub async fn interactive_tui(
         selection_start: std::sync::Mutex::new(None),
         selection_end: std::sync::Mutex::new(None),
     });
+    // Background subagents report into the work view and come back as
+    // follow-up messages on this channel.
+    crate::background_agents::global().attach(Arc::new(BackgroundUi {
+        state: state.clone(),
+        tx: tx.clone(),
+    }));
 
     // 会话内定时任务：仅当 `.ki/cron.json` 存在时启动。去重状态独立于
     // 调度器代际，在 `/reload` 先停后重建时继续复用，避免同分钟重触发。
@@ -3278,6 +3330,36 @@ pub async fn interactive_tui(
                     Vec::new(),
                 );
             }
+            Some(TuiMessage::BackgroundAgentDone(agent)) => {
+                // A background agent is not the user appearing: the transcript
+                // shows the result, and a busy session steers it in rather than
+                // dropping it (the whole point is that the work still lands).
+                let prompt = background_agent_prompt(&agent);
+                if !state.try_start_working() {
+                    let message = user_message_with_images(&prompt, Vec::new());
+                    if let Err(error) = lane.steer(message).await {
+                        diagnostic_log(&format!(
+                            "background agent {}: delivery failed: {error}",
+                            agent.id
+                        ));
+                    } else {
+                        refresh_pending_messages(&state, &lane).await;
+                    }
+                    tui.request_render(false);
+                    continue;
+                }
+                add_user_message(&chat_container, &prompt);
+                tui.request_render(false);
+                spawn_run(
+                    lane.clone(),
+                    prompt.clone(),
+                    false,
+                    tui.clone(),
+                    state.clone(),
+                    drain_handle.is_some(),
+                    Vec::new(),
+                );
+            }
             Some(TuiMessage::InvokeSkill(text)) => {
                 // User-invoked skill: same run path as a submitted prompt, but
                 // the transcript shows the command while the skill body rides
@@ -3913,6 +3995,9 @@ pub async fn interactive_tui(
 
     // ---- Shutdown ----
     ask_user_bridge.shutdown();
+    // A background agent cannot outlive the session that would report it.
+    crate::background_agents::global().detach();
+    crate::background_agents::global().shutdown();
     *running.lock().unwrap() = false;
     for handle in update_check_handles {
         handle.abort();
