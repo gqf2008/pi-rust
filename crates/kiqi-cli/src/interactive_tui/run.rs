@@ -412,6 +412,20 @@ pub(super) fn selected_screen_text(
     start: (u16, u16),
     end: (u16, u16),
 ) -> Option<String> {
+    selected_screen_text_clipped(lines, start, end, None)
+}
+
+/// [`selected_screen_text`] confined to `clip` `(x, y, width, height)`.
+///
+/// A drag that starts inside a floating box must not pick up the transcript the
+/// box covers: cells outside the box are not part of the selection, including on
+/// the rows between the two endpoints.
+pub(super) fn selected_screen_text_clipped(
+    lines: &[String],
+    start: (u16, u16),
+    end: (u16, u16),
+    clip: Option<(u16, u16, u16, u16)>,
+) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
@@ -419,8 +433,18 @@ pub(super) fn selected_screen_text(
     if (first.1, first.0) > (last.1, last.0) {
         std::mem::swap(&mut first, &mut last);
     }
+    let (clip_x, clip_right, clip_bottom) = match clip {
+        Some((x, y, width, height)) => (
+            x as usize,
+            (x as usize) + (width as usize).saturating_sub(1),
+            (y as usize) + (height as usize).saturating_sub(1),
+        ),
+        None => (0, usize::MAX, usize::MAX),
+    };
     let first_row = first.1 as usize;
-    let last_row = (last.1 as usize).min(lines.len().saturating_sub(1));
+    let last_row = (last.1 as usize)
+        .min(lines.len().saturating_sub(1))
+        .min(clip_bottom);
     if first_row > last_row {
         return None;
     }
@@ -428,16 +452,19 @@ pub(super) fn selected_screen_text(
     for (index, row) in lines.iter().enumerate().take(last_row + 1).skip(first_row) {
         let plain = kiqi_tui::ansi::strip_ansi(row);
         let from = if index == first_row {
-            first.0 as usize
+            (first.0 as usize).max(clip_x)
         } else {
-            0
+            clip_x
         };
         let to = if index == last_row {
-            last.0 as usize + 1
+            (last.0 as usize)
+                .max(from)
+                .min(clip_right)
+                .saturating_add(1)
         } else {
-            usize::MAX
+            clip_right.saturating_add(1)
         };
-        let width = to.saturating_sub(from).min(usize::MAX);
+        let width = to.saturating_sub(from);
         let piece = kiqi_tui::ansi::slice_by_column(&plain, from, width, false);
         selected.push(piece.trim_end().to_string());
     }

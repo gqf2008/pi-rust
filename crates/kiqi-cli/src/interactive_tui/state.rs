@@ -229,6 +229,10 @@ pub(super) struct TuiState {
     /// render tick drains it into the prompt editor; a voice extension drops a
     /// transcription in as an editable draft rather than sending it.
     pub(super) editor_text: kiqi_host::EditorTextMailbox,
+    /// When a drag starts inside a floating box, the selection is confined to
+    /// that box: dragging past its edge must not spill onto the transcript
+    /// behind it.
+    pub(super) selection_clip: std::sync::Mutex<Option<(u16, u16, u16, u16)>>,
     /// The last completed drag, kept so a right-click can copy it again and
     /// then drop the highlight.
     pub(super) last_span: std::sync::Mutex<Option<((u16, u16), (u16, u16))>>,
@@ -1755,6 +1759,29 @@ impl TuiState {
                 )
             })
             .collect()
+    }
+
+    pub(super) fn selection_clip(&self) -> Option<(u16, u16, u16, u16)> {
+        *self.selection_clip.lock().unwrap()
+    }
+
+    pub(super) fn set_selection_clip(&self, clip: Option<(u16, u16, u16, u16)>) {
+        *self.selection_clip.lock().unwrap() = clip;
+    }
+
+    /// Clamp a pointer cell to the active selection clip, if any.
+    pub(super) fn clamp_to_selection_clip(&self, cell: (u16, u16)) -> (u16, u16) {
+        let clip = *self.selection_clip.lock().unwrap();
+        let Some((x, y, width, height)) = clip else {
+            return cell;
+        };
+        let last_col = x.saturating_add(width.saturating_sub(1));
+        let last_row = y.saturating_add(height.saturating_sub(1));
+        (cell.0.clamp(x, last_col), cell.1.clamp(y, last_row))
+    }
+
+    pub(super) fn clear_selection_clip(&self) {
+        *self.selection_clip.lock().unwrap() = None;
     }
 
     /// Remember the span a drag just covered.

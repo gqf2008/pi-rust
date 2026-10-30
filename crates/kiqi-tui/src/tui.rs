@@ -80,6 +80,16 @@ pub struct OverlayOptions {
     pub non_blocking: bool,
 }
 
+/// A screen selection: the two pointer cells plus the rectangle the drag is
+/// confined to (a floating box), if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenSelection {
+    pub start: (u16, u16),
+    pub end: (u16, u16),
+    /// `(x, y, width, height)`: rows and columns outside it are not selected.
+    pub clip: Option<(u16, u16, u16, u16)>,
+}
+
 /// Handle returned by show_overlay for controlling the overlay.
 pub trait OverlayHandle: Send + Sync {
     /// Permanently remove the overlay.
@@ -198,5 +208,5 @@ pub trait TUI: Component + Send + Sync {
     /// Draw (or clear) the mouse selection as inverse video over the range
     /// `((column, row), (column, row))`. Backends without a compositing layer
     /// ignore it — the terminal highlights its own selection there.
-    fn set_selection(&self, _selection: Option<((u16, u16), (u16, u16))>) {}
+    fn set_selection(&self, _selection: Option<ScreenSelection>) {}
 }

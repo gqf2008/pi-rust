@@ -144,7 +144,7 @@ pub struct TuiAltScreen {
     last_frame: Mutex<Vec<String>>,
     /// The drag in progress (or the one just copied), drawn as inverse video so
     /// the selection is visible — the whole point of "选择复制".
-    selection: Mutex<Option<((u16, u16), (u16, u16))>>,
+    selection: Mutex<Option<crate::tui::ScreenSelection>>,
     scroll_top: Mutex<usize>,
     stick_to_bottom: Mutex<bool>,
     current_frame: Mutex<Option<LayoutFrame>>,
@@ -984,28 +984,41 @@ impl TuiAltScreen {
             *line = line.replace(CURSOR_MARKER, "");
         }
         // Draw the drag selection over the composed frame.
-        if let Some(((start_col, start_row), (end_col, end_row))) = *self.selection.lock().unwrap()
-        {
-            let (first, last) = if (start_row, start_col) <= (end_row, end_col) {
-                ((start_col, start_row), (end_col, end_row))
-            } else {
-                ((end_col, end_row), (start_col, start_row))
+        if let Some(selection) = *self.selection.lock().unwrap() {
+            let ((first_col, first_row), (last_col, last_row)) =
+                if (selection.start.1, selection.start.0) <= (selection.end.1, selection.end.0) {
+                    (selection.start, selection.end)
+                } else {
+                    (selection.end, selection.start)
+                };
+            let (clip_x, clip_right, clip_bottom) = match selection.clip {
+                Some((x, y, width, height)) => (
+                    x as usize,
+                    (x as usize) + (width as usize).saturating_sub(1),
+                    (y as usize) + (height as usize).saturating_sub(1),
+                ),
+                None => (0, usize::MAX, usize::MAX),
             };
-            for row in first.1 as usize..=last.1 as usize {
+            let last_row = (last_row as usize).min(clip_bottom);
+            for row in first_row as usize..=last_row {
                 let Some(line) = visible.get(row) else {
                     break;
                 };
-                let from = if row == first.1 as usize {
-                    first.0 as usize
+                let start_col = if row == first_row as usize {
+                    (first_col as usize).max(clip_x)
                 } else {
-                    0
+                    clip_x
                 };
-                let width = if row == last.1 as usize {
-                    (last.0 as usize + 1).saturating_sub(from)
+                let end_col = if row == last_row {
+                    (last_col as usize).max(start_col).min(clip_right)
                 } else {
-                    crate::ansi::visible_width(line).saturating_sub(from)
+                    clip_right.min(crate::ansi::visible_width(line).saturating_sub(1))
                 };
-                visible[row] = crate::ansi::highlight_columns(line, from, width);
+                if end_col < start_col {
+                    continue;
+                }
+                visible[row] =
+                    crate::ansi::highlight_columns(line, start_col, end_col + 1 - start_col);
             }
         }
 
@@ -1327,7 +1340,7 @@ impl TUI for TuiAltScreen {
             .unwrap_or_default()
     }
 
-    fn set_selection(&self, selection: Option<((u16, u16), (u16, u16))>) {
+    fn set_selection(&self, selection: Option<crate::tui::ScreenSelection>) {
         let changed = {
             let mut slot = self.selection.lock().unwrap();
             let changed = *slot != selection;

@@ -977,6 +977,62 @@ fn background_agent_prompt(agent: &crate::background_agents::FinishedAgent) -> S
     prompt
 }
 
+/// The selection as the renderer needs it: the two cells plus the box the drag
+/// is confined to, if it started inside one.
+fn selection_for(
+    state: &TuiState,
+    start: (u16, u16),
+    end: (u16, u16),
+) -> kiqi_tui::tui::ScreenSelection {
+    kiqi_tui::tui::ScreenSelection {
+        start,
+        end,
+        clip: state.selection_clip(),
+    }
+}
+
+/// The painted rect of the topmost floating box under the cursor, if any.
+///
+/// A drag that starts here is confined to it: the box is what the user is
+/// reading, and letting the selection run off its edge would pick up the
+/// transcript the box happens to cover.
+fn box_rect_at(
+    state: &TuiState,
+    nodes: &std::sync::Mutex<
+        std::collections::HashMap<String, (i32, i32, Arc<dyn kiqi_tui::tui::OverlayHandle>)>,
+    >,
+    work: &std::sync::Mutex<Option<Arc<dyn kiqi_tui::tui::OverlayHandle>>>,
+    column: u16,
+    row: u16,
+) -> Option<(u16, u16, u16, u16)> {
+    let mut top: Option<(usize, (u16, u16, u16, u16))> = None;
+    let mut consider = |handle: &Arc<dyn kiqi_tui::tui::OverlayHandle>| {
+        let Some(rect) = handle.rect() else {
+            return;
+        };
+        if !state::cell_inside(rect, (column, row)) {
+            return;
+        }
+        let z = handle.overlay_id().unwrap_or(0);
+        if top.is_none_or(|(top_z, _)| z >= top_z) {
+            top = Some((z, rect));
+        }
+    };
+    for node in state.node_snapshot().iter() {
+        let handle = nodes
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&node.id).map(|(_, _, handle)| handle.clone()));
+        if let Some(handle) = handle {
+            consider(&handle);
+        }
+    }
+    if let Some(handle) = work.lock().ok().and_then(|slot| slot.clone()) {
+        consider(&handle);
+    }
+    top.map(|(_, rect)| rect)
+}
+
 /// Begin dragging the floating box under `(column, row)`.
 ///
 /// Hit-testing uses each overlay's *painted* rectangle: passive overlays are
@@ -1394,6 +1450,7 @@ pub async fn interactive_tui(
         work_drag: std::sync::Mutex::new(None),
         copy_notice: std::sync::Mutex::new(None),
         last_span: std::sync::Mutex::new(None),
+        selection_clip: std::sync::Mutex::new(None),
         work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
@@ -2381,6 +2438,17 @@ pub async fn interactive_tui(
                         // Start selection tracking. `selection_end` doubles as the
                         // "a real drag happened" marker: a plain tap never sets
                         // it, so it can never overwrite the clipboard.
+                        // Confine the selection to the box the press landed
+                        // in, if any.
+                        let clip = box_rect_at(
+                            &state_for_key,
+                            &work_node_overlays_for_key,
+                            &work_overlay_for_key,
+                            m.column,
+                            m.row,
+                        );
+                        diagnostic_log(&format!("[sel] clip={clip:?} at ({},{})", m.column, m.row));
+                        state_for_key.set_selection_clip(clip);
                         *state_for_key.selection_start.lock().unwrap() = Some((m.column, m.row));
                         *state_for_key.selection_end.lock().unwrap() = None;
                         // A press arms a drag but is not a selection: drawing a
@@ -2394,17 +2462,21 @@ pub async fn interactive_tui(
                         // (Terminals only report this with button-event mouse
                         // tracking, which `ProcessTerminal` enables.)
                         if let Some(start) = *state_for_key.selection_start.lock().unwrap() {
-                            if start != (m.column, m.row) {
-                                *state_for_key.selection_end.lock().unwrap() =
-                                    Some((m.column, m.row));
-                                tui_for_key.set_selection(Some((start, (m.column, m.row))));
+                            let cell = state_for_key.clamp_to_selection_clip((m.column, m.row));
+                            if start != cell {
+                                *state_for_key.selection_end.lock().unwrap() = Some(cell);
+                                tui_for_key.set_selection(Some(selection_for(
+                                    &state_for_key,
+                                    start,
+                                    cell,
+                                )));
                             }
                         }
                     }
                     MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                         // End selection and auto-copy if enabled
                         if let Some(start) = *state_for_key.selection_start.lock().unwrap() {
-                            let end = (m.column, m.row);
+                            let end = state_for_key.clamp_to_selection_clip((m.column, m.row));
 
                             // Only auto-copy when the pointer actually MOVED with
                             // the button held (`Drag` set `selection_end`). A plain
@@ -2425,7 +2497,11 @@ pub async fn interactive_tui(
                                 // drawn even when the terminal coalesced the
                                 // motion into down/up.
                                 state_for_key.set_last_span((start, end));
-                                tui_for_key.set_selection(Some((start, end)));
+                                tui_for_key.set_selection(Some(selection_for(
+                                    &state_for_key,
+                                    start,
+                                    end,
+                                )));
                             } else {
                                 state_for_key.clear_last_span();
                                 tui_for_key.set_selection(None);
@@ -2502,24 +2578,28 @@ pub async fn interactive_tui(
                         let Some((first, last)) = state_for_key.take_last_span() else {
                             continue;
                         };
-                        let copied = selected_screen_text(&tui_for_key.screen_lines(), first, last)
-                            .filter(|text| !text.trim().is_empty())
-                            .map(|text| {
-                                let copied = copy_to_clipboard(&text);
-                                diagnostic_log(&format!(
-                                    "[sel] right-click chars={} copied={copied}",
-                                    text.chars().count()
-                                ));
-                                let note = if copied {
-                                    format!("copied {} char(s)", text.chars().count())
-                                } else {
-                                    "selection gathered but the clipboard is unavailable"
-                                        .to_string()
-                                };
-                                state_for_key.show_copy_notice(note);
-                                copied
-                            })
-                            .unwrap_or(false);
+                        let copied = selected_screen_text_clipped(
+                            &tui_for_key.screen_lines(),
+                            first,
+                            last,
+                            state_for_key.selection_clip(),
+                        )
+                        .filter(|text| !text.trim().is_empty())
+                        .map(|text| {
+                            let copied = copy_to_clipboard(&text);
+                            diagnostic_log(&format!(
+                                "[sel] right-click chars={} copied={copied}",
+                                text.chars().count()
+                            ));
+                            let note = if copied {
+                                format!("copied {} char(s)", text.chars().count())
+                            } else {
+                                "selection gathered but the clipboard is unavailable".to_string()
+                            };
+                            state_for_key.show_copy_notice(note);
+                            copied
+                        })
+                        .unwrap_or(false);
                         let _ = copied;
                         tui_for_key.set_selection(None);
                         tui_for_key.request_render(true);
@@ -2533,6 +2613,7 @@ pub async fn interactive_tui(
             // already copied when the button came up.
             tui_for_key.set_selection(None);
             state_for_key.clear_last_span();
+            state_for_key.clear_selection_clip();
             let Event::Key(key) = ev else {
                 if let Event::Paste(text) = ev {
                     crate::key_trace::note(&format!(

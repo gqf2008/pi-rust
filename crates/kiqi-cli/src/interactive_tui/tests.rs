@@ -302,6 +302,7 @@ fn test_tui_state() -> Arc<TuiState> {
         work_drag: std::sync::Mutex::new(None),
         copy_notice: std::sync::Mutex::new(None),
         last_span: std::sync::Mutex::new(None),
+        selection_clip: std::sync::Mutex::new(None),
         work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
@@ -1393,6 +1394,7 @@ fn test_agent_event_mapping_creates_assistant_and_tool() {
         work_drag: std::sync::Mutex::new(None),
         copy_notice: std::sync::Mutex::new(None),
         last_span: std::sync::Mutex::new(None),
+        selection_clip: std::sync::Mutex::new(None),
         work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
@@ -1885,6 +1887,7 @@ fn test_autocomplete_slash_suggestions_render() {
         work_drag: std::sync::Mutex::new(None),
         copy_notice: std::sync::Mutex::new(None),
         last_span: std::sync::Mutex::new(None),
+        selection_clip: std::sync::Mutex::new(None),
         work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
@@ -1987,6 +1990,7 @@ fn test_select_list_swap_restores_editor() {
         work_drag: std::sync::Mutex::new(None),
         copy_notice: std::sync::Mutex::new(None),
         last_span: std::sync::Mutex::new(None),
+        selection_clip: std::sync::Mutex::new(None),
         work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
@@ -2092,6 +2096,7 @@ fn test_message_history_browse_restores_draft() {
         work_drag: std::sync::Mutex::new(None),
         copy_notice: std::sync::Mutex::new(None),
         last_span: std::sync::Mutex::new(None),
+        selection_clip: std::sync::Mutex::new(None),
         work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
@@ -2200,6 +2205,7 @@ fn test_accept_top_suggestion_replaces_prefix() {
         work_drag: std::sync::Mutex::new(None),
         copy_notice: std::sync::Mutex::new(None),
         last_span: std::sync::Mutex::new(None),
+        selection_clip: std::sync::Mutex::new(None),
         work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
@@ -2294,6 +2300,7 @@ fn autocomplete_test_state(max_visible: usize) -> Arc<TuiState> {
         work_drag: std::sync::Mutex::new(None),
         copy_notice: std::sync::Mutex::new(None),
         last_span: std::sync::Mutex::new(None),
+        selection_clip: std::sync::Mutex::new(None),
         work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
@@ -3209,6 +3216,58 @@ fn subagent_calls_waiting_for_the_extension_are_reported_as_queued() {
         events: Vec::new(),
     });
     assert_eq!(state.queued_agent_calls().len(), 1);
+}
+
+/// A clipped selection takes only the box's columns, on every row it covers —
+/// never the transcript the box sits on top of.
+#[test]
+fn a_clipped_selection_ignores_the_transcript_under_the_box() {
+    let frame = vec![
+        "TRANSCRIPT LEFT                       BOX TEXT ONE".to_string(),
+        "TRANSCRIPT LEFT                       BOX TEXT TWO".to_string(),
+        "TRANSCRIPT LEFT                       BOX TEXT THREE".to_string(),
+    ];
+    // A box occupying columns 38..51 over rows 0..2.
+    let clip = (38, 0, 14, 3);
+    let selected = super::run::selected_screen_text_clipped(&frame, (38, 0), (51, 2), Some(clip))
+        .expect("selection");
+    assert!(
+        !selected.contains("TRANSCRIPT"),
+        "the transcript under the box must not be copied: {selected:?}"
+    );
+    assert!(selected.contains("BOX TEXT ONE"), "{selected:?}");
+    assert!(selected.contains("BOX TEXT THREE"), "{selected:?}");
+
+    // Dragging up-left past the box's edge ends at that edge, still without
+    // leaking the columns outside the box.
+    let ended = super::run::selected_screen_text_clipped(&frame, (38, 2), (5, 0), Some(clip))
+        .expect("selection");
+    assert!(!ended.contains("TRANSCRIPT"), "{ended:?}");
+    assert!(
+        ended.lines().all(|line| line.len() <= 14),
+        "nothing outside the box's 14 columns: {ended:?}"
+    );
+}
+
+/// A drag that starts inside a floating box stays inside it: the box is what
+/// the user is reading, and the transcript behind it is not part of that.
+#[test]
+fn a_selection_starting_in_a_box_is_clipped_to_it() {
+    let state = test_tui_state();
+    state.set_selection_clip(Some((10, 5, 20, 4)));
+    assert_eq!(state.clamp_to_selection_clip((15, 6)), (15, 6), "inside");
+    assert_eq!(state.clamp_to_selection_clip((0, 0)), (10, 5), "left/up");
+    assert_eq!(
+        state.clamp_to_selection_clip((100, 39)),
+        (29, 8),
+        "right/down edge is x+w-1, y+h-1"
+    );
+    state.clear_selection_clip();
+    assert_eq!(
+        state.clamp_to_selection_clip((100, 39)),
+        (100, 39),
+        "no clip: full screen"
+    );
 }
 
 /// Selection copies what the renderer painted, so it works over the input
