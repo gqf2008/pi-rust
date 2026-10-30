@@ -167,7 +167,12 @@ impl TUI for TuiMainScreen {
         }
 
         let width = self.terminal.columns();
-        let lines = self.render(width);
+        // Rows are terminal input: see `ansi::sanitize_row_owned`.
+        let lines: Vec<String> = self
+            .render(width)
+            .into_iter()
+            .map(crate::ansi::sanitize_row_owned)
+            .collect();
 
         // Write the base transcript first. A trailing newline leaves the cursor
         // one row below it, which lets the temporary overlay be painted with
@@ -224,7 +229,13 @@ impl TuiMainScreen {
                 }
                 let row = y + index;
                 let base_line = base_lines.get(row).map(String::as_str).unwrap_or("");
-                let composite = composite_tui_line(base_line, line, x, overlay_width, width);
+                let composite = crate::ansi::sanitize_row_owned(composite_tui_line(
+                    base_line,
+                    line,
+                    x,
+                    overlay_width,
+                    width,
+                ));
                 self.terminal.write("\r");
                 self.terminal.write(&composite);
             }

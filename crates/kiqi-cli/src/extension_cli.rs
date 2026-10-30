@@ -18,6 +18,15 @@ use kiqi_host::grants::{
     RENDER_KIND_MARKDOWN, RESOURCES_KIND_PROMPTS, RESOURCES_KIND_SKILLS,
 };
 
+/// Extension-authored text is terminal input, not just text.
+///
+/// A manifest description, a capability name or a declared surface carrying
+/// `\x1b]52;c;…` is executed by whatever terminal prints it, so every
+/// subcommand that prints something the extension wrote goes through here.
+fn printable(text: &str) -> String {
+    kiqi_tui::ansi::sanitize_external_text(text)
+}
+
 /// Entry for `ki extension [sub]`; `args` is the slice after `extension`.
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
@@ -80,13 +89,13 @@ fn show(id: Option<&str>) -> i32 {
         .unwrap_or_default();
     let disclosure = policy_disclosure(&grants, &credentials);
     if !disclosure.is_empty() {
-        println!("\n{disclosure}");
+        println!("\n{}", printable(&disclosure));
     }
     if grants.oauth.is_some() {
         let store = crate::config::read_auth().unwrap_or_default();
         let text = oauth_credentials_disclosure(id, &grants, &store);
         if !text.is_empty() {
-            println!("\n{text}");
+            println!("\n{}", printable(&text));
         }
     }
     print_digest(id);
@@ -406,7 +415,7 @@ fn print_declared(id: &str) {
         .into_iter()
         .find(|host| host.id() == id);
     match host {
-        Some(host) => println!("\n{}", declared_surfaces(host.extension())),
+        Some(host) => println!("\n{}", printable(&declared_surfaces(host.extension()))),
         None => eprintln!(
             "note: no compiled or wasm extension with id `{id}` is installed, so its declared \
              surfaces cannot be listed"
@@ -571,13 +580,17 @@ fn grant_into(args: &[String], root: Option<&Path>) -> i32 {
         eprintln!("error: {error}");
         return 1;
     }
-    println!("granted `{}` to {}", parsed.capability, parsed.id);
+    println!(
+        "granted `{}` to {}",
+        printable(&parsed.capability),
+        printable(&parsed.id)
+    );
     if let Some(warning) = credential_capability_warning(&grants, &parsed.capability, &parsed.id) {
-        eprintln!("{warning}");
+        eprintln!("{}", printable(&warning));
     }
     if let (Some(old), Some(new)) = (old_exec.as_ref(), grants.exec.as_ref()) {
         if let Some(note) = exec_reset_note(old, &given_options, new) {
-            eprintln!("{note}");
+            eprintln!("{}", printable(&note));
         }
     }
     0
@@ -2823,6 +2836,17 @@ mod tests {
 
         std::fs::remove_file(digest_sidecar_path(&wasm)).unwrap();
         assert_eq!(digest_status(&wasm).unwrap(), DigestStatus::Missing);
+    }
+
+    /// `ki extension show` prints what the extension declared, so a manifest
+    /// description cannot drive the user's terminal.
+    #[test]
+    fn printable_drops_what_an_extension_declaration_cannot_print() {
+        assert_eq!(printable("plain text"), "plain text");
+        assert_eq!(
+            printable("\x1b[2J\x1b]52;c;cGF3bg==\x07clear\x07ed\ttab"),
+            "cleared    tab"
+        );
     }
 
     /// `ki extension show` states which of the three cases applies, and names both

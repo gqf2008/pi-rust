@@ -281,7 +281,10 @@ HTTP 服务器把 `command`/`args`/`env`/`cwd` 换成 `url` + 可选 `headers`�
 
 stdout/stderr 里出现的转义序列不会进终端：`/mcp-doctor` 会剥掉 CSI/OSC 等序列和控制字符、
 把 Tab 折成空格、按字符截断，所以一个乱打印控制字节的服务器最多让报告难看，不会清屏、切走
-备用屏幕或改窗口标题。
+备用屏幕或改窗口标题。这条保证不止于 doctor：**渲染器在把每一行写进终端之前都会过滤**，
+只放过 SGR 样式、OSC-8 链接、OSC 133 提示区、内联图片序列和 ki 自己的 APC 标记；工具输出、
+模型回复、扩展消息、MCP 载荷、粘贴内容里的 `\x1b[2J`、光标移动、模式切换、OSC 52 写剪贴板
+都在这里被丢掉。`ki -p` 的输出和 `ki extension ...` 打印的清单同样按纯文本写出。
 
 **`subscribe`**：握手后为每条 uri 调一次 `resources/subscribe`。写不进去的（服务器拒绝、
 或它根本没声明 `resources.subscribe` 能力）只报一条 warning，不会拖垮整个服务器。订阅

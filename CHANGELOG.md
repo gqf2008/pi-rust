@@ -24,6 +24,16 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **任何扩展、命令、子命令都不能再破坏终端渲染。** 渲染单位是「一行带 ANSI 的字符串」，
+  而这一行会被当成终端输入写出去，所以它的安全性取决于来源是否可信任：工具输出、模型回复、
+  扩展消息、MCP 载荷、文件内容、粘贴文本都曾能把 `\x1b[2J`（清屏）、`\x1b[?1049l`（切走
+  备用屏幕）、`\x1b[1;1H`（移动光标）、`\x1b]52;c;…`（写剪贴板）原样送到终端。以前只在
+  个别地方补过滤，覆盖面取决于当时想到了多少个调用点。现在在**渲染器把行写出去的唯一位置**
+  统一过滤：SGR 样式、OSC-8 链接、OSC 133 提示区、内联图片序列和 ki 自己的 APC 标记放行，
+  其余转义和控制字符全部丢弃（`\r` 会回车覆写左侧列、`\n` 会破坏「一行一行」的光标账本、
+  Tab 在 `visible_width` 里算 0 列但在终端里跳制表位）。`ki -p` 的最终输出和 `ki extension`
+  打印的扩展声明/授权说明也按纯文本写出。
+
 - **一个 listing 的 `-32601` 不再吞掉另一个的清单。** 服务器声明了 `resources`、却只实现
   一半（walgit 就是这样：有 `resources/list`，没有 `resources/templates/list`）时，
   `resources/templates/list` 的 `-32601 Method not found` 被当成失败，`describe_resources`

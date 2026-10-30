@@ -291,7 +291,10 @@ pub async fn print(
                     last_exit = 1;
                 }
                 _ => {
-                    let text = assistant_text(m);
+                    // The reply goes to the user's terminal, so it is written as
+                    // text: a reply carrying `\x1b[2J` would otherwise wipe the
+                    // screen it is printed on.
+                    let text = kiqi_tui::ansi::sanitize_external_text(&assistant_text(m));
                     let mut out = std::io::stdout();
                     let _ = out.write_all(text.as_bytes());
                     if !text.ends_with('\n') {
@@ -1195,7 +1198,8 @@ async fn run_one(
             match &result.outcome {
                 HarnessRunOutcome::Completed { final_message, .. }
                 | HarnessRunOutcome::Aborted { final_message, .. } => {
-                    let text = assistant_text(final_message);
+                    let text =
+                        kiqi_tui::ansi::sanitize_external_text(&assistant_text(final_message));
                     if !text.is_empty() {
                         println!("{text}");
                     }

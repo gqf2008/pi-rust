@@ -76,6 +76,104 @@ fn escape_len(s: &str) -> usize {
     }
 }
 
+/// Whether `escape` may be written to the terminal from a rendered row.
+///
+/// Rows are built from strings ki does not own: tool output, model output,
+/// extension messages, MCP payloads, file contents, pasted text. A rendered row
+/// is handed to the terminal as input, so every escape it carries is executed.
+/// Only the sequences ki itself produces may pass: SGR styling, OSC-8
+/// hyperlinks, the inline image protocols, and ki's own APC markers. Everything
+/// else — cursor movement, erasing, mode changes, OSC 52 clipboard writes,
+/// window and title control, DCS — is dropped.
+fn row_escape_allowed(escape: &str) -> bool {
+    is_sgr(escape)
+        || escape.starts_with("\x1b]8;")
+        // iTerm2 inline images, and the OSC 133 prompt-zone markers the user
+        // message bubble wraps itself in.
+        || escape.starts_with("\x1b]1337;File=")
+        || escape.starts_with("\x1b]133;")
+        || escape.starts_with("\x1b_pi:")
+        || escape.starts_with("\x1b_G")
+}
+
+/// Rewrite `row` so it can only draw glyphs and styling, or return `None` when
+/// it already can.
+///
+/// Control characters other than the allowed escapes are dropped: a `\r`
+/// returns the carriage and repaints over the columns to its left, a `\n` breaks
+/// the one-row-per-line contract the renderer's cursor math depends on, and a
+/// tab — which [`visible_width`] counts as zero columns — jumps to the
+/// terminal's next tab stop and desynchronizes every column after it. Text ki
+/// does not own is expanded to spaces by [`sanitize_external_text`] before it is
+/// measured, so dropping a tab here cannot misalign a row that was measured.
+pub fn sanitize_row(row: &str) -> Option<String> {
+    let mut clean: Option<String> = None;
+    let mut offset = 0;
+
+    while offset < row.len() {
+        let tail = &row[offset..];
+        if tail.starts_with('\x1b') {
+            let end = escape_len(tail);
+            let escape = &tail[..end];
+            if row_escape_allowed(escape) {
+                if let Some(clean) = clean.as_mut() {
+                    clean.push_str(escape);
+                }
+            } else {
+                clean.get_or_insert_with(|| row[..offset].to_string());
+            }
+            offset += end;
+            continue;
+        }
+
+        let end = tail.find('\x1b').unwrap_or(tail.len());
+        let text = &tail[..end];
+        if text.chars().any(char::is_control) {
+            clean
+                .get_or_insert_with(|| row[..offset].to_string())
+                .extend(text.chars().filter(|c| !c.is_control()));
+        } else if let Some(clean) = clean.as_mut() {
+            clean.push_str(text);
+        }
+        offset += end;
+    }
+
+    clean
+}
+
+/// [`sanitize_row`] for an owned row: the row is returned as is when it is
+/// already safe, so ki's own rows are scanned but never copied.
+pub fn sanitize_row_owned(row: String) -> String {
+    match sanitize_row(&row) {
+        None => row,
+        Some(clean) => clean,
+    }
+}
+
+/// Text ki does not own, made safe to measure and display.
+///
+/// Escape sequences are removed rather than filtered — text from outside ki has
+/// no styling to keep — and tabs are expanded to spaces so that
+/// [`visible_width`] and the terminal agree on the layout *before* the text is
+/// wrapped, which is what keeps a tab in tool or model output from shifting
+/// every column after it.
+pub fn sanitize_external_text(text: &str) -> String {
+    let mut clean = String::with_capacity(text.len());
+    for (index, line) in strip_ansi(text).split('\n').enumerate() {
+        if index > 0 {
+            clean.push('\n');
+        }
+        for c in line.chars() {
+            match c {
+                '\t' => clean.push_str("    "),
+                c if c.is_control() => {}
+                c => clean.push(c),
+            }
+        }
+    }
+    clean
+}
+
 /// Strip ANSI escape sequences from a string.
 pub fn strip_ansi(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -409,6 +507,49 @@ pub fn dim(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_row_can_only_carry_glyphs_and_styling() {
+        // Every string a component renders is written into the terminal as
+        // input. Tool output, model output, extension messages, MCP payloads
+        // and pasted text all reach a row, so a row must not be able to move the
+        // cursor, erase, switch modes or talk to the clipboard.
+        let row = "\x1b[31mred\x1b[0m\x1b[2J\x1b[1;1Hhi\rmore\x07\x1b]52;c;cGF3bg==\x07z\tt";
+        let clean = super::sanitize_row(row).expect("escapes and controls are rewritten");
+        assert_eq!(clean, "\x1b[31mred\x1b[0mhimorezt");
+        assert_eq!(
+            super::sanitize_row(&clean),
+            None,
+            "sanitizing is idempotent"
+        );
+    }
+
+    #[test]
+    fn ki_printable_escapes_survive_a_row() {
+        // Styling, hyperlinks, APC markers, prompt zones and the image
+        // protocols are what ki itself emits into rows; dropping them would
+        // blank the frame or break clickable links.
+        for escape in [
+            "\x1b[1;38;2;1;2;3m",
+            "\x1b]8;;https://example.com\x07",
+            super::CURSOR_MARKER,
+            "\x1b]133;A\x07",
+            "\x1b]1337;File=name=1;inline=1:AAAA\x07",
+            "\x1b_Ga=T;AAAA\x1b\\",
+        ] {
+            let row = format!("before{escape}after");
+            assert_eq!(super::sanitize_row(&row), None, "{escape:?} is ki's own");
+        }
+    }
+
+    #[test]
+    fn external_text_is_measured_without_escapes_or_tabs() {
+        // A tab is zero columns to `visible_width` but a tab stop to the real
+        // terminal, so text ki does not own is expanded before it is measured.
+        let text = super::sanitize_external_text("\x1b[31mred\x1b[0m\ta\r\nb\x00c\n");
+        assert_eq!(text, "red    a\nbc\n");
+        assert_eq!(super::visible_width("red    a"), 8);
+    }
+
     #[test]
     fn highlight_columns_inverts_exactly_the_selected_cells() {
         let line = "abcdefghij";

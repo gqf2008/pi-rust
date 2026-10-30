@@ -679,7 +679,10 @@ impl TuiAltScreen {
                 }
             }
         }
-        let lines = fitted;
+        let lines: Vec<String> = fitted
+            .into_iter()
+            .map(crate::ansi::sanitize_row_owned)
+            .collect();
         let previous = self
             .previous_screen
             .lock()
@@ -1020,6 +1023,16 @@ impl TuiAltScreen {
                 visible[row] =
                     crate::ansi::highlight_columns(line, start_col, end_col + 1 - start_col);
             }
+        }
+
+        // Every row below is written into the terminal's input stream, so a row
+        // is only as safe as the text its components were handed — tool output,
+        // model output, extension messages, MCP payloads, pasted text, file
+        // contents. Filter here, once per frame, instead of trusting each
+        // component to have done it: an escape that reaches this point is
+        // executed by the terminal, and `\x1b[2J` wipes the frame it is drawn in.
+        for line in &mut visible {
+            *line = crate::ansi::sanitize_row_owned(std::mem::take(line));
         }
 
         // Keep the painted grid so a mouse drag can copy exactly what is shown.
@@ -1583,6 +1596,39 @@ mod tests {
             let frame = output.lock().unwrap().clone();
             assert!(frame.contains("short"));
             assert!(!frame.contains("\x1b[2K"));
+        }
+    }
+
+    #[test]
+    fn a_component_cannot_write_escapes_into_the_terminal() {
+        // Tool output, model output, extension messages, MCP payloads and pasted
+        // text all end up in a row; the renderer is the last place that can stop
+        // `\x1b[2J` from wiping the frame it is drawn in.
+        for main_screen in [false, true] {
+            let output = Arc::new(Mutex::new(String::new()));
+            let tui = TuiAltScreen::new(
+                Box::new(RecordingTerminal {
+                    output: output.clone(),
+                }),
+                false,
+                None,
+            );
+            let text = Arc::new(Text::new("before after", 0, 0));
+            tui.set_main_screen_mode(main_screen);
+            tui.set_layout_root(Some(text.clone()));
+            tui.start_readerless();
+            output.lock().unwrap().clear();
+            // A hostile result: styling that must survive, screen control that
+            // must not reach the terminal, and a control character that would
+            // otherwise return the carriage.
+            text.set_text("\x1b[35mbefore\x1b[0m\x1b[2J\x1b[1;1H\x1b[?1049l\rafter");
+            tui.do_render(false);
+            let frame = output.lock().unwrap().clone();
+            assert!(frame.contains("before"), "{frame:?}");
+            assert!(frame.contains("after"), "{frame:?}");
+            assert!(frame.contains("\x1b[35m"), "styling survives: {frame:?}");
+            assert!(!frame.contains("\x1b[2J"), "{frame:?}");
+            assert!(!frame.contains("\x1b[?1049l"), "{frame:?}");
         }
     }
 
