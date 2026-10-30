@@ -849,6 +849,62 @@ pub(crate) fn theme_preset(name: Option<&str>) -> ThemePreset {
     }
 }
 
+/// Sends the process's stderr to the diagnostic log while the TUI owns the
+/// terminal, and restores it afterwards.
+///
+/// The renderer owns every cell of the screen, so a raw stderr line — an MCP
+/// library warning, a provider adapter note, a panic message — is written at
+/// whatever position the cursor happens to hold: over the input box, across the
+/// transcript. `/mcp-reload` surfaced this again with `[ki mcp] server …:
+/// resources/list failed`, which landed in the prompt editor. Rather than chase
+/// every stray print in every dependency, the TUI detours fd 2 into
+/// `<agent_dir>/logs/ki.log` for its lifetime; anything that escapes a library
+/// ends up there instead of on screen.
+struct StderrToLog {
+    saved: Option<std::os::fd::RawFd>,
+}
+
+impl StderrToLog {
+    fn install() -> Self {
+        use std::os::fd::{AsRawFd, IntoRawFd};
+        let Ok(dir) = crate::config::agent_dir() else {
+            return Self { saved: None };
+        };
+        let path = dir.join("logs").join("ki.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        else {
+            return Self { saved: None };
+        };
+        let stderr = std::io::stderr().as_raw_fd();
+        let Ok(saved) = nix::unistd::dup(stderr) else {
+            return Self { saved: None };
+        };
+        // `file` must not close the fd it hands to `dup2`.
+        if nix::unistd::dup2(file.into_raw_fd(), stderr).is_err() {
+            let _ = nix::unistd::close(saved);
+            return Self { saved: None };
+        }
+        Self { saved: Some(saved) }
+    }
+}
+
+impl Drop for StderrToLog {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        let Some(saved) = self.saved.take() else {
+            return;
+        };
+        let _ = nix::unistd::dup2(saved, std::io::stderr().as_raw_fd());
+        let _ = nix::unistd::close(saved);
+    }
+}
+
 /// Runtime diagnostics while the TUI owns the terminal.
 ///
 /// A raw stderr line is written at the renderer's cursor, so it lands inside
@@ -987,6 +1043,8 @@ pub async fn interactive_tui(
     _no_themes: bool,
     reload_context: &crate::session::ReloadContext,
 ) -> i32 {
+    // Stray library output must never land in the grid this TUI owns.
+    let _stderr_to_log = StderrToLog::install();
     // A hung-up terminal must not leave this process spinning in crossterm.
     crate::tui_hangup::spawn();
     let lane: Arc<dyn AgentLane> = harness.lane("main");

@@ -101,6 +101,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **库里的诊断不再写进输入区。** TUI 拥有整个屏幕，任何裸 `eprintln!`（MCP 库的
+  `[ki mcp] server …: resources/list failed`、provider 适配器告警、panic 信息）都会落在
+  光标所在的位置——`/mcp-reload` 之后那条 MCP 诊断就压在了输入框上。现在进入交互 TUI 时
+  把进程 stderr 重定向到 `<agent_dir>/logs/ki.log`，退出时恢复；`-p` 无头模式不受影响，
+  仍然照常写 stderr。pty 实测：屏幕上 `[ki mcp]` 出现 0 次，同样的行出现在日志里。
 - **历史里的「半个工具调用」不会再让请求 400。** `Messages with role 'tool' must be a
   response to a preceding message with 'tool_calls'` 与反方向的 `An assistant message with
   'tool_calls' must be followed by tool messages…` 是同一件事的两面：持久化历史里出现了
