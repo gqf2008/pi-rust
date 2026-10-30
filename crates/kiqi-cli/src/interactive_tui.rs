@@ -860,10 +860,25 @@ pub(crate) fn theme_preset(name: Option<&str>) -> ThemePreset {
 /// every stray print in every dependency, the TUI detours fd 2 into
 /// `<agent_dir>/logs/ki.log` for its lifetime; anything that escapes a library
 /// ends up there instead of on screen.
+#[cfg(unix)]
 struct StderrToLog {
     saved: Option<std::os::fd::RawFd>,
 }
 
+/// Windows has no `dup2` through this crate's toolchain (`nix` is a
+/// `cfg(unix)` dependency), so the redirect is unix-only; the Windows console
+/// does not interleave stray stderr into the renderer grid the same way.
+#[cfg(not(unix))]
+struct StderrToLog;
+
+#[cfg(not(unix))]
+impl StderrToLog {
+    fn install() -> Self {
+        Self
+    }
+}
+
+#[cfg(unix)]
 impl StderrToLog {
     fn install() -> Self {
         use std::os::fd::{AsRawFd, IntoRawFd};
@@ -894,6 +909,7 @@ impl StderrToLog {
     }
 }
 
+#[cfg(unix)]
 impl Drop for StderrToLog {
     fn drop(&mut self) {
         use std::os::fd::AsRawFd;
