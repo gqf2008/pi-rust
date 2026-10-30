@@ -1381,6 +1381,7 @@ pub async fn interactive_tui(
         work_view: std::sync::atomic::AtomicBool::new(true),
         work_offset: std::sync::Mutex::new((0, 0)),
         work_drag: std::sync::Mutex::new(None),
+        copy_notice: std::sync::Mutex::new(None),
         work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
@@ -2028,6 +2029,9 @@ pub async fn interactive_tui(
                 // cache regenerates itself if enabling a sidebar changes width.
                 tui_tick.request_render_reusing_scroll_content();
             }
+            if state_tick.tick_copy_notice() {
+                tui_tick.request_render(false);
+            }
             if pet_tick.tick(scroll_tick.viewport_height()) {
                 tui_tick.request_render(false);
             }
@@ -2377,7 +2381,12 @@ pub async fn interactive_tui(
                             // rendered TUI line sat under the pointer, silently
                             // clobbering the user's real clipboard so the next paste
                             // returned that stale text.
-                            let is_drag = state_for_key.selection_end.lock().unwrap().is_some();
+                            // A drag counts when motion was reported, or when
+                            // the pointer came up on a different cell: some
+                            // terminals coalesce motion and send only
+                            // down/up, and a fast drag then copied nothing.
+                            let is_drag = state_for_key.selection_end.lock().unwrap().is_some()
+                                || start != end;
                             *state_for_key.selection_end.lock().unwrap() = Some(end);
 
                             // Check if auto-copy is enabled
@@ -2417,8 +2426,11 @@ pub async fn interactive_tui(
                                             "selection gathered but the clipboard is unavailable"
                                                 .to_string()
                                         };
-                                        state_for_key.footer.set_status(&note);
-                                        tui_for_key.request_render(false);
+                                        state_for_key.show_copy_notice(note);
+                                        // Forced: a coalesced frame can be
+                                        // dropped by the scheduler, and the
+                                        // confirmation is the whole point.
+                                        tui_for_key.request_render(true);
                                     }
                                 }
                             }

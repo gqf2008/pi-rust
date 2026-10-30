@@ -229,6 +229,11 @@ pub(super) struct TuiState {
     /// render tick drains it into the prompt editor; a voice extension drops a
     /// transcription in as an editable draft rather than sending it.
     pub(super) editor_text: kiqi_host::EditorTextMailbox,
+    /// A short-lived footer notice ("copied 42 char(s)"). The tick re-applies
+    /// it until it expires: the working spinner and the auto-send countdown both
+    /// write the same status line, and a selection confirmation that a later
+    /// repaint erases within a frame is no confirmation at all.
+    pub(super) copy_notice: std::sync::Mutex<Option<(String, std::time::Instant)>>,
     /// Pending auto-send for an injected draft (see [`AutoSendPending`]).
     /// `None` when no countdown is running.
     pub(super) auto_send: std::sync::Mutex<Option<AutoSendPending>>,
@@ -1747,6 +1752,30 @@ impl TuiState {
                 )
             })
             .collect()
+    }
+
+    /// Show a footer notice for a few seconds (copy confirmations).
+    pub(super) fn show_copy_notice(&self, text: String) {
+        *self.copy_notice.lock().unwrap() = Some((text, std::time::Instant::now()));
+    }
+
+    /// Re-assert the copy notice until it expires. Returns whether the footer
+    /// was repainted.
+    pub(super) fn tick_copy_notice(&self) -> bool {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(3);
+        let mut slot = self.copy_notice.lock().unwrap();
+        let Some((text, shown_at)) = slot.clone() else {
+            return false;
+        };
+        if shown_at.elapsed() >= TTL {
+            *slot = None;
+            return false;
+        }
+        if self.footer.get_status() != text {
+            self.footer.set_status(&text);
+            return true;
+        }
+        false
     }
 
     pub(super) fn llm_request_started(&self) {

@@ -445,7 +445,9 @@ impl Component for FooterComponent {
             } else {
                 colors.muted
             };
-            format!(" {}", color.fg(&sanitized))
+            // Trailing space: the status leads the line, so it survives the
+            // truncation a long hints string forces.
+            format!("{} ", color.fg(&sanitized))
         };
 
         // Extension status (e.g. the langfuse extension) sits after the run status
@@ -461,10 +463,13 @@ impl Component for FooterComponent {
 
         // Left = usage stats (or keybinding hints on a fresh session) + status;
         // right = the model, right-aligned (pi layout).
+        // The status leads: hints are long enough to push anything appended
+        // after them off the line, which silently swallowed run statuses and
+        // the "copied N char(s)" confirmation.
         let left_styled = if has_stats {
-            format!("{stats_styled}{status_word}{extension_word}")
+            format!("{status_word}{stats_styled}{extension_word}")
         } else {
-            format!("{}{status_word}{extension_word}", colors.dim.fg(&hints))
+            format!("{status_word}{}{extension_word}", colors.dim.fg(&hints))
         };
         let right_styled = model_label;
 
