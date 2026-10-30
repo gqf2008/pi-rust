@@ -2404,7 +2404,21 @@ pub async fn interactive_tui(
                                         });
                                 if let Some(selected_text) = selected_text {
                                     if !selected_text.trim().is_empty() {
-                                        let _ = copy_to_clipboard(&selected_text);
+                                        // Say so: a silent copy leaves the user
+                                        // unable to tell "nothing was selected"
+                                        // from "the clipboard write failed".
+                                        let copied = copy_to_clipboard(&selected_text);
+                                        let note = if copied {
+                                            format!(
+                                                "copied {} char(s)",
+                                                selected_text.chars().count()
+                                            )
+                                        } else {
+                                            "selection gathered but the clipboard is unavailable"
+                                                .to_string()
+                                        };
+                                        state_for_key.footer.set_status(&note);
+                                        tui_for_key.request_render(false);
                                     }
                                 }
                             }
