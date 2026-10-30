@@ -53,9 +53,10 @@ use kiqi_agent::AgentTool;
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CancelledNotification, ClientCapabilities, ClientInfo,
-    ClientNotification, ClientRequest, Implementation, PaginatedRequestParams, ProtocolVersion,
-    ReadResourceRequest, ReadResourceRequestParams, RequestId, ResourceUpdatedNotificationParam,
-    ServerResult, SubscribeRequestParams, UnsubscribeRequestParams,
+    ClientNotification, ClientRequest, ErrorCode, Implementation, PaginatedRequestParams,
+    ProtocolVersion, ReadResourceRequest, ReadResourceRequestParams, RequestId,
+    ResourceUpdatedNotificationParam, ServerResult, SubscribeRequestParams,
+    UnsubscribeRequestParams,
 };
 use rmcp::service::{NotificationContext, PeerRequestOptions, RunningService};
 use rmcp::transport::async_rw::AsyncRwTransport;
@@ -227,6 +228,17 @@ type SubscriptionToken = Arc<AtomicU64>;
 pub(crate) enum SubscriptionOrigin {
     Config,
     Model,
+}
+
+impl SubscriptionOrigin {
+    /// How `/mcp-doctor` names the origin: a config subscription survives a
+    /// reload, a model-started watch does not.
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Model => "model",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1008,20 +1020,27 @@ impl ServerHandle {
             } else {
                 let result = tokio::time::timeout(self.config.timeout, async {
                     let peer = self.peer().await?;
-                    describe_resources(&peer).await
+                    Ok::<_, String>(describe_resources(&name, &peer).await)
                 })
                 .await;
                 match result {
                     Ok(Ok(description)) => {
-                        self.replace_resource_description(description);
-                        self.shared.stale.resources.store(false, Ordering::Release);
+                        self.replace_resource_description(description.text);
+                        // A method that failed for a reason a retry could fix
+                        // stays stale so the next boundary tries again; a
+                        // `-32601` is settled and clears the flag (retrying it
+                        // would cost one RPC plus one warning per boundary,
+                        // forever).
+                        if description.complete {
+                            self.shared.stale.resources.store(false, Ordering::Release);
+                        }
                         changed = true;
                     }
                     Ok(Err(error)) => eprintln!(
-                        "[ki mcp] server {name}: resources/list refresh failed ({error}); will retry at the next boundary"
+                        "[ki mcp] server {name}: resource listing refresh failed ({error}); will retry at the next boundary"
                     ),
                     Err(_) => eprintln!(
-                        "[ki mcp] server {name}: resources/list refresh timed out; will retry at the next boundary"
+                        "[ki mcp] server {name}: resource listing refresh timed out; will retry at the next boundary"
                     ),
                 }
             }
@@ -1185,11 +1204,78 @@ impl Drop for ServerHandle {
 }
 
 /// Session-scoped owner of every configured server.
+/// What happened to one configured server at the last start/reload.
+#[derive(Clone, Debug)]
+pub(crate) enum ServerOutcome {
+    Connected,
+    Disabled,
+    Failed(String),
+}
+
+/// One configured server plus its outcome. Kept even when the connection failed,
+/// because "configured but absent" is exactly what a diagnostic has to explain.
+#[derive(Clone, Debug)]
+pub(crate) struct ServerRecord {
+    pub(crate) config: ServerConfig,
+    pub(crate) outcome: ServerOutcome,
+}
+
+/// One `/mcp-doctor` row: what is configured, whether it connected, and what it
+/// currently advertises. Built from the last start/reload — read-only, no RPCs.
+#[derive(Default)]
+pub struct ServerDiagnostic {
+    pub name: String,
+    /// `stdio: npx -y foo --bar` or `http: https://host/mcp`.
+    pub launch: String,
+    pub status: ServerStatus,
+    /// Why it is not connected (`Disabled` / `Failed` only).
+    pub reason: Option<String>,
+    /// Qualified tool names this server contributes (`{server}__{tool}`).
+    pub tools: Vec<String>,
+    pub advertises_resources: bool,
+    pub supports_subscribe: bool,
+    /// The uris the settings asked for at startup.
+    pub configured_subscribe: Vec<String>,
+    /// The subscriptions actually live now: `(uri, "config" | "model")`.
+    pub live_subscriptions: Vec<(String, &'static str)>,
+    pub auto_read: Vec<String>,
+    pub signals: crate::config::SignalsConfig,
+    /// Mistyped keys that would otherwise behave exactly like correct ones.
+    pub unknown_keys: Vec<String>,
+    /// The child's last stderr lines (stdio only) — where a server explains
+    /// itself when the protocol-level error is uninformative.
+    pub stderr_tail: Vec<String>,
+}
+
+/// How a configured server stands right now.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServerStatus {
+    #[default]
+    Connected,
+    Disabled,
+    Failed,
+}
+
+impl ServerStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Disabled => "disabled (enabled=false)",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 pub struct McpManager {
     /// Swappable so `/mcp-reload` can replace the live connections in place:
     /// every holder (tool adapters, the notice mailbox, the TUI) keeps this
     /// same `Arc<McpManager>`.
     servers: std::sync::RwLock<Vec<Arc<ServerHandle>>>,
+    /// Every configured server with what happened to it at the last
+    /// start/reload. `servers` only holds the handles that connected, so this is
+    /// the only place a disabled or failed entry still exists — which is what
+    /// `/mcp-doctor` reports.
+    records: std::sync::RwLock<Vec<ServerRecord>>,
     mailbox: Arc<McpNoticeMailbox>,
     /// Every configured server name (connected, skipped or failed), so the
     /// kiqi-cli tool-slice replace can recognize every MCP-contributed name —
@@ -1214,6 +1300,7 @@ impl Default for McpManager {
     fn default() -> Self {
         Self {
             servers: std::sync::RwLock::new(Vec::new()),
+            records: std::sync::RwLock::new(Vec::new()),
             mailbox: Arc::new(McpNoticeMailbox::new()),
             configured_names: std::sync::RwLock::new(Vec::new()),
             allowed_tools: Mutex::new(None),
@@ -1248,11 +1335,16 @@ impl McpManager {
         http_idle_timeout_ms: Option<i64>,
     ) -> (Self, Vec<String>) {
         let mailbox = Arc::new(McpNoticeMailbox::new());
-        let (handles, configured_names, issues) =
+        let (handles, records, issues) =
             connect_servers(servers, cwd, Arc::clone(&mailbox), http_idle_timeout_ms).await;
+        let configured_names = records
+            .iter()
+            .map(|record| record.config.name.clone())
+            .collect();
         (
             Self {
                 servers: std::sync::RwLock::new(handles),
+                records: std::sync::RwLock::new(records),
                 mailbox,
                 configured_names: std::sync::RwLock::new(configured_names),
                 allowed_tools: Mutex::new(None),
@@ -1275,14 +1367,19 @@ impl McpManager {
         cwd: &Path,
         http_idle_timeout_ms: Option<i64>,
     ) -> Vec<String> {
-        let (handles, configured_names, issues) = connect_servers(
+        let (handles, records, issues) = connect_servers(
             servers,
             cwd,
             Arc::clone(&self.mailbox),
             http_idle_timeout_ms,
         )
         .await;
+        let configured_names = records
+            .iter()
+            .map(|record| record.config.name.clone())
+            .collect();
         let previous = std::mem::replace(&mut *self.servers.write().unwrap(), handles);
+        *self.records.write().unwrap() = records;
         *self.configured_names.write().unwrap() = configured_names;
         // The names a boundary replace may remove are recomputed by the next
         // merge; keeping the old records would let it delete a name that a new
@@ -1481,6 +1578,73 @@ impl McpManager {
         batch
     }
 
+    /// `/mcp-doctor`: one row per configured server, including the ones that
+    /// never connected. Read-only — no RPC, no blocking on a dead socket — so a
+    /// user (or the model reading the note) can run it at any time, including
+    /// after the symptom appeared.
+    pub fn doctor(&self) -> Vec<ServerDiagnostic> {
+        let servers = self.servers.read().unwrap();
+        let records = self.records.read().unwrap();
+        records
+            .iter()
+            .map(|record| {
+                let handle = servers
+                    .iter()
+                    .find(|handle| handle.server_name() == record.config.name);
+                ServerDiagnostic {
+                    name: record.config.name.clone(),
+                    launch: launch_of(&record.config),
+                    status: match &record.outcome {
+                        ServerOutcome::Connected => ServerStatus::Connected,
+                        ServerOutcome::Disabled => ServerStatus::Disabled,
+                        ServerOutcome::Failed(_) => ServerStatus::Failed,
+                    },
+                    reason: match &record.outcome {
+                        ServerOutcome::Failed(reason) => Some(reason.clone()),
+                        _ => None,
+                    },
+                    tools: handle
+                        .map(|handle| {
+                            handle
+                                .tools()
+                                .iter()
+                                .map(|tool| tool.qualified.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    advertises_resources: handle
+                        .map(|handle| handle.advertises_resources())
+                        .unwrap_or(false),
+                    supports_subscribe: handle
+                        .map(|handle| handle.supports_subscribe())
+                        .unwrap_or(false),
+                    configured_subscribe: record.config.subscribe.clone(),
+                    live_subscriptions: handle
+                        .map(|handle| {
+                            handle
+                                .subscriptions()
+                                .into_iter()
+                                .map(|(uri, origin)| (uri, origin.as_str()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    auto_read: record.config.auto_read.clone(),
+                    signals: record.config.signals.clone(),
+                    unknown_keys: record.config.unknown_keys.clone(),
+                    stderr_tail: handle
+                        .map(|handle| split_stderr_tail(&handle.stderr_tail()))
+                        .unwrap_or_default(),
+                }
+            })
+            .collect()
+    }
+
+    /// The rendered `/mcp-doctor` report (what the TUI prints, and what the model
+    /// reads back from the note).
+    pub fn doctor_report(&self) -> String {
+        render_doctor(&self.doctor(), self.pending_notice_count())
+    }
+
     /// How many notices are currently queued, WITHOUT draining them (drain
     /// with [`McpManager::take_notices`]). Lets a caller wait for a push to
     /// have landed before acting on the mailbox.
@@ -1598,17 +1762,20 @@ async fn connect_servers(
     cwd: &Path,
     mailbox: Arc<McpNoticeMailbox>,
     http_idle_timeout_ms: Option<i64>,
-) -> (Vec<Arc<ServerHandle>>, Vec<String>, Vec<String>) {
-    let mut configured_names = Vec::new();
+) -> (Vec<Arc<ServerHandle>>, Vec<ServerRecord>, Vec<String>) {
+    let mut records = Vec::new();
     let mut handles = Vec::new();
     let mut issues = Vec::new();
     for config in servers {
-        configured_names.push(config.name.clone());
         if !config.enabled {
             issues.push(format!(
                 "mcp server {}: disabled (enabled=false), skipped",
                 config.name
             ));
+            records.push(ServerRecord {
+                config: config.clone(),
+                outcome: ServerOutcome::Disabled,
+            });
             continue;
         }
         match ServerHandle::connect(
@@ -1632,12 +1799,25 @@ async fn connect_servers(
                         ));
                     }
                 }
+                // Record AFTER the config subscriptions: the diagnostic reads
+                // the live subscription map, so it must be the post-subscribe
+                // state or it would report every configured uri as missing.
+                records.push(ServerRecord {
+                    config: config.clone(),
+                    outcome: ServerOutcome::Connected,
+                });
                 handles.push(handle);
             }
-            Err(reason) => issues.push(format!("mcp server {}: {reason} — skipped", config.name)),
+            Err(reason) => {
+                issues.push(format!("mcp server {}: {reason} — skipped", config.name));
+                records.push(ServerRecord {
+                    config: config.clone(),
+                    outcome: ServerOutcome::Failed(reason),
+                });
+            }
         }
     }
-    (handles, configured_names, issues)
+    (handles, records, issues)
 }
 
 /// Connect the configured transport, complete the initialize handshake,
@@ -1677,16 +1857,7 @@ async fn connect_and_list(
     match list_all_tools(server, &peer).await {
         Ok(tools) => {
             let description = if advertises_resources {
-                describe_resources(&peer)
-                    .await
-                    .unwrap_or_else(|error| {
-                        eprintln!(
-                            "[ki mcp] server {server}: resources/list failed ({error}); the read tool starts without a resource list"
-                        );
-                        format!(
-                            "Read a resource from this server by uri. (The resource list is currently unavailable: {error})"
-                        )
-                    })
+                describe_resources(server, &peer).await.text
             } else {
                 String::new()
             };
@@ -1978,26 +2149,115 @@ async fn list_all_tools(
     Err(format!("tools/list exceeded {MAX_TOOL_PAGES} pages"))
 }
 
+/// The read tool's discovery text, and whether every listing behind it
+/// completed.
+struct ResourceDescription {
+    text: String,
+    /// False when a listing failed for a reason a retry could fix. A `-32601`
+    /// is settled (the method will never exist) and does not count.
+    complete: bool,
+}
+
+/// One paginated listing's outcome. `unimplemented` is kept apart from `error`
+/// on purpose: `-32601` means the server advertises `resources` and does not
+/// implement this method, which is the empty list — not a failure, and nothing
+/// a retry can change.
+struct ResourceListing {
+    items: Vec<Value>,
+    unimplemented: bool,
+    error: Option<String>,
+}
+
+impl ResourceListing {
+    fn done(items: Vec<Value>) -> Self {
+        Self {
+            items,
+            unimplemented: false,
+            error: None,
+        }
+    }
+
+    fn unimplemented(items: Vec<Value>) -> Self {
+        Self {
+            items,
+            unimplemented: true,
+            error: None,
+        }
+    }
+
+    fn failed(items: Vec<Value>, error: String) -> Self {
+        Self {
+            items,
+            unimplemented: false,
+            error: Some(error),
+        }
+    }
+}
+
+/// Why one page of a listing could not be read.
+enum PageError {
+    /// `-32601 Method not found` for the listing method itself.
+    Unimplemented,
+    /// Anything else, already labelled with its method.
+    Failed(String),
+}
+
 /// Paginated `resources/list` + `resources/templates/list`, rendered as the
 /// read tool's description. The list is the discoverability of the read tool —
 /// bounded like every other server-provided text.
-async fn describe_resources(peer: &Peer<RoleClient>) -> Result<String, String> {
-    let resources = list_all_resources(peer, "resources", "resources").await?;
-    let templates = list_all_resources(peer, "resourceTemplates", "resources/templates").await?;
+///
+/// The two listings are assembled independently, because a server can
+/// legitimately implement only half of the resource surface: walgit lists
+/// `resources` and answers `-32601` for `resources/templates/list`. That answer
+/// must cost the empty template list, not the resources it did list — the read
+/// tool's discovery is the whole point of this call.
+async fn describe_resources(server: &str, peer: &Peer<RoleClient>) -> ResourceDescription {
+    let resources = list_all_resources(peer, "resources", "resources").await;
+    let templates = list_all_resources(peer, "resourceTemplates", "resources/templates").await;
+
+    let mut complete = true;
+    let mut notes: Vec<String> = Vec::new();
+    for (method, listing) in [
+        ("resources/list", &resources),
+        ("resources/templates/list", &templates),
+    ] {
+        if listing.unimplemented {
+            // Reported once per method, named the way a reader greps for it.
+            // Counting this as failure is what used to throw away the other
+            // listing (and warn under the wrong method name).
+            eprintln!(
+                "[ki mcp] server {server}: {method} is not implemented (-32601); treating it as an empty list"
+            );
+        }
+        if let Some(error) = &listing.error {
+            complete = false;
+            eprintln!(
+                "[ki mcp] server {server}: {method} failed ({error}); the rest of the list is still usable, retrying at the next boundary"
+            );
+            notes.push(format!("({method} is currently unavailable: {error})"));
+        }
+    }
+
     let mut text = String::from("Read a resource from this server by uri. Available resources:");
-    if resources.is_empty() && templates.is_empty() {
+    if resources.items.is_empty() && templates.items.is_empty() {
         text.push_str("\n(none currently listed)");
     }
-    for item in &resources {
+    for item in &resources.items {
         text.push_str(&format!("\n- {}", render_resource_entry(item)));
     }
-    if !templates.is_empty() {
+    if !templates.items.is_empty() {
         text.push_str("\nTemplates (fill the braces into a uri):");
-        for item in &templates {
+        for item in &templates.items {
             text.push_str(&format!("\n- {}", render_resource_entry(item)));
         }
     }
-    Ok(bound_resource_text(text))
+    for note in notes {
+        text.push_str(&format!("\n{note}"));
+    }
+    ResourceDescription {
+        text: bound_resource_text(text),
+        complete,
+    }
 }
 
 /// One page batch of a paginated listing. `items_field` is the result array's
@@ -2008,44 +2268,72 @@ async fn list_all_resources(
     peer: &Peer<RoleClient>,
     items_field: &str,
     method_label: &str,
-) -> Result<Vec<Value>, String> {
+) -> ResourceListing {
     let mut items = Vec::new();
     let mut cursor: Option<String> = None;
     let mut seen_cursors = std::collections::HashSet::new();
     for _ in 0..MAX_RESOURCE_PAGES {
         let mut params = PaginatedRequestParams::default();
         params.cursor = cursor.clone();
-        let value: Value = if method_label == "resources" {
-            let result = peer
-                .list_resources(Some(params))
-                .await
-                .map_err(|error| format!("{method_label}: {error}"))?;
-            serde_json::to_value(&result)
-                .map_err(|error| format!("{method_label} encode: {error}"))?
-        } else {
-            let result = peer
-                .list_resource_templates(Some(params))
-                .await
-                .map_err(|error| format!("{method_label}: {error}"))?;
-            serde_json::to_value(&result)
-                .map_err(|error| format!("{method_label} encode: {error}"))?
+        let value = match resource_page(peer, method_label, params).await {
+            Ok(value) => value,
+            // Whatever earlier pages returned stays usable: partial discovery
+            // beats none, and the caller reports the shape it is in.
+            Err(PageError::Unimplemented) => return ResourceListing::unimplemented(items),
+            Err(PageError::Failed(error)) => return ResourceListing::failed(items, error),
         };
         if let Some(batch) = value.get(items_field).and_then(Value::as_array) {
             items.extend(batch.iter().cloned());
         }
         match value.get("nextCursor").and_then(Value::as_str) {
-            None => return Ok(items),
+            None => return ResourceListing::done(items),
             Some(next) => {
                 if !seen_cursors.insert(next.to_string()) {
-                    return Err(format!("{method_label} repeated cursor {next:?}"));
+                    return ResourceListing::failed(
+                        items,
+                        format!("{method_label} repeated cursor {next:?}"),
+                    );
                 }
                 cursor = Some(next.to_string());
             }
         }
     }
-    Err(format!(
-        "{method_label} exceeded {MAX_RESOURCE_PAGES} pages"
-    ))
+    ResourceListing::failed(
+        items,
+        format!("{method_label} exceeded {MAX_RESOURCE_PAGES} pages"),
+    )
+}
+
+/// One page of a listing as wire JSON. The two methods differ only in the typed
+/// call; both errors are classified the same way.
+async fn resource_page(
+    peer: &Peer<RoleClient>,
+    method_label: &str,
+    params: PaginatedRequestParams,
+) -> Result<Value, PageError> {
+    let encoded = if method_label == "resources" {
+        match peer.list_resources(Some(params)).await {
+            Ok(result) => serde_json::to_value(&result),
+            Err(error) => return Err(classify_page_error(error)),
+        }
+    } else {
+        match peer.list_resource_templates(Some(params)).await {
+            Ok(result) => serde_json::to_value(&result),
+            Err(error) => return Err(classify_page_error(error)),
+        }
+    };
+    encoded.map_err(|error| PageError::Failed(format!("{method_label} encode: {error}")))
+}
+
+/// `-32601 Method not found` is the server saying it advertises `resources` and
+/// implements nothing behind this method — an empty listing, not a failure.
+fn classify_page_error(error: ServiceError) -> PageError {
+    match error {
+        ServiceError::McpError(data) if data.code == ErrorCode::METHOD_NOT_FOUND => {
+            PageError::Unimplemented
+        }
+        other => PageError::Failed(format!("{other}")),
+    }
 }
 
 fn render_resource_entry(item: &Value) -> String {
@@ -2324,9 +2612,335 @@ fn spawn_stderr_drain(stderr: tokio::process::ChildStderr, tail: Arc<Mutex<VecDe
     });
 }
 
+/// `stdio: npx -y foo --bar` / `http: https://host/mcp` — the launch line of a
+/// doctor row. Printed raw on purpose: a wrong path or a missing `cmd` wrapper
+/// is visible here and nowhere else.
+fn launch_of(config: &ServerConfig) -> String {
+    match &config.transport {
+        Transport::Stdio(stdio) => {
+            let mut out = String::from("stdio: ");
+            out.push_str(&stdio.command);
+            for arg in &stdio.args {
+                out.push(' ');
+                out.push_str(arg);
+            }
+            out
+        }
+        Transport::Http(http) => format!("http: {}", http.url),
+    }
+}
+
+fn split_stderr_tail(tail: &str) -> Vec<String> {
+    tail.lines()
+        .map(|line| line.trim_end().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// The rendered doctor report. Pure: the only input is the rows, so the format
+/// is testable without a live server.
+pub fn render_doctor(rows: &[ServerDiagnostic], pending_notices: usize) -> String {
+    if rows.is_empty() {
+        return "MCP doctor — no servers configured.\n  put them under `mcpServers` in \
+                ~/.ki/agent/settings.json (global) or <repo>/.ki/settings.json \
+                (the project must be trusted)."
+            .to_string();
+    }
+    let connected = rows
+        .iter()
+        .filter(|row| row.status == ServerStatus::Connected)
+        .count();
+    let disabled = rows
+        .iter()
+        .filter(|row| row.status == ServerStatus::Disabled)
+        .count();
+    let failed = rows.len() - connected - disabled;
+    let mut out = format!(
+        "MCP doctor — {} configured: {connected} connected, {disabled} disabled, \
+         {failed} failed; {pending_notices} notice(s) pending",
+        rows.len()
+    );
+    for row in rows {
+        out.push_str(&format!("\n\n{} [{}]", row.name, row.launch));
+        out.push_str(&format!("\n  status:    {}", row.status.as_str()));
+        if let Some(reason) = &row.reason {
+            out.push_str(&format!("\n  reason:    {reason}"));
+        }
+        if row.status == ServerStatus::Connected {
+            out.push_str(&format!("\n  tools:     {}", row.tools.len()));
+            if !row.tools.is_empty() {
+                out.push_str("\n             ");
+                out.push_str(&join_capped(&row.tools, 12));
+            }
+            out.push_str(&format!(
+                "\n  resources: {}",
+                match (row.advertises_resources, row.supports_subscribe) {
+                    (true, true) => "advertised, subscribe-capable".to_string(),
+                    (true, false) => "advertised, no subscribe capability".to_string(),
+                    (false, _) => "not advertised".to_string(),
+                }
+            ));
+            out.push_str(&format!(
+                "\n  subscribe: {} configured, {} live{}",
+                row.configured_subscribe.len(),
+                row.live_subscriptions.len(),
+                render_live(&row.live_subscriptions)
+            ));
+        }
+        // Subscription and wake policy only mean something for a server that is
+        // actually running; on a failed row they would be noise in the way of
+        // the `reason`.
+        if row.status == ServerStatus::Connected {
+            out.push_str(&format!(
+                "\n  autoRead:  {}",
+                if row.auto_read.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    row.auto_read.join(", ")
+                }
+            ));
+            out.push_str(&format!(
+                "\n  signals:   wake={} minInterval={}s maxRunsPerHour={} maxConsecutive={}",
+                row.signals.wake.as_str(),
+                row.signals.min_interval.as_secs(),
+                row.signals.max_runs_per_hour,
+                row.signals.max_consecutive_runs
+            ));
+        }
+        if !row.unknown_keys.is_empty() {
+            out.push_str(&format!(
+                "\n  config:    unknown key(s): {}",
+                row.unknown_keys.join(", ")
+            ));
+        }
+        if !row.stderr_tail.is_empty() {
+            out.push_str("\n  stderr:");
+            for line in &row.stderr_tail {
+                out.push_str(&format!("\n             | {line}"));
+            }
+        }
+        for hint in doctor_hints(row) {
+            out.push_str(&format!("\n  hint:      {hint}"));
+        }
+    }
+    // The one thing a doctor must not omit: what a connected server still does
+    // not have.
+    let unrunnable_hint = if connected == 0 {
+        Some(
+            "no server is connected, so no `{server}__*` tool exists this session; \
+             fix a `reason:` above and run /mcp-reload",
+        )
+    } else {
+        None
+    };
+    if let Some(hint) = unrunnable_hint {
+        out.push_str(&format!("\n\nhint: {hint}"));
+    }
+    out
+}
+
+fn render_live(live: &[(String, &'static str)]) -> String {
+    if live.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(": ");
+    for (index, (uri, origin)) in live.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&format!("{uri} ({origin})"));
+    }
+    out
+}
+
+fn join_capped(items: &[String], cap: usize) -> String {
+    if items.len() <= cap {
+        return items.join(", ");
+    }
+    format!(
+        "{}, … ({} more)",
+        items[..cap].join(", "),
+        items.len() - cap
+    )
+}
+
+/// What the report should tell the user to do next. Derived from the recorded
+/// reason rather than from the platform, so the same text is produced everywhere
+/// (and asserted in tests).
+fn doctor_hints(row: &ServerDiagnostic) -> Vec<String> {
+    let mut hints = Vec::new();
+    if !row.unknown_keys.is_empty() {
+        hints.push(format!(
+            "fix the unknown key(s) — ki ignores them, so a mistyped key looks \
+             exactly like a correct one: {}",
+            row.unknown_keys.join(", ")
+        ));
+    }
+    if !row.configured_subscribe.is_empty() && row.status == ServerStatus::Connected {
+        let missing: Vec<&String> = row
+            .configured_subscribe
+            .iter()
+            .filter(|uri| !row.live_subscriptions.iter().any(|(live, _)| live == *uri))
+            .collect();
+        if !missing.is_empty() {
+            hints.push(format!(
+                "configured but not subscribed: {} — the server rejected \
+                 `resources/subscribe` (see the reload issue list)",
+                missing
+                    .iter()
+                    .map(|uri| uri.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !row.supports_subscribe && !row.configured_subscribe.is_empty() {
+            hints.push(
+                "this server does not advertise `resources.subscribe`; a \
+                 `subscribe` list on it can never be honored"
+                    .to_string(),
+            );
+        }
+    }
+    if let Some(reason) = &row.reason {
+        if reason.contains("spawn") {
+            hints.push(
+                "the process never started: check `command`/`args` and that the \
+                 binary is on ki's PATH. ki spawns stdio servers without a shell, \
+                 so on Windows a `.cmd`/`.bat` shim (npx, uvx, pnpm) needs \
+                 command `cmd` with args ['/d', '/s', '/c', …]"
+                    .to_string(),
+            );
+            hints.push(
+                "a stdio server inherits only PATH/HOME/TMPDIR/TERM/USER/SHELL/\
+                 LANG/LC_* — everything else it needs must be listed in its \
+                 `env` block"
+                    .to_string(),
+            );
+        }
+        if reason.contains("timed out") {
+            hints.push(
+                "the connection opened but initialize/tools-list did not finish: \
+                 raise `timeoutSeconds`, or run the command by hand to see its \
+                 own error"
+                    .to_string(),
+            );
+        }
+    }
+    hints
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn connected_row(name: &str) -> ServerDiagnostic {
+        ServerDiagnostic {
+            name: name.to_string(),
+            launch: "stdio: walgit mcp --repo /repo".to_string(),
+            status: ServerStatus::Connected,
+            tools: vec![
+                "walgit__repo_list".to_string(),
+                "walgit__watch_resource".to_string(),
+            ],
+            advertises_resources: true,
+            supports_subscribe: true,
+            configured_subscribe: vec!["walgit://collab/board/x".to_string()],
+            live_subscriptions: vec![("walgit://collab/board/x".to_string(), "config")],
+            auto_read: vec!["walgit://collab/board/x".to_string()],
+            signals: crate::config::SignalsConfig {
+                wake: crate::config::WakeMode::Auto,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The report has to answer the two questions a user actually has: did it
+    /// connect, and what is still missing now that it did.
+    #[test]
+    fn doctor_report_states_status_subscriptions_and_hints() {
+        let mut row = connected_row("walgit");
+        row.unknown_keys = vec!["subscribeUri (did you mean `subscribe`?)".to_string()];
+        let report = render_doctor(&[row], 3);
+
+        assert!(
+            report.starts_with(
+                "MCP doctor — 1 configured: 1 connected, 0 disabled, 0 failed; 3 notice(s) pending"
+            ),
+            "{report}"
+        );
+        assert!(
+            report.contains("walgit [stdio: walgit mcp --repo /repo]"),
+            "{report}"
+        );
+        assert!(report.contains("  status:    connected"), "{report}");
+        assert!(report.contains("  tools:     2"), "{report}");
+        assert!(
+            report.contains("  subscribe: 1 configured, 1 live: walgit://collab/board/x (config)"),
+            "{report}"
+        );
+        assert!(
+            report.contains("  signals:   wake=auto minInterval=30s"),
+            "{report}"
+        );
+        assert!(
+            report.contains("unknown key(s): subscribeUri (did you mean `subscribe`?)"),
+            "{report}"
+        );
+        assert!(report.contains("fix the unknown key(s)"), "{report}");
+        assert!(
+            !report.contains("configured but not subscribed"),
+            "a live subscription must not be reported as missing: {report}"
+        );
+    }
+
+    /// A configured-but-unsubscribed uri is the quiet failure this command
+    /// exists for: the settings look right, nothing arrives, nothing warns.
+    #[test]
+    fn doctor_report_flags_a_subscription_that_never_went_live() {
+        let mut row = connected_row("walgit");
+        row.configured_subscribe
+            .push("walgit://not-there".to_string());
+        let report = render_doctor(&[row], 0);
+        assert!(
+            report.contains("configured but not subscribed: walgit://not-there"),
+            "{report}"
+        );
+    }
+
+    /// A failed spawn is the Windows case: `.cmd` shims and an almost-empty
+    /// inherited environment.
+    #[test]
+    fn doctor_report_explains_a_spawn_failure() {
+        let row = ServerDiagnostic {
+            name: "docs".to_string(),
+            launch: "stdio: npx -y docs-mcp".to_string(),
+            status: ServerStatus::Failed,
+            reason: Some("spawn: No such file or directory (os error 2)".to_string()),
+            stderr_tail: vec!["npm ERR! could not determine executable".to_string()],
+            ..Default::default()
+        };
+        let report = render_doctor(&[row], 0);
+        assert!(report.contains("  status:    failed"), "{report}");
+        assert!(report.contains("  reason:    spawn:"), "{report}");
+        assert!(report.contains("             | npm ERR!"), "{report}");
+        assert!(
+            report.contains("ki spawns stdio servers without a shell"),
+            "{report}"
+        );
+        assert!(report.contains("only PATH/HOME/TMPDIR"), "{report}");
+        assert!(
+            report.contains("no server is connected, so no `{server}__*` tool exists this session"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn doctor_report_without_servers_says_where_to_configure() {
+        let report = render_doctor(&[], 0);
+        assert!(report.contains("no servers configured"), "{report}");
+        assert!(report.contains("mcpServers"), "{report}");
+    }
 
     /// `/mcp-reload` swaps the live set in place: the manager keeps serving the
     /// same mailbox and reports what the new config produced.
@@ -2414,6 +3028,33 @@ mod tests {
             "uriTemplate": "file:///x/{p}", "name": "tpl"
         }));
         assert_eq!(template, "file:///x/{p} — tpl");
+    }
+
+    #[test]
+    fn only_method_not_found_is_read_as_an_empty_listing() {
+        // `-32601` is the server saying it implements nothing behind this
+        // method: an empty listing, not a failure.
+        let unimplemented =
+            classify_page_error(ServiceError::McpError(rmcp::model::ErrorData::new(
+                ErrorCode::METHOD_NOT_FOUND,
+                "method not found: resources/templates/list",
+                None,
+            )));
+        assert!(matches!(unimplemented, PageError::Unimplemented));
+
+        // Every other code is a real failure the boundary retries.
+        let failed = classify_page_error(ServiceError::McpError(rmcp::model::ErrorData::new(
+            ErrorCode::INTERNAL_ERROR,
+            "boom",
+            None,
+        )));
+        assert!(matches!(failed, PageError::Failed(ref message) if message.contains("boom")));
+
+        // A transport-level error is never an unimplemented method.
+        assert!(matches!(
+            classify_page_error(ServiceError::TransportClosed),
+            PageError::Failed(_)
+        ));
     }
 
     #[test]

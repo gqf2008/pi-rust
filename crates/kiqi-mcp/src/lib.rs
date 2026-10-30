@@ -35,8 +35,8 @@ pub use config::{
     StdioTransport, Transport, WakeMode,
 };
 pub use manager::{
-    McpManager, MAX_MODEL_SUBSCRIPTIONS, READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR,
-    WATCH_RESOURCE_SUFFIX,
+    render_doctor, McpManager, ServerDiagnostic, ServerStatus, MAX_MODEL_SUBSCRIPTIONS,
+    READ_RESOURCE_SUFFIX, TOOL_NAME_SEPARATOR, WATCH_RESOURCE_SUFFIX,
 };
 pub use notice::{
     notice_entry_text, notice_message, McpNotice, McpNoticeBatch, McpNoticeMailbox,

@@ -11,6 +11,34 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Added
+
+- **`/mcp-doctor`**：只读的 MCP 诊断报告，跑一次就知道每个服务器为什么不在、为什么没在
+  订阅。每个条目给出 `status`（`connected` / `disabled (enabled=false)` / `failed` + 原因）、
+  工具清单、`resources` 能力、配置的订阅 vs 实际存活的订阅、`autoRead`、`signals` 预算、
+  stdio 服务器最后的 stderr，以及下一步该改什么；配置改了但未 reload 时指出数量不一致。
+  不重连、不发 RPC，所以症状出现之后随时可跑。
+- **`mcpServers` 里拼错的键不再静默忽略**：条目上无法识别的键（包括 `signals` 内的）会被
+  记录下来并在 `/mcp-doctor` 里列出，附最近似的正确拼写（`auto_read` → `autoRead`、
+  `minInterval` → `minIntervalSeconds`）。仍然不拒绝该条目——拼错一个键不该连累整个服务器。
+
+### Fixed
+
+- **一个 listing 的 `-32601` 不再吞掉另一个的清单。** 服务器声明了 `resources`、却只实现
+  一半（walgit 就是这样：有 `resources/list`，没有 `resources/templates/list`）时，
+  `resources/templates/list` 的 `-32601 Method not found` 被当成失败，`describe_resources`
+  整个返回错误，**已经成功取到的资源清单一并丢掉**，read 工具的描述退化成
+  `(The resource list is currently unavailable: …)`，日志还把方法名报成 `resources/list`。
+  现在两个 listing 分别收敛：`-32601` 记为「这个方法不存在」（空清单，按方法名各报一次
+  warning，不再每次 boundary 重试），真正的失败只影响自己那一半，另一半清单照常进描述；
+  任一半真失败时 `complete=false`，boundary 继续重试。
+
+### Docs
+
+- `docs/guides/user-guide.md` 的 MCP 节补全：`subscribe` / `autoRead` / `signals` 的语义与
+  默认值（此前只在设计文档里），`/mcp-doctor`，以及 Windows 上 stdio 服务器的两个坑
+  （不经 shell 启动所以 `.cmd` shim 要包 `cmd`、子进程只继承白名单环境变量）。
+
 ## [0.4.6] - 2026-10-30
 
 ### Added

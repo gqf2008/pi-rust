@@ -649,6 +649,10 @@ enum TuiMessage {
     /// `/mcp-reload`: re-read `mcpServers` and reconnect every MCP server in
     /// place, then rebuild the tool registry from the new connections.
     ReloadMcp,
+    /// `/mcp-doctor`: report what the last start/reload produced — per server:
+    /// connected or not (and why), its tools, which subscriptions are actually
+    /// live, `signals`, and any config key ki silently ignored.
+    McpDoctor,
     /// A background subagent exited. Delivered on the main loop so it starts a
     /// run when the session is idle and is steered (never dropped) when it is
     /// not — the same contract as `CronInject`.
@@ -4222,6 +4226,40 @@ pub async fn interactive_tui(
                         mcp_tools.join(", ")
                     }
                 ));
+                add_note_message(&chat_container, &note);
+                tui.request_render(false);
+            }
+            Some(TuiMessage::McpDoctor) => {
+                // Read-only: no reconnect, no RPC. The report describes the state
+                // the last start/reload left behind, which is exactly what "it
+                // doesn't work" needs (a reload would replace the evidence).
+                let mcp = ctx.reload_context.mcp.clone();
+                let rows = mcp.doctor();
+                let mut note = kiqi_mcp::render_doctor(&rows, mcp.pending_notice_count());
+                // What the settings say *now* — the next reload uses this, and a
+                // mismatch is the "I edited it and nothing happened" case.
+                let global = crate::settings::load_settings().unwrap_or_default();
+                let (configured, issues) = crate::session::resolve_mcp_servers(
+                    &ctx.reload_context.cwd,
+                    ctx.reload_context.project_trusted,
+                    &[],
+                    &global,
+                );
+                if configured.len() != rows.len() {
+                    note.push_str(&format!(
+                        "\n\nnote: settings now define {} server(s), this session started \
+                         with {}; run /mcp-reload to apply.",
+                        configured.len(),
+                        rows.len()
+                    ));
+                }
+                if !issues.is_empty() {
+                    note.push_str("\n\nsettings issues:");
+                    for issue in &issues {
+                        note.push_str("\n  ");
+                        note.push_str(issue);
+                    }
+                }
                 add_note_message(&chat_container, &note);
                 tui.request_render(false);
             }

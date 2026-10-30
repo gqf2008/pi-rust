@@ -52,6 +52,18 @@ pub enum WakeMode {
     Auto,
 }
 
+impl WakeMode {
+    /// The config spelling (`off` / `notify` / `auto`), reused by
+    /// `/mcp-doctor` so the report and the settings file cannot drift.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Notify => "notify",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 /// Host-side wake policy for one server's resource signals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalsConfig {
@@ -175,6 +187,13 @@ pub struct ServerConfig {
     /// verb, and the editor's server list is not a signal-source opt-in).
     /// `modelWatch: false` turns it off for a settings server.
     pub model_watch: bool,
+    /// Keys present in the entry that ki does not recognize, each annotated
+    /// with the key that was probably meant (`auto_read (did you mean
+    /// `autoRead`?)`). Diagnostic only: an unknown key never rejects the entry,
+    /// because a typo must not take a working server down — but it must not be
+    /// silent either, since a mistyped key behaves exactly like an ignored one.
+    /// Rendered by `/mcp-doctor`.
+    pub unknown_keys: Vec<String>,
 }
 
 /// The raw entry as it appears in `mcpServers.<name>`. Every field is optional
@@ -289,6 +308,112 @@ pub fn parse_servers_with_defaults(
     (out, issues)
 }
 
+/// Every key `mcpServers.<name>` accepts, spelled as in the file. Kept beside
+/// [`RawServer`] on purpose: this list is what `/mcp-doctor` reports a typo
+/// against, and a key added to `RawServer` without being added here would make
+/// the doctor accuse a correct entry.
+const KNOWN_SERVER_KEYS: &[&str] = &[
+    "command",
+    "args",
+    "env",
+    "cwd",
+    "url",
+    "headers",
+    "enabled",
+    "timeoutSeconds",
+    "subscribe",
+    "autoRead",
+    "signals",
+    "modelWatch",
+];
+
+/// Keys `mcpServers.<name>.signals` accepts.
+const KNOWN_SIGNAL_KEYS: &[&str] = &[
+    "wake",
+    "minIntervalSeconds",
+    "maxRunsPerHour",
+    "maxConsecutiveRuns",
+];
+
+/// Unknown keys in one entry, as `key` or `key (did you mean `best`?)`.
+fn unknown_server_keys(entry: &serde_json::Value) -> Vec<String> {
+    let Some(map) = entry.as_object() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for key in map.keys() {
+        if KNOWN_SERVER_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        out.push(match closest_key(key, KNOWN_SERVER_KEYS) {
+            Some(best) => format!("{key} (did you mean `{best}`?)"),
+            None => key.clone(),
+        });
+    }
+    if let Some(signals) = map.get("signals").and_then(|value| value.as_object()) {
+        for key in signals.keys() {
+            if KNOWN_SIGNAL_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            out.push(match closest_key(key, KNOWN_SIGNAL_KEYS) {
+                Some(best) => format!("signals.{key} (did you mean `{best}`?)"),
+                None => format!("signals.{key}"),
+            });
+        }
+    }
+    out
+}
+
+/// `auto_read` / `AutoRead` / `auto-read` all name `autoRead`; a one-edit slip
+/// (`subscribes`) still names `subscribe`. Two edits is the cut-off — beyond
+/// that the guess is more likely to mislead than help.
+fn closest_key<'a>(key: &str, known: &[&'a str]) -> Option<&'a str> {
+    let normalized = normalize_key(key);
+    if normalized.is_empty() {
+        return None;
+    }
+    known
+        .iter()
+        .map(|candidate| {
+            let candidate_normalized = normalize_key(candidate);
+            // A key that is a strict prefix of exactly one known key is almost
+            // always that key (`minInterval` → `minIntervalSeconds`); the edit
+            // distance would call it a hopeless match.
+            let distance = if candidate_normalized.starts_with(&normalized) {
+                0
+            } else {
+                edit_distance(&normalized, &candidate_normalized)
+            };
+            (distance, *candidate)
+        })
+        .filter(|(distance, _)| *distance <= 2)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, candidate)| candidate)
+}
+
+fn normalize_key(key: &str) -> String {
+    key.chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let substitution = previous[j] + usize::from(ca != cb);
+            current[j + 1] = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
+}
+
 fn parse_one(
     name: &str,
     entry: &serde_json::Value,
@@ -381,6 +506,7 @@ fn parse_one(
         auto_read,
         signals,
         model_watch: raw.model_watch.unwrap_or(true),
+        unknown_keys: unknown_server_keys(entry),
     })
 }
 
@@ -504,6 +630,60 @@ mod tests {
 
     fn parse(value: serde_json::Value) -> (Vec<ServerConfig>, Vec<String>) {
         parse_servers(Some(&value))
+    }
+
+    #[test]
+    fn a_mistyped_key_is_reported_but_never_rejects_the_entry() {
+        let (servers, issues) = parse(json!({
+            "docs": {
+                "command": "docs-mcp",
+                "auto_read": ["file:///a.md"],
+                "signals": { "minInterval": 12, "wake": "auto" }
+            }
+        }));
+        assert!(
+            issues.is_empty(),
+            "a typo must not reject the server: {issues:?}"
+        );
+        assert_eq!(servers.len(), 1);
+        // The mistyped keys are ignored...
+        assert!(servers[0].auto_read.is_empty());
+        assert_eq!(
+            servers[0].signals.min_interval,
+            Duration::from_secs(DEFAULT_MIN_INTERVAL_SECS)
+        );
+        // ...but reported with the nearest known spelling, which is the whole
+        // point: `auto_read` looks exactly like `autoRead` to every other check.
+        assert_eq!(
+            servers[0].unknown_keys,
+            vec![
+                "auto_read (did you mean `autoRead`?)".to_string(),
+                "signals.minInterval (did you mean `minIntervalSeconds`?)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_clean_entry_reports_no_unknown_keys() {
+        let (servers, issues) = parse(json!({
+            "local": {
+                "command": "srv",
+                "subscribe": ["walgit://a"],
+                "autoRead": ["walgit://a"],
+                "signals": {
+                    "wake": "auto",
+                    "minIntervalSeconds": 5,
+                    "maxRunsPerHour": 2,
+                    "maxConsecutiveRuns": 1
+                }
+            }
+        }));
+        assert!(issues.is_empty(), "{issues:?}");
+        assert!(
+            servers[0].unknown_keys.is_empty(),
+            "{:?}",
+            servers[0].unknown_keys
+        );
     }
 
     #[test]
@@ -872,6 +1052,7 @@ mod tests {
             auto_read: Vec::new(),
             signals: SignalsConfig::default(),
             model_watch: true,
+            unknown_keys: Vec::new(),
         }
     }
 

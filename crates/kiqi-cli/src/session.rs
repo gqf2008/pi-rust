@@ -2281,7 +2281,7 @@ async fn start_mcp_manager(
 ///
 /// Shared by the initial start and `/mcp-reload`, so a reload cannot resolve a
 /// different set than a fresh start would.
-fn resolve_mcp_servers(
+pub(crate) fn resolve_mcp_servers(
     cwd: &Path,
     project_trusted: bool,
     client_servers: &[kiqi_mcp::ServerConfig],

@@ -132,6 +132,22 @@ impl SlashCommand for McpReloadCommand {
     }
 }
 
+/// `/mcp-doctor` — why a server is not there, or not subscribing. Read-only:
+/// it reports the state the last start/reload left behind, so it can be run at
+/// any time, including after the symptom appeared.
+pub(super) struct McpDoctorCommand;
+impl SlashCommand for McpDoctorCommand {
+    fn name(&self) -> &'static str {
+        "/mcp-doctor"
+    }
+    fn description(&self) -> &'static str {
+        "Report each MCP server: connected or not, tools, subscriptions, issues"
+    }
+    fn execute(&self, ctx: &CommandContext, _args: &str) {
+        let _ = ctx.tx.send(TuiMessage::McpDoctor);
+    }
+}
+
 pub(super) struct ClearChatCommand;
 impl SlashCommand for ClearChatCommand {
     fn name(&self) -> &'static str {
@@ -891,6 +907,7 @@ pub(super) fn build_builtin_registry() -> CommandRegistry {
     r.register(Arc::new(WorkCommand));
     r.register(Arc::new(AgentsCommand));
     r.register(Arc::new(McpReloadCommand));
+    r.register(Arc::new(McpDoctorCommand));
     r.register(Arc::new(ExitCommand));
     r.register(Arc::new(VersionCommand));
     r.register(Arc::new(ChangelogCommand));

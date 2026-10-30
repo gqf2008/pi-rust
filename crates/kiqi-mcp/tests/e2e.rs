@@ -573,6 +573,73 @@ async fn read_tool_is_emitted_only_for_servers_advertising_resources() {
     manager.shutdown().await;
 }
 
+/// A server that advertises `resources` and answers `-32601` for
+/// `resources/templates/list` (walgit's exact shape: resources, no templates)
+/// must keep the resources it did list. The missing half is an empty list, not
+/// a failure that blanks the read tool's discovery.
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_resource_templates_keep_the_listed_resources() {
+    let tmp = tempfile::tempdir().unwrap();
+    let args: Vec<String> = ["--resources", "--no-resource-templates"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let (manager, issues) =
+        McpManager::start(&[stdio_server("docs", args, 10, true)], tmp.path()).await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+
+    let adapters = manager.tool_adapters();
+    let description = find(&adapters, "docs__read_resource")
+        .schema()
+        .description
+        .clone();
+    assert!(
+        description.contains("file:///docs/a.md"),
+        "the listed resources must survive a -32601 templates listing: {description:?}"
+    );
+    assert!(
+        !description.contains("Templates"),
+        "no template section without templates: {description:?}"
+    );
+    assert!(
+        !description.contains("unavailable"),
+        "-32601 is an empty list, not an unavailable one: {description:?}"
+    );
+    manager.shutdown().await;
+}
+
+/// The mirror case: no `resources/list`, templates implemented.
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_resource_list_keeps_the_listed_templates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let args: Vec<String> = ["--resources", "--no-resource-list"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let (manager, issues) =
+        McpManager::start(&[stdio_server("docs", args, 10, true)], tmp.path()).await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+
+    let adapters = manager.tool_adapters();
+    let description = find(&adapters, "docs__read_resource")
+        .schema()
+        .description
+        .clone();
+    assert!(
+        description.contains("file:///docs/{path}"),
+        "the listed templates must survive a -32601 resources listing: {description:?}"
+    );
+    assert!(
+        !description.contains("file:///docs/a.md"),
+        "got {description:?}"
+    );
+    assert!(
+        !description.contains("unavailable"),
+        "-32601 is an empty list, not an unavailable one: {description:?}"
+    );
+    manager.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn read_tool_maps_text_and_images_and_bounds_oversized_text() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1304,4 +1371,56 @@ async fn subscribed_resources_shutdown_still_reaps_the_whole_tree() {
     manager.shutdown().await;
     assert_process_gone(self_pid, "server process");
     assert_process_gone(child_pid, "server grandchild");
+}
+
+/// `/mcp-doctor` against a real start: the report must describe every configured
+/// entry — including the ones that never produced a handle, which is the state a
+/// user is in when they ask for help.
+#[tokio::test]
+async fn doctor_describes_connected_disabled_and_failed_servers() {
+    let (servers, parse_issues) = parse_servers(Some(&json!({
+        "good": { "command": FAKE_SERVER, "args": ["--resources"], "subscribe": ["mem://alpha"] },
+        "off": { "command": FAKE_SERVER, "args": [], "enabled": false },
+        "broken": { "command": "/nonexistent/ki-mcp-doctor-test" }
+    })));
+    assert!(parse_issues.is_empty(), "config issues: {parse_issues:?}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (manager, issues) = McpManager::start(&servers, tmp.path()).await;
+    assert_eq!(issues.len(), 2, "one failure, one disabled: {issues:?}");
+
+    let report = manager.doctor_report();
+    assert!(
+        report.starts_with("MCP doctor — 3 configured: 1 connected, 1 disabled, 1 failed"),
+        "{report}"
+    );
+
+    // The healthy one: connected, its own tools, and its subscription live.
+    assert!(report.contains("good [stdio: "), "{report}");
+    assert!(report.contains("  status:    connected"), "{report}");
+    assert!(report.contains("good__echo"), "{report}");
+    assert!(
+        report.contains("  subscribe: 1 configured, 1 live: mem://alpha (config)"),
+        "{report}"
+    );
+
+    // The disabled one says why it is absent instead of looking like a typo.
+    assert!(
+        report.contains("  status:    disabled (enabled=false)"),
+        "{report}"
+    );
+
+    // The broken one carries the launch line, the reason and the next step.
+    assert!(
+        report.contains("broken [stdio: /nonexistent/ki-mcp-doctor-test]"),
+        "{report}"
+    );
+    assert!(report.contains("  status:    failed"), "{report}");
+    assert!(report.contains("  reason:    "), "{report}");
+    assert!(
+        report.contains("ki spawns stdio servers without a shell"),
+        "{report}"
+    );
+
+    manager.shutdown().await;
 }

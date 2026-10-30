@@ -455,6 +455,8 @@ fn decode_client_mcp_servers(
             // ACP surface has no subscription verb; do not expose the model
             // watch tool for these servers.
             model_watch: false,
+            // Nothing came from a settings entry, so there is nothing to typo.
+            unknown_keys: Vec::new(),
         });
         // The loud acceptance record (POLICY 1). Unconditional stderr — the
         // one log line a user can grep when auditing what their editor asked

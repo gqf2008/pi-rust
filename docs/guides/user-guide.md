@@ -263,15 +263,70 @@ follow-up 用户消息回到会话里——空闲就起一轮，正在跑就排�
 盒子只在 `--tui-mode fullscreen`（默认）下存在：`regular` 模式没有合成层，改为在回显
 区底部的工作块里给每个子代理列一行（`id · 状态 用时 · 任务名`）。
 
-### MCP 服务器（`/mcp-reload`）
+### MCP 服务器（`/mcp-reload` / `/mcp-doctor`）
 
-MCP 服务器从 `settings.json` 的 `mcpServers` 读取（全局一份，受信任项目可以再覆盖一层），
-启动时连接一次，工具以 `{server}__{tool}` 的形式出现，资源更新通过通知 mailbox 送达。
+MCP 服务器从 `settings.json` 的 `mcpServers` 读取（全局一份，受信任项目可以再覆盖一层；
+**项目没被信任时它的 `mcpServers` 会被忽略**并给出提示）。启动时连接一次，工具以
+`{server}__{tool}` 的形式出现，资源更新通过通知 mailbox 送达。
+
+一个 stdio 条目的完整形状：
+
+```json
+{
+  "mcpServers": {
+    "walgit": {
+      "command": "/path/to/walgit",
+      "args": ["mcp", "--repo", "/path/to/repo"],
+      "cwd": "/path/to/repo",
+      "env": { "WALGIT_LOG": "info" },
+      "enabled": true,
+      "timeoutSeconds": 60,
+      "subscribe": ["walgit://collab/board/gqf2008/abb"],
+      "autoRead": ["walgit://collab/board/gqf2008/abb"],
+      "signals": { "wake": "auto", "minIntervalSeconds": 60 }
+    }
+  }
+}
+```
+
+HTTP 服务器把 `command`/`args`/`env`/`cwd` 换成 `url` + 可选 `headers`。键名是 camelCase
+（`timeoutSeconds`、`autoRead`、`minIntervalSeconds`…）；**拼错的键会被忽略并在
+`/mcp-doctor` 里列出来**（以前是静默忽略，看起来和写对了一模一样）。
+
+**`subscribe`**：握手后为每条 uri 调一次 `resources/subscribe`。写不进去的（服务器拒绝、
+或它根本没声明 `resources.subscribe` 能力）只报一条 warning，不会拖垮整个服务器。订阅
+来自配置的**在 `/mcp-reload` 后仍然有效**；模型自己用 `{server}__watch_resource` 建的
+订阅属于本次会话，reload 后消失（受 `MAX_MODEL_SUBSCRIPTIONS` 限制）。
+
+**`autoRead`**：只对**已订阅**的 uri 有意义。它是在通知被并入会话的那一刻（会话边界，
+一轮结束之后），把该 uri 的**当前全文**读出来一并写进通知里，这样模型醒来时不必先花一次
+工具往返去读。每次边界、每个 uri 至多读一次，共享一个超时；内容会截断到
+`MAX_RESOURCE_TEXT`。所以它读的**不是「变更的增量」，也不便宜**——默认什么都不配（只送
+指针，内容由模型自己决定要不要读）。
+
+**`signals`**：资源通知允许对会话做什么。`wake` 三档——`off`（只记进 transcript，不唤醒）、
+`notify`（记 + 呈现给客户端）、`auto`（记 + 在预算内用一条合成触发消息起一轮，醒来后做
+什么由模型决定）。优先级：服务器条目自己的 `signals` > 项目顶层 `signals` > 全局顶层
+`signals` > 由 `subscribe` 推导的默认值（**配了 `subscribe` 就默认 `auto`，没配就 `off`**）。
+预算字段 `minIntervalSeconds`（1–3600，默认 30）、`maxRunsPerHour`（1–60，默认 6）、
+`maxConsecutiveRuns`（1–20，默认 2）自动夹取。
 
 改了配置不用重启 `ki`：`/mcp-reload`（别名 `/mcp`）重新读取配置、**原地重连**所有服务器
 （manager 与 mailbox 不变），再用新连接重建工具表（走的是和 `/reload` 同一条重建流程，
 所以扩展资源也会被重新读取；wasm 扩展实例本身不重建，它们的运行状态保留）。它会逐个
 列出连不上的服务器及原因，并显示重连后当前可用的 MCP 工具数量。
+
+出问题时跑 `/mcp-doctor`：**只读**（不重连、不发 RPC），报告上一次启动/重连留下的状态，
+所以症状出现之后再跑也能看到现场。每个服务器一行：`status`（`connected` / `disabled
+(enabled=false)` / `failed` + 原因）、工具清单、`resources` 能力、`subscribe` 配置了几条 /
+实际活了几条、`autoRead`、`signals` 预算、被忽略的未知键、stdio 服务器最后的 stderr，
+以及该怎么做（例如配置了但没订阅上、进程根本没起来）。配置改了但还没 reload 时它会指出
+数量不一致。
+
+Windows 上两个已知坑（`/mcp-doctor` 会提示）：stdio 服务器**不经 shell 启动**，所以
+`npx`/`uvx`/`pnpm` 这类 `.cmd` shim 要写成 `command: "cmd"`、`args: ["/d", "/s", "/c", …]`；
+子进程只继承 `PATH`/`HOME`/`TMPDIR`/`TERM`/`USER`/`SHELL`/`LANG`/`LC_*`——服务器需要的其它
+变量（`APPDATA`、`LOCALAPPDATA`、`PATHEXT`…）必须写进它的 `env`。
 
 ### 远程模式（`--server` / `--connect`）
 

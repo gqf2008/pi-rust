@@ -15,6 +15,9 @@
 //!                                  subscribe (the racing-update scenario)
 //!   --reject-duplicate-subscribe   a second subscribe for the same uri errors
 //!   --reject-unsubscribe           every unsubscribe errors
+//!   --no-resource-list             answer -32601 for `resources/list`
+//!   --no-resource-templates        answer -32601 for `resources/templates/list`
+//!                                  (the walgit shape: resources, no templates)
 //!
 //! Extra args beyond the protocol:
 //!   --name <n>          label (informational)
@@ -79,6 +82,11 @@ fn main() {
     let repeat_cursor = flag("--repeat-cursor");
     let record_path: Option<String> = opt("--record");
     let resources_mode = flag("--resources");
+    // A server may advertise `resources` and implement only half of it: the
+    // absent half answers -32601 (`Method not found`), which the client must
+    // read as an empty list, not as a failed listing.
+    let no_resource_list = flag("--no-resource-list");
+    let no_resource_templates = flag("--no-resource-templates");
     let env_tool = flag("--env-tool");
     let supports_subscribe = !flag("--no-resource-subscribe");
     let subscribe_notify = flag("--subscribe-notify");
@@ -178,15 +186,15 @@ fn main() {
                 reply(id, call_tool(name, &arguments));
             }
             "resources/list" => {
-                if !resources_mode {
-                    reply_error(id, -32601, "resources not supported");
+                if !resources_mode || no_resource_list {
+                    reply_error(id, -32601, "method not found: resources/list");
                     continue;
                 }
                 reply(id, json!({ "resources": resource_list() }));
             }
             "resources/templates/list" => {
-                if !resources_mode {
-                    reply_error(id, -32601, "resources not supported");
+                if !resources_mode || no_resource_templates {
+                    reply_error(id, -32601, "method not found: resources/templates/list");
                     continue;
                 }
                 reply(id, json!({ "resourceTemplates": resource_templates() }));
