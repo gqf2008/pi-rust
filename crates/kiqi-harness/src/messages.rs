@@ -519,7 +519,70 @@ pub fn convert_to_llm(messages: Vec<AgentMessage>) -> Vec<Message> {
             AgentMessage::Custom(c) => convert_custom_to_llm(c),
         })
         .collect();
-    drop_unanchored_tool_results(messages)
+    let messages = drop_unanchored_tool_results(messages);
+    ensure_every_tool_call_has_a_result(messages)
+}
+
+/// Give every `tool_calls` entry a result message.
+///
+/// The other half of the same gateway check: "An assistant message with
+/// 'tool_calls' must be followed by tool messages responding to each
+/// 'tool_call_id'". The id-keyed repairs upstream only reason about the results
+/// they can see; if history lost one (an interrupted run, a compaction cut, a
+/// duplicated id across turns) the request is rejected whole, and because the
+/// history is durable it fails the same way on every retry and every resume.
+fn ensure_every_tool_call_has_a_result(messages: Vec<Message>) -> Vec<Message> {
+    let mut out: Vec<Message> = Vec::with_capacity(messages.len());
+    let mut index = 0;
+    while index < messages.len() {
+        let message = messages[index].clone();
+        out.push(message.clone());
+        index += 1;
+        let Message::Assistant(assistant) = &message else {
+            continue;
+        };
+        let calls: Vec<String> = assistant
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                kiqi_ai::types::Content::ToolCall(call) => Some(call.id.clone()),
+                _ => None,
+            })
+            .collect();
+        if calls.is_empty() {
+            continue;
+        }
+        // The contiguous results behind this turn are its answers.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(Message::ToolResult(result)) = messages.get(index) {
+            seen.insert(result.tool_call_id.clone());
+            out.push(messages[index].clone());
+            index += 1;
+        }
+        for id in calls {
+            if seen.contains(&id) {
+                continue;
+            }
+            tracing::warn!(
+                tool_call_id = %id,
+                "synthesized a tool result for a tool_calls entry that had none"
+            );
+            out.push(Message::ToolResult(Box::new(ToolResultMessage {
+                role: ToolResultRole,
+                tool_call_id: id.clone(),
+                tool_name: String::new(),
+                content: vec![Content::text(
+                    "Tool execution was interrupted before its result was recorded.",
+                )],
+                details: None,
+                usage: None,
+                added_tool_names: Vec::new(),
+                is_error: true,
+                timestamp: 0,
+            })));
+        }
+    }
+    out
 }
 
 /// Drop tool results that are not directly anchored to a preceding assistant
@@ -646,6 +709,34 @@ mod tests {
             is_error: false,
             timestamp: 43,
         }))
+    }
+
+    /// The other half of the gateway's check: a turn that declares two calls
+    /// but only has one result must still produce a valid request.
+    #[test]
+    fn a_tool_call_without_a_result_gets_a_synthesized_one() {
+        let history = vec![
+            assistant_with_calls(&[("call-1", "bash"), ("call-2", "read")]),
+            tool_result("call-1", "bash"),
+        ];
+        let converted = convert_to_llm(history);
+        let ids: Vec<&str> = converted
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResult(result) => Some(result.tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["call-1", "call-2"], "{ids:?}");
+        // The synthesized one is an error result, so the model knows the output
+        // is missing instead of assuming the call succeeded silently.
+        assert!(
+            converted.iter().any(|message| matches!(
+                message,
+                Message::ToolResult(result) if result.is_error
+            )),
+            "{converted:?}"
+        );
     }
 
     /// A tool result that is not directly behind its `tool_calls` message is

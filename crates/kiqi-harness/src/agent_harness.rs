@@ -1223,14 +1223,21 @@ impl AgentHarness {
     /// Returns how many synthetic results were appended.
     pub async fn repair_dangling_tool_calls(&self) -> HarnessResult<usize> {
         let tree = self.session().view("main");
+        // Only the *active* branch: a result for the same call id on another
+        // branch must not satisfy this one (that call is still dangling here),
+        // and a call that only exists on another branch must not get a result
+        // appended to this one (that would be an orphaned tool message).
         let entries = tree
-            .find_entries(&EntryQuery {
-                entry_type: None,
-                custom_type: None,
-                order: Some(EntryOrder::OldestFirst),
-                limit: None,
-                cursor: None,
-            })
+            .find_entries_on_branch(
+                &EntryQuery {
+                    entry_type: None,
+                    custom_type: None,
+                    order: Some(EntryOrder::OldestFirst),
+                    limit: None,
+                    cursor: None,
+                },
+                &BranchBounds::default(),
+            )
             .await
             .map_err(session_to_harness_err)?;
         let mut pending: Vec<(String, String)> = Vec::new();

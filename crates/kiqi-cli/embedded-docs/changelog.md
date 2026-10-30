@@ -94,6 +94,17 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   工具输出流另发 `▶ id` / `✔ id` 进度行。没有交互 UI 时（headless、单测）上报被忽略，
   wave 行为不变。
 
+### Fixed
+
+- **历史里的「半个工具调用」不会再让请求 400。** `Messages with role 'tool' must be a
+  response to a preceding message with 'tool_calls'` 与反方向的 `An assistant message with
+  'tool_calls' must be followed by tool messages…` 是同一件事的两面：持久化历史里出现了
+  没有轮次的结果、或没有结果的轮次。现在组装 provider 上下文时**双向兜底**（丢弃无主
+  结果；给缺结果的轮次补一条标注为「记录前中断」的错误结果），`repair_dangling_tool_calls`
+  只看当前分支（此前扫全库：别的分支上同 id 的结果会让真正悬空的调用被漏修，也会把别的
+  分支的调用补一条结果到当前分支——孤立结果的另一个来源），settle 在助手消息没落盘时
+  也不再提交它的工具结果。运行期重试认这两种措辞。
+
 ## [0.4.5] - 2026-10-28
 
 ### Fixed
