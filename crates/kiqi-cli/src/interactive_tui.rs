@@ -2365,17 +2365,22 @@ pub async fn interactive_tui(
                         // it, so it can never overwrite the clipboard.
                         *state_for_key.selection_start.lock().unwrap() = Some((m.column, m.row));
                         *state_for_key.selection_end.lock().unwrap() = None;
-                        // Draw it: a drag with no visible highlight reads as
-                        // "selection does not work".
-                        tui_for_key.set_selection(Some(((m.column, m.row), (m.column, m.row))));
+                        // A press arms a drag but is not a selection: drawing a
+                        // one-cell inverse block here made every click look like
+                        // a cursor. The highlight starts with the first motion.
+                        state_for_key.clear_last_span();
+                        tui_for_key.set_selection(None);
                     }
                     MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                         // Motion with the button held = a genuine selection drag.
                         // (Terminals only report this with button-event mouse
                         // tracking, which `ProcessTerminal` enables.)
                         if let Some(start) = *state_for_key.selection_start.lock().unwrap() {
-                            *state_for_key.selection_end.lock().unwrap() = Some((m.column, m.row));
-                            tui_for_key.set_selection(Some((start, (m.column, m.row))));
+                            if start != (m.column, m.row) {
+                                *state_for_key.selection_end.lock().unwrap() =
+                                    Some((m.column, m.row));
+                                tui_for_key.set_selection(Some((start, (m.column, m.row))));
+                            }
                         }
                     }
                     MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
@@ -2398,8 +2403,14 @@ pub async fn interactive_tui(
                             let is_drag = state_for_key.selection_end.lock().unwrap().is_some()
                                 || start != end;
                             if is_drag {
-                                // Kept for a follow-up right-click copy.
+                                // Kept for a follow-up right-click copy, and
+                                // drawn even when the terminal coalesced the
+                                // motion into down/up.
                                 state_for_key.set_last_span((start, end));
+                                tui_for_key.set_selection(Some((start, end)));
+                            } else {
+                                state_for_key.clear_last_span();
+                                tui_for_key.set_selection(None);
                             }
                             *state_for_key.selection_end.lock().unwrap() = Some(end);
 
