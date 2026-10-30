@@ -82,6 +82,14 @@ pub struct SettleState {
     /// Index of the next loop message, in `new_messages` order. Advanced by
     /// `MessageStart` so a commit can name the index it persisted.
     seen: AtomicUsize,
+    /// Tool calls whose assistant message was retracted or never committed.
+    ///
+    /// Their results must not be committed either: a `tool` entry whose
+    /// `tool_calls` turn is missing makes the next request fail validation
+    /// ("Messages with role 'tool' must be a response to a preceding message
+    /// with 'tool_calls'") — and it survives in the session file, so every later
+    /// run rebuilt from it fails the same way.
+    uncommitted_calls: Mutex<std::collections::HashSet<String>>,
     /// The attempt number the retry loop is currently on.
     attempt: AtomicU32,
     retry_enabled: bool,
@@ -154,6 +162,7 @@ impl SettleState {
             soft_tail: Mutex::new(None),
             soft_tail_pending: AtomicBool::new(false),
             skip_next_assistant_end: AtomicBool::new(false),
+            uncommitted_calls: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -236,6 +245,19 @@ impl SettleState {
 
     pub fn committed_count(&self) -> usize {
         self.committed.lock().unwrap().len()
+    }
+
+    /// Remember that this call's assistant message never made it into the log.
+    fn mark_uncommitted_call(&self, tool_call_id: &str) {
+        self.uncommitted_calls
+            .lock()
+            .unwrap()
+            .insert(tool_call_id.to_string());
+    }
+
+    /// Take the "this call has no assistant turn" mark, if any.
+    fn take_uncommitted_call(&self, tool_call_id: &str) -> bool {
+        self.uncommitted_calls.lock().unwrap().remove(tool_call_id)
     }
 
     fn record_commit(&self, index: usize, entry_id: &str) {
@@ -361,6 +383,7 @@ impl SettlingEmitter {
                 tool_call_id,
                 "skipping a tool_started record: the assistant message carrying this call was not committed"
             );
+            self.state.mark_uncommitted_call(tool_call_id);
             return;
         };
         let result_entry_id = self.harness.next_entry_id();
@@ -436,6 +459,15 @@ impl SettlingEmitter {
 
     /// Commit a settled tool result under the id its `tool_started` named.
     async fn settle_tool_result(&self, index: usize, message: &kiqi_ai::types::ToolResultMessage) {
+        if self.state.take_uncommitted_call(&message.tool_call_id) {
+            // Committing this would leave a tool result without its turn, which
+            // every later request (and every resumed session) then rejects.
+            tracing::warn!(
+                tool_call_id = %message.tool_call_id,
+                "dropping a tool result whose assistant message was never committed"
+            );
+            return;
+        }
         let Some(result_entry_id) = self
             .state
             .reserved_results
@@ -626,6 +658,27 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::sync::atomic::Ordering;
+
+    /// A tool result whose assistant message never landed must not be written
+    /// either: the pair is what a provider validates, and the orphan survives in
+    /// the session file, so every later run rebuilt from it fails the same way.
+    #[test]
+    fn a_result_is_dropped_when_its_assistant_turn_was_never_committed() {
+        let state = SettleState::new("run", true, 3, BTreeMap::new());
+        state.mark_uncommitted_call("call-1");
+        assert!(
+            state.take_uncommitted_call("call-1"),
+            "the mark is taken once"
+        );
+        assert!(
+            !state.take_uncommitted_call("call-1"),
+            "a second result for the same id is not dropped twice"
+        );
+        assert!(
+            !state.take_uncommitted_call("call-2"),
+            "other calls are unaffected"
+        );
+    }
 
     #[test]
     fn a_retry_rolls_back_the_failed_attempts_assistant_start() {
