@@ -384,12 +384,47 @@ pub fn inverse(text: &str) -> String {
 }
 
 /// Apply dim/faint style.
+/// Wrap the columns `[from, from+width)` of a line in inverse video.
+///
+/// Used to draw a mouse selection: the cells keep their text and colours, and
+/// only the background/foreground swap — the terminal rendering of "selected".
+pub fn highlight_columns(line: &str, from: usize, width: usize) -> String {
+    let total = visible_width(line);
+    if width == 0 || from >= total {
+        return line.to_string();
+    }
+    let width = width.min(total - from);
+    let before = slice_by_column(line, 0, from, true);
+    let mut selected = slice_by_column(line, from, width, true);
+    let after = slice_by_column(line, from + width, total - from - width, true);
+    // Re-assert inverse after any nested reset so a coloured span inside the
+    // selection cannot punch a hole in the highlight.
+    selected = selected.replace("\x1b[0m", "\x1b[0m\x1b[7m");
+    format!("{before}\x1b[7m{selected}\x1b[27m{after}")
+}
+
 pub fn dim(text: &str) -> String {
     format!("\x1b[2m{}\x1b[22m", text)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn highlight_columns_inverts_exactly_the_selected_cells() {
+        let line = "abcdefghij";
+        let out = super::highlight_columns(line, 2, 3);
+        assert_eq!(super::strip_ansi(&out), line, "text is preserved");
+        assert!(out.contains("\x1b[7m"), "{out:?}");
+        let before = &out[..out.find("\x1b[7m").unwrap()];
+        assert_eq!(super::strip_ansi(before), "ab");
+        // A range past the end is clamped, an empty one is a no-op.
+        assert_eq!(
+            super::strip_ansi(&super::highlight_columns(line, 8, 99)),
+            line
+        );
+        assert_eq!(super::highlight_columns(line, 0, 0), line);
+    }
+
     use super::*;
 
     #[test]

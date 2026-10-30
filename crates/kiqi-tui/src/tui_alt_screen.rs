@@ -142,6 +142,9 @@ pub struct TuiAltScreen {
     /// were actually there. Rendering the components again would answer at a
     /// different width and miss every panel the chat container does not own.
     last_frame: Mutex<Vec<String>>,
+    /// The drag in progress (or the one just copied), drawn as inverse video so
+    /// the selection is visible — the whole point of "选择复制".
+    selection: Mutex<Option<((u16, u16), (u16, u16))>>,
     scroll_top: Mutex<usize>,
     stick_to_bottom: Mutex<bool>,
     current_frame: Mutex<Option<LayoutFrame>>,
@@ -199,6 +202,7 @@ impl TuiAltScreen {
             full_redraw_count: Mutex::new(0),
             previous_screen: Mutex::new(Vec::new()),
             last_frame: Mutex::new(Vec::new()),
+            selection: Mutex::new(None),
             scroll_top: Mutex::new(0),
             stick_to_bottom: Mutex::new(true),
             current_frame: Mutex::new(None),
@@ -979,6 +983,32 @@ impl TuiAltScreen {
         for line in &mut visible {
             *line = line.replace(CURSOR_MARKER, "");
         }
+        // Draw the drag selection over the composed frame.
+        if let Some(((start_col, start_row), (end_col, end_row))) = *self.selection.lock().unwrap()
+        {
+            let (first, last) = if (start_row, start_col) <= (end_row, end_col) {
+                ((start_col, start_row), (end_col, end_row))
+            } else {
+                ((end_col, end_row), (start_col, start_row))
+            };
+            for row in first.1 as usize..=last.1 as usize {
+                let Some(line) = visible.get(row) else {
+                    break;
+                };
+                let from = if row == first.1 as usize {
+                    first.0 as usize
+                } else {
+                    0
+                };
+                let width = if row == last.1 as usize {
+                    (last.0 as usize + 1).saturating_sub(from)
+                } else {
+                    crate::ansi::visible_width(line).saturating_sub(from)
+                };
+                visible[row] = crate::ansi::highlight_columns(line, from, width);
+            }
+        }
+
         // Keep the painted grid so a mouse drag can copy exactly what is shown.
         if let Ok(mut last) = self.last_frame.lock() {
             last.clone_from(&visible);
@@ -1295,6 +1325,18 @@ impl TUI for TuiAltScreen {
             .lock()
             .map(|lines| lines.clone())
             .unwrap_or_default()
+    }
+
+    fn set_selection(&self, selection: Option<((u16, u16), (u16, u16))>) {
+        let changed = {
+            let mut slot = self.selection.lock().unwrap();
+            let changed = *slot != selection;
+            *slot = selection;
+            changed
+        };
+        if changed {
+            self.request_render(true);
+        }
     }
 }
 

@@ -2364,13 +2364,17 @@ pub async fn interactive_tui(
                         // it, so it can never overwrite the clipboard.
                         *state_for_key.selection_start.lock().unwrap() = Some((m.column, m.row));
                         *state_for_key.selection_end.lock().unwrap() = None;
+                        // Draw it: a drag with no visible highlight reads as
+                        // "selection does not work".
+                        tui_for_key.set_selection(Some(((m.column, m.row), (m.column, m.row))));
                     }
                     MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                         // Motion with the button held = a genuine selection drag.
                         // (Terminals only report this with button-event mouse
                         // tracking, which `ProcessTerminal` enables.)
-                        if state_for_key.selection_start.lock().unwrap().is_some() {
+                        if let Some(start) = *state_for_key.selection_start.lock().unwrap() {
                             *state_for_key.selection_end.lock().unwrap() = Some((m.column, m.row));
+                            tui_for_key.set_selection(Some((start, (m.column, m.row))));
                         }
                     }
                     MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
@@ -2461,6 +2465,9 @@ pub async fn interactive_tui(
                 }
                 continue;
             }
+            // A key ends the mouse selection's highlight; the text itself was
+            // already copied when the button came up.
+            tui_for_key.set_selection(None);
             let Event::Key(key) = ev else {
                 if let Event::Paste(text) = ev {
                     crate::key_trace::note(&format!(

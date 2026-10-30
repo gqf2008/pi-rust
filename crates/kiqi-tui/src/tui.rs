@@ -194,4 +194,9 @@ pub trait TUI: Component + Send + Sync {
     fn screen_lines(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Draw (or clear) the mouse selection as inverse video over the range
+    /// `((column, row), (column, row))`. Backends without a compositing layer
+    /// ignore it — the terminal highlights its own selection there.
+    fn set_selection(&self, _selection: Option<((u16, u16), (u16, u16))>) {}
 }
