@@ -2387,10 +2387,22 @@ pub async fn interactive_tui(
                                 .unwrap_or(true);
 
                             if auto_copy && is_drag {
-                                // Try to extract selected text from chat container
-                                if let Some(selected_text) =
-                                    extract_selected_text(&state_for_key.chat_container, start, end)
-                                {
+                                // The painted grid first: it is the only source
+                                // that covers the input editor and the status
+                                // lines, and it is exactly what the drag
+                                // covered. The chat container remains the
+                                // fallback for backends without a frame
+                                // (main-screen mode).
+                                let selected_text =
+                                    selected_screen_text(&tui_for_key.screen_lines(), start, end)
+                                        .or_else(|| {
+                                            extract_selected_text(
+                                                &state_for_key.chat_container,
+                                                start,
+                                                end,
+                                            )
+                                        });
+                                if let Some(selected_text) = selected_text {
                                     if !selected_text.trim().is_empty() {
                                         let _ = copy_to_clipboard(&selected_text);
                                     }

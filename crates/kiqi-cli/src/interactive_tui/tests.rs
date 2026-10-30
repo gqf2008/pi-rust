@@ -3197,6 +3197,45 @@ fn subagent_calls_waiting_for_the_extension_are_reported_as_queued() {
     assert_eq!(state.queued_agent_calls().len(), 1);
 }
 
+/// Selection copies what the renderer painted, so it works over the input
+/// editor and the status lines, not only the chat container.
+#[test]
+fn screen_selection_copies_any_area_of_the_painted_frame() {
+    let frame = vec![
+        "transcript line one".to_string(),
+        "  transcript line two  ".to_string(),
+        "> typed in the editor".to_string(),
+        String::new(),
+    ];
+    // A drag inside one line covers exactly those columns.
+    assert_eq!(
+        super::run::selected_screen_text(&frame, (2, 0), (10, 0)).as_deref(),
+        Some("anscript")
+    );
+    // A drag over several lines takes whole lines in between.
+    assert_eq!(
+        super::run::selected_screen_text(&frame, (0, 0), (4, 1)).as_deref(),
+        Some("transcript line one\n  tra")
+    );
+    // Dragging upwards is the same selection.
+    assert_eq!(
+        super::run::selected_screen_text(&frame, (0, 0), (4, 1)),
+        super::run::selected_screen_text(&frame, (4, 1), (0, 0))
+    );
+    // The input editor is inside the frame, so it is selectable.
+    assert_eq!(
+        super::run::selected_screen_text(&frame, (2, 2), (6, 2)).as_deref(),
+        Some("typed")
+    );
+    // Trailing spaces are not copied, and an all-blank selection yields nothing.
+    assert_eq!(
+        super::run::selected_screen_text(&frame, (18, 1), (30, 1)).as_deref(),
+        Some("two")
+    );
+    assert!(super::run::selected_screen_text(&frame, (0, 3), (40, 3)).is_none());
+    assert!(super::run::selected_screen_text(&[], (0, 0), (3, 0)).is_none());
+}
+
 /// The boxes are painted on the theme's surface colour: a terminal has no
 /// alpha, so a panel (not a see-through overlay) is what makes them read as a
 /// layer above the transcript.

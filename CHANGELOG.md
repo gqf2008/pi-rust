@@ -101,6 +101,10 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **选择复制覆盖整个屏幕。** 之前全屏模式下拖选只从 chat 容器重新渲染（还固定按 80 列），
+  输入框、状态行选不到，列也常常对不上。现在 renderer 每帧把真正画出的网格（去掉光标
+  标记）留一份，拖选直接从这份网格按显示列切片——回显区、状态行、输入框都能选，松开
+  自动复制；`regular` 模式没有合成层，仍用终端自身的原生选择。
 - **库里的诊断不再写进输入区。** TUI 拥有整个屏幕，任何裸 `eprintln!`（MCP 库的
   `[ki mcp] server …: resources/list failed`、provider 适配器告警、panic 信息）都会落在
   光标所在的位置——`/mcp-reload` 之后那条 MCP 诊断就压在了输入框上。现在进入交互 TUI 时

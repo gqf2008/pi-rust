@@ -135,6 +135,13 @@ pub struct TuiAltScreen {
     focused: Mutex<Option<Arc<dyn Component>>>,
     full_redraw_count: Mutex<usize>,
     previous_screen: Mutex<Vec<String>>,
+    /// The exact grid the last frame painted, cursor markers stripped.
+    ///
+    /// Screen selection reads this: a user drags over any part of the screen —
+    /// transcript, status line, the input editor — and gets the characters that
+    /// were actually there. Rendering the components again would answer at a
+    /// different width and miss every panel the chat container does not own.
+    last_frame: Mutex<Vec<String>>,
     scroll_top: Mutex<usize>,
     stick_to_bottom: Mutex<bool>,
     current_frame: Mutex<Option<LayoutFrame>>,
@@ -191,6 +198,7 @@ impl TuiAltScreen {
             focused: Mutex::new(None),
             full_redraw_count: Mutex::new(0),
             previous_screen: Mutex::new(Vec::new()),
+            last_frame: Mutex::new(Vec::new()),
             scroll_top: Mutex::new(0),
             stick_to_bottom: Mutex::new(true),
             current_frame: Mutex::new(None),
@@ -971,6 +979,10 @@ impl TuiAltScreen {
         for line in &mut visible {
             *line = line.replace(CURSOR_MARKER, "");
         }
+        // Keep the painted grid so a mouse drag can copy exactly what is shown.
+        if let Ok(mut last) = self.last_frame.lock() {
+            last.clone_from(&visible);
+        }
 
         // Check for full redraw
         let previous = self
@@ -1276,6 +1288,13 @@ impl TUI for TuiAltScreen {
 
     fn full_redraws(&self) -> usize {
         self.full_redraw_count.lock().map(|c| *c).unwrap_or(0)
+    }
+
+    fn screen_lines(&self) -> Vec<String> {
+        self.last_frame
+            .lock()
+            .map(|lines| lines.clone())
+            .unwrap_or_default()
     }
 }
 

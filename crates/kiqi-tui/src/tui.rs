@@ -187,4 +187,11 @@ pub trait TUI: Component + Send + Sync {
 
     /// Get the number of full redraws performed.
     fn full_redraws(&self) -> usize;
+
+    /// The lines the renderer last painted, cursor markers stripped, for screen
+    /// selection. Empty when the backend has no compositing layer (main-screen
+    /// mode leaves the terminal's own scrollback selectable).
+    fn screen_lines(&self) -> Vec<String> {
+        Vec::new()
+    }
 }

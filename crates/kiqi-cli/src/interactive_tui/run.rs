@@ -400,6 +400,60 @@ pub(super) fn extract_selected_text(
     Some(selected_lines.join("\n"))
 }
 
+/// Extract the text under a drag from the frame the renderer actually painted.
+///
+/// Unlike [`extract_selected_text`] this covers the whole screen — the
+/// transcript, the status/working lines, and the input editor — because it
+/// reads the composited grid instead of re-rendering one component at a guessed
+/// width. Columns are display cells (a CJK glyph counts 2), matching what the
+/// pointer covers.
+pub(super) fn selected_screen_text(
+    lines: &[String],
+    start: (u16, u16),
+    end: (u16, u16),
+) -> Option<String> {
+    if lines.is_empty() {
+        return None;
+    }
+    let (mut first, mut last) = (start, end);
+    if (first.1, first.0) > (last.1, last.0) {
+        std::mem::swap(&mut first, &mut last);
+    }
+    let first_row = first.1 as usize;
+    let last_row = (last.1 as usize).min(lines.len().saturating_sub(1));
+    if first_row > last_row {
+        return None;
+    }
+    let mut selected: Vec<String> = Vec::new();
+    for (index, row) in lines.iter().enumerate().take(last_row + 1).skip(first_row) {
+        let plain = kiqi_tui::ansi::strip_ansi(row);
+        let from = if index == first_row {
+            first.0 as usize
+        } else {
+            0
+        };
+        let to = if index == last_row {
+            last.0 as usize + 1
+        } else {
+            usize::MAX
+        };
+        let width = to.saturating_sub(from).min(usize::MAX);
+        let piece = kiqi_tui::ansi::slice_by_column(&plain, from, width, false);
+        selected.push(piece.trim_end().to_string());
+    }
+    while selected.first().is_some_and(|row| row.is_empty()) {
+        selected.remove(0);
+    }
+    while selected.last().is_some_and(|row| row.is_empty()) {
+        selected.pop();
+    }
+    if selected.is_empty() {
+        None
+    } else {
+        Some(selected.join("\n"))
+    }
+}
+
 /// Best-effort clipboard write. Enabled only with the `clipboard` feature
 /// (`arboard`) on non-Android platforms; otherwise returns `false` so the
 /// caller degrades to a hint.
