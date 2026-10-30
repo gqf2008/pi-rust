@@ -1424,3 +1424,51 @@ async fn doctor_describes_connected_disabled_and_failed_servers() {
 
     manager.shutdown().await;
 }
+
+/// A real child's stderr is untrusted input for *display*: ki's renderer passes
+/// escape sequences straight to the terminal (that is how the TUI colours its own
+/// output), so echoing a tail verbatim lets a server clear the screen, leave the
+/// alternate screen, rewrite the window title, or desync the columns with a tab.
+/// `/mcp-doctor` must show the readable text and nothing else.
+#[tokio::test]
+async fn doctor_never_echoes_escape_sequences_from_server_stderr() {
+    let (manager, issues) = McpManager::start(
+        &[stdio_server(
+            "noisy",
+            vec![
+                "--stderr-msg".to_string(),
+                "\u{1b}[2J\u{1b}]0;hijacked\u{7}\u{1b}[31mtabbed red\u{1b}[0m".to_string(),
+            ],
+            10,
+            true,
+        )],
+        Path::new("."),
+    )
+    .await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+
+    // stderr is drained asynchronously, so wait for the line to land.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut report = manager.doctor_report();
+    while !report.contains("tabbed red") && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        report = manager.doctor_report();
+    }
+
+    assert!(
+        report.contains("| tabbed red"),
+        "stderr tail missing: {report}"
+    );
+    for forbidden in ['\u{1b}', '\u{7}', '\t', '\r'] {
+        assert!(
+            !report.contains(forbidden),
+            "{forbidden:?} leaked into the report: {report}"
+        );
+    }
+    assert!(
+        !report.contains("hijacked"),
+        "an OSC payload is not text: {report}"
+    );
+
+    manager.shutdown().await;
+}

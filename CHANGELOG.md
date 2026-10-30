@@ -32,6 +32,14 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   现在两个 listing 分别收敛：`-32601` 记为「这个方法不存在」（空清单，按方法名各报一次
   warning，不再每次 boundary 重试），真正的失败只影响自己那一半，另一半清单照常进描述；
   任一半真失败时 `complete=false`，boundary 继续重试。
+- **`/mcp-doctor` 不会把终端画花。** 服务器 stderr 和 `command`/`args` 都是外部输入，而 ki 的
+  渲染器把转义序列原样交给终端（TUI 自己的着色就是这么来的，`ansi::escape_len` 只算宽度不
+  吃序列）。如果把这些字节直接回显进 transcript，服务器一句 `\e[2J` 就能清屏、`\e[?1049l`
+  能把 TUI 从备用屏幕踢出去、`\e]0;…\a` 能改窗口标题、Tab 会让列宽计算和渲染错位、`\r`
+  能让一行覆盖另一行。现在报告在**显示边界**统一消毒：剥掉 CSI/OSC/APC/DCS/PM 序列和所有
+  控制字符，Tab 折成一个空格，单行按**字符**（不是字节）截断到 160/240/400 字符并加 `…`，
+  stderr 只留最后 5 行，整份报告 16K 字符封顶；全报告再兜一遍底，防止以后新增的字段漏掉。
+  消毒只发生在 `/mcp-doctor` 这一处，不改通用渲染路径。
 
 ### Docs
 

@@ -293,6 +293,10 @@ HTTP 服务器把 `command`/`args`/`env`/`cwd` 换成 `url` + 可选 `headers`�
 （`timeoutSeconds`、`autoRead`、`minIntervalSeconds`…）；**拼错的键会被忽略并在
 `/mcp-doctor` 里列出来**（以前是静默忽略，看起来和写对了一模一样）。
 
+stdout/stderr 里出现的转义序列不会进终端：`/mcp-doctor` 会剥掉 CSI/OSC 等序列和控制字符、
+把 Tab 折成空格、按字符截断，所以一个乱打印控制字节的服务器最多让报告难看，不会清屏、切走
+备用屏幕或改窗口标题。
+
 **`subscribe`**：握手后为每条 uri 调一次 `resources/subscribe`。写不进去的（服务器拒绝、
 或它根本没声明 `resources.subscribe` 能力）只报一条 warning，不会拖垮整个服务器。订阅
 来自配置的**在 `/mcp-reload` 后仍然有效**；模型自己用 `{server}__watch_resource` 建的

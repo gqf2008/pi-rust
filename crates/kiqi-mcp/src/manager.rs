@@ -2637,6 +2637,166 @@ fn split_stderr_tail(tail: &str) -> Vec<String> {
         .collect()
 }
 
+/// A long uri list is a settings file reading exercise, not a diagnosis: show
+/// the first few and a count.
+const LIST_CAP: usize = 6;
+/// Hard bound on the whole report. It is written into the transcript, the
+/// session file and the model's context, so a pathological config (many
+/// servers, long uris) must not turn a diagnostic into a wall of text.
+const REPORT_MAX_CHARS: usize = 16_000;
+
+/// How much of a child's stderr reaches the report. stderr is the one input ki
+/// does not control (a server may print a megabyte), and the report is written
+/// into the transcript, the session file and the model's context — so keep only
+/// the tail that explains a failure.
+const STDERR_REPORT_LINES: usize = 5;
+/// Per-line cap, in characters (not bytes: never split a char).
+const STDERR_REPORT_CHARS: usize = 160;
+/// The launch line is the most useful row of the report (a wrong path or a
+/// missing `cmd` wrapper shows up here), so it gets more room than a stderr line.
+const LAUNCH_REPORT_CHARS: usize = 240;
+const REASON_REPORT_CHARS: usize = 400;
+
+/// Make child-process text safe to *draw*.
+///
+/// The renderer passes `ESC` sequences through to the terminal (that is how ki
+/// colors its own output), so a server that prints `\x1b[2J` clears the screen,
+/// `\x1b[?1049l` drops the alternate screen out from under the TUI, and an OSC
+/// title sequence rewrites the window title. A tab is just as bad in a subtler
+/// way: the wrapper counts it as zero width but the terminal advances to the
+/// next tab stop, so the row no longer matches the column math the frame was
+/// laid out with. Everything below is text a user can read and nothing else.
+fn report_stderr_lines(lines: &[String]) -> Vec<String> {
+    let cleaned: Vec<String> = lines
+        .iter()
+        .map(|line| sanitize_for_report(line))
+        .filter(|line| !line.is_empty())
+        .collect();
+    let skip = cleaned.len().saturating_sub(STDERR_REPORT_LINES);
+    cleaned.into_iter().skip(skip).collect()
+}
+
+/// Strip everything from `text` that is not drawable text: escape sequences,
+/// control characters, tabs. No length limit — callers that need one use
+/// [`cap_chars`].
+fn strip_escapes(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            skip_escape(&mut chars);
+            continue;
+        }
+        if c.is_control() {
+            // A tab advances to the next tab stop but counts as zero width in
+            // ki's wrapper: one space keeps the columns honest.
+            if c == '\t' && !out.ends_with(' ') {
+                out.push(' ');
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Char-safe truncation (never splits a UTF-8 char, never splits a panic out of
+/// `String::truncate`).
+fn cap_chars(mut text: String, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text;
+    }
+    // The byte offset of the first char past `max`: truncating there keeps
+    // exactly `max` chars and can never split one.
+    let cutoff = text
+        .char_indices()
+        .nth(max)
+        .map_or(text.len(), |(index, _)| index);
+    text.truncate(cutoff);
+    text.push('…');
+    text
+}
+
+/// Whole-report belt and braces: every line stripped, newlines preserved (the
+/// report is multi-line, so the per-line helper cannot be applied to it as a
+/// whole). Anything that reaches the transcript has already been sanitized field
+/// by field; this catches a field someone adds later.
+fn sanitize_report(report: &str) -> String {
+    report
+        .split('\n')
+        .map(strip_escapes)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One line of child-process text, reduced to what is safe to put in front of
+/// the terminal.
+fn sanitize_for_report(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    let mut visible = 0usize;
+    let mut truncated = false;
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            skip_escape(&mut chars);
+            continue;
+        }
+        if c.is_control() {
+            // A tab advances to the next tab stop but counts as zero width in
+            // ki's wrapper: one space keeps the columns honest.
+            if c == '\t' && !out.ends_with(' ') {
+                out.push(' ');
+                visible += 1;
+            }
+            continue;
+        }
+        if visible == STDERR_REPORT_CHARS {
+            truncated = true;
+            break;
+        }
+        out.push(c);
+        visible += 1;
+    }
+    // A tab at the start of a stack-trace line would otherwise become a stray
+    // leading space in the report.
+    let mut text = out.trim().to_string();
+    if truncated {
+        text.push('…');
+    }
+    text
+}
+
+/// Consume one escape sequence after its `ESC` intro: CSI, OSC/APC/DCS/PM, or a
+/// two-character escape. Mirrors `kiqi_tui::ansi::escape_len` (this crate must
+/// not depend on the TUI, but both have to agree on where a sequence ends).
+fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    match chars.next() {
+        Some('[') => {
+            // CSI: parameter bytes, then a final byte in 0x40..=0x7e.
+            for c in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    break;
+                }
+            }
+        }
+        Some(']' | '_' | 'P' | '^') => {
+            // OSC / APC / DCS / PM: terminated by BEL or ST (ESC \\).
+            for c in chars.by_ref() {
+                if c == '\x07' {
+                    break;
+                }
+                if c == '\x1b' {
+                    if matches!(chars.peek(), Some('\\')) {
+                        chars.next();
+                    }
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The rendered doctor report. Pure: the only input is the rows, so the format
 /// is testable without a live server.
 pub fn render_doctor(rows: &[ServerDiagnostic], pending_notices: usize) -> String {
@@ -2661,10 +2821,20 @@ pub fn render_doctor(rows: &[ServerDiagnostic], pending_notices: usize) -> Strin
         rows.len()
     );
     for row in rows {
-        out.push_str(&format!("\n\n{} [{}]", row.name, row.launch));
+        // `name`, `launch` and `reason` can all carry config or OS text; the
+        // launch line is echoed verbatim on purpose (a wrong path is the bug),
+        // but never raw control bytes.
+        out.push_str(&format!(
+            "\n\n{} [{}]",
+            cap_chars(strip_escapes(&row.name), 60),
+            cap_chars(strip_escapes(&row.launch), LAUNCH_REPORT_CHARS)
+        ));
         out.push_str(&format!("\n  status:    {}", row.status.as_str()));
         if let Some(reason) = &row.reason {
-            out.push_str(&format!("\n  reason:    {reason}"));
+            out.push_str(&format!(
+                "\n  reason:    {}",
+                cap_chars(strip_escapes(reason), REASON_REPORT_CHARS)
+            ));
         }
         if row.status == ServerStatus::Connected {
             out.push_str(&format!("\n  tools:     {}", row.tools.len()));
@@ -2696,7 +2866,7 @@ pub fn render_doctor(rows: &[ServerDiagnostic], pending_notices: usize) -> Strin
                 if row.auto_read.is_empty() {
                     "(none)".to_string()
                 } else {
-                    row.auto_read.join(", ")
+                    join_capped(&row.auto_read, LIST_CAP)
                 }
             ));
             out.push_str(&format!(
@@ -2710,12 +2880,15 @@ pub fn render_doctor(rows: &[ServerDiagnostic], pending_notices: usize) -> Strin
         if !row.unknown_keys.is_empty() {
             out.push_str(&format!(
                 "\n  config:    unknown key(s): {}",
-                row.unknown_keys.join(", ")
+                join_capped(&row.unknown_keys, LIST_CAP)
             ));
         }
-        if !row.stderr_tail.is_empty() {
+        // `stderr_tail` is raw child output; sanitize here so every path into
+        // the transcript (this one included) gets text and nothing else.
+        let stderr = report_stderr_lines(&row.stderr_tail);
+        if !stderr.is_empty() {
             out.push_str("\n  stderr:");
-            for line in &row.stderr_tail {
+            for line in &stderr {
                 out.push_str(&format!("\n             | {line}"));
             }
         }
@@ -2736,7 +2909,16 @@ pub fn render_doctor(rows: &[ServerDiagnostic], pending_notices: usize) -> Strin
     if let Some(hint) = unrunnable_hint {
         out.push_str(&format!("\n\nhint: {hint}"));
     }
-    out
+    truncate_report(sanitize_report(&out))
+}
+
+fn truncate_report(out: String) -> String {
+    if out.chars().count() <= REPORT_MAX_CHARS {
+        return out;
+    }
+    let mut kept = cap_chars(out, REPORT_MAX_CHARS);
+    kept.push_str("\n…(report truncated)");
+    kept
 }
 
 fn render_live(live: &[(String, &'static str)]) -> String {
@@ -2786,11 +2968,13 @@ fn doctor_hints(row: &ServerDiagnostic) -> Vec<String> {
             hints.push(format!(
                 "configured but not subscribed: {} — the server rejected \
                  `resources/subscribe` (see the reload issue list)",
-                missing
-                    .iter()
-                    .map(|uri| uri.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                join_capped(
+                    &missing
+                        .iter()
+                        .map(|uri| uri.to_string())
+                        .collect::<Vec<_>>(),
+                    LIST_CAP
+                )
             ));
         }
         if !row.supports_subscribe && !row.configured_subscribe.is_empty() {
@@ -2933,6 +3117,59 @@ mod tests {
             report.contains("no server is connected, so no `{server}__*` tool exists this session"),
             "{report}"
         );
+    }
+
+    /// stderr from a child process is untrusted *for display*: the renderer
+    /// passes escape sequences straight to the terminal, so an unmodified tail
+    /// can clear the screen, drop the alternate screen out from under the TUI,
+    /// rewrite the window title, or desync the columns with a tab.
+    #[test]
+    fn doctor_report_sanitizes_server_stderr() {
+        let mut row = ServerDiagnostic {
+            name: "noisy".to_string(),
+            launch: "stdio: noisy".to_string(),
+            status: ServerStatus::Failed,
+            reason: Some("exit status 1".to_string()),
+            ..Default::default()
+        };
+        row.stderr_tail = vec![
+            "\u{1b}[2J\u{1b}]0;hijacked\u{7}\ttabbed \u{1b}[31mred\u{1b}[0m".to_string(),
+            "   ".to_string(),
+            "a".repeat(STDERR_REPORT_CHARS * 3),
+        ];
+        let report = render_doctor(&[row], 0);
+
+        assert!(report.contains("| tabbed red"), "{report}");
+        for forbidden in ['\u{1b}', '\u{7}', '\t', '\r'] {
+            assert!(
+                !report.contains(forbidden),
+                "{forbidden:?} leaked into the report: {report}"
+            );
+        }
+        assert!(
+            !report.contains("hijacked"),
+            "an OSC payload is not text: {report}"
+        );
+        // The over-long line is cut on a char boundary and marked.
+        let capped = report
+            .lines()
+            .find(|line| line.contains("| aaaa"))
+            .expect("the long line is still shown");
+        assert_eq!(
+            capped.chars().filter(|c| *c == 'a').count(),
+            STDERR_REPORT_CHARS
+        );
+        assert!(capped.ends_with('…'), "{capped}");
+        // A blank line does not become a `|` row.
+        assert!(!report.contains("| \n"), "{report}");
+    }
+
+    #[test]
+    fn report_truncation_keeps_char_boundaries() {
+        // "医" is three bytes: a byte-sliced truncation would panic here.
+        let out = truncate_report("医".repeat(REPORT_MAX_CHARS + 10));
+        assert!(out.ends_with("…(report truncated)"), "{out}");
+        assert!(out.chars().count() <= REPORT_MAX_CHARS + 32);
     }
 
     #[test]
