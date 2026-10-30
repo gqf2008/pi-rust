@@ -125,7 +125,7 @@ fn on_panel(row: &str) -> String {
 /// rectangle that replaces only its own cells. The overlay itself is sized to
 /// the box (auto width), not to the screen.
 fn frame(body: &[String], width: usize) -> Vec<String> {
-    const TITLE: &str = "WORK · alt-drag moves boxes · /work to close";
+    const TITLE: &str = "WORK · drag title to move · /work to close";
     const MAX_WIDTH: usize = 140;
     const MIN_WIDTH: usize = 60;
     let visible = |row: &str| kiqi_tui::ansi::visible_width(row);

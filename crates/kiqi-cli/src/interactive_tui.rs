@@ -993,6 +993,7 @@ fn begin_box_drag(
     column: u16,
     row: u16,
     screen_width: u16,
+    title_only: bool,
 ) -> bool {
     let mut top: Option<(usize, Option<String>, (u16, u16, u16, u16))> = None;
     let mut consider = |handle: &Arc<dyn kiqi_tui::tui::OverlayHandle>, node_id: Option<&str>| {
@@ -1000,6 +1001,11 @@ fn begin_box_drag(
             return;
         };
         if !state::cell_inside(rect, (column, row)) {
+            return;
+        }
+        // The title row is the drag handle; anything else on the box is a
+        // selection unless a modifier asks to move it.
+        if title_only && row != rect.1 {
             return;
         }
         let z = handle.overlay_id().unwrap_or(0);
@@ -2291,10 +2297,21 @@ pub async fn interactive_tui(
                         // every later selection drag) while moving an old box.
                         state_for_key.end_node_drag();
                         state_for_key.end_work_drag();
-                        // Boxes move only with Alt/Ctrl held: a plain press is
-                        // text selection, and the default-on work view must not
-                        // take the top of the screen (and every box the right
-                        // edge) away from copy/paste.
+                        // A box's title row is its drag handle: no modifier
+                        // needed, and it never selects. Alt/Ctrl anywhere on a
+                        // box still moves it; a plain press elsewhere is text
+                        // selection.
+                        if begin_box_drag(
+                            &state_for_key,
+                            &work_node_overlays_for_key,
+                            &work_overlay_for_key,
+                            m.column,
+                            m.row,
+                            screen_width,
+                            true,
+                        ) {
+                            continue;
+                        }
                         let wants_move =
                             m.modifiers.intersects(crossterm::event::KeyModifiers::ALT)
                                 || m.modifiers
@@ -2307,6 +2324,7 @@ pub async fn interactive_tui(
                                 m.column,
                                 m.row,
                                 screen_width,
+                                false,
                             )
                         {
                             continue;
