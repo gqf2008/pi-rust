@@ -24,6 +24,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Added
 
+- **`/mcp-reload`（别名 `/mcp`）。** 重新读取 `mcpServers` 配置并原地重连所有 MCP 服务器，
+  然后用新连接重建工具表——改服务器配置不再需要重启 `ki`。管理器与通知 mailbox 保持不变，
+  所以资源更新照常送达；命令会逐个列出连不上的服务器及原因，并显示当前的 MCP 工具数。
+  实现上是把 `servers` / `configured_names` 换成可替换的 `RwLock`，新增
+  `McpManager::reload`（新连接就位后才关旧的，进程树照常回收）。
 - **输入历史跨会话保留。** 之前 ↑/↓ 只能翻当前进程里提交过的消息，`ki` 一退出记忆就没了。
   现在每条提交的消息（含多行输入）追加到 `<agent_dir>/input-history.jsonl`，启动时读回
   最近 100 条，连续重复只留一条；↑/↓ 的翻找规则不变（输入框为空或已在翻历史时才取用，

@@ -2265,6 +2265,28 @@ async fn start_mcp_manager(
     client_servers: &[kiqi_mcp::ServerConfig],
 ) -> Arc<kiqi_mcp::McpManager> {
     let global = crate::settings::load_settings().unwrap_or_default();
+    let (merged, issues) = resolve_mcp_servers(cwd, project_trusted, client_servers, &global);
+    let (manager, start_issues) =
+        kiqi_mcp::McpManager::start_with_http_policy(&merged, cwd, global.http_idle_timeout_ms())
+            .await;
+    for issue in issues.iter().chain(start_issues.iter()) {
+        eprintln!("warning: mcp: {issue}");
+    }
+    Arc::new(manager)
+}
+
+/// The configured server list for this session: global `mcpServers`, a trusted
+/// project's entries on top, and any client-supplied (ACP) servers instead of
+/// the same-named settings entry.
+///
+/// Shared by the initial start and `/mcp-reload`, so a reload cannot resolve a
+/// different set than a fresh start would.
+fn resolve_mcp_servers(
+    cwd: &Path,
+    project_trusted: bool,
+    client_servers: &[kiqi_mcp::ServerConfig],
+    global: &crate::settings::Settings,
+) -> (Vec<kiqi_mcp::ServerConfig>, Vec<String>) {
     let project_settings = crate::settings::load_project_settings(cwd);
     // Top-level `signals` defaults: global first, a trusted project overrides
     // field by field. Project defaults are parsed only when trusted (an
@@ -2311,15 +2333,32 @@ async fn start_mcp_manager(
         merged.extend(client_servers.iter().cloned());
     }
 
-    let (manager, start_issues) =
-        kiqi_mcp::McpManager::start_with_http_policy(&merged, cwd, global.http_idle_timeout_ms())
-            .await;
-    issues.extend(start_issues);
+    (merged, issues)
+}
 
-    for issue in &issues {
-        eprintln!("warning: mcp: {issue}");
-    }
-    Arc::new(manager)
+/// `/mcp-reload`: re-read the MCP configuration and reconnect every server in
+/// place.
+///
+/// The manager keeps its identity (and its notice mailbox), so the caller can
+/// rebuild the tool registry through the normal reload path afterwards. Returns
+/// one line per problem, for the transcript note.
+pub async fn reload_mcp(reload_context: &ReloadContext) -> Vec<String> {
+    let global = crate::settings::load_settings().unwrap_or_default();
+    // ACP client servers are supplied per session and are not re-sent by this
+    // path; a reload in an ACP session therefore keeps only the settings-
+    // defined servers, which is what the editor sees on its next session anyway.
+    let (servers, mut issues) = resolve_mcp_servers(
+        &reload_context.cwd,
+        reload_context.project_trusted,
+        &[],
+        &global,
+    );
+    let reload_issues = reload_context
+        .mcp
+        .reload(&servers, &reload_context.cwd, global.http_idle_timeout_ms())
+        .await;
+    issues.extend(reload_issues);
+    issues
 }
 
 /// Build the `Session` facade for the chosen selection.

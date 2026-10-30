@@ -1186,12 +1186,15 @@ impl Drop for ServerHandle {
 
 /// Session-scoped owner of every configured server.
 pub struct McpManager {
-    servers: Vec<Arc<ServerHandle>>,
+    /// Swappable so `/mcp-reload` can replace the live connections in place:
+    /// every holder (tool adapters, the notice mailbox, the TUI) keeps this
+    /// same `Arc<McpManager>`.
+    servers: std::sync::RwLock<Vec<Arc<ServerHandle>>>,
     mailbox: Arc<McpNoticeMailbox>,
     /// Every configured server name (connected, skipped or failed), so the
     /// kiqi-cli tool-slice replace can recognize every MCP-contributed name —
     /// including a server that went away after contributing tools.
-    configured_names: Vec<String>,
+    configured_names: std::sync::RwLock<Vec<String>>,
     /// The MCP tool names that passed the session's tool policy
     /// (`--tools`/`--exclude-tools`/`--no-tools`), recorded by kiqi-cli's merge.
     /// A boundary refresh consults this so it can never resurrect a name the
@@ -1210,9 +1213,9 @@ impl Default for McpManager {
     /// (and the test harnesses) needs without spinning up a runtime.
     fn default() -> Self {
         Self {
-            servers: Vec::new(),
+            servers: std::sync::RwLock::new(Vec::new()),
             mailbox: Arc::new(McpNoticeMailbox::new()),
-            configured_names: Vec::new(),
+            configured_names: std::sync::RwLock::new(Vec::new()),
             allowed_tools: Mutex::new(None),
             injected_tools: Mutex::new(None),
         }
@@ -1245,58 +1248,51 @@ impl McpManager {
         http_idle_timeout_ms: Option<i64>,
     ) -> (Self, Vec<String>) {
         let mailbox = Arc::new(McpNoticeMailbox::new());
-        let mut configured_names = Vec::new();
-        let mut handles = Vec::new();
-        let mut issues = Vec::new();
-        for config in servers {
-            configured_names.push(config.name.clone());
-            if !config.enabled {
-                issues.push(format!(
-                    "mcp server {}: disabled (enabled=false), skipped",
-                    config.name
-                ));
-                continue;
-            }
-            match ServerHandle::connect(
-                config.clone(),
-                cwd,
-                Arc::clone(&mailbox),
-                http_idle_timeout_ms,
-            )
-            .await
-            {
-                Ok(handle) => {
-                    let handle = Arc::new(handle);
-                    // Config-driven auto-subscribe, after the handshake. One
-                    // failed uri is loud but never poisons the server.
-                    for uri in &handle.config.subscribe {
-                        if let Err(error) = handle
-                            .subscribe_uri(uri, SubscriptionOrigin::Config, None)
-                            .await
-                        {
-                            issues.push(format!(
-                                "mcp server {}: subscribing {uri}: {error} — subscription skipped",
-                                config.name
-                            ));
-                        }
-                    }
-                    handles.push(handle);
-                }
-                Err(reason) => {
-                    issues.push(format!("mcp server {}: {reason} — skipped", config.name))
-                }
-            }
-        }
+        let (handles, configured_names, issues) =
+            connect_servers(servers, cwd, Arc::clone(&mailbox), http_idle_timeout_ms).await;
         (
             Self {
-                servers: handles,
+                servers: std::sync::RwLock::new(handles),
                 mailbox,
-                configured_names,
+                configured_names: std::sync::RwLock::new(configured_names),
                 allowed_tools: Mutex::new(None),
                 injected_tools: Mutex::new(None),
             },
             issues,
         )
+    }
+
+    /// Replace the live connections with a fresh set from `servers`.
+    ///
+    /// The manager keeps its identity — and its notice mailbox — so a reload is
+    /// invisible to everything holding an `Arc<McpManager>`: new notices land in
+    /// the mailbox the session already drains, and the tool registry is rebuilt
+    /// from [`Self::tool_adapters`] by the caller's normal reload path. The old
+    /// connections are shut down (process trees reaped) only after the swap.
+    pub async fn reload(
+        &self,
+        servers: &[ServerConfig],
+        cwd: &Path,
+        http_idle_timeout_ms: Option<i64>,
+    ) -> Vec<String> {
+        let (handles, configured_names, issues) = connect_servers(
+            servers,
+            cwd,
+            Arc::clone(&self.mailbox),
+            http_idle_timeout_ms,
+        )
+        .await;
+        let previous = std::mem::replace(&mut *self.servers.write().unwrap(), handles);
+        *self.configured_names.write().unwrap() = configured_names;
+        // The names a boundary replace may remove are recomputed by the next
+        // merge; keeping the old records would let it delete a name that a new
+        // server just re-registered.
+        *self.allowed_tools.lock().unwrap() = None;
+        *self.injected_tools.lock().unwrap() = None;
+        for handle in previous {
+            handle.shutdown().await;
+        }
+        issues
     }
 
     /// One native tool adapter per discovered tool, across every live server —
@@ -1306,7 +1302,7 @@ impl McpManager {
     /// zero tools beyond its tools.
     pub fn tool_adapters(&self) -> Vec<Arc<dyn AgentTool>> {
         let mut adapters: Vec<Arc<dyn AgentTool>> = Vec::new();
-        for server in &self.servers {
+        for server in self.servers.read().unwrap().iter() {
             for tool in server.tools() {
                 // `read_resource` / `watch_resource` are reserved synthetic
                 // verbs. A server tool with the same bare name would otherwise
@@ -1400,7 +1396,11 @@ impl McpManager {
         let Some((prefix, _)) = name.split_once(TOOL_NAME_SEPARATOR) else {
             return false;
         };
-        self.configured_names.iter().any(|server| server == prefix)
+        self.configured_names
+            .read()
+            .unwrap()
+            .iter()
+            .any(|server| server == prefix)
     }
 
     /// Drain the resource-update notice mailbox. Called at session boundaries
@@ -1416,6 +1416,9 @@ impl McpManager {
     /// light notice — the update is still delivered, loudly degraded.
     pub async fn take_notices_with_auto_read(&self) -> crate::notice::McpNoticeBatch {
         let mut batch = self.mailbox.take();
+        // Snapshot the live set once: a reload may swap it mid-batch, and the
+        // handles here must stay the ones the notices came from.
+        let servers = self.servers.read().unwrap().clone();
         // ONE deadline for the whole batch. A per-read timeout alone multiplies
         // by the number of notices (up to `MAX_NOTICE_ENTRIES`), so a server
         // that stops responding would stall a turn boundary for N x timeout --
@@ -1427,8 +1430,7 @@ impl McpManager {
             .notices
             .iter()
             .filter_map(|notice| {
-                let handle = self
-                    .servers
+                let handle = servers
                     .iter()
                     .find(|handle| handle.server_name() == notice.server)?;
                 handle
@@ -1441,8 +1443,7 @@ impl McpManager {
             .max();
         let deadline = budget.map(|budget| tokio::time::Instant::now() + budget);
         for notice in &mut batch.notices {
-            let Some(handle) = self
-                .servers
+            let Some(handle) = servers
                 .iter()
                 .find(|handle| handle.server_name() == notice.server)
             else {
@@ -1498,6 +1499,8 @@ impl McpManager {
     /// failed server — it cannot produce notices, so it has nothing to wake.
     pub fn signal_config(&self, server: &str) -> Option<crate::config::SignalsConfig> {
         self.servers
+            .read()
+            .unwrap()
             .iter()
             .find(|handle| handle.server_name() == server)
             .map(|handle| handle.config.signals.clone())
@@ -1513,8 +1516,11 @@ impl McpManager {
     ) -> Option<crate::config::SignalsConfig> {
         let handle = self
             .servers
+            .read()
+            .unwrap()
             .iter()
-            .find(|handle| handle.server_name() == server)?;
+            .find(|handle| handle.server_name() == server)
+            .cloned()?;
         if !handle
             .config
             .subscribe
@@ -1531,8 +1537,11 @@ impl McpManager {
     pub async fn subscribe(&self, server: &str, uri: &str) -> Result<(), String> {
         let handle = self
             .servers
+            .read()
+            .unwrap()
             .iter()
             .find(|handle| handle.server_name() == server)
+            .cloned()
             .ok_or_else(|| format!("mcp server {server} is not running"))?;
         handle
             .subscribe_uri(uri, SubscriptionOrigin::Config, None)
@@ -1545,8 +1554,11 @@ impl McpManager {
     pub async fn unsubscribe(&self, server: &str, uri: &str) -> Result<(), String> {
         let handle = self
             .servers
+            .read()
+            .unwrap()
             .iter()
             .find(|handle| handle.server_name() == server)
+            .cloned()
             .ok_or_else(|| format!("mcp server {server} is not running"))?;
         handle
             .unsubscribe_uri(uri, SubscriptionOrigin::Config, None)
@@ -1557,7 +1569,10 @@ impl McpManager {
     /// Returns whether anything changed.
     pub async fn refresh_if_stale(&self) -> bool {
         let mut changed = false;
-        for server in &self.servers {
+        // Snapshot before awaiting: a lock guard is not `Send`, and the future
+        // is driven on other threads.
+        let servers = self.servers.read().unwrap().clone();
+        for server in servers {
             changed |= server.refresh_if_stale().await;
         }
         changed
@@ -1567,10 +1582,62 @@ impl McpManager {
     /// every subscription (and queued notice) — a torn-down connection must
     /// never leave deliverable state behind.
     pub async fn shutdown(&self) {
-        for server in &self.servers {
+        let servers = self.servers.read().unwrap().clone();
+        for server in servers {
             server.shutdown().await;
         }
     }
+}
+
+/// Connect every enabled server and auto-subscribe the configured uris.
+/// Shared by [`McpManager::start_with_http_policy`] and
+/// [`McpManager::reload`]; the mailbox is the caller's, so a reload keeps
+/// delivering notices to the session that installed it.
+async fn connect_servers(
+    servers: &[ServerConfig],
+    cwd: &Path,
+    mailbox: Arc<McpNoticeMailbox>,
+    http_idle_timeout_ms: Option<i64>,
+) -> (Vec<Arc<ServerHandle>>, Vec<String>, Vec<String>) {
+    let mut configured_names = Vec::new();
+    let mut handles = Vec::new();
+    let mut issues = Vec::new();
+    for config in servers {
+        configured_names.push(config.name.clone());
+        if !config.enabled {
+            issues.push(format!(
+                "mcp server {}: disabled (enabled=false), skipped",
+                config.name
+            ));
+            continue;
+        }
+        match ServerHandle::connect(
+            config.clone(),
+            cwd,
+            Arc::clone(&mailbox),
+            http_idle_timeout_ms,
+        )
+        .await
+        {
+            Ok(handle) => {
+                let handle = Arc::new(handle);
+                for uri in &handle.config.subscribe {
+                    if let Err(error) = handle
+                        .subscribe_uri(uri, SubscriptionOrigin::Config, None)
+                        .await
+                    {
+                        issues.push(format!(
+                            "mcp server {}: subscribing {uri}: {error} — subscription skipped",
+                            config.name
+                        ));
+                    }
+                }
+                handles.push(handle);
+            }
+            Err(reason) => issues.push(format!("mcp server {}: {reason} — skipped", config.name)),
+        }
+    }
+    (handles, configured_names, issues)
 }
 
 /// Connect the configured transport, complete the initialize handshake,
@@ -2260,6 +2327,38 @@ fn spawn_stderr_drain(stderr: tokio::process::ChildStderr, tail: Arc<Mutex<VecDe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/mcp-reload` swaps the live set in place: the manager keeps serving the
+    /// same mailbox and reports what the new config produced.
+    #[tokio::test]
+    async fn reload_swaps_the_server_set_and_reports_issues() {
+        let (manager, issues) = McpManager::start(&[], Path::new(".")).await;
+        assert!(issues.is_empty());
+
+        let (servers, parse_issues) = crate::config::parse_servers_with_defaults(
+            Some(&serde_json::json!({
+                "ghost": {"transport": "stdio", "command": "true", "enabled": false}
+            })),
+            &crate::config::SignalsDefaults::default(),
+        );
+        assert!(parse_issues.is_empty(), "{parse_issues:?}");
+
+        let issues = manager.reload(&servers, Path::new("."), None).await;
+        assert!(
+            issues.iter().any(|issue| issue.contains("disabled")),
+            "{issues:?}"
+        );
+        // A disabled server contributes no tools, and the policy records a
+        // boundary replace consults are reset for the next merge.
+        assert!(manager.tool_adapters().is_empty());
+        assert!(manager.injected_tools().is_none());
+        assert!(manager
+            .configured_names
+            .read()
+            .unwrap()
+            .iter()
+            .any(|name| name == "ghost"));
+    }
 
     #[test]
     fn tool_names_reject_dots_and_the_separator() {

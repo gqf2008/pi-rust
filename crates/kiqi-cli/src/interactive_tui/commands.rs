@@ -114,6 +114,24 @@ impl SlashCommand for AgentsCommand {
     }
 }
 
+/// `/mcp-reload` — settings changed under a running session (a server added,
+/// removed, or its command fixed): reconnect without restarting `ki`.
+pub(super) struct McpReloadCommand;
+impl SlashCommand for McpReloadCommand {
+    fn name(&self) -> &'static str {
+        "/mcp-reload"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["/mcp"]
+    }
+    fn description(&self) -> &'static str {
+        "Re-read mcpServers and reconnect MCP servers without restarting"
+    }
+    fn execute(&self, ctx: &CommandContext, _args: &str) {
+        let _ = ctx.tx.send(TuiMessage::ReloadMcp);
+    }
+}
+
 pub(super) struct ClearChatCommand;
 impl SlashCommand for ClearChatCommand {
     fn name(&self) -> &'static str {
@@ -872,6 +890,7 @@ pub(super) fn build_builtin_registry() -> CommandRegistry {
     r.register(Arc::new(ClearChatCommand));
     r.register(Arc::new(WorkCommand));
     r.register(Arc::new(AgentsCommand));
+    r.register(Arc::new(McpReloadCommand));
     r.register(Arc::new(ExitCommand));
     r.register(Arc::new(VersionCommand));
     r.register(Arc::new(ChangelogCommand));

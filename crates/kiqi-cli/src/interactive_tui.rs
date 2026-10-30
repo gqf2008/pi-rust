@@ -646,6 +646,9 @@ enum TuiMessage {
     /// `/skill <name>`: load one skill's instructions as this turn's user
     /// message (the explicit half of progressive skill disclosure).
     InvokeSkill(String),
+    /// `/mcp-reload`: re-read `mcpServers` and reconnect every MCP server in
+    /// place, then rebuild the tool registry from the new connections.
+    ReloadMcp,
     /// A background subagent exited. Delivered on the main loop so it starts a
     /// run when the session is idle and is steered (never dropped) when it is
     /// not — the same contract as `CronInject`.
@@ -3885,6 +3888,50 @@ pub async fn interactive_tui(
                         &format!("models.json changed but could not be reloaded: {error}"),
                     ),
                 }
+                tui.request_render(false);
+            }
+            Some(TuiMessage::ReloadMcp) => {
+                // Servers are reconnected in place (the manager keeps its
+                // mailbox), so the rebuild below is what makes their new tools
+                // visible: `reload_extension_resources` re-runs `merge_mcp_tools`
+                // against the live adapters.
+                add_note_message(&chat_container, "Reloading MCP servers…");
+                tui.request_render(false);
+                let issues = crate::session::reload_mcp(&ctx.reload_context).await;
+                let reload_ctx = ctx.reload_context.clone();
+                let outcome =
+                    crate::session::reload_extension_resources(harness, &reload_ctx).await;
+                let mut note = if issues.is_empty() {
+                    "MCP servers reconnected.".to_string()
+                } else {
+                    let mut text = format!("MCP reloaded with {} issue(s):", issues.len());
+                    for issue in &issues {
+                        text.push_str("\n  ");
+                        text.push_str(issue);
+                    }
+                    text
+                };
+                if outcome.had_errors {
+                    note.push_str(
+                        "\n(extension/resource reload reported errors; run /reload for details)",
+                    );
+                }
+                let tools = harness.get_active_tools().await.unwrap_or_default();
+                let mcp_tools: Vec<String> = tools
+                    .iter()
+                    .filter(|name| name.contains("__"))
+                    .cloned()
+                    .collect();
+                note.push_str(&format!(
+                    "\nMCP tools now {} tool(s): {}",
+                    mcp_tools.len(),
+                    if mcp_tools.is_empty() {
+                        "none".to_string()
+                    } else {
+                        mcp_tools.join(", ")
+                    }
+                ));
+                add_note_message(&chat_container, &note);
                 tui.request_render(false);
             }
             Some(TuiMessage::ReloadExtensions) => {
