@@ -1045,6 +1045,11 @@ pub async fn interactive_tui(
 ) -> i32 {
     // Stray library output must never land in the grid this TUI owns.
     let _stderr_to_log = StderrToLog::install();
+    diagnostic_log(&format!(
+        "[ki tui] mode={:?} screen_selection={}",
+        args.tui_mode,
+        matches!(args.tui_mode, crate::args::TuiMode::Fullscreen)
+    ));
     // A hung-up terminal must not leave this process spinning in crossterm.
     crate::tui_hangup::spawn();
     let lane: Arc<dyn AgentLane> = harness.lane("main");
@@ -2395,6 +2400,17 @@ pub async fn interactive_tui(
                                 .and_then(|s| s.fullscreen_copy_on_select)
                                 .unwrap_or(true);
 
+                            let frame_lines = tui_for_key.screen_lines();
+                            diagnostic_log(&format!(
+                                "[sel] up start=({},{}) end=({},{}) moved={} drag={} frame_rows={}",
+                                start.0,
+                                start.1,
+                                end.0,
+                                end.1,
+                                start != end,
+                                is_drag,
+                                frame_lines.len()
+                            ));
                             if auto_copy && is_drag {
                                 // The painted grid first: it is the only source
                                 // that covers the input editor and the status
@@ -2402,15 +2418,14 @@ pub async fn interactive_tui(
                                 // covered. The chat container remains the
                                 // fallback for backends without a frame
                                 // (main-screen mode).
-                                let selected_text =
-                                    selected_screen_text(&tui_for_key.screen_lines(), start, end)
-                                        .or_else(|| {
-                                            extract_selected_text(
-                                                &state_for_key.chat_container,
-                                                start,
-                                                end,
-                                            )
-                                        });
+                                let selected_text = selected_screen_text(&frame_lines, start, end)
+                                    .or_else(|| {
+                                        extract_selected_text(
+                                            &state_for_key.chat_container,
+                                            start,
+                                            end,
+                                        )
+                                    });
                                 if let Some(selected_text) = selected_text {
                                     if !selected_text.trim().is_empty() {
                                         // Say so: a silent copy leaves the user
@@ -2426,6 +2441,10 @@ pub async fn interactive_tui(
                                             "selection gathered but the clipboard is unavailable"
                                                 .to_string()
                                         };
+                                        diagnostic_log(&format!(
+                                            "[sel] chars={} copied={copied}",
+                                            selected_text.chars().count()
+                                        ));
                                         state_for_key.show_copy_notice(note);
                                         // Forced: a coalesced frame can be
                                         // dropped by the scheduler, and the
