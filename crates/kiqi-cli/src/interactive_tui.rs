@@ -2447,7 +2447,14 @@ pub async fn interactive_tui(
                             m.column,
                             m.row,
                         );
-                        diagnostic_log(&format!("[sel] clip={clip:?} at ({},{})", m.column, m.row));
+                        if clip.is_some() {
+                            // Only presses inside a box are worth a line; a
+                            // plain click would otherwise fill the log.
+                            diagnostic_log(&format!(
+                                "[sel] clip={clip:?} at ({},{})",
+                                m.column, m.row
+                            ));
+                        }
                         state_for_key.set_selection_clip(clip);
                         *state_for_key.selection_start.lock().unwrap() = Some((m.column, m.row));
                         *state_for_key.selection_end.lock().unwrap() = None;
