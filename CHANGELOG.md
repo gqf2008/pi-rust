@@ -11,6 +11,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-10-30
+
 ### Added
 
 - **工作视图（`/work`），默认打开。** 在回显区右上角叠加「agent 正在做什么」：一个汇总
