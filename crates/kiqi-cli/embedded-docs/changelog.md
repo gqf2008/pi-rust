@@ -101,6 +101,10 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Fixed
 
+- **右键复制后选中消失。** 左键拖选留着反显，右键把这段再复制一次（并显示 `copied N
+  char(s)`），然后清掉高亮——选区用完就不再占屏。左键释放时的自动复制保持原样
+  （`fullscreenCopyOnSelect: false` 可关）。Windows 上原本的右键粘贴保留：没有选区时
+  仍按粘贴处理。
 - **拖选有了可见高亮。** 复制一直是成功的，但画面上没有任何选中效果——拖完看上去像
   「没选中」。现在按下即开始绘制，拖动实时跟随，松开后保留到下一次按键；选中的格子以
   反显呈现（`Alt`/`Ctrl` 拖动移动盒子的手势不受影响）。

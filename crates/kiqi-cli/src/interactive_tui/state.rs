@@ -229,6 +229,9 @@ pub(super) struct TuiState {
     /// render tick drains it into the prompt editor; a voice extension drops a
     /// transcription in as an editable draft rather than sending it.
     pub(super) editor_text: kiqi_host::EditorTextMailbox,
+    /// The last completed drag, kept so a right-click can copy it again and
+    /// then drop the highlight.
+    pub(super) last_span: std::sync::Mutex<Option<((u16, u16), (u16, u16))>>,
     /// A short-lived footer notice ("copied 42 char(s)"). The tick re-applies
     /// it until it expires: the working spinner and the auto-send countdown both
     /// write the same status line, and a selection confirmation that a later
@@ -1752,6 +1755,20 @@ impl TuiState {
                 )
             })
             .collect()
+    }
+
+    /// Remember the span a drag just covered.
+    pub(super) fn set_last_span(&self, span: ((u16, u16), (u16, u16))) {
+        *self.last_span.lock().unwrap() = Some(span);
+    }
+
+    /// Take the last drag's span (a right-click consumes it).
+    pub(super) fn take_last_span(&self) -> Option<((u16, u16), (u16, u16))> {
+        self.last_span.lock().unwrap().take()
+    }
+
+    pub(super) fn clear_last_span(&self) {
+        *self.last_span.lock().unwrap() = None;
     }
 
     /// Show a footer notice for a few seconds (copy confirmations).

@@ -1387,6 +1387,7 @@ pub async fn interactive_tui(
         work_offset: std::sync::Mutex::new((0, 0)),
         work_drag: std::sync::Mutex::new(None),
         copy_notice: std::sync::Mutex::new(None),
+        last_span: std::sync::Mutex::new(None),
         work_node_offsets: std::sync::Mutex::new(std::collections::HashMap::new()),
         work_node_drag: std::sync::Mutex::new(None),
         todo_lines: std::sync::Mutex::new(Vec::new()),
@@ -2396,6 +2397,10 @@ pub async fn interactive_tui(
                             // down/up, and a fast drag then copied nothing.
                             let is_drag = state_for_key.selection_end.lock().unwrap().is_some()
                                 || start != end;
+                            if is_drag {
+                                // Kept for a follow-up right-click copy.
+                                state_for_key.set_last_span((start, end));
+                            }
                             *state_for_key.selection_end.lock().unwrap() = Some(end);
 
                             // Check if auto-copy is enabled
@@ -2461,6 +2466,36 @@ pub async fn interactive_tui(
                         *state_for_key.selection_start.lock().unwrap() = None;
                         *state_for_key.selection_end.lock().unwrap() = None;
                     }
+                    MouseEventKind::Down(crossterm::event::MouseButton::Right) => {
+                        // Right-click copies the drag that is still highlighted,
+                        // then drops the highlight: the selection has served
+                        // its purpose and a lingering inverse block is noise.
+                        let Some((first, last)) = state_for_key.take_last_span() else {
+                            continue;
+                        };
+                        let copied = selected_screen_text(&tui_for_key.screen_lines(), first, last)
+                            .filter(|text| !text.trim().is_empty())
+                            .map(|text| {
+                                let copied = copy_to_clipboard(&text);
+                                diagnostic_log(&format!(
+                                    "[sel] right-click chars={} copied={copied}",
+                                    text.chars().count()
+                                ));
+                                let note = if copied {
+                                    format!("copied {} char(s)", text.chars().count())
+                                } else {
+                                    "selection gathered but the clipboard is unavailable"
+                                        .to_string()
+                                };
+                                state_for_key.show_copy_notice(note);
+                                copied
+                            })
+                            .unwrap_or(false);
+                        let _ = copied;
+                        tui_for_key.set_selection(None);
+                        tui_for_key.request_render(true);
+                        continue;
+                    }
                     _ => {}
                 }
                 continue;
@@ -2468,6 +2503,7 @@ pub async fn interactive_tui(
             // A key ends the mouse selection's highlight; the text itself was
             // already copied when the button came up.
             tui_for_key.set_selection(None);
+            state_for_key.clear_last_span();
             let Event::Key(key) = ev else {
                 if let Event::Paste(text) = ev {
                     crate::key_trace::note(&format!(
