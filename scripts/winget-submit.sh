@@ -23,7 +23,12 @@ cd "$(git rev-parse --show-toplevel)"
 
 me=$(gh api user --jq .login) || die "gh is not authenticated"
 branch="kiqi-$VERSION"
-dir="manifests/b/gqf2008/ki/$VERSION"
+# The manifest path is manifests/<first letter of the publisher>/<publisher>/…,
+# not a fixed "b": a hardcoded b/ made every submission since 0.4.2 fail
+# validation ("the manifest file path must match PackageIdentifier and
+# PackageVersion: actual manifests\\b\\gqf2008\\ki, expected manifests\\g\\…").
+publisher="gqf2008"
+dir="manifests/${publisher:0:1}/$publisher/ki/$VERSION"
 up=$(gh api repos/microsoft/winget-pkgs/commits/master --jq .sha) \
   || die "could not read upstream master"
 
