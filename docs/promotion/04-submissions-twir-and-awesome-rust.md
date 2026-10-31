@@ -134,8 +134,11 @@ Exact template, from their CONTRIBUTING.md:
 Entry to paste (with the CI badge, which they also ask for):
 
 ```markdown
-* [gqf2008/pi-rust](https://github.com/gqf2008/pi-rust) [[kiqi-agent](https://crates.io/crates/kiqi-agent)] - Library-first coding-agent runtime: composable provider, agent-loop, tool and session crates, plus a terminal agent and a stable `#[repr(C)]` extension ABI. [![CI](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml)
+* [gqf2008/pi-rust](https://github.com/gqf2008/pi-rust) - Rust coding-agent runtime: composable provider, agent-loop, tool and session crates, plus a terminal agent, an ACP server for editors, and a wasm extension ABI (WIT). [![CI](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml)
 ```
+
+The `/ [CRATE]` slot many lists offer is left out on purpose: nothing is
+published to crates.io, so that link would be dead on arrival.
 
 **Where it goes:** `README.md` → `### Artificial Intelligence`. That section has
 no generic agents subsection; the agent runtimes currently live under

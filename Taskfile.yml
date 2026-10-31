@@ -87,7 +87,7 @@ tasks:
       - rustc --edition=2021 release-helper.rs -o "{{.KI_RELEASE_HELPER}}"
 
   docs:sync:
-    desc: 同步仓库文档到 pi-cli 的 embedded-docs（include_str! 快照，CI 会校验）
+    desc: 同步仓库文档到 kiqi-cli 的 embedded-docs（include_str! 快照，CI 会校验）
     cmds:
       - sh scripts/sync-embedded-docs.sh
 

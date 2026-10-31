@@ -158,9 +158,9 @@ is exactly the case where guessing would be worse than saying nothing.
 
 What is known without a browser:
 
-- **lib.rs** auto-indexes crates.io, so the nine `kiqi-*` crates are already
-  listed there with no submission step. That is coverage we did not have to ask
-  for, and it is the one directory channel currently working.
+- **lib.rs** auto-indexes crates.io, so it would list the `kiqi-*` crates with no
+  submission step — but all ten are `publish = false`, so none of them appears
+  there. That channel stays closed until a crate is published.
 - **AlternativeTo** is the highest-value unverified channel: it is a
   *substitution* directory, so ki's natural position is as an alternative to
   Claude Code / Codex CLI, which is the same search intent the new

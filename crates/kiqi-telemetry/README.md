@@ -1,8 +1,5 @@
 # kiqi-telemetry
 
-[![crates.io](https://img.shields.io/crates/v/kiqi-telemetry.svg)](https://crates.io/crates/kiqi-telemetry)
-[![docs.rs](https://docs.rs/kiqi-telemetry/badge.svg)](https://docs.rs/kiqi-telemetry)
-
 Minimal span and event contracts, with a no-op default. This is the smallest
 crate in the family and it exists so that instrumentation is a *choice*: the
 agent loop, providers and tools emit spans through a trait object that does
@@ -10,9 +7,11 @@ nothing unless you supply a real context.
 
 ## Install
 
+The crates are not published to crates.io; depend on them from this repository.
+
 ```toml
 [dependencies]
-kiqi-telemetry = "0.3"
+kiqi-telemetry = { git = "https://github.com/gqf2008/pi-rust" }
 ```
 
 ## Why a whole crate
@@ -44,7 +43,7 @@ assertions in tests.
 
 ## Documentation
 
-- Crate docs: <https://docs.rs/kiqi-telemetry>
+- Crate docs: `cargo doc --open -p kiqi-telemetry`
 
 ## License
 

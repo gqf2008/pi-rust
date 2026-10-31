@@ -1,24 +1,23 @@
 # kiqi-agent
 
-[![crates.io](https://img.shields.io/crates/v/kiqi-agent.svg)](https://crates.io/crates/kiqi-agent)
-[![docs.rs](https://docs.rs/kiqi-agent/badge.svg)](https://docs.rs/kiqi-agent)
-
 The provider-agnostic agent runtime: the agent loop, the `AgentTool` trait,
 events, hooks, queues and cancellation. This is the layer you embed when you
 want to build your own agent rather than use the `ki` CLI.
 
 ## Install
 
+The crates are not published to crates.io; depend on them from this repository.
+
 ```toml
 [dependencies]
-kiqi-agent = "0.3"
-kiqi-ai = "0.3"
+kiqi-agent = { git = "https://github.com/gqf2008/pi-rust" }
+kiqi-ai = { git = "https://github.com/gqf2008/pi-rust" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
 For built-in file and shell tools, add
-[`kiqi-tools`](https://crates.io/crates/kiqi-tools). For durable sessions and
-compaction, add [`kiqi-harness`](https://crates.io/crates/kiqi-harness).
+[`kiqi-tools`](../kiqi-tools). For durable sessions and
+compaction, add [`kiqi-harness`](../kiqi-harness).
 
 ## Design
 
@@ -137,7 +136,7 @@ dropped by the loop, so a tool never has to track settlement itself. Returning
 `Err(AgentError)` turns into an error tool result, not a failed run.
 
 For real implementations, wrap the JSON Schema derivation with `schemars` and
-start from [`kiqi-tools`](https://crates.io/crates/kiqi-tools), which contains
+start from [`kiqi-tools`](../kiqi-tools), which contains
 complete examples of a filesystem tool and a streaming shell tool.
 
 ## Observing a run
@@ -151,14 +150,14 @@ run (`AgentStart`/`AgentEnd`), each assistant message
 
 | Crate | Role |
 | ----- | ---- |
-| [`kiqi-ai`](https://crates.io/crates/kiqi-ai) | Provider-agnostic message and streaming types |
-| [`kiqi-tools`](https://crates.io/crates/kiqi-tools) | `read`/`write`/`edit`/`bash` and friends |
-| [`kiqi-harness`](https://crates.io/crates/kiqi-harness) | Sessions, JSONL persistence, compaction |
-| [`kiqi-cli`](https://crates.io/crates/kiqi-cli) | The `ki` terminal agent built on all of the above |
+| [`kiqi-ai`](../kiqi-ai) | Provider-agnostic message and streaming types |
+| [`kiqi-tools`](../kiqi-tools) | `read`/`write`/`edit`/`bash` and friends |
+| [`kiqi-harness`](../kiqi-harness) | Sessions, JSONL persistence, compaction |
+| [`kiqi-cli`](../kiqi-cli) | The `ki` terminal agent built on all of the above |
 
 ## Documentation
 
-- Crate docs: <https://docs.rs/kiqi-agent>
+- Crate docs: `cargo doc --open -p kiqi-agent`
 - Architecture: [docs/architecture/overview.md](https://github.com/gqf2008/pi-rust/blob/main/docs/architecture/overview.md)
 - Project structure guide: [docs/agent/project-structure.md](https://github.com/gqf2008/pi-rust/blob/main/docs/agent/project-structure.md)
 

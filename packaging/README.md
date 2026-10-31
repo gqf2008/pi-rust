@@ -3,7 +3,7 @@
 ki has one live binary install path today (`scripts/install.sh`), plus a source build.
 The package-manager manifests in this directory are prepared for the project's
 own owner (`gqf2008`) but have **not been published**; the taps under
-`bigfish1913` belong to an unrelated fork and carry a different tool (`rpi`).
+`bigfish1913` belong to an unrelated project and carry a different tool (`rpi`).
 Every manifest still points at a **real release asset** with its **real
 checksum** — none of it is a template with placeholders.
 

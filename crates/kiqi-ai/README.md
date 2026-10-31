@@ -1,8 +1,5 @@
 # kiqi-ai
 
-[![crates.io](https://img.shields.io/crates/v/kiqi-ai.svg)](https://crates.io/crates/kiqi-ai)
-[![docs.rs](https://docs.rs/kiqi-ai/badge.svg)](https://docs.rs/kiqi-ai)
-
 The unified, provider-agnostic LLM layer: message and content types, the
 `Provider` trait, streaming events, and concrete provider implementations.
 
@@ -12,17 +9,19 @@ deterministic in-process `faux` provider.
 
 ## Install
 
+The crates are not published to crates.io; depend on them from this repository.
+
 ```toml
 [dependencies]
 # Types + the faux provider only. No HTTP stack, no network at build time.
-kiqi-ai = "0.3"
+kiqi-ai = { git = "https://github.com/gqf2008/pi-rust" }
 ```
 
 ```toml
 [dependencies]
 # Adds the real HTTP providers (Anthropic Messages, OpenAI-compatible Chat
 # Completions / Responses, and OpenAI-compatible gateways).
-kiqi-ai = { version = "0.3", features = ["providers"] }
+kiqi-ai = { git = "https://github.com/gqf2008/pi-rust", features = ["providers"] }
 ```
 
 | Feature | Default | What it enables |
@@ -99,13 +98,13 @@ tool → result → follow-up cycle offline. See
 
 | Crate | Role |
 | ----- | ---- |
-| [`kiqi-agent`](https://crates.io/crates/kiqi-agent) | The agent loop built on this layer |
-| [`kiqi-harness`](https://crates.io/crates/kiqi-harness) | Sessions, persistence, compaction |
-| [`kiqi-cli`](https://crates.io/crates/kiqi-cli) | The `ki` terminal agent |
+| [`kiqi-agent`](../kiqi-agent) | The agent loop built on this layer |
+| [`kiqi-harness`](../kiqi-harness) | Sessions, persistence, compaction |
+| [`kiqi-cli`](../kiqi-cli) | The `ki` terminal agent |
 
 ## Documentation
 
-- Crate docs: <https://docs.rs/kiqi-ai>
+- Crate docs: `cargo doc --open -p kiqi-ai`
 - Architecture: [docs/architecture/overview.md](https://github.com/gqf2008/pi-rust/blob/main/docs/architecture/overview.md)
 
 ## License

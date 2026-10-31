@@ -1,22 +1,21 @@
 # kiqi-tui
 
-[![crates.io](https://img.shields.io/crates/v/kiqi-tui.svg)](https://crates.io/crates/kiqi-tui)
-[![docs.rs](https://docs.rs/kiqi-tui/badge.svg)](https://docs.rs/kiqi-tui)
-
 The terminal UI primitives behind the `ki` interactive agent: a component
 model, layout containers, an editor, transcript rendering, and both fullscreen
 and main-screen terminal modes.
 
-This is the rendering layer, not an extension point. Agents extend `ki` by
-registering tools and event handlers (see
-[`kiqi-extension-sdk`](https://crates.io/crates/kiqi-extension-sdk)), and the CLI decides
-how to draw them.
+This is the rendering layer, not an extension point. Agents extend `ki` as wasm
+components — the contract is
+[`extensions/kiqi-extension.wit`](../../extensions/kiqi-extension.wit), and the
+CLI decides how to draw whatever those components register.
 
 ## Install
 
+The crates are not published to crates.io; depend on them from this repository.
+
 ```toml
 [dependencies]
-kiqi-tui = "0.3"
+kiqi-tui = { git = "https://github.com/gqf2008/pi-rust" }
 ```
 
 Built on `crossterm`; no async runtime required.
@@ -77,7 +76,7 @@ navigation — the source is at
 
 ## Documentation
 
-- Crate docs: <https://docs.rs/kiqi-tui>
+- Crate docs: `cargo doc --open -p kiqi-tui`
 - [TUI gap analysis](https://github.com/gqf2008/pi-rust/blob/main/docs/README.md)
 
 ## License

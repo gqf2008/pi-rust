@@ -55,7 +55,7 @@ body:
     id: install
     attributes:
       label: How did you install ki?
-      placeholder: "cargo install kiqi-cli / cargo install --path crates/kiqi-cli / prebuilt binary"
+      placeholder: "cargo install --path crates/kiqi-cli / prebuilt installer (scripts/install.sh)"
     validations:
       required: true
 

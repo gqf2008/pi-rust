@@ -5,9 +5,10 @@ All notable changes to the `kiqi-*` crate family are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The nine published crates share one workspace version and are released together
-in dependency order. `git tag vX.Y.Z` marks the commit that a release was cut
-from; the matching [GitHub Release](../../releases) carries the same notes.
+The ten `kiqi-*` crates share one workspace version and are released together
+in dependency order; none is published to crates.io. `git tag vX.Y.Z` marks the
+commit that a release was cut from; the matching [GitHub Release](../../releases)
+carries the same notes.
 
 ## [Unreleased]
 
@@ -1946,7 +1947,7 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 Early crates.io publications while the workspace layout, provider layer and
 agent loop were being established. See `git log` for details.
 
-[Unreleased]: https://github.com/bigfish1913/pi-rust/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/gqf2008/pi-rust/compare/v0.4.7...HEAD
 [0.3.3]: https://github.com/bigfish1913/pi-rust/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/bigfish1913/pi-rust/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/bigfish1913/pi-rust/compare/v0.3.0...v0.3.1

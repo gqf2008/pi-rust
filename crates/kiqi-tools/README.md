@@ -1,12 +1,9 @@
 # kiqi-tools
 
-[![crates.io](https://img.shields.io/crates/v/kiqi-tools.svg)](https://crates.io/crates/kiqi-tools)
-[![docs.rs](https://docs.rs/kiqi-tools/badge.svg)](https://docs.rs/kiqi-tools)
-
 The built-in agent tools and the execution environment they run against:
 `read`, `write`, `edit`, `bash`, plus `grep`, `find`, `ls` and `powershell`,
 implemented as `AgentTool`s that any agent built on
-[`kiqi-agent`](https://crates.io/crates/kiqi-agent) can use.
+[`kiqi-agent`](../kiqi-agent) can use.
 
 The point of the crate is the split between *what a tool does* and *where it
 runs*. Tools are written against `ExecutionEnv`, so the same `read` tool works
@@ -15,10 +12,12 @@ test suite never touches your disk.
 
 ## Install
 
+The crates are not published to crates.io; depend on them from this repository.
+
 ```toml
 [dependencies]
-kiqi-tools = "0.3"
-kiqi-agent = "0.3"
+kiqi-tools = { git = "https://github.com/gqf2008/pi-rust" }
+kiqi-agent = { git = "https://github.com/gqf2008/pi-rust" }
 ```
 
 ## Execution environments
@@ -102,14 +101,14 @@ Pi-compatible set — and exposes the rest through the `default_tools` setting.
 
 | Crate | Role |
 | ----- | ---- |
-| [`kiqi-agent`](https://crates.io/crates/kiqi-agent) | The `AgentTool` trait these tools implement |
-| [`kiqi-ai`](https://crates.io/crates/kiqi-ai) | Message and tool-schema types |
-| [`kiqi-harness`](https://crates.io/crates/kiqi-harness) | Sessions and the run loop that drives them |
-| [`kiqi-cli`](https://crates.io/crates/kiqi-cli) | The terminal agent |
+| [`kiqi-agent`](../kiqi-agent) | The `AgentTool` trait these tools implement |
+| [`kiqi-ai`](../kiqi-ai) | Message and tool-schema types |
+| [`kiqi-harness`](../kiqi-harness) | Sessions and the run loop that drives them |
+| [`kiqi-cli`](../kiqi-cli) | The terminal agent |
 
 ## Documentation
 
-- Crate docs: <https://docs.rs/kiqi-tools>
+- Crate docs: `cargo doc --open -p kiqi-tools`
 - Architecture: [docs/architecture/overview.md](https://github.com/gqf2008/pi-rust/blob/main/docs/architecture/overview.md)
 
 ## License

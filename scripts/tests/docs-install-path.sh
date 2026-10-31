@@ -42,22 +42,29 @@ fi
 # not published; the guides' first install snippet was the same dead command.
 for doc in \
     "$ROOT/README.md" \
+    "$ROOT/ROADMAP.md" \
     "$ROOT/docs/kiqi-tool/README.md" \
     "$ROOT/docs/kiqi-tool/user-guide.md" \
     "$ROOT/docs/guides/user-guide.md" \
-    "$ROOT/crates/kiqi-cli/README.md"
+    "$ROOT/crates/kiqi-cli/README.md" \
+    "$ROOT"/crates/*/README.md
 do
     [ -f "$doc" ] || continue
     rel=${doc#"$ROOT"/}
 
     # No crates.io badges for a crate that is not on crates.io.
-    grep -q 'img.shields.io/crates/v/kiqi-cli' "$doc" && {
+    grep -q 'img.shields.io/crates/v/kiqi-' "$doc" && {
         echo "FAIL: $rel has a crates.io version badge for an unpublished crate" >&2
         status=1
     }
     # No link to a crates.io crate page (the doc's own prose explains there is none).
     grep -q 'crates.io/crates/kiqi-' "$doc" && {
         echo "FAIL: $rel links to crates.io crate pages; nothing is published there" >&2
+        status=1
+    }
+    # Same for docs.rs: `publish = false` means no page is ever built.
+    grep -q 'docs\.rs/kiqi-' "$doc" && {
+        echo "FAIL: $rel links to a docs.rs page; nothing is published there" >&2
         status=1
     }
 
@@ -74,10 +81,16 @@ do
             status=1
         }
         # The supported source build must be present instead.
-        grep -q 'cargo install --path crates/kiqi-cli' "$doc" || {
-            echo "FAIL: $rel does not show the working source-install command" >&2
-            status=1
-        }
+        # Only the docs a new user starts from must spell out the source install;
+        # a crate README shows a dependency line instead, and ROADMAP links out.
+        case "$rel" in
+            README.md|docs/kiqi-tool/README.md|docs/kiqi-tool/user-guide.md|\
+            docs/guides/user-guide.md|crates/kiqi-cli/README.md)
+                grep -q 'cargo install --path crates/kiqi-cli' "$doc" || {
+                    echo "FAIL: $rel does not show the working source-install command" >&2
+                    status=1
+                } ;;
+        esac
     fi
 
     # `ki install <name>` resolves the crate through crates.io (install.rs's header
@@ -142,8 +155,12 @@ for rel in $(git ls-files '*.md' 'scripts/install.sh' 'scripts/install.ps1' \
     '.github/ISSUE_TEMPLATE/*.yml' 2>/dev/null); do
     is_exempt_file "$rel" && continue
     [ -f "$rel" ] || continue
+    # A line may name the other project only to warn about it: the exemption
+    # needs the phrase *and* an explicit prohibition on the same line, so
+    # `... | sh  # unrelated project` cannot slip through.
     grep -n 'bigfish1913/pi-rust' "$rel" \
-        | grep -vE 'star-history|Upstream|cherry-pick|unrelated (fork|project)' >/dev/null && {
+        | grep -vE 'star-history|Upstream|cherry-pick' \
+        | grep -vE 'unrelated (fork|project).*(do not use|不要|never)' >/dev/null && {
         echo "FAIL: $rel links to bigfish1913/pi-rust," >&2
         echo "      which serves a different project (rpi v0.6.1, rpi-v* assets)" >&2
         status=1

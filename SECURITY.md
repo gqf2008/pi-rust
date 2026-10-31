@@ -62,9 +62,10 @@ it. The following areas are treated as security-relevant:
 - **Untrusted input handling.** Provider error bodies and model output are
   sanitized before they reach the terminal, because terminal control sequences
   can corrupt or spoof the TUI. Regressions here are in scope.
-- **Package installation.** `ki install` builds and installs a crate with
-  Cargo. Build scripts in a third-party extension execute arbitrary code, so
-  the provenance and trust checks around installation are in scope.
+- **Extension installation.** `ki insmod` installs a wasm component that runs
+  inside the wasmtime sandbox with only the capabilities its install approved.
+  The provenance and trust checks around installation are in scope; a cdylib
+  no longer loads.
 
 ## Out of scope
 

@@ -4,8 +4,9 @@ This is a direction document, not a commitment. It records what the project is
 working on next and why, so that issues and PRs can be judged against it. For
 what has already shipped, see [CHANGELOG.md](CHANGELOG.md).
 
-Current release: **0.4.7**. Install with `scripts/install.sh`, Homebrew, Scoop
-or winget — the crates are not on crates.io.
+Current release: **0.4.7**. Install with `scripts/install.sh` / `install.ps1`, or
+build from source — the crates are not on crates.io, and the package-manager
+taps are staged under `packaging/` but not published yet (`packaging/README.md`).
 
 ## Where the project is now
 
@@ -33,9 +34,11 @@ What is solid today:
 ### 1. Distribution without a Rust toolchain
 
 Shipped in 0.4.7: prebuilt `x86_64`/`aarch64` binaries for Linux, macOS and
-Windows, `scripts/install.sh` and `install.ps1`, a Homebrew formula, a Scoop
-manifest and a winget package — every channel is refreshed from one release with
-`scripts/refresh-channels.sh`. Nothing here needs a Rust toolchain any more.
+Windows, and `scripts/install.sh` / `install.ps1`, which verify the published
+SHA-256 before installing. Nothing here needs a Rust toolchain any more. The
+Homebrew formula, the Scoop manifest and the winget package are written and
+refreshed from one release by `scripts/refresh-channels.sh`, but they are **not
+published** yet — `packaging/README.md` tracks each channel.
 
 ### 2. Documentation that stands on its own
 
@@ -43,8 +46,9 @@ manifest and a winget package — every channel is refreshed from one release wi
   the workspace README (there are no crates.io/docs.rs pages — `publish = false`).
 - A task-oriented tutorial that goes from `scripts/install.sh` to a working
   custom tool, in one page.
-- Keep `docs/native-pi-missing-features.md` current: it is the honest answer to
-  "is this really at parity?" and it is more useful than a compatibility claim.
+- Keep the parity story honest and measured: `docs/performance/benchmark-vs-pi.md`
+  holds the numbers, and the README says plainly what `ki` does not do. A
+  compatibility claim without either is worse than none.
 
 ### 3. Provider breadth
 
@@ -75,7 +79,7 @@ harness are negligible (ki's `--version` and its cold start differ by 0.2 ms).
 
 The one real startup cost is **extension loading**, and it scales with what the user
 installed: the same measurement reads ~100 ms on a machine whose
-`~/.ki/agent/extensions` holds 25 extension DLLs. So the work here is:
+`~/.ki/agent/extensions` holds 25 installed wasm extensions. So the work here is:
 
 - make extension discovery and loading lazy (or parallel) so startup does not
   scale with the number of installed extensions;

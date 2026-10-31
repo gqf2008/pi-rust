@@ -15,7 +15,7 @@ By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 - **Extensions** — wasm guests live in
   [`extensions/wasm/`](extensions/wasm) and are built with `ki insmod --build`.
   Bugs in the ABI or the loader itself belong in this repository too.
-- **Documentation** — `README.md`, `docs/`, and the static site in `website/`
+- **Documentation** — `README.md`, `docs/`, and the per-crate READMEs
   are all fair game. Typos and broken links are welcome as direct PRs.
 - **Code** — see below.
 
@@ -66,7 +66,7 @@ provider to the default `cargo test` path.
 
 ## Repository layout
 
-The workspace directories and the published crate names both use the `kiqi-`
+The workspace directories and the crate names both use the `kiqi-`
 prefix (`crates/kiqi-ai` ↔ `kiqi-ai`). `package.name` in each `Cargo.toml` is the
 crate name; the directory name is not part of the public API.
 
@@ -77,7 +77,9 @@ crate name; the directory name is not part of the public API.
 | `crates/kiqi-agent`                  | `kiqi-agent`      |
 | `crates/kiqi-tools`                  | `kiqi-tools`      |
 | `crates/kiqi-harness`                | `kiqi-harness`    |
+| `crates/kiqi-mcp`                    | `kiqi-mcp`        |
 | `crates/kiqi-cli`                    | `kiqi-cli`        |
+| `crates/kiqi-acp`                    | `kiqi-acp`        |
 | `crates/kiqi-tui`                    | `kiqi-tui`        |
 | `crates/kiqi-host`                   | `kiqi-host`       |
 
@@ -88,8 +90,9 @@ kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → ki
 ```
 
 `kiqi-host` sits beside the runtime chain: its contract and dispatch spine
-build without wasmtime (so `kiqi-tools` can read the env-var names), and the
-wasmtime backend is behind the `wasm` feature that only `kiqi-cli` enables.
+build without wasmtime (so `kiqi-acp` and `kiqi-cli` share the event tags and
+dialog semantics), and the wasmtime backend is behind the `wasm` feature that
+only `kiqi-cli` enables.
 Adding a dependency that points backwards (for example `kiqi-agent` depending
 on `kiqi-cli`) will be rejected.
 

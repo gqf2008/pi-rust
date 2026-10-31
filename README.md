@@ -74,15 +74,15 @@ The crates are not published to crates.io, so `cargo install kiqi-cli` does not 
 it would fetch a different (or no) package.
 
 **Package managers:** not available yet. `gqf2008/homebrew-tap` and
-`gqf2008/scoop-bucket` do not exist, and the `bigfish1913` taps belong to the
-unrelated fork — they carry that project's `rpi` formula/manifest, not `ki` — so
+`gqf2008/scoop-bucket` do not exist, and the `bigfish1913` taps belong to an
+unrelated project — they carry that project's `rpi` formula/manifest, not `ki` — so
 `brew install ki` / `scoop install ki` have nothing to install. `packaging/` holds
 a formula and manifests that have never been published. The open winget PRs
 (`#441442`, `#444745`) are for the other project's `bigfish1913.rpi`, not `ki`.
 
-Use the prebuilt installer or a source build until then:
+Use the prebuilt installer or a source build until then.
 
-**From source:**
+**Offline examples** — the smallest agent, no credentials and no network:
 
 ```bash
 git clone https://github.com/gqf2008/pi-rust.git
@@ -176,8 +176,9 @@ A few crates sit outside that chain:
 - `kiqi-acp` is the Agent Client Protocol server behind `ki acp serve`.
 - `kiqi-tui` depends on no other `kiqi-*` crate.
 - `kiqi-host` is the extension-side crate: the `Extension` contract plus the event
-  dispatch spine (built always, so `kiqi-tools` can read the env-var names and
-  everyone agrees on the boundary strings), with the wasmtime-backed wasm
+  dispatch spine (built without wasmtime, so `kiqi-acp` and `kiqi-cli` share the
+  event tags and dialog semantics without pulling the sandbox in), with the
+  wasmtime-backed wasm
   backend behind its `wasm` feature. Only `kiqi-cli` turns that feature on,
   which is how the `ki` binary gets the extension runtime while the pure-Rust
   crates stay wasmtime-free.
@@ -193,7 +194,7 @@ A few crates sit outside that chain:
 | [`kiqi-acp`](./crates/kiqi-acp) | Agent Client Protocol server (`ki acp serve`) over stdio |
 | [`kiqi-tui`](./crates/kiqi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
 | [`kiqi-cli`](./crates/kiqi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, extension loading |
-| [`kiqi-host`](./crates/kiqi-host) | Extension side of the host: the `Extension` contract (event tags, grants, env-var names, dialog semantics), the dispatch spine (registry, event funnels, compiled/wasm sink, action mailboxes) and — behind the `wasm` feature — the wasmtime host that runs wasm extensions against `extensions/kiqi-extension.wit` |
+| [`kiqi-host`](./crates/kiqi-host) | Extension side of the host: the `Extension` contract (event tags, grants, dialog semantics), the dispatch spine (registry, event funnels, compiled/wasm sink, action mailboxes) and — behind the `wasm` feature — the wasmtime host that runs wasm extensions against `extensions/kiqi-extension.wit` |
 
 Every crate has its own README. The crates are **not** published to crates.io
 (`publish = false` in each manifest), so links above point at the in-repo
@@ -281,7 +282,7 @@ throughput, long sessions, TUI frame cost) are in
 
 ## Extensions
 
-Extensions arrive through two channels.
+Extensions arrive as wasm components.
 
 **The capabilities that ship with this repository are wasm components.** Each is
 a WebAssembly component (`extensions/kiqi-extension.wit` is the contract) running in a
@@ -348,15 +349,13 @@ required and none is loaded.
 
 Start with the [documentation index](docs/README.md), grouped by feature.
 
-Start with the [documentation index](docs/README.md), grouped by feature.
-
 - [User guide](docs/guides/user-guide.md) — commands, config, sessions, skills
 - [Architecture](docs/architecture/overview.md) — how the crates fit together and why
 - [Building an agent project](docs/agent/project-structure.md) — recommended structure
 - [Extension authoring](docs/extensions/authoring.md) — extension templates and ABI rules
 - [Remote mode](docs/remote/user-guide.md) — protocol, tokens, limitations
 - [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
-- [docs.rs](https://docs.rs/kiqi-cli) for per-crate API docs
+- Per-crate API docs: `cargo doc --open -p kiqi-agent`
 
 ## Contributing
 

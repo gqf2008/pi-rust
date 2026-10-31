@@ -539,7 +539,7 @@ kiqi-tools → kiqi-harness → kiqi-tui → kiqi-cli
 
 - 用户指南：[`docs/guides/user-guide.md`](user-guide.md)
 - 源码仓库：<https://github.com/gqf2008/pi-rust>
-- Rust API：<https://docs.rs/kiqi-agent>
+- Rust API：crates 均为 `publish = false`，无 docs.rs 页面；API 文档以仓库内源码与 crate README 为准
 
 - Package 与扩展作者指南：[`docs/extensions/authoring.md`](docs/extensions/authoring.md)
 - 远程模式：<docs/remote/user-guide.md>

@@ -1,19 +1,18 @@
 # kiqi-harness
 
-[![crates.io](https://img.shields.io/crates/v/kiqi-harness.svg)](https://crates.io/crates/kiqi-harness)
-[![docs.rs](https://docs.rs/kiqi-harness/badge.svg)](https://docs.rs/kiqi-harness)
-
-Durable sessions and the run loop that drives [`kiqi-agent`](https://crates.io/crates/kiqi-agent).
+Durable sessions and the run loop that drives [`kiqi-agent`](../kiqi-agent).
 Where the agent crate gives you a loop over one prompt, the harness gives you
 a session tree that survives process death.
 
 ## Install
 
+The crates are not published to crates.io; depend on them from this repository.
+
 ```toml
 [dependencies]
-kiqi-harness = "0.3"
-kiqi-agent = "0.3"
-kiqi-ai = "0.3"
+kiqi-harness = { git = "https://github.com/gqf2008/pi-rust" }
+kiqi-agent = { git = "https://github.com/gqf2008/pi-rust" }
+kiqi-ai = { git = "https://github.com/gqf2008/pi-rust" }
 ```
 
 ## What it adds on top of the agent loop
@@ -141,13 +140,13 @@ including one test per crash point.
 
 | Crate | Role |
 | ----- | ---- |
-| [`kiqi-agent`](https://crates.io/crates/kiqi-agent) | The loop this crate drives |
-| [`kiqi-tools`](https://crates.io/crates/kiqi-tools) | Built-in tools and execution environments |
-| [`kiqi-cli`](https://crates.io/crates/kiqi-cli) | The terminal agent built on the harness |
+| [`kiqi-agent`](../kiqi-agent) | The loop this crate drives |
+| [`kiqi-tools`](../kiqi-tools) | Built-in tools and execution environments |
+| [`kiqi-cli`](../kiqi-cli) | The terminal agent built on the harness |
 
 ## Documentation
 
-- Crate docs: <https://docs.rs/kiqi-harness>
+- Crate docs: `cargo doc --open -p kiqi-harness`
 - Design notes: [docs/architecture/overview.md](https://github.com/gqf2008/pi-rust/blob/main/docs/architecture/overview.md)
 
 ## License

@@ -4,10 +4,14 @@ name = "kiqi-acp"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license = "MIT"
-authors = ["高庆丰 <gao.qingfeng@gmail.com>"]
-repository = "https://github.com/gqf2008/pi-rust"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "ki acp serve — a host-level Agent Client Protocol server"
+readme = "README.md"
+keywords = ["agent", "llm", "ai", "acp"]
+categories = ["api-bindings", "development-tools"]
 
 [dependencies]
 kiqi-ai = { workspace = true }

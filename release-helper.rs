@@ -11,6 +11,8 @@ const RELEASE_CRATES: &[(&str, &str)] = &[
     ("kiqi-tools", "crates/kiqi-tools/Cargo.toml"),
     ("kiqi-harness", "crates/kiqi-harness/Cargo.toml"),
     ("kiqi-tui", "crates/kiqi-tui/Cargo.toml"),
+    ("kiqi-mcp", "crates/kiqi-mcp/Cargo.toml"),
+    ("kiqi-acp", "crates/kiqi-acp/Cargo.toml"),
     ("kiqi-cli", "crates/kiqi-cli/Cargo.toml"),
 ];
 
@@ -22,6 +24,8 @@ const INTERNAL_DEPENDENCIES: &[&str] = &[
     "kiqi-tools",
     "kiqi-harness",
     "kiqi-tui",
+    "kiqi-mcp",
+    "kiqi-acp",
 ];
 
 fn main() {
