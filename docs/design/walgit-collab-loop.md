@@ -8,7 +8,7 @@
 
 - 协作记录的唯一载体是 walgit collab：条目落在 `refs/collab/inbox/ki-agent/*`，
   principal = `ki-agent`，ed25519 签名，读取侧逐条验签（当前 12 条全 `verified`）。
-- 载体不是 GitHub。`origin = bigfish1913/pi-rust` 是与本项目无关的分叉仓库，
+- 载体不是 GitHub。`origin = gqf2008/pi-rust` 只是 GitHub 镜像（旧上游 `bigfish1913/pi-rust` 与本项目无关），
   `fork = gqf2008/pi-rust` 的 issue 已禁用；按 `AGENTS.md` 不得向 `origin` 提 issue/PR/推送/合并。
 - 一轮（round）= 一张 board 卡片（issue + naming `owner` 的 status）+ 每个工作项一个 worktree
   + 一串签名条目（patch → review → merge_result → status closed）。

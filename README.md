@@ -1,10 +1,11 @@
 # ki — a Rust-native coding-agent runtime
 
-> **This is a fork.** The project is developed as `kiqi` here; the command is
-> `ki`, config lives in `~/.ki`, environment variables use the `KI_` prefix and
-> releases are cut from this repository only (the crates are **not** published
-> to crates.io, and `ki update` installs from this repo's GitHub Releases).
-> This repository is the project home. `bigfish1913/pi-rust` is an unrelated fork: do not use it as a source, release target, or upstream.
+> The command is `ki`, the crates are `kiqi-*`, config lives in `~/.ki`,
+> environment variables use the `KI_` prefix, and releases are cut from this
+> repository only (the crates are **not** published to crates.io, and
+> `ki update` installs from this repo's GitHub Releases).
+> `bigfish1913/pi-rust` is an unrelated project: do not use it as a source,
+> release target, or upstream.
 
 [![license](https://img.shields.io/crates/l/kiqi-cli.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue.svg)](#install)
@@ -297,8 +298,9 @@ guest against [`extensions/kiqi-extension.wit`](extensions/kiqi-extension.wit) (
 notes in [`docs/design/extension-abi.md`](docs/design/extension-abi.md)) and install
 it with `ki insmod`.
 
-Ready-to-install wasm extensions live in the companion
-[`pi-rust/rpi-package`](https://github.com/pi-rust/rpi-package) repository
+The wasm guests under [`extensions/wasm/`](extensions/wasm) are the reference
+set: each one is a standalone component you can build and install with
+`ki insmod --build`.
 
 ## Remote mode
 
@@ -386,4 +388,4 @@ The `kiqi-*` crates are a Rust-native coding-agent stack.
 
 ## Star history
 
-[![Star History Chart](https://api.star-history.com/svg?repos=gqf2008/pi-rust,pi-rust/rpi-package&type=Date)](https://www.star-history.com/#gqf2008/pi-rust&pi-rust/rpi-package&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=gqf2008/pi-rust&type=Date)](https://www.star-history.com/#gqf2008/pi-rust&Date)

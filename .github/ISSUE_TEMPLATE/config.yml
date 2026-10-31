@@ -9,6 +9,6 @@ contact_links:
   - name: Documentation
     url: https://github.com/gqf2008/pi-rust/blob/main/docs/guides/user-guide.md
     about: User guide, SDK docs, and the extension authoring guide.
-  - name: Extension packages
-    url: https://github.com/pi-rust/rpi-package
-    about: Report problems with a published extension in the package repository.
+  - name: Extension authoring
+    url: https://github.com/gqf2008/pi-rust/blob/main/docs/extensions/authoring.md
+    about: The wasm extension contract, the reference guests in extensions/wasm, and how to install one.

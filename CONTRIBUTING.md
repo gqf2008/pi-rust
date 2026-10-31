@@ -12,9 +12,9 @@ By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
   long description.
 - **Feature requests** — use the [feature request form](../../issues/new?template=feature_request.yml).
   Describe the problem first, then the proposed solution.
-- **Extensions** — publish `cdylib` extensions in
-  [`pi-rust/rpi-package`](https://github.com/pi-rust/rpi-package). Bugs in the
-  ABI or the loader itself belong in this repository.
+- **Extensions** — wasm guests live in
+  [`extensions/wasm/`](extensions/wasm) and are built with `ki insmod --build`.
+  Bugs in the ABI or the loader itself belong in this repository too.
 - **Documentation** — `README.md`, `docs/`, and the static site in `website/`
   are all fair game. Typos and broken links are welcome as direct PRs.
 - **Code** — see below.
