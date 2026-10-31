@@ -34,6 +34,21 @@ gh api repos/gqf2008/pi-rust --jq .fork    # 必须是 false
 
 新仓建仓时没有搬 release（旧资产在归档仓）。发布前需重建 release，或从归档仓转存。
 
+## macOS 发行版必须带 JIT entitlements
+
+`--options runtime`（公证要求）签出的二进制，如果没带 entitlements，一进入
+wasmtime 的 JIT 页就被内核杀掉：`zsh: killed ki`、
+`termination: {"namespace":"CODESIGNING","indicator":"Invalid Page"}`、
+`signal: "SIGKILL (Code Signature Invalid)"`。0.4.6/0.4.7 的 macOS 资产都中过这个。
+签名一律带 `packaging/macos/ki.entitlements`（见 `.github/workflows/release-binaries.yml`）；
+该文件里的 XML 注释**不能含双破折号**，AMFI 解析器会报
+`AMFIUnserializeXML: syntax error`，而 `plutil -lint` 照样放行。
+
+同一版本重新上传资产后 digest 会变，频道刷新要显式加 `FORCE=1`
+（`refresh-channels.sh` 默认按版本号短路）：
+`FORCE=1 bash scripts/refresh-channels.sh 0.4.7`，再跑 `scripts/push-taps.sh 0.4.7`，
+winget 的 `InstallerSha256` 也要同步改。
+
 ## 命名
 
 CLI = `ki`，crate 前缀 = `kiqi-`。`git grep -i rpi` 命中的是外部项目名、legacy
