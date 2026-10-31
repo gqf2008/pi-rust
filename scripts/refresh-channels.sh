@@ -49,7 +49,10 @@ sha() {
     printf '%s\n' "$digest"
     return 0
   fi
-  note "  digest unavailable for $asset; falling back to the .sha256 sidecar"
+  # stderr, not stdout: this function's stdout is the captured digest, and a
+  # note on stdout ended up inside the Homebrew formula's sha256 string in
+  # the 0.4.6 release.
+  note "  digest unavailable for $asset; falling back to the .sha256 sidecar" >&2
   gh release download "$TAG" -R "$REPO" -p "$asset.sha256" -D "$tmp" >/dev/null \
     || die "could not fetch $asset.sha256"
   local file="$tmp/$asset.sha256"

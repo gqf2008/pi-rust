@@ -2,7 +2,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 
 PackageIdentifier: gqf2008.ki
-PackageVersion: 0.4.6
+PackageVersion: 0.4.7
 InstallerType: zip
 NestedInstallerType: portable
 ReleaseDate: "2026-10-28"
@@ -11,7 +11,7 @@ Installers:
   NestedInstallerFiles:
   - RelativeFilePath: ki.exe
     PortableCommandAlias: ki
-  InstallerUrl: https://github.com/gqf2008/pi-rust/releases/download/v0.4.6/ki-v0.4.6-x86_64-pc-windows-msvc.zip
-  InstallerSha256: AA564A5AC746339C8CAD081944234C6D5B451A15A1F19171EF0AAF9C3187333B
+  InstallerUrl: https://github.com/gqf2008/pi-rust/releases/download/v0.4.7/ki-v0.4.7-x86_64-pc-windows-msvc.zip
+  InstallerSha256: BF4BC2406FB9EFA2B6F14CC926B498BFE24A8E3C9BC3AE3FEB321D045C6EA8F1
 ManifestType: installer
 ManifestVersion: 1.12.0

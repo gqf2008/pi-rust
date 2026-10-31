@@ -16,7 +16,7 @@ taps, or winget package are published; the catalogue, README and
 `docs-install-path.sh` state that, and the site no longer promises
 `cargo install`/`ki install` for unpublished packages.
 
-The manifests and scripts already point at `gqf2008/pi-rust` v0.4.6 with real
+The manifests and scripts already point at `gqf2008/pi-rust` v0.4.7 with real
 digests. Publishing is a later owner decision: create the `gqf2008` taps, run
 `scripts/push-taps.sh`, submit a `gqf2008.ki` winget manifest, and publish the
 crates; only then should the catalogue claims change.
@@ -67,11 +67,10 @@ target.
 
 | Target | Asset | sha256 (v0.3.2) |
 | --- | --- | --- |
-| `x86_64-unknown-linux-gnu` | `kiqi-v0.3.2-x86_64-unknown-linux-gnu.tar.gz` | `»   digest unavailable for ki-v0.4.6-x86_64-unknown-linux-gnu.tar.gz; falling back to the .sha256 sidecar
-7e10c603a5c9d9ea2827008341dde3e577ce257e2e35f66bdd8b6ba663db96a4` |
-| `aarch64-unknown-linux-gnu` | `kiqi-v0.3.2-aarch64-unknown-linux-gnu.tar.gz` | `1194680c147240fdadb2629d9dd3cb2859d27168285cfd080a020101dbe69a96` |
-| `aarch64-apple-darwin` | `kiqi-v0.3.2-aarch64-apple-darwin.tar.gz` | `9e93acd0ee075e568213209c9e571b5916a5719fabc4d7196f632233bdd6a765` |
-| `x86_64-pc-windows-msvc` | `kiqi-v0.3.2-x86_64-pc-windows-msvc.zip` | `aa564a5ac746339c8cad081944234c6d5b451a15a1f19171ef0aaf9c3187333b` |
+| `x86_64-unknown-linux-gnu` | `kiqi-v0.3.2-x86_64-unknown-linux-gnu.tar.gz` | `15052b950f786b299ac65655936001e26c79287060077fb3df34fd2ff87b36ca` |
+| `aarch64-unknown-linux-gnu` | `kiqi-v0.3.2-aarch64-unknown-linux-gnu.tar.gz` | `e327c7e77ac941067a5dbe81b526f9b35316d86912ab654ba15cd07f12dc60c4` |
+| `aarch64-apple-darwin` | `kiqi-v0.3.2-aarch64-apple-darwin.tar.gz` | `99d43eb1da9ba0a8e263492a0fe5e942cef804118fc6272e861e15bf6e593dfe` |
+| `x86_64-pc-windows-msvc` | `kiqi-v0.3.2-x86_64-pc-windows-msvc.zip` | `bf4bc2406fb9efa2b6f14cc926b498bfe24a8e3c9bc3ae3feb321d045c6ea8f1` |
 
 Two consequences worth knowing:
 
@@ -88,7 +87,7 @@ Two consequences worth knowing:
 networks (this machine included), so use `gh`, which goes through the API:
 
 ```bash
-TAG=v0.4.6                      # the tag being packaged
+TAG=v0.4.7                      # the tag being packaged
 gh release download "$TAG" --pattern "*.sha256" --dir /tmp/kiqi-sha --clobber
 cat /tmp/kiqi-sha/*.sha256
 ```
@@ -150,12 +149,12 @@ Verified on this machine:
 - `winget validate packaging/winget` validated the old `0.3.21` manifests. The
   `gqf2008.ki` / `0.4.1` manifests were edited in this batch and have not been
   re-validated here (no `winget` on this machine).
-- The current v0.4.6 URLs and hashes were read from the GitHub API
-  (`releases/tags/v0.4.6`, `assets[].digest`), not copied from a template. The
+- The current v0.4.7 URLs and hashes were read from the GitHub API
+  (`releases/tags/v0.4.7`, `assets[].digest`), not copied from a template. The
   `v0.3.2` table below is historical and is not what the manifests carry now.
 - `scoop/ki.json` parses, and its `bin` (`ki.exe`) matches the zip's root
   entry produced by the workflow's `7z a -tzip … .` step.
-- The v0.4.6 digests recorded in `scoop/ki.json` and `homebrew/ki.rb` match
+- The v0.4.7 digests recorded in `scoop/ki.json` and `homebrew/ki.rb` match
   the GitHub API's `assets[].digest` (Windows zip `1edc47c0…e273`, macOS arm64
   tarball `f7f894fa…ceec`), and the API's asset list confirms the filenames the
   manifests build. A downloaded archive was not re-hashed in this pass; older
