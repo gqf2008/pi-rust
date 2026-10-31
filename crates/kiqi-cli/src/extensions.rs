@@ -854,6 +854,9 @@ pub struct StderrLog;
 
 impl kiqi_host::Log for StderrLog {
     fn log(&self, level: kiqi_host::LogLevel, message: &str) {
+        // An extension writes this line and it lands on a terminal, so it goes
+        // out as text: no escapes, and no newline to fake a second log line.
+        let message = kiqi_tui::ansi::sanitize_external_text(message).replace('\n', " ");
         eprintln!("[extension/{level:?}] {message}");
     }
 }

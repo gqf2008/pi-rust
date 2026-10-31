@@ -57,9 +57,13 @@ fn list() -> i32 {
     }
     for id in extensions {
         let granted = Grants::load_for(&id).granted();
+        // Both halves come from disk — the id from a directory name, the
+        // capabilities from `grants.json` — so they are printed as text.
+        let id = printable(&id);
         if granted.is_empty() {
             println!("{id}: (nothing granted)");
         } else {
+            let granted: Vec<String> = granted.iter().map(|c| printable(c)).collect();
             println!("{id}: {}", granted.join(", "));
         }
     }
@@ -970,7 +974,11 @@ fn revoke_into(args: &[String], root: Option<&Path>) -> i32 {
         eprintln!("error: {error}");
         return 1;
     }
-    println!("revoked `{}` from {}", parsed.capability, parsed.id);
+    println!(
+        "revoked `{}` from {}",
+        printable(&parsed.capability),
+        printable(&parsed.id)
+    );
     0
 }
 

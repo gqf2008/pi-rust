@@ -255,19 +255,14 @@ impl Image {
                     id,
                 };
                 // Keep cursor position stable and reserve the image's rows in
-                // the retained layout so following text cannot overlap it.
+                // the retained layout so following text cannot overlap it. The
+                // cursor move the iTerm2 protocol used to need is gone: a row
+                // may only carry glyphs and styling (see
+                // `crate::ansi::sanitize_row`), and the renderer places every
+                // row it writes, so the reserved rows are just newlines.
                 let sequence = render_image(img_data, &options);
                 let rows = img_height.saturating_sub(1) as usize;
-                if caps.protocol == ImageProtocol::Kitty {
-                    format!("{sequence}{}", "\n".repeat(rows))
-                } else {
-                    let up = if rows > 0 {
-                        format!("\x1b[{rows}A")
-                    } else {
-                        String::new()
-                    };
-                    format!("{}{up}{sequence}", "\n".repeat(rows))
-                }
+                format!("{sequence}{}", "\n".repeat(rows))
             } else {
                 self.render_placeholder(img_width as usize, img_height as usize, width)
             }

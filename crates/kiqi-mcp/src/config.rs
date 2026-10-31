@@ -8,7 +8,9 @@
 //! Two deliberate departures from the adapter:
 //! * the adapter's `exposure` field is **not** modeled — it was parsed and then
 //!   never enforced (dead config). A ported file that still carries it parses
-//!   fine: unknown keys are ignored, only the *discriminator* is validated.
+//!   fine: unknown keys are ignored for parsing (they are collected into
+//!   [`ServerConfig::unknown_keys`] and reported, so a typo cannot hide), and
+//!   only the *discriminator* is validated.
 //! * validation is explicit and per entry: one malformed server is dropped with
 //!   a reported issue instead of poisoning the whole block.
 
@@ -198,7 +200,10 @@ pub struct ServerConfig {
 
 /// The raw entry as it appears in `mcpServers.<name>`. Every field is optional
 /// so a partially-specified entry produces a specific validation message rather
-/// than a serde error, and unknown keys (e.g. a legacy `exposure`) are ignored.
+/// than a serde error. Unknown keys (e.g. a legacy `exposure`, or a misspelling
+/// such as `auto_read`) are not part of this struct: they are collected from the
+/// raw value by [`unknown_server_keys`] into [`ServerConfig::unknown_keys`] and
+/// reported, while parsing proceeds as if they were absent.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawServer {
@@ -301,7 +306,16 @@ pub fn parse_servers_with_defaults(
     };
     for (name, entry) in map {
         match parse_one(name, entry, defaults) {
-            Ok(config) => out.push(config),
+            Ok(config) => {
+                // Reported as a non-fatal issue as well as on the doctor row:
+                // the TUI prints issues at start, and `ki -p` / ACP sessions have
+                // no `/mcp-doctor` to run, so an unreported typo stays silent
+                // exactly where it hurts most.
+                for key in &config.unknown_keys {
+                    issues.push(format!("mcpServers.{name}: unknown key {key}"));
+                }
+                out.push(config)
+            }
             Err(reason) => issues.push(format!("mcpServers.{name}: {reason}")),
         }
     }
@@ -641,9 +655,17 @@ mod tests {
                 "signals": { "minInterval": 12, "wake": "auto" }
             }
         }));
-        assert!(
-            issues.is_empty(),
-            "a typo must not reject the server: {issues:?}"
+        // The entry is kept, and the typo is announced where every mode can
+        // see it — a mistyped key is otherwise indistinguishable from a correct
+        // one.
+        assert_eq!(
+            issues,
+            vec![
+                "mcpServers.docs: unknown key auto_read (did you mean `autoRead`?)".to_string(),
+                "mcpServers.docs: unknown key signals.minInterval (did you mean \
+                 `minIntervalSeconds`?)"
+                    .to_string(),
+            ]
         );
         assert_eq!(servers.len(), 1);
         // The mistyped keys are ignored...
@@ -721,11 +743,15 @@ mod tests {
     #[test]
     fn unknown_legacy_keys_are_ignored_so_ported_files_load() {
         // The retired adapter's `exposure` field: parsed there, never enforced.
-        // A user porting their file must not have the whole entry rejected.
+        // A user porting their file must not have the whole entry rejected — but
+        // the key is now reported, because "silently dropped" is how a typo hides.
         let (servers, issues) = parse(json!({
             "codegraph": { "command": "codegraph", "exposure": "always", "enabled": true }
         }));
-        assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+        assert_eq!(
+            issues,
+            vec!["mcpServers.codegraph: unknown key exposure".to_string()]
+        );
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "codegraph");
     }

@@ -43,9 +43,11 @@ fn escape_len(s: &str) -> usize {
             }
             end
         }
-        // OSC / APC / DCS / PM: skip until BEL (0x07) or ST (ESC \).
-        // `CURSOR_MARKER` (`ESC _ pi:c BEL`) is an APC sequence, so it is
-        // consumed whole here and never contributes any visible width.
+        // OSC / APC / DCS / PM: skip until BEL (0x07) or ST (ESC \). A *bare*
+        // `ESC` ends the string as well — that is what terminals do (xterm
+        // aborts an OSC at a stray `ESC`), and pretending otherwise would let
+        // `ESC ]8;;x ESC [2J` pass as one "hyperlink" whose injected CSI is
+        // then executed by the terminal.
         Some((_, ']' | '_' | 'P' | '^')) => {
             let mut end = 2;
             let mut chars = chars.peekable();
@@ -58,8 +60,8 @@ fn escape_len(s: &str) -> usize {
                     if matches!(chars.peek(), Some((_, '\\'))) {
                         let (index, c) = chars.next().expect("peeked char");
                         end = index + c.len_utf8();
-                        break;
                     }
+                    break;
                 }
             }
             end
@@ -85,15 +87,42 @@ fn escape_len(s: &str) -> usize {
 /// hyperlinks, the inline image protocols, and ki's own APC markers. Everything
 /// else — cursor movement, erasing, mode changes, OSC 52 clipboard writes,
 /// window and title control, DCS — is dropped.
+///
+/// A sequence is allowed only when it is *terminated* within `escape` and its
+/// payload holds neither a nested introducer nor a control character. Matching
+/// the prefix alone is not enough: [`escape_len`] hands over everything up to
+/// the string terminator, so a row ending in `ESC ]8;;x ESC [2J` (no `BEL`, no
+/// `ST`) arrives as one "OSC 8" that merely *starts* like a hyperlink, and a
+/// terminal aborts that OSC at the stray `ESC` and then executes the `[2J`.
 fn row_escape_allowed(escape: &str) -> bool {
-    is_sgr(escape)
-        || escape.starts_with("\x1b]8;")
+    // SGR is a CSI sequence terminated by `m`; only its parameters may sit
+    // between, so private/mode forms like `CSI > 4 ; 2 m` stay out.
+    if let Some(params) = escape
+        .strip_prefix("\x1b[")
+        .and_then(|rest| rest.strip_suffix('m'))
+    {
+        return params
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == ';' || c == ':');
+    }
+    // Everything else is a string sequence, and must be terminated by BEL or ST.
+    let Some(body) = escape
+        .strip_suffix('\x07')
+        .or_else(|| escape.strip_suffix("\x1b\\"))
+    else {
+        return false;
+    };
+    let known = body.starts_with("\x1b]8;")
         // iTerm2 inline images, and the OSC 133 prompt-zone markers the user
         // message bubble wraps itself in.
-        || escape.starts_with("\x1b]1337;File=")
-        || escape.starts_with("\x1b]133;")
-        || escape.starts_with("\x1b_pi:")
-        || escape.starts_with("\x1b_G")
+        || body.starts_with("\x1b]1337;File=")
+        || body.starts_with("\x1b]133;")
+        || body.starts_with("\x1b_pi:")
+        || body.starts_with("\x1b_G");
+    // `body[1..]` skips the leading `ESC` (which is a control character by
+    // definition); anything past it that reintroduces an escape, or any other
+    // control character, would be read by the terminal as a new sequence.
+    known && !body[1..].contains('\x1b') && body[1..].chars().all(|c| !c.is_control())
 }
 
 /// Rewrite `row` so it can only draw glyphs and styling, or return `None` when
@@ -103,9 +132,17 @@ fn row_escape_allowed(escape: &str) -> bool {
 /// returns the carriage and repaints over the columns to its left, a `\n` breaks
 /// the one-row-per-line contract the renderer's cursor math depends on, and a
 /// tab — which [`visible_width`] counts as zero columns — jumps to the
-/// terminal's next tab stop and desynchronizes every column after it. Text ki
-/// does not own is expanded to spaces by [`sanitize_external_text`] before it is
-/// measured, so dropping a tab here cannot misalign a row that was measured.
+/// terminal's next tab stop and desynchronizes every column after it. Components
+/// expand tabs to spaces before they measure a row (`markdown`, `diff`,
+/// tool output); a row that skips that loses the tab instead of shifting the
+/// columns after it. Text that is measured *after* this point — `ki -p` replies,
+/// extension declarations — goes through [`sanitize_external_text`], which does
+/// expand tabs.
+///
+/// A denied escape is dropped whole, including the single printable character an
+/// `ESC X` / `ESC ( X` form swallows. That never widens a row, so the
+/// measurement the row was fitted with stays valid; keeping those characters
+/// would push the row past the width it was laid out for.
 pub fn sanitize_row(row: &str) -> Option<String> {
     let mut clean: Option<String> = None;
     let mut offset = 0;
@@ -521,6 +558,34 @@ mod tests {
             None,
             "sanitizing is idempotent"
         );
+    }
+
+    #[test]
+    fn an_allowlisted_sequence_cannot_carry_an_injection() {
+        // The allowlist matches a kind of sequence, not just a prefix. A payload
+        // that terminates the string early — or never terminates it — must not
+        // smuggle a second escape through: terminals abort an OSC at a bare
+        // `ESC` and then execute what follows.
+        for row in [
+            "\x1b]8;;http://x\x1b[2Jafter",
+            "\x1b]8;;\x1b[2J\x07",
+            "\x1b]133;A\x1b[?1049l\x07",
+            "\x1b_pi:c\x1b[1;1Htail\x07",
+            "\x1b_Ga=T;A\x1b[?1049l\x1b\\",
+            "\x1b]1337;File=name=1:x\x1b]52;c;cGF3bg==\x07\x07",
+            // Private/mode CSI forms end in `m` but are not styling.
+            "\x1b[>4;2mtext",
+        ] {
+            let clean = super::sanitize_row(row).expect("injections are rewritten");
+            assert!(
+                !clean.contains("\x1b[2J")
+                    && !clean.contains("\x1b[?1049l")
+                    && !clean.contains("\x1b[1;1H")
+                    && !clean.contains("\x1b]52;")
+                    && !clean.contains("\x1b[>4;2m"),
+                "{row:?} -> {clean:?}"
+            );
+        }
     }
 
     #[test]

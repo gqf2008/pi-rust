@@ -4236,28 +4236,60 @@ pub async fn interactive_tui(
                 let mcp = ctx.reload_context.mcp.clone();
                 let rows = mcp.doctor();
                 let mut note = kiqi_mcp::render_doctor(&rows, mcp.pending_notice_count());
-                // What the settings say *now* — the next reload uses this, and a
-                // mismatch is the "I edited it and nothing happened" case.
-                let global = crate::settings::load_settings().unwrap_or_default();
-                let (configured, issues) = crate::session::resolve_mcp_servers(
-                    &ctx.reload_context.cwd,
-                    ctx.reload_context.project_trusted,
-                    &[],
-                    &global,
-                );
-                if configured.len() != rows.len() {
-                    note.push_str(&format!(
-                        "\n\nnote: settings now define {} server(s), this session started \
-                         with {}; run /mcp-reload to apply.",
-                        configured.len(),
-                        rows.len()
-                    ));
-                }
-                if !issues.is_empty() {
-                    note.push_str("\n\nsettings issues:");
-                    for issue in &issues {
-                        note.push_str("\n  ");
-                        note.push_str(issue);
+                // What the settings say *now*: the next reload uses this, so a
+                // difference is the "I edited it and nothing happened" case. It
+                // compares names rather than counts — replacing one server with
+                // another keeps the count and is exactly the case worth reporting
+                // — and it stays quiet when this session was started without MCP
+                // on purpose (`--no-tools` builds an empty manager, so every
+                // configured name would look unstarted).
+                if !rows.is_empty() {
+                    let global = crate::settings::load_settings().unwrap_or_default();
+                    let (configured, issues) = crate::session::resolve_mcp_servers(
+                        &ctx.reload_context.cwd,
+                        ctx.reload_context.project_trusted,
+                        &[],
+                        &global,
+                    );
+                    let started: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+                    let names: Vec<&str> = configured
+                        .iter()
+                        .map(|config| config.name.as_str())
+                        .collect();
+                    let added: Vec<&str> = names
+                        .iter()
+                        .copied()
+                        .filter(|name| !started.contains(name))
+                        .collect();
+                    let removed: Vec<&str> = started
+                        .iter()
+                        .copied()
+                        .filter(|name| !names.contains(name))
+                        .collect();
+                    if !added.is_empty() || !removed.is_empty() {
+                        note.push_str(
+                            "\n\nnote: the settings and this session disagree; \
+                             run /mcp-reload to apply.",
+                        );
+                        if !added.is_empty() {
+                            note.push_str(&format!(
+                                "\n  in the settings, not started here: {}",
+                                added.join(", ")
+                            ));
+                        }
+                        if !removed.is_empty() {
+                            note.push_str(&format!(
+                                "\n  started here, no longer in the settings: {}",
+                                removed.join(", ")
+                            ));
+                        }
+                    }
+                    if !issues.is_empty() {
+                        note.push_str("\n\nsettings issues:");
+                        for issue in &issues {
+                            note.push_str("\n  ");
+                            note.push_str(issue);
+                        }
                     }
                 }
                 add_note_message(&chat_container, &note);

@@ -1591,17 +1591,41 @@ impl McpManager {
                 let handle = servers
                     .iter()
                     .find(|handle| handle.server_name() == record.config.name);
+                // `Connected` is the start-time outcome. A stdio child that died
+                // since then is the case this command exists for, so ask the
+                // transport — `try_lock` keeps the doctor non-blocking.
+                let transport_closed = handle
+                    .map(|handle| match handle.client.try_lock() {
+                        Ok(client) => client
+                            .as_ref()
+                            .map(|client| client.peer().is_transport_closed())
+                            .unwrap_or(false),
+                        Err(_) => false,
+                    })
+                    .unwrap_or(false);
                 ServerDiagnostic {
                     name: record.config.name.clone(),
                     launch: launch_of(&record.config),
-                    status: match &record.outcome {
-                        ServerOutcome::Connected => ServerStatus::Connected,
-                        ServerOutcome::Disabled => ServerStatus::Disabled,
-                        ServerOutcome::Failed(_) => ServerStatus::Failed,
+                    status: if transport_closed {
+                        ServerStatus::Failed
+                    } else {
+                        match &record.outcome {
+                            ServerOutcome::Connected => ServerStatus::Connected,
+                            ServerOutcome::Disabled => ServerStatus::Disabled,
+                            ServerOutcome::Failed(_) => ServerStatus::Failed,
+                        }
                     },
-                    reason: match &record.outcome {
-                        ServerOutcome::Failed(reason) => Some(reason.clone()),
-                        _ => None,
+                    reason: if transport_closed {
+                        Some(
+                            "the transport is closed: the server exited or the connection \
+                             dropped; run /mcp-reload to start it again"
+                                .to_string(),
+                        )
+                    } else {
+                        match &record.outcome {
+                            ServerOutcome::Failed(reason) => Some(reason.clone()),
+                            _ => None,
+                        }
                     },
                     tools: handle
                         .map(|handle| {
@@ -1639,8 +1663,8 @@ impl McpManager {
             .collect()
     }
 
-    /// The rendered `/mcp-doctor` report (what the TUI prints, and what the model
-    /// reads back from the note).
+    /// The rendered `/mcp-doctor` report: the shape the TUI prints, so the CLI
+    /// and the tests share one renderer instead of drifting apart.
     pub fn doctor_report(&self) -> String {
         render_doctor(&self.doctor(), self.pending_notice_count())
     }
@@ -1838,7 +1862,7 @@ async fn connect_and_list(
         &config.transport,
         cwd,
         stderr_tail,
-        shared,
+        Arc::clone(&shared),
         mailbox,
         http_idle_timeout_ms,
         config.timeout,
@@ -1857,7 +1881,15 @@ async fn connect_and_list(
     match list_all_tools(server, &peer).await {
         Ok(tools) => {
             let description = if advertises_resources {
-                describe_resources(server, &peer).await.text
+                let description = describe_resources(server, &peer).await;
+                // A listing that half-failed is retried at the next boundary.
+                // Nothing else marks it stale (`resources/list_changed` does),
+                // so without this the warning below would be the last word on
+                // it and the read tool would carry the gap forever.
+                if !description.complete {
+                    shared.stale.resources.store(true, Ordering::Release);
+                }
+                description.text
             } else {
                 String::new()
             };
@@ -2866,7 +2898,7 @@ pub fn render_doctor(rows: &[ServerDiagnostic], pending_notices: usize) -> Strin
                 if row.auto_read.is_empty() {
                     "(none)".to_string()
                 } else {
-                    join_capped(&row.auto_read, LIST_CAP)
+                    join_capped(&report_list(&row.auto_read), LIST_CAP)
                 }
             ));
             out.push_str(&format!(
@@ -2880,7 +2912,7 @@ pub fn render_doctor(rows: &[ServerDiagnostic], pending_notices: usize) -> Strin
         if !row.unknown_keys.is_empty() {
             out.push_str(&format!(
                 "\n  config:    unknown key(s): {}",
-                join_capped(&row.unknown_keys, LIST_CAP)
+                join_capped(&report_list(&row.unknown_keys), LIST_CAP)
             ));
         }
         // `stderr_tail` is raw child output; sanitize here so every path into
@@ -2930,9 +2962,17 @@ fn render_live(live: &[(String, &'static str)]) -> String {
         if index > 0 {
             out.push_str(", ");
         }
-        out.push_str(&format!("{uri} ({origin})"));
+        // Uris come from a server or from ki's settings; a newline in one would
+        // forge a line of this report (see `sanitize_report`).
+        out.push_str(&format!("{} ({origin})", strip_escapes(uri)));
     }
     out
+}
+
+/// Report-ready copy of a list of uris or keys. Escapes and control characters
+/// are removed, so an entry cannot span a line and pose as a `hint:`.
+fn report_list(items: &[String]) -> Vec<String> {
+    items.iter().map(|item| strip_escapes(item)).collect()
 }
 
 fn join_capped(items: &[String], cap: usize) -> String {
@@ -2955,7 +2995,7 @@ fn doctor_hints(row: &ServerDiagnostic) -> Vec<String> {
         hints.push(format!(
             "fix the unknown key(s) — ki ignores them, so a mistyped key looks \
              exactly like a correct one: {}",
-            row.unknown_keys.join(", ")
+            join_capped(&report_list(&row.unknown_keys), LIST_CAP)
         ));
     }
     if !row.configured_subscribe.is_empty() && row.status == ServerStatus::Connected {
@@ -3192,7 +3232,12 @@ mod tests {
             })),
             &crate::config::SignalsDefaults::default(),
         );
-        assert!(parse_issues.is_empty(), "{parse_issues:?}");
+        // An old file still names its transport; the key is ignored, and the
+        // new reporter says so instead of letting the entry look clean.
+        assert_eq!(
+            parse_issues,
+            vec!["mcpServers.ghost: unknown key transport".to_string()]
+        );
 
         let issues = manager.reload(&servers, Path::new("."), None).await;
         assert!(
@@ -3209,6 +3254,14 @@ mod tests {
             .unwrap()
             .iter()
             .any(|name| name == "ghost"));
+
+        // The diagnostic follows the reload, and it carries what the parse
+        // collected: a swap that keeps the count still shows up by name.
+        let rows = manager.doctor();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "ghost");
+        assert_eq!(rows[0].status, ServerStatus::Disabled);
+        assert_eq!(rows[0].unknown_keys, vec!["transport".to_string()]);
     }
 
     #[test]

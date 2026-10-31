@@ -16,10 +16,12 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - **`/mcp-doctor`**：只读的 MCP 诊断报告，跑一次就知道每个服务器为什么不在、为什么没在
   订阅。每个条目给出 `status`（`connected` / `disabled (enabled=false)` / `failed` + 原因）、
   工具清单、`resources` 能力、配置的订阅 vs 实际存活的订阅、`autoRead`、`signals` 预算、
-  stdio 服务器最后的 stderr，以及下一步该改什么；配置改了但未 reload 时指出数量不一致。
-  不重连、不发 RPC，所以症状出现之后随时可跑。
+  stdio 服务器最后的 stderr，以及下一步该改什么；配置改了但未 reload 时按**名字**指出
+  哪个没启动、哪个已不在配置里（不再只比数量，“换了一个服务器”那种改动同样会报）。
+  报告进会话，是给人看的；不重连、不发 RPC，所以症状出现之后随时可跑。
 - **`mcpServers` 里拼错的键不再静默忽略**：条目上无法识别的键（包括 `signals` 内的）会被
-  记录下来并在 `/mcp-doctor` 里列出，附最近似的正确拼写（`auto_read` → `autoRead`、
+  记录下来，在启动告警（TUI 和 `ki -p` 都会打）和 `/mcp-doctor` 里列出，附最近似的正确
+  拼写（`auto_read` → `autoRead`、
   `minInterval` → `minIntervalSeconds`）。仍然不拒绝该条目——拼错一个键不该连累整个服务器。
 
 ### Fixed
@@ -29,17 +31,18 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   扩展消息、MCP 载荷、文件内容、粘贴文本都曾能把 `\x1b[2J`（清屏）、`\x1b[?1049l`（切走
   备用屏幕）、`\x1b[1;1H`（移动光标）、`\x1b]52;c;…`（写剪贴板）原样送到终端。以前只在
   个别地方补过滤，覆盖面取决于当时想到了多少个调用点。现在在**渲染器把行写出去的唯一位置**
-  统一过滤：SGR 样式、OSC-8 链接、OSC 133 提示区、内联图片序列和 ki 自己的 APC 标记放行，
-  其余转义和控制字符全部丢弃（`\r` 会回车覆写左侧列、`\n` 会破坏「一行一行」的光标账本、
-  Tab 在 `visible_width` 里算 0 列但在终端里跳制表位）。`ki -p` 的最终输出和 `ki extension`
-  打印的扩展声明/授权说明也按纯文本写出。
+  统一过滤：SGR 样式（只收数字/`;`/`:` 参数）、OSC-8 链接、OSC 133 提示区、内联图片序列和 ki 自己的 APC 标记放行，其余转义和控制字符全部丢弃（`\r` 会回车覆写左侧列、`\n` 会破坏
+  「一行一行」的光标账本、Tab 在 `visible_width` 里算 0 列但在终端里跳制表位）。放行还要
+  **序列被正常终止**：一条没有 BEL/ST 收尾的 `OSC`、或一条夹带了 `ESC` 的 APC，都当未终止
+  处理——否则终端会在裸 `ESC` 处中断它，转头去执行紧跟的 `\x1b[2J`。`ki -p` 的最终输出和
+  `ki extension` 打印的扩展声明/授权说明也按纯文本写出（去掉转义、Tab 折成空格）。
 
 - **一个 listing 的 `-32601` 不再吞掉另一个的清单。** 服务器声明了 `resources`、却只实现
   一半（walgit 就是这样：有 `resources/list`，没有 `resources/templates/list`）时，
   `resources/templates/list` 的 `-32601 Method not found` 被当成失败，`describe_resources`
   整个返回错误，**已经成功取到的资源清单一并丢掉**，read 工具的描述退化成
   `(The resource list is currently unavailable: …)`，日志还把方法名报成 `resources/list`。
-  现在两个 listing 分别收敛：`-32601` 记为「这个方法不存在」（空清单，按方法名各报一次
+  现在两个 listing 分别收敛：`-32601` 记为「这个方法不存在」（空清单，每次列举报一次
   warning，不再每次 boundary 重试），真正的失败只影响自己那一半，另一半清单照常进描述；
   任一半真失败时 `complete=false`，boundary 继续重试。
 - **`/mcp-doctor` 不会把终端画花。** 服务器 stderr 和 `command`/`args` 都是外部输入，而 ki 的
@@ -49,7 +52,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   能让一行覆盖另一行。现在报告在**显示边界**统一消毒：剥掉 CSI/OSC/APC/DCS/PM 序列和所有
   控制字符，Tab 折成一个空格，单行按**字符**（不是字节）截断到 160/240/400 字符并加 `…`，
   stderr 只留最后 5 行，整份报告 16K 字符封顶；全报告再兜一遍底，防止以后新增的字段漏掉。
-  消毒只发生在 `/mcp-doctor` 这一处，不改通用渲染路径。
+  当时消毒只发生在 `/mcp-doctor` 这一处，不改通用渲染路径；后来补上了渲染器级的统一过滤
+  （见上一条），所以这条现在是双保险。
 
 ### Docs
 

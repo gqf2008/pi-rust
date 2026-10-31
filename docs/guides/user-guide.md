@@ -283,33 +283,37 @@ MCP 服务器从 `settings.json` 的 `mcpServers` 读取（全局一份，受信
       "timeoutSeconds": 60,
       "subscribe": ["walgit://collab/board/gqf2008/abb"],
       "autoRead": ["walgit://collab/board/gqf2008/abb"],
-      "signals": { "wake": "auto", "minIntervalSeconds": 60 }
+      "signals": { "wake": "auto", "minIntervalSeconds": 60 },
+      "modelWatch": true
     }
   }
 }
 ```
 
 HTTP 服务器把 `command`/`args`/`env`/`cwd` 换成 `url` + 可选 `headers`。键名是 camelCase
-（`timeoutSeconds`、`autoRead`、`minIntervalSeconds`…）；**拼错的键会被忽略并在
-`/mcp-doctor` 里列出来**（以前是静默忽略，看起来和写对了一模一样）。
+（`timeoutSeconds`、`autoRead`、`minIntervalSeconds`…）；**拼错的键不会静默生效**：解析时
+忽略它（不连累整个条目），但会在启动告警里打一条、并写进 `/mcp-doctor` 的 `config:` 行，
+附最近似的正确拼写（`auto_read` → `autoRead`）。以前这里是静默忽略，看起来和写对了一模一样。
 
 stdout/stderr 里出现的转义序列不会进终端：`/mcp-doctor` 会剥掉 CSI/OSC 等序列和控制字符、
 把 Tab 折成空格、按字符截断，所以一个乱打印控制字节的服务器最多让报告难看，不会清屏、切走
 备用屏幕或改窗口标题。这条保证不止于 doctor：**渲染器在把每一行写进终端之前都会过滤**，
-只放过 SGR 样式、OSC-8 链接、OSC 133 提示区、内联图片序列和 ki 自己的 APC 标记；工具输出、
-模型回复、扩展消息、MCP 载荷、粘贴内容里的 `\x1b[2J`、光标移动、模式切换、OSC 52 写剪贴板
-都在这里被丢掉。`ki -p` 的输出和 `ki extension ...` 打印的清单同样按纯文本写出。
+只放过 SGR 样式（数字参数）、OSC-8 链接、OSC 133 提示区、内联图片序列和 ki 自己的 APC 标记，
+而且序列必须正常收尾（无 BEL/ST 的 OSC、夹带 `ESC` 的 APC 一律丢弃，否则终端会在裸 `ESC`
+处中断它、转头执行后面紧跟的 `\x1b[2J`）；工具输出、模型回复、扩展消息、MCP 载荷、粘贴内容
+里的 `\x1b[2J`、光标移动、模式切换、OSC 52 写剪贴板都在这里被丢掉。`ki -p` 的输出和
+`ki extension` 打印的扩展声明 / 授权说明同样按纯文本写出。
 
 **`subscribe`**：握手后为每条 uri 调一次 `resources/subscribe`。写不进去的（服务器拒绝、
 或它根本没声明 `resources.subscribe` 能力）只报一条 warning，不会拖垮整个服务器。订阅
 来自配置的**在 `/mcp-reload` 后仍然有效**；模型自己用 `{server}__watch_resource` 建的
-订阅属于本次会话，reload 后消失（受 `MAX_MODEL_SUBSCRIPTIONS` 限制）。
+订阅属于本次会话，reload 后消失，且最多同时 32 条（`MAX_MODEL_SUBSCRIPTIONS`）。
 
 **`autoRead`**：只对**已订阅**的 uri 有意义。它是在通知被并入会话的那一刻（会话边界，
 一轮结束之后），把该 uri 的**当前全文**读出来一并写进通知里，这样模型醒来时不必先花一次
-工具往返去读。每次边界、每个 uri 至多读一次，共享一个超时；内容会截断到
-`MAX_RESOURCE_TEXT`。所以它读的**不是「变更的增量」，也不便宜**——默认什么都不配（只送
-指针，内容由模型自己决定要不要读）。
+工具往返去读。每次边界、每个 uri 至多读一次，共享一个超时；单条内容截断到 20000 字符
+（`MAX_RESOURCE_TEXT`）。所以它读的**不是「变更的增量」，也不便宜**——默认什么都不配
+（只送指针，内容由模型自己决定要不要读）。
 
 **`signals`**：资源通知允许对会话做什么。`wake` 三档——`off`（只记进 transcript，不唤醒）、
 `notify`（记 + 呈现给客户端）、`auto`（记 + 在预算内用一条合成触发消息起一轮，醒来后做
@@ -324,16 +328,21 @@ stdout/stderr 里出现的转义序列不会进终端：`/mcp-doctor` 会剥掉 
 列出连不上的服务器及原因，并显示重连后当前可用的 MCP 工具数量。
 
 出问题时跑 `/mcp-doctor`：**只读**（不重连、不发 RPC），报告上一次启动/重连留下的状态，
-所以症状出现之后再跑也能看到现场。每个服务器一行：`status`（`connected` / `disabled
+所以症状出现之后再跑也能看到现场。每个服务器一块：`status`（`connected` / `disabled
 (enabled=false)` / `failed` + 原因）、工具清单、`resources` 能力、`subscribe` 配置了几条 /
-实际活了几条、`autoRead`、`signals` 预算、被忽略的未知键、stdio 服务器最后的 stderr，
-以及该怎么做（例如配置了但没订阅上、进程根本没起来）。配置改了但还没 reload 时它会指出
-数量不一致。
+实际活了几条（没配置过就不出现这一项）、`autoRead`、`signals` 预算、被忽略的未知键、stdio
+服务器最后的 stderr，以及该怎么做（例如配置了但没订阅上、进程根本没起来）。配置改了但还没
+reload 时，它会按**名字**指出哪些服务器没在这个会话里启动、哪些已不在配置里。
+
+它只有 TUI 入口：没有 `ki mcp` 子命令，无头模式（`ki -p`）只打启动告警。服务器声明了
+`resources` 但没实现 `resources/templates/list`（`-32601`）时，那份模板清单按空处理，
+资源清单照常列出，只报一条“未实现”的 warning。
 
 Windows 上两个已知坑（`/mcp-doctor` 会提示）：stdio 服务器**不经 shell 启动**，所以
 `npx`/`uvx`/`pnpm` 这类 `.cmd` shim 要写成 `command: "cmd"`、`args: ["/d", "/s", "/c", …]`；
-子进程只继承 `PATH`/`HOME`/`TMPDIR`/`TERM`/`USER`/`SHELL`/`LANG`/`LC_*`——服务器需要的其它
-变量（`APPDATA`、`LOCALAPPDATA`、`PATHEXT`…）必须写进它的 `env`。
+子进程只继承 `PATH`/`HOME`/`TMPDIR`/`TERM`/`USER`/`SHELL`/`LANG`/`LC_*`（外加 ki 自己注入的
+`AGENT_ID_ENV`）——服务器需要的其它变量（`APPDATA`、`LOCALAPPDATA`、`PATHEXT`…）必须写进它
+的 `env`。
 
 ### 远程模式（`--server` / `--connect`）
 

@@ -608,6 +608,40 @@ async fn missing_resource_templates_keep_the_listed_resources() {
     manager.shutdown().await;
 }
 
+/// A listing the server *does* implement but fails: the other half must survive
+/// and the description must say which half is missing, so a temporarily broken
+/// listing does not look like an empty one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_templates_listing_keeps_the_resources_and_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let args: Vec<String> = ["--resources", "--fail-resource-templates"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let (manager, issues) =
+        McpManager::start(&[stdio_server("docs", args, 10, true)], tmp.path()).await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+
+    let adapters = manager.tool_adapters();
+    let description = find(&adapters, "docs__read_resource")
+        .schema()
+        .description
+        .clone();
+    assert!(
+        description.contains("file:///docs/a.md"),
+        "a failed templates listing must not drop the resources: {description:?}"
+    );
+    assert!(
+        description.contains("resources/templates/list is currently unavailable"),
+        "the missing half must be named: {description:?}"
+    );
+    assert!(
+        description.contains("templates store is unavailable"),
+        "the server's own error belongs in the note: {description:?}"
+    );
+    manager.shutdown().await;
+}
+
 /// The mirror case: no `resources/list`, templates implemented.
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_resource_list_keeps_the_listed_templates() {

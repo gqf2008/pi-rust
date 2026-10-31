@@ -17,6 +17,7 @@
 //!   --reject-unsubscribe           every unsubscribe errors
 //!   --no-resource-list             answer -32601 for `resources/list`
 //!   --no-resource-templates        answer -32601 for `resources/templates/list`
+//!   --fail-resource-templates      answer -32603 for `resources/templates/list`
 //!                                  (the walgit shape: resources, no templates)
 //!
 //! Extra args beyond the protocol:
@@ -87,6 +88,9 @@ fn main() {
     // read as an empty list, not as a failed listing.
     let no_resource_list = flag("--no-resource-list");
     let no_resource_templates = flag("--no-resource-templates");
+    // The other failure kind: a listing the server does implement but cannot
+    // answer right now (-32603), which must not read as "the method is gone".
+    let fail_resource_templates = flag("--fail-resource-templates");
     let env_tool = flag("--env-tool");
     let supports_subscribe = !flag("--no-resource-subscribe");
     let subscribe_notify = flag("--subscribe-notify");
@@ -193,6 +197,10 @@ fn main() {
                 reply(id, json!({ "resources": resource_list() }));
             }
             "resources/templates/list" => {
+                if fail_resource_templates {
+                    reply_error(id, -32603, "internal error: templates store is unavailable");
+                    continue;
+                }
                 if !resources_mode || no_resource_templates {
                     reply_error(id, -32601, "method not found: resources/templates/list");
                     continue;

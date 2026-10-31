@@ -243,7 +243,9 @@ pub async fn print(
                             if let Some(m) = final_message {
                                 if m.stop_reason == StopReason::Error {
                                     if let Some(em) = &m.error_message {
-                                        eprintln!("{em}");
+                                        // The provider wrote this text; it reaches
+                                        // a terminal, so it goes out as plain text.
+                                        eprintln!("{}", kiqi_tui::ansi::sanitize_external_text(em));
                                     }
                                 }
                             }
@@ -282,7 +284,7 @@ pub async fn print(
             match m.stop_reason {
                 StopReason::Error => {
                     if let Some(em) = &m.error_message {
-                        eprintln!("{em}");
+                        eprintln!("{}", kiqi_tui::ansi::sanitize_external_text(em));
                     }
                     last_exit = 1;
                 }
