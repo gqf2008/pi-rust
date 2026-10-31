@@ -57,13 +57,14 @@ do
         echo "FAIL: $rel has a crates.io version badge for an unpublished crate" >&2
         status=1
     }
-    # No link to a crates.io crate page (the doc's own prose explains there is none).
-    grep -q 'crates.io/crates/kiqi-' "$doc" && {
+    # No link to a crates.io crate page (the doc's own prose explains there is none);
+    # match the API paths too, so `crates.io/api/v1/crates/kiqi-agent` cannot pass.
+    grep -qE 'crates\.io/(crates|api/v1/crates)/kiqi-' "$doc" && {
         echo "FAIL: $rel links to crates.io crate pages; nothing is published there" >&2
         status=1
     }
     # Same for docs.rs: `publish = false` means no page is ever built.
-    grep -q 'docs\.rs/kiqi-' "$doc" && {
+    grep -qE 'docs\.rs/(crate/)?kiqi-' "$doc" && {
         echo "FAIL: $rel links to a docs.rs page; nothing is published there" >&2
         status=1
     }
@@ -156,15 +157,19 @@ for rel in $(git ls-files '*.md' 'scripts/install.sh' 'scripts/install.ps1' \
     is_exempt_file "$rel" && continue
     [ -f "$rel" ] || continue
     # A line may name the other project only to warn about it: the exemption
-    # needs the phrase *and* an explicit prohibition on the same line, so
-    # `... | sh  # unrelated project` cannot slip through.
-    grep -n 'bigfish1913/pi-rust' "$rel" \
-        | grep -vE 'star-history|Upstream|cherry-pick' \
-        | grep -vE 'unrelated (fork|project).*(do not use|不要|never)' >/dev/null && {
+    # needs the phrase *and* an explicit prohibition, and a line that *runs*
+    # something is never exempt -- otherwise `... | sh  # unrelated project, do
+    # not use` would read as a warning while being an instruction.
+    if grep -n 'bigfish1913/pi-rust' "$rel" | awk '
+        /\| *(sh|bash)|curl |wget |git clone|cargo install|gh repo|docker |insmod/ { print; next }
+        /star-history|Upstream|cherry-pick/ { next }
+        /unrelated (fork|project)/ && /do not use|不要|never/ { next }
+        { print }
+    ' | grep -q .; then
         echo "FAIL: $rel links to bigfish1913/pi-rust," >&2
         echo "      which serves a different project (rpi v0.6.1, rpi-v* assets)" >&2
         status=1
-    }
+    fi
 done
 
 # --- Only name packages that exist --------------------------------------------
