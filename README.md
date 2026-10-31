@@ -7,16 +7,16 @@
 > `bigfish1913/pi-rust` is an unrelated project: do not use it as a source,
 > release target, or upstream.
 
-[![license](https://img.shields.io/crates/l/kiqi-cli.svg)](#license)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue.svg)](#install)
 [![CI](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/gqf2008/pi-rust/actions/workflows/ci.yml)
 [![GitHub stars](https://img.shields.io/github/stars/gqf2008/pi-rust?style=flat)](https://github.com/gqf2008/pi-rust/stargazers)
 [![Latest release](https://img.shields.io/github/v/release/gqf2008/pi-rust)](https://github.com/gqf2008/pi-rust/releases/latest)
 
-`ki` is a library-first coding-agent runtime written in Rust, plus a terminal
-agent built on top of it. Nine composable crates span provider adapters, a
-durable crash-resumable agent loop, a terminal UI, and a stable extension ABI — so
-the same code works as an embedded SDK or as a ready-to-run `ki` command.
+`ki` is a Rust-native coding-agent runtime. The terminal agent is the product:
+`ki` is what you run, and the ten `kiqi-*` crates underneath it are a library you
+can use on their own. They span provider adapters, a durable crash-resumable
+agent loop, a terminal UI and a wasm extension ABI.
 
 ![ki interactive session](docs/images/kiqi-interactive.png)
 
@@ -161,8 +161,9 @@ provider — the full version is in [`examples/minimal/src/main.rs`](examples/mi
 
 ## Crates
 
-Nine crates, one version, published together. Dependency direction is one-way
-and enforced in review:
+Ten crates, one version, released together from this repository (none of them
+is published to crates.io). Dependency direction is one-way and enforced in
+review:
 
 ```
 kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness
@@ -170,6 +171,9 @@ kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness
 
 A few crates sit outside that chain:
 
+- `kiqi-mcp` is the host-level MCP client: stdio and HTTP servers from
+  `settings.json`, expanded into native tools and wired into the session boundary.
+- `kiqi-acp` is the Agent Client Protocol server behind `ki acp serve`.
 - `kiqi-tui` depends on no other `kiqi-*` crate.
 - `kiqi-host` is the extension-side crate: the `Extension` contract plus the event
   dispatch spine (built always, so `kiqi-tools` can read the env-var names and
@@ -185,6 +189,8 @@ A few crates sit outside that chain:
 | [`kiqi-agent`](./crates/kiqi-agent) | The agent loop: `AgentTool`, events, hooks, queues, cancellation |
 | [`kiqi-tools`](./crates/kiqi-tools) | `read`/`write`/`edit`/`bash` (+ `grep`, `find`, `ls`, `powershell`) and the `ExecutionEnv` seam |
 | [`kiqi-harness`](./crates/kiqi-harness) | Session tree, JSONL persistence, compaction, crash recovery, the run loop |
+| [`kiqi-mcp`](./crates/kiqi-mcp) | MCP client: servers from `settings.json` as native tools, resource subscriptions, boundary-drained notices |
+| [`kiqi-acp`](./crates/kiqi-acp) | Agent Client Protocol server (`ki acp serve`) over stdio |
 | [`kiqi-tui`](./crates/kiqi-tui) | Terminal UI primitives: components, layout, editor, transcript rendering |
 | [`kiqi-cli`](./crates/kiqi-cli) | The `ki` binary: TUI, one-shot and JSON modes, config, extension loading |
 | [`kiqi-host`](./crates/kiqi-host) | Extension side of the host: the `Extension` contract (event tags, grants, env-var names, dialog semantics), the dispatch spine (registry, event funnels, compiled/wasm sink, action mailboxes) and — behind the `wasm` feature — the wasmtime host that runs wasm extensions against `extensions/kiqi-extension.wit` |
@@ -195,8 +201,8 @@ directories; `docs.rs` has no pages for them.
 
 ## Why ki
 
-Most coding agents are CLIs. `ki` is a **runtime with a CLI attached**, which
-changes what you can build with it:
+`ki` ships as a terminal agent, but the runtime under it does not need one —
+every layer is a library, so the same pieces work inside your own process:
 
 - **Embeddable.** The agent loop is a library. `kiqi-agent` + `kiqi-ai` is enough
   to run an agent inside your own process, with your own event handling and
@@ -360,25 +366,6 @@ build/test commands and the repository layout, and the
 through [SECURITY.md](SECURITY.md), not a public issue.
 
 The whole test suite runs offline: `cargo test --workspace --locked`.
-
-## Community
-
-Questions, ideas and early builds are welcome in either group:
-
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <img src="docs/images/weixin.jpg" width="230" alt="WeChat group QR code"><br>
-      <sub><b>WeChat</b> — <a href="https://weixin.qq.com/g/AQYAAD8z3FmKPk143hi_HUVOtGvNqlHWMtVZu1VGGB_46JKoNpyhJvS7kDwQwUTr">微信交流群</a></sub>
-    </td>
-    <td align="center" width="50%">
-      <img src="docs/images/tg.png" width="230" alt="Telegram group QR code"><br>
-      <sub><b>Telegram</b> — <a href="https://t.me/+7YfN4TZPP7Y0M2Q1">t.me/+7YfN4TZPP7Y0M2Q1</a></sub>
-    </td>
-  </tr>
-</table>
-
-<sub>Group invite codes expire — WeChat's rotates every few days. If a QR code stops working, open an issue and it will be refreshed.</sub>
 
 ## License
 

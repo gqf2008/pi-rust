@@ -64,7 +64,7 @@ tasks:
       - bash scripts/refresh-channels.sh "{{.RELEASE_VERSION}}"
 
   release:validate:
-    desc: Require a clean tree and one consistent version across the nine release crates
+    desc: Require a clean tree and one consistent version across the ten release crates
     requires:
       vars: [RELEASE_VERSION]
     deps:

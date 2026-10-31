@@ -212,7 +212,7 @@ Repo: https://github.com/gqf2008/pi-rust (MIT)
 **Body**
 
 ```
-ki is a coding-agent runtime in Rust, published as nine crates with one-way
+ki is a coding-agent runtime in Rust, released as ten crates with one-way
 dependencies:
 
   kiqi-telemetry -> kiqi-ai -> kiqi-agent -> kiqi-tools -> kiqi-harness -> kiqi-cli
@@ -302,13 +302,13 @@ https://github.com/gqf2008/pi-rust (MIT)
 **Title**
 
 ```
-ki: a Rust-native, library-first coding-agent runtime
+ki: a Rust-native coding-agent runtime
 ```
 
 **Body** (keep it short; Lobsters rewards substance over marketing)
 
 ```
-A coding-agent runtime written in Rust, split into nine crates with one-way
+A coding-agent runtime written in Rust, split into ten crates with one-way
 dependencies, plus a terminal agent on top.
 
 The design choice worth discussing: rather than a CLI with an API bolted on, the

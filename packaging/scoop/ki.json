@@ -1,6 +1,6 @@
 {
   "version": "0.4.7",
-  "description": "Rust-native, library-first coding-agent runtime and terminal CLI",
+  "description": "Rust-native coding-agent runtime and terminal CLI",
   "homepage": "https://github.com/gqf2008/pi-rust",
   "license": "MIT",
   "architecture": {

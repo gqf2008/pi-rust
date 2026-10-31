@@ -13,7 +13,7 @@
 
 ## 一、分层：让依赖方向不可逆
 
-九个 crate，单向依赖：
+十个 crate，单向依赖：
 
 ```
 kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli
@@ -183,7 +183,7 @@ SDK 里写死了五条规则，违反任意一条都是 UB：
 
 ## 项目
 
-ki 是 Rust 原生、library-first 的 coding-agent runtime，MIT 许可，九个 crate 同版本发布。
+ki 是 Rust 原生 coding-agent runtime（终端代理是产品，crate 也可当库用），MIT 许可，十个 crate 同版本发布。
 
 - GitHub：https://github.com/gqf2008/pi-rust
 - 架构文档：https://github.com/gqf2008/pi-rust/blob/main/docs/architecture/overview.md

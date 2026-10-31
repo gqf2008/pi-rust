@@ -119,7 +119,8 @@ done
 #
 # Two kinds of exemption, both deliberate:
 #   1. files whose mentions are historical record (rewriting falsifies provenance);
-#   2. lines that name it *as* the other project (the header note, star-history chart).
+#   2. lines that name it explicitly *as* the other project ("… is an unrelated
+#      project/fork", the header note, the star-history chart).
 is_exempt_file() {
     case "$1" in
         CHANGELOG.md) return 0 ;;
@@ -142,7 +143,7 @@ for rel in $(git ls-files '*.md' 'scripts/install.sh' 'scripts/install.ps1' \
     is_exempt_file "$rel" && continue
     [ -f "$rel" ] || continue
     grep -n 'bigfish1913/pi-rust' "$rel" \
-        | grep -vE 'star-history|Upstream|cherry-pick|unrelated fork' >/dev/null && {
+        | grep -vE 'star-history|Upstream|cherry-pick|unrelated (fork|project)' >/dev/null && {
         echo "FAIL: $rel links to bigfish1913/pi-rust," >&2
         echo "      which serves a different project (rpi v0.6.1, rpi-v* assets)" >&2
         status=1

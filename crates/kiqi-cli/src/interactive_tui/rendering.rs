@@ -27,7 +27,7 @@ pub(super) fn add_welcome_message_with_capabilities(
     container.add_child(Arc::new(Spacer::new(1)));
     // The mark carries the product name, so the line under it is the tagline
     // rather than a second logotype.
-    let title = c.muted.fg("interactive TUI · library-first agent runtime");
+    let title = c.muted.fg("interactive TUI · ki coding agent");
     container.add_child(Arc::new(Text::new(title, 1, 0)));
     container.add_child(Arc::new(Spacer::new(1)));
     container.add_child(Arc::new(Text::new(

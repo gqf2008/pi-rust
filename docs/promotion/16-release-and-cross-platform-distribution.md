@@ -9,7 +9,7 @@ flowchart TD
     A[clean tree + version check] --> B[bump Cargo.toml pins]
     B --> C[cargo update --workspace]
     C --> D[cut CHANGELOG + sync embedded docs]
-    D --> E[validate nine crates]
+    D --> E[validate ten crates]
     E --> F[commit + git tag]
     F --> G[push branch/tag]
     G --> H[GitHub Actions binaries + sha256]

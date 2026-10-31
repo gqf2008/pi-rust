@@ -2,9 +2,11 @@
 
 ## Supported versions
 
-Security fixes are issued for the latest published version of each `kiqi-*`
-crate. The workspace releases all nine crates together, so the version you see
-on crates.io is the supported one.
+Security fixes are issued for the latest release. All ten `kiqi-*` crates share
+one workspace version and are released together from this repository, so the
+supported version is the newest
+[GitHub Release](https://github.com/gqf2008/pi-rust/releases/latest). The crates
+are not published to crates.io.
 
 | Version        | Supported |
 | -------------- | --------- |

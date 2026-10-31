@@ -11,6 +11,23 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Docs
+
+- **文案与本项目对齐。** `ki` 不再自称 “library-first”：终端代理就是产品，底下十个
+  `kiqi-*` crate 可以作为库用。README（含 `docs/kiqi-tool/README.md` 与编进二进制
+  的副本）、ROADMAP、SECURITY、CONTRIBUTING、Homebrew/Scoop/winget 清单与
+  `packaging`、promotion 稿、TUI 标题栏一起改；同时修掉几处与源码不符的陈述：
+  crate 数量 “九个”→“十个”（补上此前完全没提到的 `kiqi-mcp`、`kiqi-acp` 及它们的
+  表格行）、`cargo install kiqi-cli`（`publish = false`，装了也没用）、
+  “站点/ crates.io 页”“crates.io 上的版本是受支持版本”、`task publish:crates`
+  （这个任务不存在，实际是 `task release`）、`kiqi-tui` 的 “for pi-rust” 描述、
+  各 crate 描述里的 “Rust port of pi-*”、`kiqi-acp` 缺 `publish = false`、
+  LICENSE 的版权署名，以及 star badge 里另一个仓库、指向已失效 crates.io 的
+  license badge。README 的 Community 区整块删掉（微信二维码是旧项目群、10-15 已
+  过期，而 Issues 是关的，没法按原话“提 issue 换码”）。`scripts/tests/docs-install-path.sh`
+  用来放行“明确指出它是另一个项目”的那条豁免，措辞从 `unrelated fork` 扩到
+  `unrelated (fork|project)`，否则 README 里那句“unrelated project”会被它判成链接错误。
+
 ### Changed
 
 - **不再对外宣称一个不存在的站点。** `homepage` 曾指向 `https://ki.laofu.online/`，

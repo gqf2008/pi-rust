@@ -13,14 +13,13 @@ PackageUrl: https://github.com/gqf2008/pi-rust
 License: MIT
 LicenseUrl: https://github.com/gqf2008/pi-rust/blob/main/LICENSE
 Copyright: Copyright (c) gqf2008
-ShortDescription: Rust-native, library-first coding-agent runtime and terminal CLI
+ShortDescription: Rust-native coding-agent runtime and terminal CLI
 Description: |-
-  ki is a library-first coding-agent runtime written in Rust, plus a terminal
-  agent built on it. Nine composable crates take you from provider adapters to a
-  durable, crash-resumable agent loop with a stable extension ABI. Sessions persist
-  as JSONL and resume after a crash, and the session log self-heals when it was
-  written by two processes at once. It can be used as an embedded SDK or as a
-  ready-to-run `ki` command.
+  ki is a Rust-native coding-agent runtime. The terminal agent is the product;
+  the ten kiqi-* crates under it are a library you can use on their own. They take
+  you from provider adapters to a durable, crash-resumable agent loop with a wasm
+  extension ABI. Sessions persist as JSONL and resume after a crash, and the
+  session log self-heals when it was written by two processes at once.
 Moniker: ki
 Tags:
 - ai

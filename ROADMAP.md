@@ -4,14 +4,16 @@ This is a direction document, not a commitment. It records what the project is
 working on next and why, so that issues and PRs can be judged against it. For
 what has already shipped, see [CHANGELOG.md](CHANGELOG.md).
 
-Current release: **0.3.0**. Install with `cargo install kiqi-cli`.
+Current release: **0.4.7**. Install with `scripts/install.sh`, Homebrew, Scoop
+or winget — the crates are not on crates.io.
 
 ## Where the project is now
 
-`ki` is a Rust-native, library-first coding-agent runtime: the core chain
-(`kiqi-telemetry` → `kiqi-ai` → `kiqi-agent` → `kiqi-tools` → `kiqi-harness` →
-`kiqi-cli`) plus `kiqi-tui` and `kiqi-host`, and a terminal CLI built on them. Extensions are wasm guests
-(the cdylib channel was retired on 2026-10-26).
+`ki` is a Rust-native coding-agent runtime: a terminal agent on top of ten
+`kiqi-*` crates — the core chain (`kiqi-telemetry` → `kiqi-ai` → `kiqi-agent` →
+`kiqi-tools` → `kiqi-harness` → `kiqi-cli`), plus `kiqi-tui`, `kiqi-host`,
+`kiqi-mcp` and `kiqi-acp`. Extensions are wasm guests (the cdylib channel was
+retired on 2026-10-26).
 
 What is solid today:
 
@@ -30,17 +32,16 @@ What is solid today:
 
 ### 1. Distribution without a Rust toolchain
 
-Today the only install path is `cargo install kiqi-cli`, which requires rustup, a
-C toolchain and a full release build. Prebuilt binaries for
-`x86_64`/`aarch64` on Linux, macOS and Windows, plus an install script, are the
-highest-leverage change for adoption. Package-manager taps (Homebrew, Scoop,
-winget) follow from the same release artifacts.
+Shipped in 0.4.7: prebuilt `x86_64`/`aarch64` binaries for Linux, macOS and
+Windows, `scripts/install.sh` and `install.ps1`, a Homebrew formula, a Scoop
+manifest and a winget package — every channel is refreshed from one release with
+`scripts/refresh-channels.sh`. Nothing here needs a Rust toolchain any more.
 
 ### 2. Documentation that stands on its own
 
-- Per-crate README and `lib.rs` landing docs, so each crates.io/docs.rs page is
-  usable without the workspace README.
-- A task-oriented tutorial that goes from `cargo install kiqi-cli` to a working
+- Per-crate README and `lib.rs` landing docs, so each crate is usable without
+  the workspace README (there are no crates.io/docs.rs pages — `publish = false`).
+- A task-oriented tutorial that goes from `scripts/install.sh` to a working
   custom tool, in one page.
 - Keep `docs/native-pi-missing-features.md` current: it is the honest answer to
   "is this really at parity?" and it is more useful than a compatibility claim.
