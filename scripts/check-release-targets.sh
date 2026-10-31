@@ -130,11 +130,18 @@ fi
 # line that merely mentions the path. The signing step also references
 # `target/<t>/release/ki` (it signs that file) and is legitimately target-gated, so a
 # looser marker flags Apple signing as a violation.
+#
+# A target-gated step may still need to run the binary for a target-specific reason --
+# the macOS step must exec the *signed* copy, because a bad signature/entitlement pair
+# only fails at exec time, and that is how the missing JIT entitlement shipped. Such a
+# step opts out explicitly with a `# release-targets: allow-target-gated` comment; the
+# opt-out is per step block, so it cannot silence the real smoke test.
 awk '
     function flush() {
-        if (nruns) { found = 1; if (ngate) print nname "|" gate }
+        if (nruns) { found = 1; if (ngate && !nexempt) print nname "|" gate }
     }
-    /^      - name:/ { flush(); nname=$0; nruns=0; ngate=0; gate=""; next }
+    /^      - name:/ { flush(); nname=$0; nruns=0; ngate=0; gate=""; nexempt=0; next }
+    /^[[:space:]]*#[[:space:]]*release-targets:[[:space:]]*allow-target-gated/ { nexempt=1 }
     /^[[:space:]]*"\$\{bin\}"/ { nruns=1 }
     /^        if:/ { ngate=1; gate=$0 }
     END { flush(); if (!found) print "NONE|" }

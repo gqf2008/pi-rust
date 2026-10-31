@@ -165,6 +165,7 @@ jobs:
           # Run the *signed* binary, not just the unsigned one the smoke step
           # above saw: a bad signature/entitlement combination only fails at
           # exec time, which is exactly how the missing JIT entitlement shipped.
+          # release-targets: allow-target-gated
           "${bin}" --version
 
           # notarytool only accepts an archive. A bare Mach-O cannot carry a
