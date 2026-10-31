@@ -11,6 +11,19 @@
 
 本项目已与旧上游脱离关系：不配置、不拉取、不合并旧上游，历史出处只用 commit SHA。
 
+**已彻底分叉（2026-10-31）**：旧上游 remote（`bigfish1913/pi-rust`）及其 112 个
+remote-tracking ref 已从本仓删除。不要再 `git remote add upstream`、也不要
+`git fetch --all`（会连带拉回上游）。自查：
+
+```bash
+git remote -v                      # 只应有 walgit / origin
+git for-each-ref refs/remotes      # 只应有 origin/* 与 walgit/*
+```
+
+旧世代（0.9.x–0.15.x）遗留 tag 已于 2026-10-31 一并删除（44 个，含 preview）；现存的
+tag 全部在 `main` 历史上。`walgit` / `origin` 上本来就没有这些 tag，因此 fetch 不会把它
+们拉回来。
+
 ## 命名
 
 CLI = `ki`，crate 前缀 = `kiqi-`。`git grep -i rpi` 命中的是外部项目名、legacy
