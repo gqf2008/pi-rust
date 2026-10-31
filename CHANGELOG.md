@@ -11,6 +11,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-10-31
+
 ### Added
 
 - **`/mcp-doctor`**：只读的 MCP 诊断报告，跑一次就知道每个服务器为什么不在、为什么没在
