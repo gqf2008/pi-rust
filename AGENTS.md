@@ -24,6 +24,16 @@ git for-each-ref refs/remotes      # 只应有 origin/* 与 walgit/*
 tag 全部在 `main` 历史上。`walgit` / `origin` 上本来就没有这些 tag，因此 fetch 不会把它
 们拉回来。
 
+**`origin` 已不是 fork（2026-10-31）**：GitHub 不会自动解除 fork 关系，所以旧仓被改名为
+`gqf2008/pi-rust-fork-archive`（仍是 fork，留着 v0.4.0–v0.4.6 的 release 与资产），
+再在同名位置新建了一个**非 fork** 仓并推入全部 refs。判据：
+
+```bash
+gh api repos/gqf2008/pi-rust --jq .fork    # 必须是 false
+```
+
+新仓建仓时没有搬 release（旧资产在归档仓）。发布前需重建 release，或从归档仓转存。
+
 ## 命名
 
 CLI = `ki`，crate 前缀 = `kiqi-`。`git grep -i rpi` 命中的是外部项目名、legacy

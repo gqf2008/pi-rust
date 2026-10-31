@@ -96,7 +96,15 @@ jobs:
           set -euo pipefail
           bin="target/${{ matrix.target }}/release/ki"
           if [ -f "${bin}.exe" ]; then bin="${bin}.exe"; fi
-          if ! "${bin}" --version; then
+          # Kept as a bare command line (not `if ! "${bin}" --version`): the
+          # release-target check in scripts/ recognises the smoke test by that
+          # exact shape, and wrapping it in `if !` made the check report "builds
+          # release binaries but never executes one".
+          set +e
+          "${bin}" --version
+          smoke_status=$?
+          set -e
+          if [ "$smoke_status" -ne 0 ]; then
             # A cross-compiled binary needs Rosetta on the arm64 runner. When
             # the image lacks it, report that instead of failing a good build.
             if [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]]; then
