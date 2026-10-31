@@ -6,7 +6,7 @@
   "architecture": {
     "64bit": {
       "url": "https://github.com/gqf2008/pi-rust/releases/download/v0.4.7/ki-v0.4.7-x86_64-pc-windows-msvc.zip",
-      "hash": "bf4bc2406fb9efa2b6f14cc926b498bfe24a8e3c9bc3ae3feb321d045c6ea8f1"
+      "hash": "6d15ba717c96087bf46062639ad33d29b90259e922af56a892493c82c737b5e8"
     }
   },
   "bin": "ki.exe",

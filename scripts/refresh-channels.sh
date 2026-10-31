@@ -2,6 +2,7 @@
 # Rewrite the install-channel manifests + site data for a released version.
 #
 #   bash scripts/refresh-channels.sh 0.3.4
+#   FORCE=1 bash scripts/refresh-channels.sh 0.3.4   # after re-uploading a tag's assets
 #
 # Requires the release assets to exist (run after the binaries workflow
 # finishes). It reads the asset digests from the GitHub API and does targeted
@@ -29,7 +30,10 @@ cd "$(git rev-parse --show-toplevel)"
 
 OLD=$(grep -m1 -oE '"version": "[0-9.]+"' packaging/scoop/ki.json | grep -oE '[0-9.]+')
 [[ -n "$OLD" ]] || die "could not read the current version from packaging/scoop/ki.json"
-[[ "$OLD" != "$VERSION" ]] || { note "manifests already at $VERSION"; exit 0; }
+# A re-cut release re-uploads the same tag's assets, so the version is already
+# current while the digests are stale. FORCE=1 refreshes without a bump.
+[[ "$OLD" != "$VERSION" ]] || [[ "${FORCE:-0}" == 1 ]] \
+  || { note "manifests already at $VERSION"; exit 0; }
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

@@ -67,10 +67,10 @@ target.
 
 | Target | Asset | sha256 (v0.3.2) |
 | --- | --- | --- |
-| `x86_64-unknown-linux-gnu` | `kiqi-v0.3.2-x86_64-unknown-linux-gnu.tar.gz` | `15052b950f786b299ac65655936001e26c79287060077fb3df34fd2ff87b36ca` |
-| `aarch64-unknown-linux-gnu` | `kiqi-v0.3.2-aarch64-unknown-linux-gnu.tar.gz` | `e327c7e77ac941067a5dbe81b526f9b35316d86912ab654ba15cd07f12dc60c4` |
-| `aarch64-apple-darwin` | `kiqi-v0.3.2-aarch64-apple-darwin.tar.gz` | `99d43eb1da9ba0a8e263492a0fe5e942cef804118fc6272e861e15bf6e593dfe` |
-| `x86_64-pc-windows-msvc` | `kiqi-v0.3.2-x86_64-pc-windows-msvc.zip` | `bf4bc2406fb9efa2b6f14cc926b498bfe24a8e3c9bc3ae3feb321d045c6ea8f1` |
+| `x86_64-unknown-linux-gnu` | `kiqi-v0.3.2-x86_64-unknown-linux-gnu.tar.gz` | `b5223b80cd23a773f90226b334e1f20bbf6c04117486fa9aade6b1fcc8c174b0` |
+| `aarch64-unknown-linux-gnu` | `kiqi-v0.3.2-aarch64-unknown-linux-gnu.tar.gz` | `0da0cd424977225b5a3d8b0227fac47f4c1bbe31acad480de7cc284ff6637a5a` |
+| `aarch64-apple-darwin` | `kiqi-v0.3.2-aarch64-apple-darwin.tar.gz` | `a6277a7d2b21013ef612d2b78c4ea37d6054fafc23616c108ccfd5045fb11494` |
+| `x86_64-pc-windows-msvc` | `kiqi-v0.3.2-x86_64-pc-windows-msvc.zip` | `6d15ba717c96087bf46062639ad33d29b90259e922af56a892493c82c737b5e8` |
 
 Two consequences worth knowing:
 
