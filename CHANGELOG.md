@@ -26,8 +26,12 @@ carries the same notes.
   LICENSE 的版权署名，以及 star badge 里另一个仓库、指向已失效 crates.io 的
   license badge。README 的 Community 区整块删掉（微信二维码是旧项目群、10-15 已
   过期，而 Issues 是关的，没法按原话“提 issue 换码”）。`scripts/tests/docs-install-path.sh`
-  用来放行“明确指出它是另一个项目”的那条豁免，措辞从 `unrelated fork` 扩到
-  `unrelated (fork|project)`，否则 README 里那句“unrelated project”会被它判成链接错误。
+  那条“可以提到旧项目”的豁免，之前只要同一行出现 `unrelated fork` 就放行，于是
+  `… | sh  # unrelated fork` 这种安装指令也能混过去；现在要求同一行既点明它是另一个
+  项目、又明确说不要用，并把这轮改过的 `crates/*/README.md`、`ROADMAP.md` 纳入检查、
+  新增 `docs.rs/kiqi-` 死链检查（`publish = false` 意味着 docs.rs 永远不会建页）。
+  `release-helper.rs` 的发版 crate 清单此前漏了 `kiqi-mcp` 与 `kiqi-acp`：十个 crate
+  都继承 workspace version，校验却只走八个，现在补齐。
 
 ### Changed
 
