@@ -147,9 +147,25 @@ jobs:
             -s -k "${keychain_password}" "${keychain}" >/dev/null
           security list-keychains -d user -s "${keychain}" $(security list-keychains -d user | tr -d '"')
 
-          codesign --force --timestamp --options runtime --keychain "${keychain}" \
-            --sign "${identity}" "${bin}"
+          # --entitlements: ki runs wasm (wasmtime) in-process, and hardened
+          # runtime without these makes the kernel SIGKILL the binary the moment
+          # it enters JITed code — "CODESIGNING / Invalid Page". Every macOS
+          # release before this had that bug; the two assertions below keep it
+          # from coming back silently.
+          codesign --force --timestamp --options runtime \
+            --entitlements packaging/macos/ki.entitlements \
+            --keychain "${keychain}" --sign "${identity}" "${bin}"
           codesign --verify --strict --verbose=2 "${bin}"
+          for want in com.apple.security.cs.allow-unsigned-executable-memory com.apple.security.cs.allow-jit; do
+            if ! codesign -d --entitlements - "${bin}" 2>/dev/null | tr -d '\0' | grep -q "${want}"; then
+              echo "the signed binary is missing the ${want} entitlement" >&2
+              exit 1
+            fi
+          done
+          # Run the *signed* binary, not just the unsigned one the smoke step
+          # above saw: a bad signature/entitlement combination only fails at
+          # exec time, which is exactly how the missing JIT entitlement shipped.
+          "${bin}" --version
 
           # notarytool only accepts an archive. A bare Mach-O cannot carry a
           # stapled ticket, so the submit is what matters: Gatekeeper then

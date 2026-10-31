@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the macOS release binary. Rationale lives in
+  packaging/README.md and in the signing step of release-binaries.yml.
+
+  Short version: ki compiles and runs wasm (wasmtime) in process, so it needs
+  executable memory that is not covered by the code signature. Without these
+  two keys the hardened runtime gets the process killed with
+  CODESIGNING / Invalid Page on the first JIT call.
+
+  Do not put double dashes inside this comment: AMFI's plist parser rejects
+  them (AMFIUnserializeXML: syntax error) even though plutil accepts the file.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+</dict>
+</plist>
