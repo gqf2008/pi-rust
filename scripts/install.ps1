@@ -60,7 +60,7 @@ try {
     }
     $Version = $Version.Trim() -replace '^v', ''
     if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
-        throw 'Could not determine a valid release version; pass -Version <major>.<minor>.<patch> (for example -Version 0.4.1).'
+        throw 'Could not determine a valid release version; pass -Version <major>.<minor>.<patch> (for example -Version 0.4.7).'
     }
 
     $Asset = "ki-v$Version-$Target.zip"

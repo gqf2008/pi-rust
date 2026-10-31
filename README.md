@@ -59,7 +59,7 @@ On **Windows (x64)**, run in PowerShell 5.1 or later:
 Verifies the published SHA-256 checksum and installs to
 `$env:LOCALAPPDATA\Programs\ki`. Follow the printed instructions to add it to
 PATH, then run `ki --version`. Append `-DryRun` to preview, or use
-`-Version 0.4.1` and `-Dir 'C:\Tools\ki'` to select a version and directory.
+`-Version 0.4.7` and `-Dir 'C:\Tools\ki'` to select a version and directory.
 
 **From source** (requires Rust 1.96+):
 
@@ -327,7 +327,7 @@ permission requests bridged to the client. See
 
 | | |
 | --- | --- |
-| Current release | **[0.4.1](https://github.com/gqf2008/pi-rust/releases/tag/v0.4.1)** (all crates share one workspace version) |
+| Current release | **[0.4.7](https://github.com/gqf2008/pi-rust/releases/tag/v0.4.7)** (all crates share one workspace version) |
 | Stability | `kiqi-ai`, `kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-host` are the intended stable surface |
 | MSRV | 1.96 |
 | Platforms | Linux, macOS, Windows (CI runs the suite on Linux) |
