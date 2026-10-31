@@ -131,7 +131,7 @@ For building your own agent, depend on
 
 ## Documentation
 
-- User guide: <https://ki.laofu.online/docs.html>
+- User guide: [docs/guides/user-guide.md](https://github.com/gqf2008/pi-rust/blob/main/docs/guides/user-guide.md)
 - Architecture: [docs/architecture/overview.md](https://github.com/gqf2008/pi-rust/blob/main/docs/architecture/overview.md)
 - Extension authoring: [docs/extensions/authoring.md](https://github.com/gqf2008/pi-rust/blob/main/docs/extensions/authoring.md)
 - Changelog: [CHANGELOG.md](https://github.com/gqf2008/pi-rust/blob/main/CHANGELOG.md)

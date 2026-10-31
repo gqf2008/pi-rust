@@ -41,7 +41,7 @@ edition = "2021"
 rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/gqf2008/pi-rust"
-homepage = "https://ki.laofu.online/"
+homepage = "https://github.com/gqf2008/pi-rust"
 version = "0.4.7"
 authors = ["高庆丰 <gao.qingfeng@gmail.com>"]
 

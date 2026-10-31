@@ -11,6 +11,15 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **不再对外宣称一个不存在的站点。** `homepage` 曾指向 `https://ki.laofu.online/`，
+  但那个域名只有 DNS、没有 vhost 和证书（每次握手都是 `tlsv1 alert internal
+  error`），`docs.html` 也从来没存在过。项目主页就是本仓库，所以 workspace
+  `homepage`、Homebrew 清单、Scoop 清单都改指仓库地址，`kiqi-cli/README` 的
+  “User guide” 改指仓内 `docs/guides/user-guide.md`，winget 清单里那段“等站点
+  修好再切回来”的注释整段删掉。
+
 ### Fixed
 
 - **macOS 发行版一启动就被内核杀掉。** release 用 `--options runtime`（hardened

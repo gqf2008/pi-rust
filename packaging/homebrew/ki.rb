@@ -10,7 +10,7 @@
 # Hashes below are for v0.4.7. See packaging/README.md for the refresh procedure.
 class Ki < Formula
   desc "Rust-native, library-first coding-agent runtime and terminal CLI"
-  homepage "https://ki.laofu.online/"
+  homepage "https://github.com/gqf2008/pi-rust"
   version "0.4.7"
   license "MIT"
 
