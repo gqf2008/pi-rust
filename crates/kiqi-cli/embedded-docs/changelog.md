@@ -42,18 +42,6 @@ carries the same notes.
   “User guide” 改指仓内 `docs/guides/user-guide.md`，winget 清单里那段“等站点
   修好再切回来”的注释整段删掉。
 
-### Fixed
-
-- **macOS 发行版一启动就被内核杀掉。** release 用 `--options runtime`（hardened
-  runtime，公证要求）签名，但签名时没带 entitlements；ki 在进程内编译并执行
-  wasm（wasmtime/Cranelift），内核一旦看到执行了签名之外的页面就直接 SIGKILL：
-  `termination: {"namespace": "CODESIGNING", "indicator": "Invalid Page"}`、
-  `signal: "SIGKILL (Code Signature Invalid)"`。表现是 `zsh: killed ki`，
-  `ki -p "hi"` 和裸 `ki` 都在一秒内死掉——凡是签名发行过的 macOS 版本（0.4.6、
-  0.4.7）都受影响。现在签名时带上 `packaging/macos/ki.entitlements`
-  （`allow-unsigned-executable-memory` + `allow-jit`），并在签名后断言这两个
-  entitlement 确实在产物里。
-
 ## [0.4.7] - 2026-10-31
 
 ### Added
@@ -105,6 +93,19 @@ carries the same notes.
 - `docs/guides/user-guide.md` 的 MCP 节补全：`subscribe` / `autoRead` / `signals` 的语义与
   默认值（此前只在设计文档里），`/mcp-doctor`，以及 Windows 上 stdio 服务器的两个坑
   （不经 shell 启动所以 `.cmd` shim 要包 `cmd`、子进程只继承白名单环境变量）。
+
+### Fixed
+
+- **macOS 发行版一启动就被内核杀掉。** 首发上传的 v0.4.7 资产受影响，重切后修复。
+  release 用 `--options runtime`（hardened runtime，公证要求）签名，但签名时没带
+  entitlements；ki 在进程内编译并执行
+  wasm（wasmtime/Cranelift），内核一旦看到执行了签名之外的页面就直接 SIGKILL：
+  `termination: {"namespace": "CODESIGNING", "indicator": "Invalid Page"}`、
+  `signal: "SIGKILL (Code Signature Invalid)"`。表现是 `zsh: killed ki`，
+  `ki -p "hi"` 和裸 `ki` 都在一秒内死掉——凡是签名发行过的 macOS 版本（0.4.6、
+  0.4.7）都受影响。现在签名时带上 `packaging/macos/ki.entitlements`
+  （`allow-unsigned-executable-memory` + `allow-jit`），并在签名后断言这两个
+  entitlement 确实在产物里。
 
 ## [0.4.6] - 2026-10-30
 

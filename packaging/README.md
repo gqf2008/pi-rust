@@ -65,12 +65,12 @@ also builds Intel macOS as `ki-v<version>-x86_64-apple-darwin.tar.gz`, with a
 matching `.sha256`; this asset is available in releases whose tag includes that
 target.
 
-| Target | Asset | sha256 (v0.3.2) |
+| Target | Asset | sha256 (v0.4.7) |
 | --- | --- | --- |
-| `x86_64-unknown-linux-gnu` | `kiqi-v0.3.2-x86_64-unknown-linux-gnu.tar.gz` | `b5223b80cd23a773f90226b334e1f20bbf6c04117486fa9aade6b1fcc8c174b0` |
-| `aarch64-unknown-linux-gnu` | `kiqi-v0.3.2-aarch64-unknown-linux-gnu.tar.gz` | `0da0cd424977225b5a3d8b0227fac47f4c1bbe31acad480de7cc284ff6637a5a` |
-| `aarch64-apple-darwin` | `kiqi-v0.3.2-aarch64-apple-darwin.tar.gz` | `a6277a7d2b21013ef612d2b78c4ea37d6054fafc23616c108ccfd5045fb11494` |
-| `x86_64-pc-windows-msvc` | `kiqi-v0.3.2-x86_64-pc-windows-msvc.zip` | `6d15ba717c96087bf46062639ad33d29b90259e922af56a892493c82c737b5e8` |
+| `x86_64-unknown-linux-gnu` | `ki-v0.4.7-x86_64-unknown-linux-gnu.tar.gz` | `39c14680bf0c5690924cc3687266e578593688403ee6fce87dae43df0b95c61f` |
+| `aarch64-unknown-linux-gnu` | `ki-v0.4.7-aarch64-unknown-linux-gnu.tar.gz` | `d0ffd15a20241f5dc70f99c7be3f33ac130e645ab43e77e66dc49b85ee171600` |
+| `aarch64-apple-darwin` | `ki-v0.4.7-aarch64-apple-darwin.tar.gz` | `6be8e01f89f29cd490770403999ecb688610584a3f2e0a86e43a02deee358ec9` |
+| `x86_64-pc-windows-msvc` | `ki-v0.4.7-x86_64-pc-windows-msvc.zip` | `be96a3e08098811830eefe865a7395e9a3c178acb550ef109fa4642db6cfa9ef` |
 
 Two consequences worth knowing:
 

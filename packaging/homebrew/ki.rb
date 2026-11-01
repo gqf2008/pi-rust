@@ -17,7 +17,7 @@ class Ki < Formula
   on_macos do
     on_arm do
       url "https://github.com/gqf2008/pi-rust/releases/download/v0.4.7/ki-v0.4.7-aarch64-apple-darwin.tar.gz"
-      sha256 "a6277a7d2b21013ef612d2b78c4ea37d6054fafc23616c108ccfd5045fb11494"
+      sha256 "6be8e01f89f29cd490770403999ecb688610584a3f2e0a86e43a02deee358ec9"
     end
     # Intel macOS prebuilt binaries are installed via scripts/install.sh.
     # This formula currently covers Apple silicon on macOS.
@@ -26,11 +26,11 @@ class Ki < Formula
   on_linux do
     on_arm do
       url "https://github.com/gqf2008/pi-rust/releases/download/v0.4.7/ki-v0.4.7-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "0da0cd424977225b5a3d8b0227fac47f4c1bbe31acad480de7cc284ff6637a5a"
+      sha256 "d0ffd15a20241f5dc70f99c7be3f33ac130e645ab43e77e66dc49b85ee171600"
     end
     on_intel do
       url "https://github.com/gqf2008/pi-rust/releases/download/v0.4.7/ki-v0.4.7-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "b5223b80cd23a773f90226b334e1f20bbf6c04117486fa9aade6b1fcc8c174b0"
+      sha256 "39c14680bf0c5690924cc3687266e578593688403ee6fce87dae43df0b95c61f"
     end
   end
 

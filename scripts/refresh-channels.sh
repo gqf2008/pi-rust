@@ -121,7 +121,16 @@ perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/" \
 # packaging/README.md: the sha table label/rows + the example tag.
 # --------------------------------------------------------------------------
 note "packaging/README.md"
-perl -pi -e "s/sha256 \(v$OLD\)/sha256 (v$VERSION)/; s/TAG=v$OLD/TAG=v$VERSION/; s/v$OLD/v$VERSION/g" packaging/README.md
+# The table carries its own version token, and after a re-cut (`FORCE=1`) the manifests
+# are already at $VERSION while the table still names the previous one -- a substitution
+# keyed on $OLD then matches nothing and the stale label/asset names survive. Key on the
+# label the file actually has. The asset names also lost their `kiqi-` prefix in 0.4.0,
+# so a row that still says `kiqi-v...` is stale even at the right version.
+README_OLD=$(grep -m1 -oE 'sha256 \(v[0-9.]+\)' packaging/README.md | sed -E 's/.*\(v//; s/\)$//' || true)
+if [[ -n "$README_OLD" ]]; then
+  perl -pi -e "s/sha256 \(v$README_OLD/sha256 (v$VERSION/; s/TAG=v$README_OLD/TAG=v$VERSION/g; s/v$README_OLD-/v$VERSION-/g" packaging/README.md
+fi
+perl -pi -e "s/kiqi-v$VERSION-/ki-v$VERSION-/g" packaging/README.md
 OLD_TABLE=()
 while IFS= read -r hash; do
   OLD_TABLE+=("$hash")
