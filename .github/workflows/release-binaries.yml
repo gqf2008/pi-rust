@@ -100,18 +100,22 @@ jobs:
           # release-target check in scripts/ recognises the smoke test by that
           # exact shape, and wrapping it in `if !` made the check report "builds
           # release binaries but never executes one".
+          # The Intel macOS target is cross-compiled on the arm64 image, so executing
+          # it needs Rosetta. Install it instead of treating "cannot run" as a note:
+          # a skipped exec is precisely how a binary that cannot start gets uploaded,
+          # and the signing step below now runs the signed copy unconditionally.
+          if [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]]; then
+            if ! /usr/bin/pgrep -q oahd; then
+              sudo softwareupdate --install-rosetta --agree-to-license
+            fi
+          fi
           set +e
           "${bin}" --version
           smoke_status=$?
           set -e
           if [ "$smoke_status" -ne 0 ]; then
-            # A cross-compiled binary needs Rosetta on the arm64 runner. When
-            # the image lacks it, report that instead of failing a good build.
-            if [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]]; then
-              echo "note: cannot execute ${bin} on this runner (no Rosetta); staging it unsigned-smoke" >&2
-            else
-              exit 1
-            fi
+            echo "smoke test failed for ${{ matrix.target }} (exit ${smoke_status})" >&2
+            exit 1
           fi
           echo "smoke test passed for ${{ matrix.target }}"
 
@@ -162,9 +166,9 @@ jobs:
               exit 1
             fi
           done
-          # Run the *signed* binary, not just the unsigned one the smoke step
-          # above saw: a bad signature/entitlement combination only fails at
-          # exec time, which is exactly how the missing JIT entitlement shipped.
+          # The smoke step above ran the unsigned binary; the signed copy must start
+          # too, because a bad signature/entitlement pair only fails at exec time —
+          # which is exactly how the missing JIT entitlement shipped.
           # release-targets: allow-target-gated
           "${bin}" --version
 
