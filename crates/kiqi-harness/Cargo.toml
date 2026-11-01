@@ -8,7 +8,6 @@ version.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/kiqi-harness"
 description = "Session tree, JSONL persistence, compaction and the AgentHarness run loop"
 readme = "README.md"
 keywords = ["agent", "llm", "ai", "claude", "harness"]

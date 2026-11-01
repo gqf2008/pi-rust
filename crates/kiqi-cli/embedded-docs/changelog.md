@@ -42,6 +42,15 @@ carries the same notes.
   “User guide” 改指仓内 `docs/guides/user-guide.md`，winget 清单里那段“等站点
   修好再切回来”的注释整段删掉。
 
+### Fixed
+
+- **安装通道里的 sha256 曾与 v0.4.7 资产对不上。** 重切资产之后，清单是在最后一次
+  上传前 3 秒从 API 读到 digest 的，于是 Homebrew/Scoop/winget 记的都是旧值——用户
+  `brew`/`scoop`/winget 一装就校验失败。现在按资产实际 digest 重新生成（并已同步
+  homebrew-tap、scoop-bucket 与 winget PR），`scripts/refresh-channels.sh` 在
+  `FORCE=1` 的重切路径下也会更新 `packaging/README.md` 的版本标签与资产名（此前
+  版本号相同就静默跳过，表里一直留着 0.3.2 的 `kiqi-v…` 旧名）。
+
 ## [0.4.7] - 2026-10-31
 
 ### Added

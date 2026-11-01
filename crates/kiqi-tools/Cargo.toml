@@ -8,7 +8,6 @@ version.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/kiqi-tools"
 description = "Built-in agent tools (read/write/edit/bash/grep/find/ls/powershell) and the ExecutionEnv seam"
 readme = "README.md"
 keywords = ["agent", "llm", "ai", "claude", "tools"]

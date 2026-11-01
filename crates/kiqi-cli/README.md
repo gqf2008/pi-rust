@@ -37,7 +37,7 @@ ki --mode json -p "list the crates"
 Credentials are resolved in priority order:
 
 1. `--api-key` on the command line
-2. `~/.ki/auth.json`, written by `ki auth login` (mode `0o600` on Unix)
+2. `~/.ki/agent/auth.json`, written by `ki auth login` (mode `0o600` on Unix)
 3. the `apiKey` field of a provider in `~/.ki/agent/models.json`
 4. provider environment variables: `OPENAI_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
    `ANTHROPIC_API_KEY`
@@ -113,7 +113,7 @@ The CLI loads the Pi-compatible `read`, `write`, `edit` and `bash` tools, the
 read-only `docs` lookup, and the host-owned `permissions` policy tool.
 Additional implementations (`grep`, `find`, `ls`, `powershell`) remain
 available in the [`kiqi-tools`](../../crates/kiqi-tools) library and
-through the `default_tools` setting.
+through the `defaultTools` setting.
 
 ## Library usage
 

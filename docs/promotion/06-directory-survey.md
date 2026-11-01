@@ -66,7 +66,7 @@ so a stale number lands the entry in the wrong slot.
 ### Entry, ready for the `### Open Source` section
 
 ```markdown
-- **[ki](https://github.com/gqf2008/pi-rust)** `⭐ <refresh at submit time>` — Library-first Rust coding agent: nine composable crates (`kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-tui`, …) so the agent loop can be embedded in your own program, plus a ready-to-run `ki` terminal CLI. Crash-resumable JSONL sessions that self-heal a duplicated-seq log, a stable `#[repr(C)]` extension ABI for tools and providers, and a provider-agnostic `StreamFn` boundary that makes the loop testable with no network. MIT.
+- **[ki](https://github.com/gqf2008/pi-rust)** `⭐ <refresh at submit time>` — Terminal coding agent in Rust with a wasm extension channel: tools, providers and slash commands ship as sandboxed `.wasm` guests (`ki insmod --build`) against a versioned WIT contract, so adding one never rebuilds the binary. Crash-resumable JSONL sessions, an MCP client with signal-driven wake-ups, a headless `--server` mode, and an ACP server for editors. MIT.
 ```
 
 Placement: bottom of `### Open Source` (32★ is the lowest band in that section).

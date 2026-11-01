@@ -8,7 +8,6 @@ version.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/kiqi-agent"
 description = "Agent runtime and loop: tools, events, hooks, queues, cancellation"
 readme = "README.md"
 keywords = ["agent", "llm", "ai", "claude", "sdk"]

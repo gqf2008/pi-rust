@@ -77,7 +77,7 @@ navigation — the source is at
 ## Documentation
 
 - Crate docs: `cargo doc --open -p kiqi-tui`
-- [TUI gap analysis](https://github.com/gqf2008/pi-rust/blob/main/docs/README.md)
+- [Documentation index](https://github.com/gqf2008/pi-rust/blob/main/docs/README.md)
 
 ## License
 

@@ -8,7 +8,6 @@ version.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/kiqi-cli"
 description = "Terminal coding-agent CLI (the `ki` binary) built on the kiqi-* library crates"
 readme = "README.md"
 keywords = ["agent", "llm", "ai", "claude", "cli"]

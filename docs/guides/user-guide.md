@@ -380,7 +380,7 @@ stdout 会以为任务完成（输出可能是半截的）。把上限当成失�
 
 默认工具包含 Pi 的 `read`、`bash`、`edit`、`write`，以及 ki 自带的只读 `docs` 文档查询工具。Windows 上还会默认注册 `powershell`。`docs` 可以查询使用手册、扩展开发、Agent 项目结构、Rust 调试和架构说明；`grep`、`find`、`ls` 仍保留为库实现，但不由 CLI 默认注册。
 
-可以通过 `.ki/settings.json` 的 `defaultTools` 字段（或简写 `default_tools`）在未指定
+可以通过 `.ki/settings.json` 的 `defaultTools` 字段在未指定
 `--tools` 时限定启动工具集：
 
 ```json

@@ -17,8 +17,9 @@
 
 ```
 kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → kiqi-cli
-                  ↑                                        ↑
-            kiqi-tui                          kiqi-extension-sdk → kiqi-extensions
+                  ↑                ↑
+            kiqi-tui          kiqi-mcp / kiqi-acp
+                             kiqi-host（wasm 扩展宿主）
 ```
 
 每一层只解决一件事：
@@ -30,14 +31,16 @@ kiqi-telemetry → kiqi-ai → kiqi-agent → kiqi-tools → kiqi-harness → ki
 | `kiqi-tools` | `read`/`write`/`edit`/`bash` + `ExecutionEnv` 抽象 | 工具只依赖 `ExecutionEnv`，不依赖真实文件系统 |
 | `kiqi-harness` | 会话树、JSONL 持久化、压缩、崩溃恢复 | 唯一负责"状态活过进程"的层 |
 | `kiqi-cli` | TUI、配置、插件加载 | 只做编排，不含领域逻辑 |
-| `kiqi-extension-sdk` | 稳定 `#[repr(C)]` ABI | **零依赖叶子**，插件不该拖进整个 runtime |
+| `extensions/wasm/kiqi-*` | 扩展（`kiqi:extension@0.9.0` 的 WIT 契约） | 编译到 `wasm32-wasip2`，不链接宿主 |
 
 两条约束是硬性的，代码评审会直接拒：
 
 1. **不能有反向依赖。** `kiqi-agent` 依赖 `kiqi-cli` 这类改动一出现就说明分层错了。
-2. **插件 SDK 必须是零依赖叶子。** 如果它依赖 runtime，插件就会链接宿主，`cdylib` 加载立刻出问题。
+2. **扩展不链接宿主。** 扩展编译成 `wasm32-wasip2` 模块，只依赖 WIT 生成的绑定；一旦
+   依赖 runtime，宿主升个版本扩展就全废。
 
-第二条尤其容易被忽略：插件是宿主**加载**进来的动态库，宿主链接插件，反过来不行。
+第二条在 0.4.0 之前是反着做的（扩展是宿主 `dlopen` 的动态库），见第五节——那是本仓最
+彻底的一次推翻。
 
 ## 二、把 LLM 边界收成一个 trait
 
@@ -138,30 +141,35 @@ agent 跑一轮可能要几分钟。如果只在回合结束时持久化，那�
 `has_pending_resume()` 告诉调用方"还有未完成的工作"——**由调用方决定什么时候继续**，
 因为"跑起来"必须发生在能渲染输出的地方，而 harness 不知道那在哪。
 
-## 五、插件：为什么手写 C ABI，而不是"都是 Rust 所以直接传类型"
+## 五、插件：从手写 C ABI 到 wasm + WIT（一次被推翻的决定）
 
-两边都是 Rust，看起来可以直接传 `Vec<Message>`。但插件和宿主是**分开编译**的，可能用不同
-编译器版本、不同版本的 SDK。所以任何非 `#[repr(C)]`、或者有 `Drop` 的类型都不能跨界。
+> 这一节保留的是**推翻过程**，不是当前契约。现行 ABI 的唯一真源是
+> [`docs/design/extension-abi.md`](../design/extension-abi.md)，扩展契约是
+> `extensions/kiqi-extension.wit`（`kiqi:extension@0.9.0`）。
 
-SDK 里写死了五条规则，违反任意一条都是 UB：
+早期版本的出发点是"两边都是 Rust，插件直接 `dlopen` 进来就行"。两边确实都是 Rust，但
+插件和宿主**分开编译**、可能用不同编译器版本，所以任何非 `#[repr(C)]`、或带 `Drop` 的
+类型都不能跨界。为此定过五条铁律：
 
-1. **跨界的每个类型都是 `#[repr(C)]`**，union 里的 enum 显式 `#[repr(u32)]` 钉住判别宽度。
-2. **没有 `Drop` 类型跨界。** 不能有 `Vec`/`String`/`serde_json::Value`/它们的 `Option`。
-   字符串以 `StbString`（指针+长度）跨界，并附带一个 producer 导出的 `free_string`——
-   每块内存**恰好被接收方释放一次**。
-3. **结构化数据以 JSON 字符串跨界。** 而且 `serde_json` 必须在宿主和插件两侧配置一致
-   （`preserve_order` + `arbitrary_precision`），否则超出 `u64`/`i64` 的整数会丢精度、
-   对象 key 顺序会变。
-4. **union 只放 `Copy` 载荷**，所以读变体是 `unsafe`，由 tag 判别。
-5. **panic 不能跨越边界。** 每一边都用 `catch_unwind` 把 panic 转成状态码——
-   从 `extern "C"` 里 unwinding 出去会直接 abort 进程。
+1. 跨界的每个类型都是 `#[repr(C)]`，union 里的 enum 显式钉住判别宽度；
+2. 没有 `Drop` 类型跨界，字符串用"指针 + 长度 + producer 导出的 `free_string`"传递，
+   每块内存恰好被接收方释放一次；
+3. 结构化数据以 JSON 字符串跨界，且两侧 `serde_json` 特性必须一致；
+4. union 只放 `Copy` 载荷，读变体 `unsafe` 由 tag 判别；
+5. panic 不能跨边界——两边都 `catch_unwind` 成状态码。
 
-第 5 条不是理论问题：插件 panic 曾经会拖垮宿主进程，现在被隔离成一次"这个插件出错了"。
+这些规则都写对过，系统也跑起来了。但代价是：**违反任意一条都是 UB，而编译器不会帮你**。
+一个越界的 `String`、一次没对上 tag 的 union，症状是随机的内存破坏，而不是编译错误。
+再加上动态库与宿主共享地址空间，插件的一次越界读写就是宿主的越界读写——"沙箱"这个词
+在那个模型里并不成立。
 
-宿主侧还有个异步桥的问题：插件的工具执行是**四个导出函数**（`execute`→handle、`poll`、
-`cancel`、`destroy`）驱动的阻塞循环。宿主的适配器不自己持有 runtime，而是取当前的
-`tokio::runtime::Handle`，把 `poll` 循环丢进 `spawn_blocking`，用 mpsc 回传部分结果。
-这样"跨 ABI 的同步插件"就变成了宿主里的普通 async 工具。
+0.4.0 之后插件通道换成 wasm：扩展编译成 `wasm32-wasip2` 模块，跨界类型由 WIT 生成，
+内存和指令都在 wasm 线性内存内；越界访问被运行时拦下，而不是靠评审保证。宿主按需授予
+`net-http`/`fs`/`exec`/`proc` 等能力，扩展不能自己申请。上面五条铁律连同上千行 `unsafe`
+一起删掉了——**"手写 C ABI"这个决定是错的，纠错的方式是换运行时，不是补更多测试。**
+
+留下来的经验只有一条还成立：**跨边界的每个值都要有明确的归属与生命周期**。只是现在这条
+由 WIT 的类型系统表达，而不是由人肉约定表达。
 
 ## 六、我踩过的坑和还没做的
 

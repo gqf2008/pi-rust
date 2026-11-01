@@ -83,6 +83,7 @@ it. The following areas are treated as security-relevant:
 - Run the CLI on a checkout you trust, and review `.ki/` / `.pi/` resources
   before granting a project trust.
 - Prefer `--server` with a token on a private network or behind an SSH tunnel.
-- Install extensions from a source you trust, and pin `--version`.
+- Install extensions from a source you trust, and install a specific ki release
+  (`sh scripts/install.sh --version X.Y.Z`) instead of always taking the latest.
 - Keep `~/.ki/agent/auth.json` out of version control and out of shared
   session directories.

@@ -8,7 +8,6 @@ version.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/kiqi-ai"
 description = "Provider-agnostic message, streaming and tool-schema types; Anthropic, OpenAI-compatible and faux providers"
 readme = "README.md"
 keywords = ["agent", "llm", "ai", "anthropic", "openai"]

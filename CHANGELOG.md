@@ -44,15 +44,12 @@ carries the same notes.
 
 ### Fixed
 
-- **macOS 发行版一启动就被内核杀掉。** release 用 `--options runtime`（hardened
-  runtime，公证要求）签名，但签名时没带 entitlements；ki 在进程内编译并执行
-  wasm（wasmtime/Cranelift），内核一旦看到执行了签名之外的页面就直接 SIGKILL：
-  `termination: {"namespace": "CODESIGNING", "indicator": "Invalid Page"}`、
-  `signal: "SIGKILL (Code Signature Invalid)"`。表现是 `zsh: killed ki`，
-  `ki -p "hi"` 和裸 `ki` 都在一秒内死掉——凡是签名发行过的 macOS 版本（0.4.6、
-  0.4.7）都受影响。现在签名时带上 `packaging/macos/ki.entitlements`
-  （`allow-unsigned-executable-memory` + `allow-jit`），并在签名后断言这两个
-  entitlement 确实在产物里。
+- **安装通道里的 sha256 曾与 v0.4.7 资产对不上。** 重切资产之后，清单是在最后一次
+  上传前 3 秒从 API 读到 digest 的，于是 Homebrew/Scoop/winget 记的都是旧值——用户
+  `brew`/`scoop`/winget 一装就校验失败。现在按资产实际 digest 重新生成（并已同步
+  homebrew-tap、scoop-bucket 与 winget PR），`scripts/refresh-channels.sh` 在
+  `FORCE=1` 的重切路径下也会更新 `packaging/README.md` 的版本标签与资产名（此前
+  版本号相同就静默跳过，表里一直留着 0.3.2 的 `kiqi-v…` 旧名）。
 
 ## [0.4.7] - 2026-10-31
 
@@ -105,6 +102,19 @@ carries the same notes.
 - `docs/guides/user-guide.md` 的 MCP 节补全：`subscribe` / `autoRead` / `signals` 的语义与
   默认值（此前只在设计文档里），`/mcp-doctor`，以及 Windows 上 stdio 服务器的两个坑
   （不经 shell 启动所以 `.cmd` shim 要包 `cmd`、子进程只继承白名单环境变量）。
+
+### Fixed
+
+- **macOS 发行版一启动就被内核杀掉。** 首发上传的 v0.4.7 资产受影响，重切后修复。
+  release 用 `--options runtime`（hardened runtime，公证要求）签名，但签名时没带
+  entitlements；ki 在进程内编译并执行
+  wasm（wasmtime/Cranelift），内核一旦看到执行了签名之外的页面就直接 SIGKILL：
+  `termination: {"namespace": "CODESIGNING", "indicator": "Invalid Page"}`、
+  `signal: "SIGKILL (Code Signature Invalid)"`。表现是 `zsh: killed ki`，
+  `ki -p "hi"` 和裸 `ki` 都在一秒内死掉——凡是签名发行过的 macOS 版本（0.4.6、
+  0.4.7）都受影响。现在签名时带上 `packaging/macos/ki.entitlements`
+  （`allow-unsigned-executable-memory` + `allow-jit`），并在签名后断言这两个
+  entitlement 确实在产物里。
 
 ## [0.4.6] - 2026-10-30
 

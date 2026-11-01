@@ -27,6 +27,9 @@ body:
         - kiqi-tools (read/write/edit/bash and friends)
         - kiqi-harness (sessions, persistence, compaction)
         - kiqi-host (extension contract / wasm backend)
+        - kiqi-mcp (MCP servers, tools, subscriptions)
+        - kiqi-acp (ACP server for editors)
+        - kiqi-telemetry (OTLP export)
         - Remote mode (--server / --connect)
         - Website or documentation
         - Not sure
@@ -38,7 +41,7 @@ body:
     attributes:
       label: ki version
       description: "Output of `ki --version`."
-      placeholder: "ki 0.3.0"
+      placeholder: "ki 0.4.7"
     validations:
       required: true
 
