@@ -12,6 +12,8 @@ carries the same notes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-01
+
 ### Docs
 
 - **文案与本项目对齐。** `ki` 不再自称 “library-first”：终端代理就是产品，底下十个
