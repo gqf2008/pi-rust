@@ -39,14 +39,19 @@ use kiqi_ai::types::{AssistantMessageEvent, ErrorReason, StopReason, UserContent
 use kiqi_ai::Provider;
 use kiqi_harness::agent_harness::{AgentHarness, AgentLane, HarnessRunOutcome};
 use kiqi_harness::events::{HarnessEvent, RunEndOutcome};
-use kiqi_harness::session::memory::{InMemorySessionStorage, SystemClock};
+use kiqi_harness::session::jsonl::codec::encode_header;
+use kiqi_harness::session::jsonl::storage::JsonlSessionStorage;
+use kiqi_harness::session::jsonl::types::JsonlV4Header;
+use kiqi_harness::session::memory::{
+    CounterIdGenerator, FakeClock, InMemorySessionStorage, SystemClock,
+};
 use kiqi_harness::session::types::SessionMetadata;
 use kiqi_harness::session::types::{BranchBounds, EntryOrder, EntryQuery, LaneRecord, RecordQuery};
 use kiqi_harness::session::{DefaultIdGenerator, Session};
 use kiqi_harness::types::{AgentHarnessOptions, HarnessTool, RetryPolicy, ToolReplay};
 use kiqi_tools::{
-    create_bash_tool, create_read_tool, create_write_tool, ExecutionToolContext, FileSystem,
-    InMemoryExecutionEnv, MutationQueueRegistry,
+    create_bash_tool, create_read_tool, create_write_tool, ExecutionToolContext, FileContent,
+    FileSystem, InMemoryExecutionEnv, MutationQueueRegistry,
 };
 
 /// Serialises the tests that flip `KI_MAX_TURNS_PER_RUN`.
@@ -1370,6 +1375,81 @@ async fn reopen_harness(session: kiqi_harness::session::session::Session) -> Age
     AgentHarness::create(options)
         .await
         .expect("reopen harness on the crashed session")
+}
+
+/// Where the multi-open-operation journal is written.
+const MULTI_OPEN_PATH: &str = "/multi-open.jsonl";
+
+fn multi_open_header() -> JsonlV4Header {
+    JsonlV4Header::new("multi-open".into(), 0, "/proj".into(), None, None, None)
+}
+
+/// A lane can carry more than one open operation when a crash lands during
+/// recovery (and another one after that). Reopening used to abort the whole
+/// harness build — `Lane main has multiple open operations; the session log is
+/// corrupted` — which bricked `--continue` for that session with no way out.
+/// Every open operation must be settled instead.
+/// The journal a crash leaves behind is written straight to disk: the storage
+/// layer rejects a second open operation on one lane, so the state can only
+/// arrive through a reload.
+async fn two_open_operations_on_disk() -> Session {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryExecutionEnv::with_cwd("/".into()));
+    let created = JsonlSessionStorage::create(
+        fs.clone(),
+        MULTI_OPEN_PATH,
+        multi_open_header(),
+        Arc::new(FakeClock::new()),
+        Arc::new(CounterIdGenerator::new()),
+    )
+    .await
+    .expect("create jsonl session");
+    drop(created);
+
+    // A killed `/compact` and a killed turn, both never finished.
+    let crash_left = [
+        r#"{"kind":"record","type":"operation_started","id":"crashed-run","seq":1,"lane":"main","timestamp":1,"sourceLeafId":null,"intent":{"kind":"run","originalPrompt":[],"initialMessages":[]}}"#,
+        r#"{"kind":"record","type":"operation_started","id":"crashed-compact","seq":2,"lane":"main","timestamp":2,"sourceLeafId":null,"intent":{"kind":"compaction","resultEntryId":"crashed-entry"}}"#,
+    ];
+    let journal = format!(
+        "{}{}\n",
+        encode_header(&multi_open_header()),
+        crash_left.join("\n")
+    );
+    fs.write_file(MULTI_OPEN_PATH, FileContent::Text(journal), None)
+        .await
+        .expect("write the journal a crash leaves behind");
+
+    let storage = JsonlSessionStorage::load(
+        fs,
+        MULTI_OPEN_PATH,
+        Arc::new(FakeClock::new()),
+        Arc::new(CounterIdGenerator::new()),
+    )
+    .await
+    .expect("load the crashed journal");
+    Session::new(Arc::new(storage), None)
+}
+
+/// A session whose journal left more than one operation open on `main` must
+/// still open: the recovery path settles *every* open operation, not just the
+/// newest one. Real sessions reach this state (a killed compaction op plus a
+/// killed run), and `--continue` used to refuse the whole session over it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reopening_settles_every_open_operation() {
+    let reopened = reopen_harness(two_open_operations_on_disk().await).await;
+    let still_open = reopened
+        .session()
+        .find_open_operations("main", None)
+        .await
+        .expect("open operations readable");
+    assert!(
+        still_open.is_empty(),
+        "every interrupted operation must be settled, still open: {:?}",
+        still_open
+            .iter()
+            .map(|operation| operation.base.id.as_str())
+            .collect::<Vec<_>>()
+    );
 }
 
 /// The whole point of frame progress, end to end: crash mid-stream, reopen the

@@ -2614,36 +2614,40 @@ impl AgentHarness {
         salvage_failed_attempts: bool,
     ) -> HarnessResult<()> {
         let open = session
-            .find_open_operations(lane, Some(2))
+            .find_open_operations(lane, None)
             .await
             .map_err(session_to_harness_err)?;
-        if open.len() > 1 {
-            return Err(HarnessError::io(format!(
-                "Lane {lane} has multiple open operations; the session log is corrupted"
-            )));
-        }
         let Some(operation) = open.first() else {
             return Ok(());
         };
         let run_id = operation.base.id.clone();
 
-        session
-            .append_record(LaneRecord::OperationFinished(OperationFinishedRecord {
-                base: RecordBase {
-                    id: session.id_generator().next(),
-                    seq: 0,
-                    lane: lane.to_string(),
-                    timestamp: 0,
-                },
-                run_id: run_id.clone(),
-                outcome: OperationOutcome::Aborted,
-                error: Some(OperationError {
-                    code: "interrupted".to_string(),
-                    message: "Operation was interrupted before it could finish".to_string(),
-                }),
-            }))
-            .await
-            .map_err(session_to_harness_err)?;
+        // Settle *every* open operation, not just the newest. A crash that lands
+        // during recovery leaves the earlier attempt open too, and the next crash
+        // adds another, so a lane can legitimately carry more than one. Refusing
+        // to build in that case (the old `multiple open operations; the session
+        // log is corrupted` error) bricked `--continue` for the session with no
+        // way out. All of them are interrupted; only the newest is worth
+        // salvaging, because the others sit earlier in the branch.
+        for interrupted in &open {
+            session
+                .append_record(LaneRecord::OperationFinished(OperationFinishedRecord {
+                    base: RecordBase {
+                        id: session.id_generator().next(),
+                        seq: 0,
+                        lane: lane.to_string(),
+                        timestamp: 0,
+                    },
+                    run_id: interrupted.base.id.clone(),
+                    outcome: OperationOutcome::Aborted,
+                    error: Some(OperationError {
+                        code: "interrupted".to_string(),
+                        message: "Operation was interrupted before it could finish".to_string(),
+                    }),
+                }))
+                .await
+                .map_err(session_to_harness_err)?;
+        }
 
         // The run never got to persist its messages, so replay whatever
         // assistant frames committed before the process died and record them as
