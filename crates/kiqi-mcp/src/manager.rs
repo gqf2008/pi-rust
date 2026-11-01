@@ -52,10 +52,10 @@ use http::{HeaderName, HeaderValue};
 use kiqi_agent::AgentTool;
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
-    CallToolRequest, CallToolRequestParams, CancelledNotification, ClientCapabilities, ClientInfo,
-    ClientNotification, ClientRequest, ErrorCode, Implementation, PaginatedRequestParams,
-    ProtocolVersion, ReadResourceRequest, ReadResourceRequestParams, RequestId,
-    ResourceUpdatedNotificationParam, ServerResult, SubscribeRequestParams,
+    CallToolRequest, CallToolRequestParams, CancelledNotification, ClientCapabilities,
+    ClientConfig, ClientNotification, ClientRequest, ErrorCode, Implementation,
+    PaginatedRequestParams, ProtocolVersion, ReadResourceRequest, ReadResourceRequestParams,
+    RequestId, ResourceUpdatedNotificationParam, ServerResult, SubscribeRequestParams,
     UnsubscribeRequestParams,
 };
 use rmcp::service::{NotificationContext, PeerRequestOptions, RunningService};
@@ -278,15 +278,15 @@ struct StaleFlags {
 /// surfaces batch 2 uses. One instance per connection; the shared state it
 /// holds outlives any single connection.
 pub(crate) struct KiClientHandler {
-    info: ClientInfo,
+    info: ClientConfig,
     server: String,
     shared: Arc<ServerShared>,
     mailbox: Arc<McpNoticeMailbox>,
 }
 
 impl ClientHandler for KiClientHandler {
-    /// Same identity the plain `ClientInfo` generic carried in batch 1.
-    fn get_info(&self) -> ClientInfo {
+    /// Same identity the plain `ClientConfig` generic carried in batch 1.
+    fn get_info(&self) -> ClientConfig {
         self.info.clone()
     }
 
@@ -2133,8 +2133,8 @@ async fn verify_protocol(client: Client) -> Result<Client, String> {
 }
 
 /// ki's client identity + requested protocol version for the initialize request.
-fn client_info() -> ClientInfo {
-    ClientInfo::new(
+fn client_info() -> ClientConfig {
+    ClientConfig::new(
         ClientCapabilities::default(),
         Implementation::new("ki", env!("CARGO_PKG_VERSION")),
     )
@@ -3371,9 +3371,8 @@ mod tests {
 /// `self_session`, which is a spawn-time snapshot. An empty list means "no
 /// provenance" (an older server, or entries written before sessions were
 /// recorded) and never counts as an echo.
-fn authored_sessions_from_meta(meta: &rmcp::model::Meta) -> Vec<String> {
-    meta.0
-        .get("sessions")
+fn authored_sessions_from_meta(meta: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    meta.get("sessions")
         .and_then(serde_json::Value::as_array)
         .map(|sessions| {
             sessions
@@ -3389,8 +3388,8 @@ fn authored_sessions_from_meta(meta: &rmcp::model::Meta) -> Vec<String> {
 mod provenance_tests {
     use super::authored_sessions_from_meta;
 
-    fn meta(value: serde_json::Value) -> rmcp::model::Meta {
-        rmcp::model::Meta(value.as_object().expect("object").clone())
+    fn meta(value: serde_json::Value) -> rmcp::model::MetaObject {
+        rmcp::model::MetaObject(value.as_object().expect("object").clone())
     }
 
     #[test]

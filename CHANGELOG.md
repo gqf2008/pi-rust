@@ -35,6 +35,15 @@ carries the same notes.
 
 ### Changed
 
+- **MCP 客户端升级到 `rmcp` 3.8**（原 1.8）。ki 只用到客户端一半，且所有线值都经
+  `serde_json` marshalling，所以真正的改动只有两处：`StreamableHttpClient::get_stream`
+  的 `session_id` 变成 `Option<Arc<str>>`（3.x 在 `initialize` 之后才拿得到会话 id，
+  HTTP 头随之改为「有时才发」），以及 `model::Meta` 拆成
+  `MetaObject`/`RequestMetaObject`/`NotificationMetaObject`，来源作者解析改成直接读
+  JSON 对象；`ClientInfo` 已废弃，改用 `ClientConfig`。`process-wrap` 随之上到 10。
+  `Peer::subscribe` 在 3.x 被标成 legacy（新协议改用 `listen`），但 walgit 走的是
+  legacy session 模式、只实现了 `resources/subscribe`，所以继续用它。
+
 - **不再对外宣称一个不存在的站点。** `homepage` 曾指向 `https://ki.laofu.online/`，
   但那个域名只有 DNS、没有 vhost 和证书（每次握手都是 `tlsv1 alert internal
   error`），`docs.html` 也从来没存在过。项目主页就是本仓库，所以 workspace
