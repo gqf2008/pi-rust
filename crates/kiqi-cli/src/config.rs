@@ -1270,7 +1270,10 @@ pub fn provider_to_models(provider_id: &str, cfg: &ProviderConfig) -> Option<Vec
             base_url,
         );
         m.reasoning = def.reasoning.unwrap_or(false);
-        m.context_window = def.context_window.unwrap_or(0);
+        // An absent window and a literal `0` both mean "the provider did not
+        // state one": a real window is positive, so `0` is a typo rather than a
+        // limit. Both land as `None` instead of as a number to divide by.
+        m.context_window = def.context_window.filter(|window| *window > 0);
         m.max_tokens = def.max_tokens.unwrap_or(0);
         m.input = parse_input_modalities(def.input.as_deref());
         // Merge: model-level headers, then provider-level headers (provider wins

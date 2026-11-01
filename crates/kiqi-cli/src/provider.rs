@@ -325,7 +325,6 @@ pub fn unconfigured_resolved(theme: Option<String>) -> ResolvedModel {
         UNCONFIGURED_PROVIDER_ID,
         "http://unconfigured.invalid",
     );
-    model.context_window = 0;
     model.max_tokens = 0;
     ResolvedModel {
         provider: Arc::new(UnconfiguredProvider),
@@ -2730,7 +2729,7 @@ mod tests {
         );
         assert!(resolved.has_provider_key);
         // Optional metadata is not part of first-run model selection.
-        assert_eq!(resolved.model.context_window, 0);
+        assert_eq!(resolved.model.context_window, None);
         assert_eq!(resolved.model.max_tokens, 0);
     }
 

@@ -1155,12 +1155,12 @@ pub fn clamp_max_tokens_to_context(
 ) -> u64 {
     const CONTEXT_SAFETY_TOKENS: u64 = 4096;
     const MIN_MAX_TOKENS: u64 = 1;
-    if model.context_window == 0 {
+    // An undeclared window cannot clamp anything: send what was asked for.
+    let Some(window) = model.context_window else {
         return std::cmp::max(MIN_MAX_TOKENS, max_tokens);
-    }
+    };
     let tokens = estimate_context_tokens(messages, system_prompt);
-    let available = model
-        .context_window
+    let available = window
         .saturating_sub(tokens)
         .saturating_sub(CONTEXT_SAFETY_TOKENS);
     std::cmp::min(max_tokens, std::cmp::max(MIN_MAX_TOKENS, available))
@@ -1525,7 +1525,7 @@ mod tests {
             "https://api.anthropic.com",
         );
         m.input = vec![InputModality::Text, InputModality::Image];
-        m.context_window = 200_000;
+        m.context_window = Some(200_000);
         m.max_tokens = 8_192;
         m.cost = ModelCost::default();
         m.compat = Some(StreamingProtocolCompat::AnthropicMessages(compat));

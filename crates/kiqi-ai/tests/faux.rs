@@ -219,5 +219,5 @@ fn faux_model_carryover() {
     let provider = FauxProvider::new(FauxScript::new());
     let m: &Model = provider.default_model();
     assert!(matches!(m.api, Api::Faux));
-    assert_eq!(m.context_window, 128_000);
+    assert_eq!(m.context_window, Some(128_000));
 }

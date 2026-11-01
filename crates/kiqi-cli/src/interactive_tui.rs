@@ -1386,7 +1386,7 @@ pub async fn interactive_tui(
     footer.set_cwd(&cwd.to_string_lossy());
     footer.set_git_branch(git_branch_for(&cwd).as_deref());
     if let Some(m) = model_catalog.iter().find(|m| m.id == lane_model_id) {
-        footer.set_context_window(m.context_window as i64);
+        footer.set_context_window(m.context_window);
     }
     footer.set_hints("Enter: Send | Shift+Enter: New line | Ctrl+C: Clear/Exit | Esc: Abort | Ctrl+L: Model | Ctrl+P: Cycle | Ctrl+O: Expand/collapse tools | Ctrl+T: Show/hide thinking | /help");
 

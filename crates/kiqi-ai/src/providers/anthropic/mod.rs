@@ -651,7 +651,7 @@ mod tests {
             "https://api.anthropic.com",
         );
         m.input = vec![InputModality::Text];
-        m.context_window = 200_000;
+        m.context_window = Some(200_000);
         m.max_tokens = 8_192;
         m.cost = ModelCost::default();
         m.compat = Some(crate::model::StreamingProtocolCompat::AnthropicMessages(

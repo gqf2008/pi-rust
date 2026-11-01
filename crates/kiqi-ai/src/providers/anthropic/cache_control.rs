@@ -155,7 +155,7 @@ mod tests {
             "https://api.anthropic.com",
         );
         m.input = vec![InputModality::Text, InputModality::Image];
-        m.context_window = 200_000;
+        m.context_window = Some(200_000);
         m.max_tokens = 32_000;
         m.cost = ModelCost::default();
         m.compat = Some(StreamingProtocolCompat::AnthropicMessages(compat));

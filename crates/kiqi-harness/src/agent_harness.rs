@@ -3501,10 +3501,14 @@ impl AgentHarness {
         let build_opts = Self::build_opts(&snap.entry_projectors, &snap.entry_transforms);
 
         // Pre-run compaction evaluation.
-        if snap.compaction.enabled && snap.model.context_window > 0 {
+        if let Some(window) = snap
+            .model
+            .context_window
+            .filter(|_| snap.compaction.enabled)
+        {
             let ctx = build_session_context(&path, &build_opts);
             let ctx_tokens = estimate_context_tokens(&ctx.messages).tokens;
-            let window = snap.model.context_window as i64;
+            let window = window as i64;
             if should_compact(ctx_tokens, window, &snap.compaction) {
                 if let Ok(Some(prep)) = prepare_compaction(&path, snap.compaction) {
                     let compaction_provider = Self::resolve_provider(&snap.models, &snap.model)
@@ -3682,7 +3686,8 @@ impl AgentHarness {
                         .cloned();
                     let compaction_signal = signal.clone();
                     let compaction_run_id = run_id.clone();
-                    if enabled && model.context_window > 0 && provider.is_some() {
+                    let enabled_window = if enabled { model.context_window } else { None };
+                    if let (Some(window), Some(provider)) = (enabled_window, provider) {
                         let cut_for_hook = Arc::clone(&post_compaction_cut);
                         Some(Arc::new(
                             move |ctx: ShouldStopAfterTurnContext<'_>| -> BoxFuture<
@@ -3691,7 +3696,7 @@ impl AgentHarness {
                             > {
                                 let harness = harness.clone();
                                 let model = model.clone();
-                                let provider = provider.clone().expect("checked above");
+                                let provider = provider.clone();
                                 let cut = Arc::clone(&cut_for_hook);
                                 let compaction_signal = compaction_signal.clone();
                                 let compaction_run_id = compaction_run_id.clone();
@@ -3699,11 +3704,7 @@ impl AgentHarness {
                                 let new_messages_len = ctx.new_messages.len();
                                 Box::pin(async move {
                                     let tokens = estimate_context_tokens(&context.messages).tokens;
-                                    if !should_compact(
-                                        tokens,
-                                        model.context_window as i64,
-                                        &settings,
-                                    ) {
+                                    if !should_compact(tokens, window as i64, &settings) {
                                         return None;
                                     }
                                     let entries: Vec<Entry> = context

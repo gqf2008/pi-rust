@@ -1611,7 +1611,7 @@ fn context_badge_ignores_aborted_and_error_turns() {
     use kiqi_ai::types::{Api, StopReason, Usage};
 
     let footer = Arc::new(FooterComponent::new());
-    footer.set_context_window(100_000);
+    footer.set_context_window(Some(100_000));
 
     // A real response fills in the percent (`?` -> `25.0%/100k`).
     let mut ok = kiqi_ai::AssistantMessage::empty(Api::AnthropicMessages, "anthropic", "m", 0);

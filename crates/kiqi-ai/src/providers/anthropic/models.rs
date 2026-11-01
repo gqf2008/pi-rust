@@ -124,7 +124,7 @@ fn finish(
     m.thinking_level_map = thinking_level_map;
     m.input = vec![InputModality::Text, InputModality::Image];
     m.cost = cost(rates);
-    m.context_window = context_window;
+    m.context_window = Some(context_window);
     m.max_tokens = max_tokens;
     m.compat = Some(StreamingProtocolCompat::AnthropicMessages(compat));
     m

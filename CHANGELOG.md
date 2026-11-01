@@ -44,6 +44,12 @@ carries the same notes.
   `Peer::subscribe` 在 3.x 被标成 legacy（新协议改用 `listen`），但 walgit 走的是
   legacy session 模式、只实现了 `resources/subscribe`，所以继续用它。
 
+- **`contextWindow` 不再是「0 表示未知」。** 库里 `Model::context_window` 从 `u64` 改成
+  `Option<u64>`：`None` 才是「模型没声明窗口」，而不是一个要拿去当除数的 0。省略和写
+  `0` 都解析成 `None`（真实窗口恒为正数，`0` 只可能是笔误）。随之：阈值压缩只在窗口已知
+  时评估（未知就交给溢出兜底），`ki models` 表格显示 `unknown`，状态栏在窗口未知时不显示
+  百分比。此前 0 既像「窗口是零」又像「没配置」，`ki` 的模型信息还把它显示成 `0`。
+
 - **不再对外宣称一个不存在的站点。** `homepage` 曾指向 `https://ki.laofu.online/`，
   但那个域名只有 DNS、没有 vhost 和证书（每次握手都是 `tlsv1 alert internal
   error`），`docs.html` 也从来没存在过。项目主页就是本仓库，所以 workspace

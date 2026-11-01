@@ -182,7 +182,14 @@ pub struct Model {
     pub thinking_level_map: Option<ThinkingLevelMap>,
     pub input: Vec<InputModality>,
     pub cost: ModelCost,
-    pub context_window: u64,
+    /// The model's context window in tokens, **when the provider states one**.
+    ///
+    /// `None` means "not declared", not "zero": threshold compaction is skipped,
+    /// the footer drops the percentage, and the overflow/adaptive paths discover
+    /// the real limit. `Some(0)` would be a lie (a model with a zero-token
+    /// window cannot run at all), so config parsing drops a literal `0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     pub max_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampling_params: Option<serde_json::Map<String, serde_json::Value>>,
@@ -193,7 +200,7 @@ pub struct Model {
 }
 
 impl Model {
-    /// Construct a minimal model with empty cost + zeroed windows.
+    /// Construct a minimal model with empty cost + unknown windows.
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -211,7 +218,7 @@ impl Model {
             thinking_level_map: None,
             input: vec![InputModality::Text],
             cost: ModelCost::default(),
-            context_window: 0,
+            context_window: None,
             max_tokens: 0,
             sampling_params: None,
             headers: None,

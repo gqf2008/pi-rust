@@ -563,7 +563,7 @@ fn default_faux_model() -> Model {
         DEFAULT_BASE_URL,
     );
     m.input = vec![InputModality::Text, InputModality::Image];
-    m.context_window = 128_000;
+    m.context_window = Some(128_000);
     m.max_tokens = 16_384;
     m
 }

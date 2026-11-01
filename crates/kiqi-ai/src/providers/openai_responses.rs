@@ -39,7 +39,7 @@ pub fn openai_responses_models() -> Vec<Model> {
         "https://api.openai.com/v1",
     );
     model.reasoning = true;
-    model.context_window = 1_000_000;
+    model.context_window = Some(1_000_000);
     model.max_tokens = 128_000;
     model.compat = Some(StreamingProtocolCompat::OpenaiResponses(
         crate::model::OpenaiResponsesCompat {

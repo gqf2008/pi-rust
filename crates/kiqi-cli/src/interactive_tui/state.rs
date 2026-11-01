@@ -1938,7 +1938,7 @@ impl TuiState {
         ));
         // A model switch changes the context window, so the `%/{window}` badge
         // must rescale against the same last-reported token count.
-        self.footer.set_context_window(model.context_window as i64);
+        self.footer.set_context_window(model.context_window);
     }
 
     /// B5e: read a clone of the current assistant-markdown transformer (if any).

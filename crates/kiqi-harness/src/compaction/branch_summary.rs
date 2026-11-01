@@ -281,7 +281,7 @@ const BRANCH_SUMMARY_PREAMBLE: &str =
 const BRANCH_SUMMARY_PROMPT: &str = "Create a structured summary of this conversation branch for context when returning later.\n\nUse this EXACT format:\n\n## Goal\n[What was the user trying to accomplish in this branch?]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned]\n- [Or \"(none)\" if none were mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Work that was started but not finished]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [What should happen next to continue this work]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
 
 /// `generateBranchSummary`. Mirrors TS: budget = `context_window − reserve`
-/// (context_window 0 → 128000); empty messages → `"No content to summarize"`;
+/// (undeclared window → 128000); empty messages → `"No content to summarize"`;
 /// single user message with the conversation+instructions prompt; `maxTokens:
 /// 2048`; prepend `BRANCH_SUMMARY_PREAMBLE`; append file-op tags; map
 /// `aborted`/`error` to `BranchSummaryError`.
@@ -289,11 +289,12 @@ pub async fn generate_branch_summary(
     entries: &[Entry],
     options: &GenerateBranchSummaryOptions,
 ) -> Result<BranchSummaryResult, BranchSummaryError> {
-    let context_window = if options.llm.model.context_window > 0 {
-        options.llm.model.context_window as i64
-    } else {
-        128_000
-    };
+    let context_window = options
+        .llm
+        .model
+        .context_window
+        .map(|window| window as i64)
+        .unwrap_or(128_000);
     let token_budget = context_window - options.reserve_tokens;
 
     let prep = prepare_branch_entries(entries, token_budget);

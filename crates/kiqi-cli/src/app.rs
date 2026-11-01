@@ -647,7 +647,10 @@ async fn list_models(search: &str) -> i32 {
             (
                 model.provider,
                 model.id,
-                format_tokens(model.context_window),
+                model
+                    .context_window
+                    .map(format_tokens)
+                    .unwrap_or_else(|| "unknown".to_string()),
                 format_tokens(model.max_tokens),
                 if model.reasoning { "yes" } else { "no" }.to_string(),
             )

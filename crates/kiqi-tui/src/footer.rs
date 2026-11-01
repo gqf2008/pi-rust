@@ -120,8 +120,8 @@ pub struct FooterComponent {
     /// known. The percent is derived from this against `context_window`; `None`
     /// renders `?` (no post-compaction usage yet, or nothing reported).
     context_tokens: Mutex<Option<i64>>,
-    /// Model context window in tokens (0 ⇒ unknown).
-    context_window: Mutex<i64>,
+    /// Model context window in tokens, when the model declares one.
+    context_window: Mutex<Option<u64>>,
     /// Whether auto-compaction is enabled (renders the `(auto)` suffix).
     auto_compact: Mutex<bool>,
 }
@@ -147,7 +147,7 @@ impl FooterComponent {
             cache_hit_rate: Mutex::new(None),
             context_percent: Mutex::new(None),
             context_tokens: Mutex::new(None),
-            context_window: Mutex::new(0),
+            context_window: Mutex::new(None),
             auto_compact: Mutex::new(true),
         }
     }
@@ -239,7 +239,7 @@ impl FooterComponent {
     }
 
     /// Set the context usage percent + window (line 2).
-    pub fn set_context_usage(&self, percent: Option<f64>, window: i64) {
+    pub fn set_context_usage(&self, percent: Option<f64>, window: Option<u64>) {
         if let Ok(mut p) = self.context_percent.lock() {
             *p = percent;
         }
@@ -261,7 +261,7 @@ impl FooterComponent {
 
     /// Set the model's context window and recompute the `%` against the
     /// tracked token count (a model switch changes the denominator).
-    pub fn set_context_window(&self, window: i64) {
+    pub fn set_context_window(&self, window: Option<u64>) {
         if let Ok(mut w) = self.context_window.lock() {
             *w = window;
         }
@@ -273,7 +273,7 @@ impl FooterComponent {
         let window = *self.context_window.lock().unwrap();
         let tokens = *self.context_tokens.lock().unwrap();
         let percent = match (tokens, window) {
-            (Some(t), w) if t > 0 && w > 0 => Some(t as f64 / w as f64 * 100.0),
+            (Some(t), Some(w)) if t > 0 && w > 0 => Some(t as f64 / w as f64 * 100.0),
             _ => None,
         };
         if let Ok(mut p) = self.context_percent.lock() {
@@ -355,12 +355,15 @@ impl FooterComponent {
 
         // Context usage: colorized by pressure like upstream.
         let auto_indicator = if auto { " (auto)" } else { "" };
-        let context_display = match context_percent {
-            Some(p) => format!("{p:.1}%/{}{auto_indicator}", format_tokens(context_window)),
-            None if context_window > 0 => {
-                format!("0.0%/{}{auto_indicator}", format_tokens(context_window))
+        let context_display = match (context_percent, context_window) {
+            (Some(p), Some(window)) => {
+                format!("{p:.1}%/{}{auto_indicator}", format_tokens(window as i64))
             }
-            None => String::new(),
+            (None, Some(window)) => {
+                format!("0.0%/{}{auto_indicator}", format_tokens(window as i64))
+            }
+            (Some(p), None) => format!("{p:.1}%{auto_indicator}"),
+            (None, None) => String::new(),
         };
         let context_styled = if context_display.is_empty() {
             String::new()
@@ -610,7 +613,7 @@ mod tests {
             cost: 0.421,
         });
         footer.set_cache_hit_rate(Some(72.0));
-        footer.set_context_usage(Some(63.2), 200_000);
+        footer.set_context_usage(Some(63.2), Some(200_000));
         let lines = footer.render(120);
         assert_eq!(lines.len(), 2, "expected pwd + stats rows");
         let pwd = strip_ansi(&lines[0]);
@@ -625,7 +628,7 @@ mod tests {
     #[test]
     fn context_badge_derives_percent_from_reported_tokens() {
         let footer = FooterComponent::new();
-        footer.set_context_window(512_000);
+        footer.set_context_window(Some(512_000));
         // No response yet → shows 0.0% initially.
         let stats = strip_ansi(&footer.render(120).join("\n"));
         assert!(stats.contains("0.0%/512k"), "stats: {stats}");
@@ -636,7 +639,7 @@ mod tests {
         assert!(stats.contains("50.0%/512k"), "stats: {stats}");
 
         // Switching the model rescales the same token count.
-        footer.set_context_window(128_000);
+        footer.set_context_window(Some(128_000));
         let stats = strip_ansi(&footer.render(120).join("\n"));
         assert!(stats.contains("200.0%/128k"), "stats: {stats}");
 
