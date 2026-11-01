@@ -3,9 +3,9 @@
 #
 # Two classes of drift, both silent and both found in this script:
 #
-#   1. **Push target.** `phase_push` ran `git push origin HEAD`. In this clone
-#      `origin` is `bigfish1913/pi-rust`, which AGENTS.md forbids pushing to
-#      ("要推送就推 `fork`"). A release would have published to the wrong repo.
+#   1. **Push target.** `phase_push` ran `git push origin HEAD`. At the time,
+#      `origin` pointed at the unrelated `bigfish1913/pi-rust`, which AGENTS.md
+#      forbids pushing to. A release would have published to the wrong repo.
 #   2. **Asset names.** `phase_wait` polled for `kiqi-v<ver>-<target>`, but
 #      `release-binaries.yml` uploads `ki-v<ver>-<target>` (`name="ki-v${version}-
 #      ${target}"`). The poll would never see its files and would die after

@@ -22,17 +22,27 @@ status=0
 # should be revisited rather than deleted.
 unpublished=0
 published=0
+published_list=""
 for manifest in "$ROOT"/crates/*/Cargo.toml; do
     if grep -q '^publish = false' "$manifest"; then
         unpublished=$((unpublished + 1))
     else
         published=$((published + 1))
+        rel=${manifest#"$ROOT"/}
+        published_list="${published_list}${published_list:+ }$rel"
     fi
 done
 
-if [ "$unpublished" -gt 0 ] && [ "$published" -gt 0 ]; then
-    echo "note: some crates are published and some are not ($published/$unpublished);"
-    echo "      the README check below assumes none are"
+# Everything below is written against "nothing is published". This used to be a
+# `note:` when the manifests disagreed, which meant one crate directory without the
+# key -- or a single flipped `publish` -- downgraded the entire install section to
+# silence and still exited 0, while the README went on saying `cargo install
+# kiqi-cli`. The invariant is a precondition of the assertions, so it fails loudly.
+if [ "$unpublished" -eq 0 ] || [ "$published" -gt 0 ]; then
+    echo "FAIL: the crates are not uniformly 'publish = false' ($published published / $unpublished unpublished):" >&2
+    for m in $published_list; do echo "      $m" >&2; done
+    echo "      the checks below assume none is published; fix the manifest or this script" >&2
+    status=1
 fi
 
 # The user guides and the crate README are read at exactly the moment the
@@ -46,14 +56,15 @@ for doc in \
     "$ROOT/docs/kiqi-tool/README.md" \
     "$ROOT/docs/kiqi-tool/user-guide.md" \
     "$ROOT/docs/guides/user-guide.md" \
-    "$ROOT/crates/kiqi-cli/README.md" \
     "$ROOT"/crates/*/README.md
 do
     [ -f "$doc" ] || continue
     rel=${doc#"$ROOT"/}
 
-    # No crates.io badges for a crate that is not on crates.io.
-    grep -q 'img.shields.io/crates/v/kiqi-' "$doc" && {
+    # No crates.io badges for a crate that is not on crates.io. Match any badge
+    # service and any metric: the version badge was the one that happened to be in the
+    # README, while `crates/d/`, `crates/l/` and badgen.net render the same dead page.
+    grep -qE '(img\.shields\.io|badgen\.net)/crates/[a-z]+/kiqi-' "$doc" && {
         echo "FAIL: $rel has a crates.io version badge for an unpublished crate" >&2
         status=1
     }
@@ -72,8 +83,11 @@ do
     if [ "$published" -eq 0 ]; then
         # A bare `cargo install <crate>` cannot work with publish = false. Mentioning it
         # in prose ("does not work") is fine; presenting it as an instruction is not.
-        if grep -n 'cargo install kiqi-cli' "$doc" \
-            | grep -vE 'does not work|装不到' >/dev/null; then
+        # `cargo install --locked kiqi-cli`, `cargo install -f kiqi-cli` and a stray
+        # double space are the same instruction; only prose that says it fails is fine.
+        install_re='cargo[[:space:]]+install([[:space:]]+-[-A-Za-z]+)*[[:space:]]+kiqi-cli'
+        if grep -nE "$install_re" "$doc" \
+            | grep -vE 'does not work|装不到|cannot succeed|cannot work|returns not found|no matching package|未发布|不会成功' >/dev/null; then
             echo "FAIL: $rel instructs 'cargo install kiqi-cli', which cannot succeed" >&2
             status=1
         fi
@@ -105,6 +119,20 @@ do
         grep -n 'ki install kiqi-' "$doc" | grep -v -- '--path' | head -5 | sed 's/^/      /' >&2
         status=1
     fi
+done
+
+# --- The manifests must not advertise pages that cannot exist -------------------
+# `publish = false` also means docs.rs never builds a page, yet every crate carried
+# `documentation = "https://docs.rs/kiqi-*"` -- the "no dead docs.rs link" rule above
+# only scanned Markdown, so the URLs that actually ship in the published manifest went
+# unchecked.
+for manifest in "$ROOT"/crates/*/Cargo.toml; do
+    rel=${manifest#"$ROOT"/}
+    grep -nE 'https://(docs\.rs|crates\.io)/(crate/|crates/|api/v1/crates/)?kiqi-' "$manifest" >/dev/null && {
+        echo "FAIL: $rel advertises a docs.rs/crates.io URL for an unpublished crate" >&2
+        grep -nE 'https://(docs\.rs|crates\.io)/[^"]*kiqi-' "$manifest" | head -3 | sed 's/^/      /' >&2
+        status=1
+    }
 done
 
 # --- The extension channel must be described as it exists -----------------------
@@ -162,8 +190,7 @@ for rel in $(git ls-files '*.md' 'scripts/install.sh' 'scripts/install.ps1' \
     # not use` would read as a warning while being an instruction.
     if grep -n 'bigfish1913/pi-rust' "$rel" | awk '
         /\| *(sh|bash)|curl |wget |git clone|cargo install|gh repo|docker |insmod/ { print; next }
-        /star-history|Upstream|cherry-pick/ { next }
-        /unrelated (fork|project)/ && /do not use|不要|never/ { next }
+        /unrelated (fork|project)[^A-Za-z]{0,4}(do not use|never use|不要使用|不要用)/ { next }
         { print }
     ' | grep -q .; then
         echo "FAIL: $rel links to bigfish1913/pi-rust," >&2

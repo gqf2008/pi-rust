@@ -188,8 +188,10 @@ phase_tag() {
 
 phase_push() {
   note "push branch + tag"
-  # `fork` is gqf2008/pi-rust; `origin` is bigfish1913/pi-rust, which AGENTS.md
-  # forbids pushing to ("要推送就推 `fork`"). This used to push to `origin`.
+  # `origin` is gqf2008/pi-rust (the GitHub mirror) and `walgit` is the daily
+  # remote; both are ours. The unrelated bigfish1913/pi-rust is not configured in
+  # this clone at all (AGENTS.md keeps it that way) -- if it ever comes back, do
+  # not push there.
   step git push "$PUSH_REMOTE" HEAD
   step git push "$PUSH_REMOTE" "$release_tag"
 }

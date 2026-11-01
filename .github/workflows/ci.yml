@@ -114,7 +114,8 @@ jobs:
 
       # `release.sh` orchestrates the release workflow, so it has to agree with it:
       # the asset names it polls for and the remote it pushes to. Both were fixed
-      # (the poll uses `ki-v…`; the push uses `fork`, never `origin` = bigfish1913).
+      # (the poll uses `ki-v…`; the push names its remote explicitly instead of
+      # assuming `origin` points at this repository).
       - name: Test release.sh against the release workflow
         run: sh scripts/tests/release-sh.sh
 
