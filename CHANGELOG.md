@@ -12,6 +12,16 @@ carries the same notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **重复的指针不再刷进会话。** 一条资源更新如果只是指针（该 uri 没配 `autoRead`），
+  而模型已经被告知过同一条、中间又没有读过它，就不会再往 transcript 里追加一条完全
+  相同的 `MCP resources updated`：它被累加进下一条通知的 `(N update(s) suppressed)`
+  里。重复的指针不携带任何可行动信息——要看内容终究得读一次——所以「每轮一条同一个
+  uri」只会把会话刷满。真的读过（`{server}__read_resource`，含边界上的 `autoRead`）
+  之后指针重新生效。唤醒判定不受影响：每次更新照旧进 `signals` 预算，否则「板子变了
+  就醒」会退化成一次性事件。
+
 ## [0.5.0] - 2026-11-01
 
 ### Docs

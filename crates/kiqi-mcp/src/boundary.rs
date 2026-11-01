@@ -36,11 +36,28 @@ pub async fn take_mcp_boundary(harness: &AgentHarness, mcp: &McpManager) -> crat
 
 /// Record one drained batch as the single batched custom entry (the goal extension
 /// injection precedent). It becomes a user message on the next context build.
-pub async fn append_notice_batch(harness: &AgentHarness, batch: &crate::McpNoticeBatch) {
+///
+/// A content-free pointer the model was already told about — and has not read
+/// since — folds into the suppressed count instead of printing the same line into
+/// another turn's transcript: it carries nothing the model can act on, so only a
+/// read or a genuinely new resource earns a new entry. The drain stays
+/// unfiltered: the wake decision downstream must still see every update.
+pub async fn append_notice_batch(
+    harness: &AgentHarness,
+    mcp: &McpManager,
+    batch: &crate::McpNoticeBatch,
+) {
     if batch.is_empty() {
         return;
     }
-    let message = crate::notice_message(batch);
+    let (fresh, folded) = mcp.keep_news(batch.notices.clone());
+    if fresh.is_empty() {
+        return;
+    }
+    let message = crate::notice_message(&crate::McpNoticeBatch {
+        notices: fresh,
+        suppressed: batch.suppressed + folded,
+    });
     if let Err(error) = harness.session().append_message(message).await {
         eprintln!("warning: mcp: could not record resource notice: {error}");
     }
@@ -59,7 +76,7 @@ pub async fn append_notice_batch(harness: &AgentHarness, batch: &crate::McpNotic
 /// ignore the result. The model copy above is the only copy those callers had.
 pub async fn drain_mcp_boundary(harness: &AgentHarness, mcp: &McpManager) -> Vec<crate::McpNotice> {
     let batch = take_mcp_boundary(harness, mcp).await;
-    append_notice_batch(harness, &batch).await;
+    append_notice_batch(harness, mcp, &batch).await;
     batch.notices
 }
 

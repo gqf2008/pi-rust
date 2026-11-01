@@ -1506,6 +1506,18 @@ impl McpManager {
         self.mailbox.take()
     }
 
+    /// Split notices into news and repeats of a pointer the model was already
+    /// given (see [`crate::McpNoticeMailbox::keep_news`]).
+    ///
+    /// Consulted by the TRANSCRIPT writer only, never by the drain: a repeated
+    /// content-free pointer adds nothing to a transcript (the model has to read
+    /// the resource either way), but every update must still reach the wake
+    /// decision — its own budgets (interval, runs per hour, consecutive runs)
+    /// are what rate-limit turns.
+    pub fn keep_news(&self, notices: Vec<crate::McpNotice>) -> (Vec<crate::McpNotice>, u64) {
+        self.mailbox.keep_news(notices)
+    }
+
     /// Boundary drain with the `autoRead` opt-in applied: a notice whose uri a
     /// server lists in `autoRead` is read through that server's connection now,
     /// and the text rides the notice entry (bounded at [`MAX_RESOURCE_TEXT`]).
@@ -2550,8 +2562,14 @@ pub(crate) async fn read_resource(
     )
     .await?;
     match result {
-        ServerResult::ReadResourceResult(result) => serde_json::to_value(&result)
-            .map_err(|error| CallError::Failed(handle.decorate(format!("result encode: {error}")))),
+        ServerResult::ReadResourceResult(result) => {
+            // The caller now holds the content: the next update for this uri is
+            // news again, not a repeat of a pointer it never followed.
+            handle.mailbox.mark_read(handle.server_name(), uri);
+            serde_json::to_value(&result).map_err(|error| {
+                CallError::Failed(handle.decorate(format!("result encode: {error}")))
+            })
+        }
         _ => Err(CallError::Failed(handle.decorate(
             "unexpected response type to resources/read".to_string(),
         ))),
@@ -3056,6 +3074,40 @@ fn doctor_hints(row: &ServerDiagnostic) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The transcript writer asks the manager which notices are news; a pointer
+    /// the model was already given (and has not read since) must not come back.
+    /// Reaching the same uri through `read_resource` re-arms it.
+    #[tokio::test]
+    async fn only_fresh_pointers_survive_a_second_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, issues) = McpManager::start(&[], dir.path()).await;
+        assert!(issues.is_empty(), "start issues: {issues:?}");
+        let notice = || crate::McpNotice {
+            server: "docs".into(),
+            uri: "mem://alpha".into(),
+            content: None,
+            authored_sessions: Vec::new(),
+        };
+
+        let (fresh, folded) = manager.keep_news(vec![notice()]);
+        assert_eq!(fresh.len(), 1, "the first pointer is news");
+        assert_eq!(folded, 0);
+
+        let (fresh, folded) = manager.keep_news(vec![notice()]);
+        assert!(
+            fresh.is_empty(),
+            "a repeated pointer adds nothing: {fresh:?}"
+        );
+        assert_eq!(folded, 1, "it becomes a suppressed count instead");
+
+        manager.mailbox.mark_read("docs", "mem://alpha");
+        let (fresh, folded) = manager.keep_news(vec![notice()]);
+        assert_eq!(fresh.len(), 1, "reading the resource re-arms the pointer");
+        assert_eq!(folded, 0);
+
+        manager.shutdown().await;
+    }
 
     fn connected_row(name: &str) -> ServerDiagnostic {
         ServerDiagnostic {

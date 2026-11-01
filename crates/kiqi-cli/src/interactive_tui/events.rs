@@ -232,7 +232,7 @@ pub(super) async fn handle_signal_boundary(
     if batch.is_empty() {
         return false;
     }
-    kiqi_mcp::boundary::append_notice_batch(harness, &batch).await;
+    kiqi_mcp::boundary::append_notice_batch(harness, mcp, &batch).await;
     let any_auto = batch.notices.iter().any(|notice| {
         mcp.signal_config_for(&notice.server, &notice.uri)
             .is_some_and(|config| config.wake == kiqi_mcp::WakeMode::Auto)

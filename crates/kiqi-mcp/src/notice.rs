@@ -14,8 +14,16 @@
 //! Every suppressed update — coalesced or dropped — is folded into the next
 //! drained batch as an "N update(s) suppressed" line, so a consumer can tell
 //! "changed once" from "changed many times since you looked".
+//!
+//! Coalescing only covers ONE accumulation window. A resource that changes once
+//! per turn would still put an identical "this changed, and I will not tell you
+//! what it looks like" pointer in every turn's transcript, which is noise the
+//! model cannot act on: it has to read the resource to learn anything either
+//! way. So a pointer is delivered once and then held (`announced`) until the
+//! resource is actually read — further updates fold into the suppressed count
+//! instead. Content notices are never held: their content *is* the news.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 
 use tokio::sync::Notify;
@@ -91,6 +99,9 @@ impl McpNoticeBatch {
 struct Inner {
     entries: VecDeque<McpNotice>,
     suppressed: u64,
+    /// Resources whose pointer was already delivered and not read since. A
+    /// pointer carries no content, so a repeat tells the model nothing new.
+    announced: HashSet<(String, String)>,
 }
 
 /// Session-scoped sink for resource-update notices. One per
@@ -170,21 +181,59 @@ impl McpNoticeMailbox {
     /// lifetime was rotated or removed, so anything queued under the old one
     /// is stale content that must never deliver (upstream's queue purge).
     pub(crate) fn purge(&self, server: &str, uri: &str) {
-        self.inner
-            .lock()
-            .unwrap()
+        let mut inner = self.inner.lock().unwrap();
+        inner
             .entries
             .retain(|entry| !(entry.server == server && entry.uri == uri));
+        // A rotated or removed subscription re-arms the pointer: the new one has
+        // not announced anything yet.
+        inner
+            .announced
+            .remove(&(server.to_string(), uri.to_string()));
     }
 
     /// Forget every pending notice for one server — its whole connection was
     /// restored or torn down (upstream's `clear_pending_for_key`).
     pub(crate) fn purge_server(&self, server: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.entries.retain(|entry| entry.server != server);
+        inner.announced.retain(|(owner, _)| owner != server);
+    }
+
+    /// Split a drained batch into the notices that are news and the ones that
+    /// repeat a pointer already delivered: the first returns the delivered
+    /// notices plus how many were folded away (to add to `suppressed`).
+    ///
+    /// A notice carrying content is always news — the content is the payload.
+    pub(crate) fn keep_news(&self, notices: Vec<McpNotice>) -> (Vec<McpNotice>, u64) {
+        let mut inner = self.inner.lock().unwrap();
+        let mut folded = 0;
+        let kept = notices
+            .into_iter()
+            .filter(|notice| {
+                if notice.content.is_some() {
+                    return true;
+                }
+                let key = (notice.server.clone(), notice.uri.clone());
+                if inner.announced.contains(&key) {
+                    folded += 1;
+                    return false;
+                }
+                inner.announced.insert(key);
+                true
+            })
+            .collect();
+        (kept, folded)
+    }
+
+    /// Re-arm one resource: whoever asked now holds its content, so the next
+    /// update is news again rather than a repeat.
+    pub(crate) fn mark_read(&self, server: &str, uri: &str) {
         self.inner
             .lock()
             .unwrap()
-            .entries
-            .retain(|entry| entry.server != server);
+            .announced
+            .remove(&(server.to_string(), uri.to_string()));
     }
 
     /// How many notices are currently pending, WITHOUT draining them (drain
@@ -482,5 +531,88 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), wait)
             .await
             .expect("a coalesced update must still wake the MUI adapter");
+    }
+
+    #[test]
+    fn a_pointer_is_delivered_once_until_the_resource_is_read() {
+        let mailbox = McpNoticeMailbox::new();
+        mailbox.push("docs", "mem://alpha");
+        let (kept, folded) = mailbox.keep_news(mailbox.take().notices);
+        assert_eq!(kept.len(), 1, "the first pointer is news");
+        assert_eq!(folded, 0);
+
+        mailbox.push("docs", "mem://alpha");
+        let (kept, folded) = mailbox.keep_news(mailbox.take().notices);
+        assert!(
+            kept.is_empty(),
+            "a repeated pointer tells the model nothing it can act on: {kept:?}"
+        );
+        assert_eq!(folded, 1);
+
+        mailbox.mark_read("docs", "mem://alpha");
+        mailbox.push("docs", "mem://alpha");
+        let (kept, folded) = mailbox.keep_news(mailbox.take().notices);
+        assert_eq!(kept.len(), 1, "reading the resource re-arms the pointer");
+        assert_eq!(folded, 0);
+    }
+
+    #[test]
+    fn each_resource_holds_its_own_pointer() {
+        let mailbox = McpNoticeMailbox::new();
+        mailbox.push("docs", "mem://alpha");
+        mailbox.push("docs", "mem://beta");
+        assert_eq!(mailbox.keep_news(mailbox.take().notices).0.len(), 2);
+        // One resource's pointer says nothing about another's.
+        mailbox.push("docs", "mem://beta");
+        let (kept, folded) = mailbox.keep_news(mailbox.take().notices);
+        assert!(kept.is_empty(), "got {kept:?}");
+        assert_eq!(folded, 1);
+    }
+
+    #[test]
+    fn a_content_notice_is_always_news() {
+        let mailbox = McpNoticeMailbox::new();
+        let notice = McpNotice {
+            server: "docs".into(),
+            uri: "mem://alpha".into(),
+            content: None,
+            authored_sessions: Vec::new(),
+        };
+        assert_eq!(mailbox.keep_news(vec![notice.clone()]).0.len(), 1);
+        // The content is the payload: holding it back would drop the update.
+        let with_content = McpNotice {
+            content: Some("alpha body".into()),
+            ..notice
+        };
+        let (kept, folded) = mailbox.keep_news(vec![with_content]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(folded, 0);
+        assert_eq!(kept[0].content.as_deref(), Some("alpha body"));
+    }
+
+    #[test]
+    fn a_rotated_subscription_re_arms_the_pointer() {
+        let mailbox = McpNoticeMailbox::new();
+        mailbox.push("docs", "mem://alpha");
+        assert_eq!(mailbox.keep_news(mailbox.take().notices).0.len(), 1);
+        mailbox.push("docs", "mem://alpha");
+        assert!(mailbox.keep_news(mailbox.take().notices).0.is_empty());
+        // The subscription lifetime that announced it is gone, so the next one
+        // announces afresh instead of inheriting a stale "already told you".
+        mailbox.purge("docs", "mem://alpha");
+        mailbox.push("docs", "mem://alpha");
+        assert_eq!(mailbox.keep_news(mailbox.take().notices).0.len(), 1);
+    }
+
+    #[test]
+    fn a_server_purge_re_arms_every_pointer_it_owned() {
+        let mailbox = McpNoticeMailbox::new();
+        mailbox.push("docs", "mem://alpha");
+        mailbox.push("docs", "mem://beta");
+        assert_eq!(mailbox.keep_news(mailbox.take().notices).0.len(), 2);
+        mailbox.purge_server("docs");
+        mailbox.push("docs", "mem://alpha");
+        mailbox.push("docs", "mem://beta");
+        assert_eq!(mailbox.keep_news(mailbox.take().notices).0.len(), 2);
     }
 }
