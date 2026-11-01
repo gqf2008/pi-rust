@@ -54,9 +54,9 @@ use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CancelledNotification, ClientCapabilities,
     ClientConfig, ClientNotification, ClientRequest, ErrorCode, Implementation,
-    PaginatedRequestParams, ProtocolVersion, ReadResourceRequest, ReadResourceRequestParams,
-    RequestId, ResourceUpdatedNotificationParam, ServerResult, SubscribeRequestParams,
-    UnsubscribeRequestParams,
+    PaginatedRequestParams, PingRequest, ProtocolVersion, ReadResourceRequest,
+    ReadResourceRequestParams, RequestId, ResourceUpdatedNotificationParam, ServerResult,
+    SubscribeRequestParams, UnsubscribeRequestParams,
 };
 use rmcp::service::{NotificationContext, PeerRequestOptions, RunningService};
 use rmcp::transport::async_rw::AsyncRwTransport;
@@ -470,6 +470,11 @@ impl Drop for ChildTransport {
 /// ACROSS its RPC (mark-before-RPC, serialize subscribe/unsubscribe/restore,
 /// exactly the adapter's `with_session` lock). Tool calls and reads only clone
 /// the peer and release.
+/// How long a connection may sit quiet before the watchdog pings it.
+pub const LIVENESS_IDLE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long a `ping` may take before the connection counts as wedged.
+pub const LIVENESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(crate) struct ServerHandle {
     config: ServerConfig,
     cwd: PathBuf,
@@ -498,6 +503,10 @@ pub(crate) struct ServerHandle {
     /// `httpIdleTimeout` from ki's settings, applied when building an HTTP
     /// client (the provider-side policy). Ignored by stdio transports.
     http_idle_timeout_ms: Option<i64>,
+    /// When this connection last did anything the server answered. The liveness
+    /// watchdog only pings a server that has been quiet for a while, so an
+    /// actively used server never pays for a probe.
+    last_active: Mutex<std::time::Instant>,
 }
 
 impl ServerHandle {
@@ -547,7 +556,88 @@ impl ServerHandle {
             shutdown: tokio_util::sync::CancellationToken::new(),
             pgid: AtomicU32::new(pgid.unwrap_or(0)),
             http_idle_timeout_ms,
+            last_active: Mutex::new(std::time::Instant::now()),
         })
+    }
+
+    /// Record activity: the watchdog will not ping a server that just answered.
+    fn touch(&self) {
+        *self.last_active.lock().unwrap() = std::time::Instant::now();
+    }
+
+    /// Ping the server if it has been quiet for `idle_for`.
+    ///
+    /// A wedged server — a hung event loop, or a proxy that dropped the session
+    /// without closing the socket — keeps the transport open, so
+    /// `is_transport_closed` says nothing. An idle session would then never
+    /// find out: no call means no liveness check, and no notification either,
+    /// because the server is the side that would have sent them. `ping` is the
+    /// protocol's own liveness probe (`PingRequest`), so it costs one round trip
+    /// and needs no server cooperation beyond the spec.
+    ///
+    /// `Ok(true)` pinged and answered, `Ok(false)` skipped (recently active or
+    /// already retired), `Err` is a reason to retire the connection.
+    async fn probe_if_idle(&self, idle_for: std::time::Duration) -> Result<bool, String> {
+        if self.stopped.load(Ordering::Acquire)
+            || self.last_active.lock().unwrap().elapsed() < idle_for
+        {
+            return Ok(false);
+        }
+        let peer = {
+            let guard = self.client.lock().await;
+            match guard.as_ref() {
+                Some(client) => client.peer().clone(),
+                None => return Ok(false),
+            }
+        };
+        if peer.is_transport_closed() {
+            return Err("the transport is closed".to_string());
+        }
+        match tokio::time::timeout(
+            LIVENESS_TIMEOUT,
+            peer.send_request(ClientRequest::PingRequest(PingRequest::default())),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                self.touch();
+                Ok(true)
+            }
+            // A JSON-RPC error is still an answer: the server is alive and
+            // talking. Newer protocol versions dropped `ping` outright — an
+            // rmcp server replies `-32601 method not found` — so reading a
+            // protocol error as death would retire perfectly healthy servers.
+            // Only the transport-level failures below prove nothing came back.
+            Ok(Err(rmcp::ServiceError::McpError(_))) => {
+                self.touch();
+                Ok(true)
+            }
+            Ok(Err(error)) => Err(format!("ping failed: {error}")),
+            Err(_) => Err(format!(
+                "ping did not answer within {}s",
+                LIVENESS_TIMEOUT.as_secs()
+            )),
+        }
+    }
+
+    /// Drop a dead connection so the next use reconnects. Deliberately does not
+    /// reconnect on its own: a server that crashes on start would otherwise be
+    /// respawned on every probe. Tearing down goes through the same process
+    /// group signal as a shutdown, so a wedged child is not left running.
+    async fn retire(&self, why: &str) {
+        let mut guard = self.client.lock().await;
+        if let Some(client) = guard.take() {
+            signal_process_group(
+                &self.config.name,
+                &client,
+                self.pgid.load(Ordering::Acquire),
+            );
+        }
+        drop(guard);
+        eprintln!(
+            "[ki mcp] server {}: {why}; reconnecting on next use",
+            self.config.name
+        );
     }
 
     pub(crate) fn server_name(&self) -> &str {
@@ -1787,6 +1877,35 @@ impl McpManager {
             server.shutdown().await;
         }
     }
+
+    /// Ping every server that has been quiet for a while and retire the ones
+    /// that do not answer, so the next use reconnects.
+    ///
+    /// This is the only liveness check that runs while nothing is happening:
+    /// call-time checks cover an actively used server, and notifications cover
+    /// a server that is still talking. A dead-but-quiet one is invisible to
+    /// both. One message is returned per retired server; an active or healthy
+    /// server costs nothing.
+    pub async fn probe_idle(&self) -> Vec<String> {
+        self.probe_idle_with(LIVENESS_IDLE_AFTER).await
+    }
+
+    /// [`McpManager::probe_idle`] with an explicit idle threshold — tests probe
+    /// a connection they just made, which the real threshold would skip.
+    pub async fn probe_idle_with(&self, idle_after: std::time::Duration) -> Vec<String> {
+        let handles: Vec<Arc<ServerHandle>> = self.servers.read().unwrap().clone();
+        let mut retired = Vec::new();
+        for handle in handles {
+            match handle.probe_if_idle(idle_after).await {
+                Ok(_) => {}
+                Err(error) => {
+                    retired.push(format!("{}: {error}", handle.server_name()));
+                    handle.retire(&error).await;
+                }
+            }
+        }
+        retired
+    }
 }
 
 /// Connect every enabled server and auto-subscribe the configured uris.
@@ -2519,7 +2638,14 @@ async fn send_request(
         }
         result = handle_req.await_response() => result,
     };
-    raw.map_err(|error| CallError::Failed(handle.decorate(error.to_string())))
+    match raw {
+        Ok(result) => {
+            // The server answered, so the watchdog does not need to ask.
+            handle.touch();
+            Ok(result)
+        }
+        Err(error) => Err(CallError::Failed(handle.decorate(error.to_string()))),
+    }
 }
 
 /// Run a `tools/call` on this server and return the raw result JSON.

@@ -1506,3 +1506,94 @@ async fn doctor_never_echoes_escape_sequences_from_server_stderr() {
 
     manager.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// liveness
+// ---------------------------------------------------------------------------
+
+/// A server that died while the session sat idle is invisible to every other
+/// check: no call means no transport check, and no notification means no wake.
+/// The watchdog pings it and retires the connection, so the next call
+/// reconnects instead of failing forever against a corpse.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dead_server_is_retired_by_the_idle_probe() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pidfile = tmp.path().join("probe.pid");
+    let server = stdio_server(
+        "probe",
+        vec!["--pidfile".to_string(), pidfile.display().to_string()],
+        10,
+        true,
+    );
+    let (manager, issues) = McpManager::start(&[server], tmp.path()).await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    let adapters = manager.tool_adapters();
+    let echo = find(&adapters, "probe__echo").clone();
+
+    // Healthy and recently used: the probe must leave it alone. (An rmcp server
+    // answers `-32601` for `ping` on current protocol versions, which is an
+    // answer, not a death.)
+    let retired = manager.probe_idle_with(Duration::ZERO).await;
+    assert!(retired.is_empty(), "a live server was retired: {retired:?}");
+    call(&echo, json!({ "text": "before" }))
+        .await
+        .expect("the connection survives a probe");
+
+    let pid: u32 = std::fs::read_to_string(&pidfile)
+        .expect("pidfile")
+        .lines()
+        .find_map(|line| line.strip_prefix("SELF "))
+        .expect("SELF line")
+        .trim()
+        .parse()
+        .expect("pid");
+    std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .expect("kill the server");
+    wait_for(5, "the transport to notice the child died", || {
+        (!process_alive(pid)).then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(200));
+
+    let retired = manager.probe_idle_with(Duration::ZERO).await;
+    assert_eq!(
+        retired.len(),
+        1,
+        "the dead server must be retired: {retired:?}"
+    );
+    assert!(retired[0].starts_with("probe: "), "{retired:?}");
+
+    // Retired, not bricked: the next call respawns and succeeds.
+    call(&echo, json!({ "text": "after" }))
+        .await
+        .expect("the next call reconnects");
+    manager.shutdown().await;
+}
+
+/// `probe_idle`'s real threshold must not ping a server that was used a moment
+/// ago — otherwise every boundary would cost a round trip per server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_busy_server_is_not_probed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let record = tmp.path().join("probe-record.jsonl");
+    let server = stdio_server(
+        "quiet",
+        vec!["--record".to_string(), record.display().to_string()],
+        10,
+        true,
+    );
+    let (manager, issues) = McpManager::start(&[server], tmp.path()).await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+    let adapters = manager.tool_adapters();
+    call(find(&adapters, "quiet__echo"), json!({ "text": "hi" }))
+        .await
+        .expect("call");
+    assert!(manager.probe_idle().await.is_empty());
+    assert_eq!(
+        count_recorded(&record, "ping", ""),
+        0,
+        "a server used a moment ago must not be pinged"
+    );
+    manager.shutdown().await;
+}

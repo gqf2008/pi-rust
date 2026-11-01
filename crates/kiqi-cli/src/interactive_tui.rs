@@ -624,6 +624,9 @@ enum TuiMessage {
     /// MUI input event: the same main loop that handles terminal input drains
     /// it (idle) or leaves it for AgentEnd (run active).
     McpInput,
+    /// The periodic idle probe: ping the MCP servers that have gone quiet, so a
+    /// wedged one is retired instead of silently never delivering again.
+    McpProbe,
     /// An active goal still has budget after a run ended: start the next run
     /// without waiting for the user. The goal itself is already in context.
     GoalContinue(String),
@@ -1966,6 +1969,10 @@ pub async fn interactive_tui(
         //
         // Advancing here as well would double-step every tick and make the idle
         // spinner run at 40ms/frame, twice upstream's rate.
+        // MCP liveness runs on this same clock (a whole number of frames per
+        // probe, so the two never drift apart).
+        const MCP_PROBE_TICKS: u32 = (30_000 / kiqi_tui::loader::SPINNER_FRAME_MS) as u32;
+        let mut probe_ticks: u32 = 0;
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(
             kiqi_tui::loader::SPINNER_FRAME_MS,
         ));
@@ -1980,6 +1987,13 @@ pub async fn interactive_tui(
             if now_mtime != models_mtime {
                 models_mtime = now_mtime;
                 let _ = tx_tick.send(TuiMessage::ReloadModels);
+            }
+            // MCP liveness, on the same clock: `/proc`-free, one `ping` per
+            // quiet server per interval — a server that died while the session
+            // sat idle has no other way to be noticed.
+            probe_ticks = probe_ticks.wrapping_add(1);
+            if probe_ticks % MCP_PROBE_TICKS == 0 && tx_tick.send(TuiMessage::McpProbe).is_err() {
+                break;
             }
             // `/work` overlay: created on demand, hidden when toggled off or
             // when it would draw nothing. An always-present overlay would keep
@@ -3780,6 +3794,16 @@ pub async fn interactive_tui(
                     drain_handle.is_some(),
                     Vec::new(),
                 );
+            }
+            Some(TuiMessage::McpProbe) => {
+                // Only while idle: a probe takes the connection lock, and a run
+                // is using those servers right now (its own calls are the
+                // liveness signal anyway).
+                if *state.status.lock().unwrap() == RunStatus::Idle {
+                    for retired in reload_context.mcp.probe_idle().await {
+                        diagnostic_log(&format!("[ki mcp] liveness: {retired}"));
+                    }
+                }
             }
             Some(TuiMessage::McpInput) => {
                 // MUI input: drain at the same kind of boundary as terminal
