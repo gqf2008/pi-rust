@@ -177,6 +177,36 @@ pub struct TuiAltScreen {
     scheduler_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// The bytes that bring a terminal from `previous` to `visible`, row by row.
+///
+/// Pulled out of the frame loop so it can be replayed into a grid in tests: the
+/// loop was only reachable through a real terminal, which is why a row that
+/// came out wrong survived until the frame height changed (the only thing that
+/// forces a full redraw) and nothing caught it.
+pub(crate) fn frame_writes(previous: &[String], visible: &[String], full_redraw: bool) -> String {
+    let mut buffer = String::new();
+    for (row, line) in visible.iter().enumerate() {
+        if !full_redraw && row < previous.len() && &previous[row] == line {
+            continue; // Skip unchanged lines
+        }
+        // Overwrite before clearing any leftover tail. Clearing the whole row
+        // first blanks stationary sidebars during scroll on terminals that do
+        // not implement synchronized output.
+        if let Some((column, text)) = (!full_redraw)
+            .then(|| crate::line_diff::patch(&previous[row], line))
+            .flatten()
+        {
+            buffer.push_str(&format!("\x1b[{};{}H{}", row + 1, column + 1, text));
+        } else {
+            buffer.push_str(&format!("\x1b[{};1H{}", row + 1, line));
+            if !full_redraw && visible_width(line) < visible_width(&previous[row]) {
+                buffer.push_str("\x1b[K");
+            }
+        }
+    }
+    buffer
+}
+
 impl TuiAltScreen {
     /// Create a new alternate screen TUI.
     pub fn new(
@@ -1066,25 +1096,7 @@ impl TuiAltScreen {
             buffer.push_str("\x1b[?2026h");
 
             // Write changed lines
-            for (row, line) in visible.iter().enumerate() {
-                if !full_redraw && row < previous.len() && &previous[row] == line {
-                    continue; // Skip unchanged lines
-                }
-                // Overwrite before clearing any leftover tail. Clearing the
-                // whole row first blanks stationary sidebars during scroll on
-                // terminals that do not implement synchronized output.
-                if let Some((column, text)) = (!full_redraw)
-                    .then(|| crate::line_diff::patch(&previous[row], line))
-                    .flatten()
-                {
-                    buffer.push_str(&format!("\x1b[{};{}H{}", row + 1, column + 1, text));
-                } else {
-                    buffer.push_str(&format!("\x1b[{};1H{}", row + 1, line));
-                    if !full_redraw && visible_width(line) < visible_width(&previous[row]) {
-                        buffer.push_str("\x1b[K");
-                    }
-                }
-            }
+            buffer.push_str(&frame_writes(&previous, &visible, full_redraw));
 
             // Position the hardware cursor using the marker location captured
             // before internal markers were stripped from `visible`.
@@ -2017,5 +2029,283 @@ mod tests {
             "200 requests in ~250 ms must coalesce into ~16 ms frames, painted {frames}"
         );
         tui.stop(TuiStopOptions::default());
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    #[derive(Clone, Default, PartialEq)]
+    struct Cell {
+        text: String,
+        /// Second half of a double-width grapheme.
+        continuation: bool,
+    }
+
+    /// A grid that understands exactly the writes `frame_writes` emits: absolute
+    /// cursor moves, erase-to-end-of-line, and text. SGR/OSC are ignored — this
+    /// asserts *what the screen shows*, not how it is styled.
+    #[derive(Default)]
+    struct Grid {
+        rows: Vec<Vec<Cell>>,
+        row: usize,
+        col: usize,
+    }
+
+    impl Grid {
+        fn ensure(&mut self, row: usize, col: usize) {
+            while self.rows.len() <= row {
+                self.rows.push(Vec::new());
+            }
+            while self.rows[row].len() <= col {
+                self.rows[row].push(Cell::default());
+            }
+        }
+
+        fn put_text(&mut self, text: &str) {
+            for grapheme in unicode_segmentation::UnicodeSegmentation::graphemes(text, true) {
+                let width = unicode_width::UnicodeWidthStr::width(grapheme);
+                if width == 0 {
+                    if self.col > 0 {
+                        let row = self.row;
+                        let col = self.col - 1;
+                        self.ensure(row, col);
+                        self.rows[row][col].text.push_str(grapheme);
+                    }
+                    continue;
+                }
+                self.ensure(self.row, self.col);
+                self.rows[self.row][self.col] = Cell {
+                    text: grapheme.to_string(),
+                    continuation: false,
+                };
+                if width == 2 {
+                    self.ensure(self.row, self.col + 1);
+                    self.rows[self.row][self.col + 1] = Cell {
+                        text: String::new(),
+                        continuation: true,
+                    };
+                }
+                self.col += width;
+            }
+        }
+
+        fn erase_to_eol(&mut self) {
+            let (row, col) = (self.row, self.col);
+            if let Some(line) = self.rows.get_mut(row) {
+                for cell in line.iter_mut().skip(col) {
+                    *cell = Cell::default();
+                }
+            }
+        }
+
+        fn feed(&mut self, buffer: &str) {
+            let bytes = buffer.as_bytes();
+            let mut index = 0;
+            while index < bytes.len() {
+                if bytes[index] == 0x1b {
+                    let tail = &buffer[index..];
+                    if tail.starts_with("\x1b[") {
+                        let end = tail[2..]
+                            .find(|c: char| ('\u{40}'..='\u{7e}').contains(&c))
+                            .map(|offset| offset + 2);
+                        let Some(end) = end else { break };
+                        let params = &tail[2..end];
+                        let final_char = tail[end..].chars().next().unwrap_or('m');
+                        match final_char {
+                            'H' => {
+                                let mut parts = params.split(';');
+                                let row = parts
+                                    .next()
+                                    .and_then(|value| value.parse::<usize>().ok())
+                                    .unwrap_or(1);
+                                let col = parts
+                                    .next()
+                                    .and_then(|value| value.parse::<usize>().ok())
+                                    .unwrap_or(1);
+                                self.row = row.saturating_sub(1);
+                                self.col = col.saturating_sub(1);
+                            }
+                            'K' => self.erase_to_eol(),
+                            _ => {}
+                        }
+                        index += tail[..=end].len().max(1);
+                        continue;
+                    }
+                    if tail.starts_with("\x1b]") {
+                        let mut cursor = 2;
+                        let chars: Vec<char> = tail.chars().collect();
+                        while cursor < chars.len() {
+                            if chars[cursor] == '\u{7}' {
+                                cursor += 1;
+                                break;
+                            }
+                            if chars[cursor] == '\u{1b}' && chars.get(cursor + 1) == Some(&'\\') {
+                                cursor += 2;
+                                break;
+                            }
+                            cursor += 1;
+                        }
+                        index += chars[..cursor].iter().map(|c| c.len_utf8()).sum::<usize>();
+                        continue;
+                    }
+                    index += tail.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                    continue;
+                }
+                let tail = &buffer[index..];
+                let end = tail.find('\x1b').unwrap_or(tail.len());
+                self.put_text(&tail[..end]);
+                index += end;
+            }
+        }
+
+        fn row_text(&self, row: usize) -> String {
+            let Some(line) = self.rows.get(row) else {
+                return String::new();
+            };
+            let text: String = line
+                .iter()
+                .filter(|cell| !cell.continuation)
+                .map(|cell| cell.text.as_str())
+                .collect();
+            text.trim_end().to_string()
+        }
+    }
+
+    fn shown(line: &str) -> String {
+        crate::ansi::strip_ansi(line).trim_end().to_string()
+    }
+
+    /// Replay `previous -> visible` into a grid and assert every row shows the
+    /// line it was asked to show.
+    fn assert_frame(previous: &[String], visible: &[String]) {
+        let mut grid = Grid::default();
+        // Seed the screen with what it showed before, then apply the
+        // incremental writes on top — that is the transition being tested.
+        grid.feed(&frame_writes(&[], previous, true));
+        grid.feed(&frame_writes(previous, visible, false));
+        let mut full = Grid::default();
+        full.feed(&frame_writes(&[], visible, true));
+        for (row, line) in visible.iter().enumerate() {
+            let expected = shown(line);
+            assert_eq!(
+                grid.row_text(row),
+                expected,
+                "incremental row {row} differs from the intended line\n  previous: {:?}\n  line:     {:?}",
+                previous.get(row),
+                line
+            );
+            assert_eq!(
+                full.row_text(row),
+                expected,
+                "full redraw row {row} differs from the intended line"
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_rows_match_the_intended_line() {
+        let cases: &[(&str, &str)] = &[
+            ("plain", "plain"),
+            ("short", "a longer replacement line"),
+            ("a longer line", "short"),
+            ("中文 old", "中文 new"),
+            ("中文中文", "中"),
+            ("\x1b[31mred\x1b[0m text", "\x1b[32mgreen\x1b[0m text"),
+            (
+                "\x1b]8;;http://a\x07link\x1b]8;;\x07 tail",
+                "\x1b]8;;http://b\x07link\x1b]8;;\x07 tail",
+            ),
+            ("👩‍💻 dev", "👩‍💻 ops"),
+            ("│ │ │ tail", "│ │ │ tail2"),
+            ("", "grew from nothing"),
+            ("shrunk to nothing", ""),
+        ];
+        for (previous, next) in cases {
+            assert_frame(&[previous.to_string()], &[next.to_string()]);
+        }
+        // A whole frame, with rows that changed, stayed, shrank and grew.
+        let previous: Vec<String> = ["a", "bb", "中文", "│ x", ""]
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        let visible: Vec<String> = ["a", "bbb", "中文x", "│ y", "new"]
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert_frame(&previous, &visible);
+    }
+
+    #[test]
+    fn random_transitions_show_what_they_asked_for() {
+        use crate::layout::composite_tui_line;
+        let pieces = [
+            "a",
+            "bb",
+            "中",
+            "文",
+            "│",
+            "·",
+            " ",
+            "  ",
+            "👩‍💻",
+            "e\u{301}",
+            "tail",
+            "\x1b[31m",
+            "\x1b[0m",
+            "\x1b[2m",
+            "\x1b[1;36m",
+            "\x1b]8;;http://x\x07",
+            "\x1b]8;;\x07",
+            "✓",
+            "→",
+        ];
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as usize
+        };
+        for round in 0..400 {
+            let mut base = String::new();
+            for _ in 0..(next() % 14) + 1 {
+                base.push_str(pieces[next() % pieces.len()]);
+            }
+            let mut other = String::new();
+            for _ in 0..(next() % 14) + 1 {
+                other.push_str(pieces[next() % pieces.len()]);
+            }
+            let overlay = "WORK · drag title to move · /work to close";
+            let start = next() % 30;
+            let width = (next() % 40) + 1;
+            let composited = composite_tui_line(&base, overlay, start, width, 80);
+            for (previous, visible) in [
+                (base.clone(), composited.clone()),
+                (composited.clone(), base.clone()),
+                (base.clone(), other.clone()),
+                (other.clone(), composited.clone()),
+                (composited.clone(), base.clone()),
+                (base, other),
+            ] {
+                assert_frame(&[previous], &[visible]);
+            }
+            let _ = round;
+        }
+    }
+
+    #[test]
+    fn overlay_composited_rows_match_the_intended_line() {
+        use crate::layout::composite_tui_line;
+        let base =
+            "task 你是独立代码评审者, principal `abb-reviewer-171`。评审任务条目**主目的已达成**";
+        for start in [0usize, 1, 7, 12, 13, 40] {
+            for width in [3usize, 10, 24] {
+                let overlay = "WORK · drag title to move · /work to close";
+                let composited = composite_tui_line(base, overlay, start, width, 120);
+                assert_frame(&[base.to_string()], &[composited.clone()]);
+            }
+        }
     }
 }
