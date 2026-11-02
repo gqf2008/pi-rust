@@ -65,12 +65,12 @@ also builds Intel macOS as `ki-v<version>-x86_64-apple-darwin.tar.gz`, with a
 matching `.sha256`; this asset is available in releases whose tag includes that
 target.
 
-| Target | Asset | sha256 (v0.5.0) |
+| Target | Asset | sha256 (v0.5.1) |
 | --- | --- | --- |
-| `x86_64-unknown-linux-gnu` | `ki-v0.5.0-x86_64-unknown-linux-gnu.tar.gz` | `87bd4fe6dbe1b7097c10c160aad9892cc4842c37e9a97b3f04a4c3735a32c087` |
-| `aarch64-unknown-linux-gnu` | `ki-v0.5.0-aarch64-unknown-linux-gnu.tar.gz` | `9ebc51f6ee0c41e6eeff5a29cbb3f57d2d0b4219dbc547a377761b1f2c88494e` |
-| `aarch64-apple-darwin` | `ki-v0.5.0-aarch64-apple-darwin.tar.gz` | `51427a4543c5a7faf1b2d1b52237b09a1423d523931bab57d3794cb148015b02` |
-| `x86_64-pc-windows-msvc` | `ki-v0.5.0-x86_64-pc-windows-msvc.zip` | `f71684cd97eb0a956f9c3f35c2b33a2400c075ad861827a62cdd720c48475629` |
+| `x86_64-unknown-linux-gnu` | `ki-v0.5.1-x86_64-unknown-linux-gnu.tar.gz` | `cf45890d7ffffafa3aa1ae23e33cc0371d5bec2559e5fd6183261f4a7e3f0788` |
+| `aarch64-unknown-linux-gnu` | `ki-v0.5.1-aarch64-unknown-linux-gnu.tar.gz` | `ce7e35de72dbd09c23d3b4c1e227a5dce96075f56908f697e063d9411b662b39` |
+| `aarch64-apple-darwin` | `ki-v0.5.1-aarch64-apple-darwin.tar.gz` | `a7b7d6744d4a6214c0acc4c396779638ae123fa2d39aab2251f41b4c585da50c` |
+| `x86_64-pc-windows-msvc` | `ki-v0.5.1-x86_64-pc-windows-msvc.zip` | `5a5f6fc6da7952f3681b003b716b14acd3b7f50b8e9c708ba5b62121e42a44c7` |
 
 Two consequences worth knowing:
 
@@ -87,7 +87,7 @@ Two consequences worth knowing:
 networks (this machine included), so use `gh`, which goes through the API:
 
 ```bash
-TAG=v0.5.0                      # the tag being packaged
+TAG=v0.5.1                      # the tag being packaged
 gh release download "$TAG" --pattern "*.sha256" --dir /tmp/kiqi-sha --clobber
 cat /tmp/kiqi-sha/*.sha256
 ```
