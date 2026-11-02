@@ -285,14 +285,50 @@ pub fn ensure_named(repo: &Path, name: &str) -> Result<Worktree, String> {
     Ok(worktree)
 }
 
+/// The worktree this process entered through `--worktree`, so `run` can land it
+/// on the way out: whoever created the checkout is the one that settles it.
+static PENDING: std::sync::Mutex<Option<(PathBuf, String)>> = std::sync::Mutex::new(None);
+
 /// Enter a named worktree, creating it when it does not exist yet. The child
 /// process then works there for its whole life.
 pub fn enter(cwd: &Path, name: &str) -> Result<PathBuf, String> {
-    let repo = repo_root(cwd)?;
+    // `common_root`: a worktree started from inside another worktree still
+    // belongs to the one repository that owns them all.
+    let repo = common_root(cwd)?;
     let worktree = ensure_named(&repo, name)?;
     std::env::set_current_dir(&worktree.path)
         .map_err(|error| format!("enter {}: {error}", worktree.path.display()))?;
+    if let Ok(mut pending) = PENDING.lock() {
+        *pending = Some((repo.clone(), name.to_string()));
+    }
     Ok(worktree.path)
+}
+
+/// Land the worktree this process entered (`--worktree`), if it entered one.
+///
+/// Called once, after the session is over, so a `--worktree` run is
+/// self-contained: report the outcome and let the caller turn a worktree that
+/// could not land into a failing exit code. The verify command comes from
+/// `KI_WORKTREE_VERIFY`, which is how a caller that spawned us states the gate.
+pub fn finish_pending() -> Option<i32> {
+    let (repo, name) = PENDING.lock().ok().and_then(|mut slot| slot.take())?;
+    let verify = std::env::var("KI_WORKTREE_VERIFY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    match finish(&repo, &name, verify.as_deref()) {
+        Ok(Outcome::Merged { commit }) => {
+            eprintln!("[ki worktree] merged {name} as {}", commit.trim());
+            None
+        }
+        Ok(Outcome::Halted { reason }) => {
+            eprintln!("[ki worktree] {name} did not land: {reason}");
+            Some(1)
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            Some(1)
+        }
+    }
 }
 
 /// Rebase the worktree onto the current base, verify it, then fast-forward.
@@ -331,9 +367,12 @@ pub fn finish(repo: &Path, id: &str, verify: Option<&str>) -> Result<Outcome, St
             });
         }
     }
-    match git(repo, &["merge", "--ff-only", &worktree.branch]) {
+    // A nested worktree's base is its parent's branch, and that branch is checked
+    // out in the parent worktree, not here: merge where the branch lives.
+    let target = checkout_of(repo, &base);
+    match git(&target, &["merge", "--ff-only", &worktree.branch]) {
         Ok(text) => {
-            let commit = git(repo, &["rev-parse", "HEAD"]).unwrap_or_default();
+            let commit = git(&target, &["rev-parse", "HEAD"]).unwrap_or_default();
             worktree.archive(Some(&text))?;
             worktree
                 .write_manifest("merged", verify.map(|v| (v, true)), None)
@@ -518,11 +557,14 @@ pub fn status(repo: &Path) -> String {
     out
 }
 
-/// The branch a new worktree starts from: the one this checkout has, else
+/// The branch a new worktree starts from: this checkout's branch, else
 /// `origin/main`, else `main`.
 ///
-/// `ki/wt-*` branches are excluded: "the most recent branch" is often another
-/// worktree, and stacking worktrees on each other makes the merge chain a tree.
+/// A `ki/wt-*` branch is a legitimate base when it *is* this checkout's branch:
+/// that is a worktree stacking on its parent, and the chain stays linear because
+/// the parent merges the child and then merges upward itself. What must never
+/// happen is picking some *other* worktree's branch, which is why this reads the
+/// current checkout and never "the newest branch in the repository".
 pub fn base_ref(repo: &Path) -> Result<String, String> {
     if let Some(env) = std::env::var("KI_WORKTREE_BASE")
         .ok()
@@ -532,7 +574,7 @@ pub fn base_ref(repo: &Path) -> Result<String, String> {
     }
     if let Ok(branch) = git(repo, &["symbolic-ref", "--short", "HEAD"]) {
         let branch = branch.trim().to_string();
-        if !branch.is_empty() && !branch.starts_with(BRANCH_PREFIX) {
+        if !branch.is_empty() {
             return Ok(branch);
         }
     }
@@ -542,6 +584,46 @@ pub fn base_ref(repo: &Path) -> Result<String, String> {
         }
     }
     Err("cannot find a base branch: no current branch, no origin/main, no main".to_string())
+}
+
+/// The checkout that has `branch` checked out, so a merge can run where that
+/// branch lives: a nested worktree's base is its parent's branch, and `git merge`
+/// refuses to update a branch that is checked out in another worktree.
+fn checkout_of(repo: &Path, branch: &str) -> PathBuf {
+    let Ok(text) = git(repo, &["worktree", "list", "--porcelain"]) else {
+        return repo.to_path_buf();
+    };
+    let want = format!("branch refs/heads/{branch}");
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            current = Some(rest.to_string());
+        } else if line.trim() == want {
+            if let Some(path) = current.take() {
+                return PathBuf::from(path);
+            }
+        }
+    }
+    repo.to_path_buf()
+}
+
+/// The repository that owns the worktrees: the main checkout, even when `cwd`
+/// is inside one of them. A nested agent's worktree must land beside its
+/// parent's, not inside it, or `locate`/`prune` stop seeing it.
+pub fn common_root(cwd: &Path) -> Result<PathBuf, String> {
+    let common = git(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let common = PathBuf::from(common.trim());
+    if common
+        .file_name()
+        .map(|name| name == ".git")
+        .unwrap_or(false)
+    {
+        return Ok(common.parent().map(Path::to_path_buf).unwrap_or(common));
+    }
+    Ok(common)
 }
 
 /// The repository root that contains `cwd`.
@@ -720,14 +802,15 @@ mod tests {
     }
 
     #[test]
-    fn base_ref_prefers_this_checkout_and_skips_worktree_branches() {
+    fn base_ref_follows_this_checkout_and_ignores_other_worktrees() {
         let dir = repo("base");
         git(&dir, &["checkout", "--quiet", "-b", "feature"]).unwrap();
         assert_eq!(base_ref(&dir).unwrap(), "feature");
         let tree = create(&dir, "task").unwrap();
-        git(&dir, &["checkout", "--quiet", "main"]).unwrap();
-        // The worktree branch is newer, but it must never become the base.
-        assert_eq!(base_ref(&dir).unwrap(), "main");
+        assert!(tree.branch.starts_with(BRANCH_PREFIX));
+        // Another worktree's branch must never become the base, however new it
+        // is: reading the checkout we are in is what keeps the chain linear.
+        assert_eq!(base_ref(&dir).unwrap(), "feature");
         assert!(tree.branch.starts_with(BRANCH_PREFIX));
         git(
             &dir,
@@ -739,5 +822,45 @@ mod tests {
             ],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_base_branch_is_merged_where_it_is_checked_out() {
+        let dir = repo("checkout");
+        let tree = create(&dir, "task").unwrap();
+        assert_eq!(
+            checkout_of(&dir, "main").canonicalize().unwrap(),
+            dir.canonicalize().unwrap()
+        );
+        // A nested worktree bases on its parent's branch, and `git merge`
+        // refuses to update a branch that another checkout has: the merge has
+        // to happen in the worktree that owns it.
+        assert_eq!(
+            checkout_of(&dir, &tree.branch).canonicalize().unwrap(),
+            tree.path.canonicalize().unwrap()
+        );
+        std::fs::write(tree.path.join("b.txt"), "two\n").unwrap();
+        git(&tree.path, &["add", "."]).unwrap();
+        git(&tree.path, &["commit", "-m", "two"]).unwrap();
+        assert!(matches!(
+            finish(&dir, &tree.id, None).unwrap(),
+            Outcome::Merged { .. }
+        ));
+    }
+
+    #[test]
+    fn a_worktree_started_from_a_worktree_lands_in_the_same_repository() {
+        let dir = repo("nesting");
+        let parent = create(&dir, "parent").unwrap();
+        // The child inherits the parent's checkout as its cwd.
+        assert_eq!(
+            common_root(&parent.path).unwrap().canonicalize().unwrap(),
+            dir.canonicalize().unwrap()
+        );
+        assert_eq!(
+            base_ref(&parent.path).unwrap(),
+            parent.branch,
+            "a nested worktree stacks on the branch that spawned it"
+        );
     }
 }

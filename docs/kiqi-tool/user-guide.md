@@ -355,7 +355,29 @@ ki --connect 127.0.0.1:9899
 `/name`、`/reload` 依赖本地 harness，在远程模式下不可用。完整协议、可用命令与
 限制见 [`remote-mode.md`](remote-mode.md)。
 
-### 3.1 退出码
+### 3.1 Worktree 隔离（`--worktree` / `ki worktree`）
+
+并行写同一个项目时，每个代理需要一个自己的 checkout，否则它们互相覆盖。
+
+```bash
+ki --worktree fix-login -p "..."   # 在 .ki/worktrees/fix-login 里干活，退出时自动落回
+ki worktree status                 # 活着的工作树 + 是否已合入 base
+ki worktree merge fix-login        # 重试一次落地（rebase → 验证 → fast-forward）
+ki worktree abandon fix-login      # 不合并，留 change.patch + manifest 后清掉
+ki worktree prune                  # 只清理分支已被 base 包含的（未合并的一律不动）
+```
+
+- **谁创建谁收尾**：`--worktree` 在本进程退出时自己落地——rebase 到最新 base、跑
+  `KI_WORKTREE_VERIFY`（若设置）、再 `git merge --ff-only`。落不下去就**退出码 1**，并把状态
+  写成 `needs-merge`，改动留在工作树里，主线不动。
+- 冲突挂起而不是硬合：代码冲突留在工作树等你处理；被覆盖的一侧存在
+  `.ki/worktrees/archive/<id>/change.patch` 与 `manifest.json` 里，共 5 天策略只做标记不删除。
+- **base 是“当前 checkout 的分支”**：所以嵌套代理会叠在父代理的分支上，而不是跳到 main；
+  合并发生在拥有该分支的那个 checkout 里（`git merge` 不会去改别的 checkout 正占用的分支）。
+- 子代理默认各自一个工作树（`subagent` 的 `worktree: true`，默认开）；`dispatch` 的节点
+  要隔离就在节点上写 `worktree: true`，子进程会跑 `ki --worktree node-<id>` 并自己落地。
+
+### 3.2 退出码
 
 | 码 | 含义 |
 |---|---|

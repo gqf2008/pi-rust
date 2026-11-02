@@ -2136,8 +2136,8 @@ fn orchestrator_guest_runs_a_wave_via_cat() {
         .call(
             "plan",
             &serde_json::json!({"action": "set", "nodes": [
-                {"id": "a", "task": "alpha"},
-                {"id": "b", "task": "beta", "deps": ["a"]}
+                {"id": "a", "task": "alpha", "timeoutSeconds": 60},
+                {"id": "b", "task": "beta", "deps": ["a"], "timeoutSeconds": 60}
             ]}),
             &caps,
             &sink,
@@ -2210,7 +2210,7 @@ fn orchestrator_guest_session_switch_clears_the_plan() {
         .call(
             "plan",
             &serde_json::json!({"action": "set", "nodes": [
-                {"id": "a", "task": "x"}
+                {"id": "a", "task": "x", "timeoutSeconds": 60}
             ]}),
             &caps,
             &sink,
@@ -2527,7 +2527,7 @@ fn dispatch_delivers_each_task_and_closes_the_child_stdin() {
             "plan",
             &serde_json::json!({
                 "action": "set",
-                "nodes": [{"id": "a", "task": "hello-from-node-a"}]
+                "nodes": [{"id": "a", "task": "hello-from-node-a", "timeoutSeconds": 60}]
             }),
             &caps,
             &sink,
@@ -2608,7 +2608,7 @@ fn a_ki_shaped_child_receives_its_task_and_an_eof() {
             "plan",
             &serde_json::json!({
                 "action": "set",
-                "nodes": [{"id": "a", "task": "do the thing"}]
+                "nodes": [{"id": "a", "task": "do the thing", "timeoutSeconds": 60}]
             }),
             &caps,
             &sink,
@@ -3694,15 +3694,28 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
     );
     assert_eq!(outcome.details, serde_json::Value::Null);
 
-    // Defaults apply when the optional fields are absent.
+    // A delegation without a budget is refused: the envelope's timeout is what a
+    // stuck child is killed by, so "no budget" cannot mean "whatever".
+    let unbudgeted = extension.call(
+        "delegate_task",
+        &serde_json::json!({"task": "x"}),
+        &caps,
+        &sink,
+    );
+    assert!(
+        matches!(unbudgeted, Err(_)),
+        "a delegation without `timeoutSeconds` must be rejected, got {unbudgeted:?}"
+    );
+
+    // The optional fields still default; the budget does not.
     let defaults = extension
         .call(
             "delegate_task",
-            &serde_json::json!({"task": "x"}),
+            &serde_json::json!({"task": "x", "timeoutSeconds": 300}),
             &caps,
             &sink,
         )
-        .expect("call with defaults");
+        .expect("call with an explicit budget");
     assert_eq!(
         text_of(&defaults),
         r#"{"kind":"kiqi-delegation","task":"x","role":"worker","maxTurns":8,"timeoutSeconds":300,"recursive":false}"#
@@ -3712,7 +3725,7 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
     let roled = extension
         .call(
             "delegate_task",
-            &serde_json::json!({"task": "x", "role": "planner"}),
+            &serde_json::json!({"task": "x", "role": "planner", "timeoutSeconds": 300}),
             &caps,
             &sink,
         )

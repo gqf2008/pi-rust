@@ -79,6 +79,12 @@ pub async fn run() -> i32 {
     // 与 MCP signal、goal continuation 的诊断走同一处。
     crate::extensions::install_guest_error_sink();
     let code = run_inner().await;
+    // A `--worktree` run settles its own checkout: landing it (or refusing to)
+    // is part of the run, not something the caller has to remember.
+    let code = match crate::worktree::finish_pending() {
+        Some(1) if code == 0 => 1,
+        _ => code,
+    };
     crate::timings::print_timings();
     code
 }

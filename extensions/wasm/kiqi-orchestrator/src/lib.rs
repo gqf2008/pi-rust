@@ -50,7 +50,7 @@ const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
 const GOALS_FILE: &str = ".ki/goals.json";
 const GUIDE_HEADING: &str = "## Subagent orchestration";
 
-const GUIDE_SECTION: &str = "## Subagent orchestration\n\nFor work that has several steps, or steps that can run in parallel, use the\n`plan` and `dispatch` tools instead of doing everything inline:\n\n1. `plan` with action=set: write the task graph as nodes, each with an `id`, a\n   self-contained `task`, and its `deps`.\n2. `dispatch`: run the current ready wave. Nodes whose dependencies are done run\n   in parallel (up to `maxParallel`).\n3. Read the results, then `plan` with action=update (add/remove/re-dep/reset\n   nodes) and `dispatch` again until the goal is met.\n\nThe `todo` list is not a plan. A todo list is progress the user can watch; it\nserialises nothing and schedules nothing. If the work is more than one leaf,\nthe execution plan is the graph, and the todo list follows it.\n\n**Independent work runs in parallel; that is a rule, not a preference.** After\nyou decompose a task, look at the ready set: if two or more nodes have their\ndependencies satisfied and they do not depend on each other, dispatch them in\nthe same wave. Dispatching a single node when the wave could hold three is a\nserialisation you have to justify in one sentence to yourself — \"they touch\nthe same files\" is a decomposition failure (split by file), not a reason to\nqueue. The cost is not runs, it is wall-clock: three sequential 10-minute nodes\nare thirty minutes for work that fits in ten.\n\nA subagent starts fresh and cannot see this conversation, so each node's `task`\nmust contain everything it needs. Prefer this over hand-rolling the whole\nworkflow with `bash`.\n\nParallel writers need separate checkouts. The `subagent` tool gives each child\nits own git worktree by default (`.ki/worktrees/<name>`, branch `ki/wt-<name>`)\nand merges the result back after a rebase, so `subagents` started in one turn\ncan touch the same project without overwriting each other. Nodes dispatched\nthrough `dispatch` still share the caller's checkout: give them disjoint files,\nor run them through `subagent` when they would overlap.\n\nEach node states its own budget:\n\n- `timeoutSeconds` is **required** per node (10-900) and has no default. A node\n  that runs a build or the full test suite needs more than a short one, and a\n  node with no budget at all can hang the wave; past 900s the host kills the\n  child whatever the node asked for.\n- `maxTurns` defaults to **8** (max 32). Reading code, editing, running gates,\n  checking mutations, and committing does not fit in 8 turns. A node that runs\nthe budget out stops halfway and reports unfinished work as if it were done.\n\nA node that exits early is therefore usually a budget problem, not a logic\nproblem: raise the two numbers before suspecting the task text.\n\nFor independent tasks whose results you do NOT need in this turn, prefer the\n`subagent` tool: it starts a background agent and returns immediately, so\nseveral run in parallel and their answers arrive as follow-up messages. Use\nplan/dispatch when the work has dependencies or you must use the results now.";
+const GUIDE_SECTION: &str = "## Subagent orchestration\n\nFor work that has several steps, or steps that can run in parallel, use the\n`plan` and `dispatch` tools instead of doing everything inline:\n\n1. `plan` with action=set: write the task graph as nodes, each with an `id`, a\n   self-contained `task`, and its `deps`.\n2. `dispatch`: run the current ready wave. Nodes whose dependencies are done run\n   in parallel (up to `maxParallel`).\n3. Read the results, then `plan` with action=update (add/remove/re-dep/reset\n   nodes) and `dispatch` again until the goal is met.\n\nThe `todo` list is not a plan. A todo list is progress the user can watch; it\nserialises nothing and schedules nothing. If the work is more than one leaf,\nthe execution plan is the graph, and the todo list follows it.\n\n**Independent work runs in parallel; that is a rule, not a preference.** After\nyou decompose a task, look at the ready set: if two or more nodes have their\ndependencies satisfied and they do not depend on each other, dispatch them in\nthe same wave. Dispatching a single node when the wave could hold three is a\nserialisation you have to justify in one sentence to yourself — \"they touch\nthe same files\" is a decomposition failure (split by file), not a reason to\nqueue. The cost is not runs, it is wall-clock: three sequential 10-minute nodes\nare thirty minutes for work that fits in ten.\n\nA subagent starts fresh and cannot see this conversation, so each node's `task`\nmust contain everything it needs. Prefer this over hand-rolling the whole\nworkflow with `bash`.\n\nParallel writers need separate checkouts. The `subagent` tool gives each child\nits own git worktree by default (`.ki/worktrees/<name>`, branch `ki/wt-<name>`)\nand merges the result back after a rebase, so `subagents` started in one turn\ncan touch the same project without overwriting each other. A `dispatch` node\ngets the same isolation with `worktree: true`: the child runs `ki --worktree\nnode-<id>`, lands its own change on exit, and exits non-zero when it cannot\nland, so an unlanded node fails the wave instead of leaving finished work in a\ndirectory nobody reads. Without it, nodes share the caller's checkout and must\ntouch disjoint files.\n\nEach node states its own budget:\n\n- `timeoutSeconds` is **required** per node (10-900) and has no default. A node\n  that runs a build or the full test suite needs more than a short one, and a\n  node with no budget at all can hang the wave; past 900s the host kills the\n  child whatever the node asked for.\n- `maxTurns` defaults to **8** (max 32). Reading code, editing, running gates,\n  checking mutations, and committing does not fit in 8 turns. A node that runs\nthe budget out stops halfway and reports unfinished work as if it were done.\n\nA node that exits early is therefore usually a budget problem, not a logic\nproblem: raise the two numbers before suspecting the task text.\n\nFor independent tasks whose results you do NOT need in this turn, prefer the\n`subagent` tool: it starts a background agent and returns immediately, so\nseveral run in parallel and their answers arrive as follow-up messages. Use\nplan/dispatch when the work has dependencies or you must use the results now.";
 
 // ---------------------------------------------------------------------------
 // Graph (ported from the compile-time extension's graph.rs)
@@ -93,6 +93,10 @@ struct Node {
     model: Option<String>,
     expect_file: Option<String>,
     verify: Option<String>,
+    /// Give the node its own `ki --worktree` checkout. Two nodes that touch the
+    /// same files cannot run at once otherwise, and that serialisation is what
+    /// turns a parallel plan into a queue.
+    worktree: bool,
     timeout_secs: u64,
     status: Status,
     result: Option<String>,
@@ -186,6 +190,10 @@ impl Node {
             model: string_field(value, "model"),
             expect_file: string_field(value, "expectFile"),
             verify: string_field(value, "verify"),
+            worktree: value
+                .get("worktree")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             timeout_secs,
             status: Status::Pending,
             result: None,
@@ -1054,6 +1062,19 @@ fn emit_node_full(
     ));
 }
 
+/// A node id is free-form text; a worktree name is a directory and a branch.
+fn worktree_name(id: &str) -> String {
+    let mut name = String::from("node-");
+    for ch in id.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            name.push(ch.to_ascii_lowercase());
+        } else {
+            name.push('-');
+        }
+    }
+    name
+}
+
 fn spawn_node(node: &Node, program: &str) -> Result<u32, String> {
     // Same rule as run_subagent: ki-specific flags only for the default ki.
     let mut args: Vec<String> = if program == DEFAULT_PROGRAM {
@@ -1076,6 +1097,13 @@ fn spawn_node(node: &Node, program: &str) -> Result<u32, String> {
         if let Some(model) = &node.model {
             args.push("--model".into());
             args.push(model.clone());
+        }
+        if node.worktree {
+            // The child settles the checkout itself when it exits (`--worktree`
+            // merges back), so a node that cannot land exits non-zero here
+            // instead of leaving finished work in a directory nobody reads.
+            args.push("--worktree".into());
+            args.push(worktree_name(&node.id));
         }
     }
     proc::spawn(program, &args, None).map_err(|error| match error {

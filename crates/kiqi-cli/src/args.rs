@@ -795,6 +795,7 @@ const KNOWN_LONG_FLAGS: &[&str] = &[
     "--no-extensions",
     "--no-prompt-templates",
     "--no-session",
+    "--worktree",
     "--no-skills",
     "--no-themes",
     "--no-tools",

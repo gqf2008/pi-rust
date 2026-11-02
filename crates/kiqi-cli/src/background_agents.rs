@@ -453,7 +453,7 @@ fn merge_worktree(plan: &WorktreePlan) -> String {
         Ok(cwd) => cwd,
         Err(error) => return format!("worktree `{}`: {error}", plan.name),
     };
-    let repo = match crate::worktree::repo_root(&cwd) {
+    let repo = match crate::worktree::common_root(&cwd) {
         Ok(repo) => repo,
         Err(error) => return format!("worktree `{}`: {error}", plan.name),
     };
