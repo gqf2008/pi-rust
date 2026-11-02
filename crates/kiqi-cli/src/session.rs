@@ -525,14 +525,8 @@ pub async fn build_with_selection(
 
     let active = filter_active_tool_names(active_tool_names(&tools, args), args);
 
-    // The signal tool and the TUI boundary share this host; the durable mute is
-    // a session value, so restore it before the first run can decide.
-    if let Err(error) = signal_host
-        .attach_session_and_load_mute(session.clone())
-        .await
-    {
-        eprintln!("warning: mcp: could not restore the signal mute: {error}");
-    }
+    // The signal tool and the TUI boundary share this host.
+    signal_host.attach_session(session.clone());
     // `--name`/`-n` sets the session display name durably (a `name` fact in the
     // log). It applies to whichever session this launch works in — a fresh one
     // or a restored one — and an empty value clears a previous name. This is the
@@ -2928,15 +2922,8 @@ pub(crate) async fn set_active_session(
         .await
         .map_err(|e| e.to_string())?;
     // Only after a successful swap: on error the harness still serves the old
-    // session, which is where the signal host must stay too. A mute-read error
-    // must not fail a swap that already happened — keep the previous flag and
-    // say so (the same best-effort contract as the startup restore).
-    if let Err(error) = signal_host
-        .attach_session_and_load_mute(signal_session)
-        .await
-    {
-        tracing::warn!(%error, "could not restore the signal mute for the new session");
-    }
+    // session, which is where the signal host must stay too.
+    signal_host.attach_session(signal_session);
     Ok(())
 }
 

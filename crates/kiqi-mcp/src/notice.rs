@@ -25,6 +25,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use tokio::sync::Notify;
 
@@ -102,6 +103,12 @@ struct Inner {
     /// Resources whose pointer was already delivered and not read since. A
     /// pointer carries no content, so a repeat tells the model nothing new.
     announced: HashSet<(String, String)>,
+    /// When the last pointer arrived, so the host can tell a quiet repository
+    /// from a dead subscription: a server-side poller that stops (a failed
+    /// bucket read, a closed peer, a dropped registry entry) never tells the
+    /// client, and a subscription that was live at subscribe time then looks
+    /// live forever while nothing arrives.
+    last_push: Option<Instant>,
 }
 
 /// Session-scoped sink for resource-update notices. One per
@@ -154,6 +161,7 @@ impl McpNoticeMailbox {
                 // provenance too: the batch must reflect the latest write.
                 entry.authored_sessions = authored_sessions;
                 inner.suppressed += 1;
+                inner.last_push = Some(Instant::now());
             } else if inner.entries.len() >= MAX_NOTICE_ENTRIES {
                 inner.suppressed += 1;
             } else {
@@ -163,11 +171,24 @@ impl McpNoticeMailbox {
                     content: None,
                     authored_sessions,
                 });
+                inner.last_push = Some(Instant::now());
             }
         }
         // Even a coalesced/dropped update means "state changed since you last
         // looked"; the waiter may have drained the previous entry already.
         self.notify.notify_one();
+    }
+
+    /// How long since the last pointer arrived, or `None` if none ever did.
+    /// A subscription that has been live for hours and produced nothing looks
+    /// exactly like one whose server-side poller died; the host uses this to
+    /// tell the two apart from its own side.
+    pub(crate) fn seconds_since_last_push(&self) -> Option<u64> {
+        self.inner
+            .lock()
+            .unwrap()
+            .last_push
+            .map(|at| at.elapsed().as_secs())
     }
 
     /// Wait for the next [`McpNoticeMailbox::push`]. A notice pushed before the
@@ -515,6 +536,17 @@ mod tests {
         assert!(text.contains("- docs: file:///b.md"), "got {text:?}");
         // The light notice stays a pointer: no fabricated content block.
         assert_eq!(text.matches("  line one").count(), 1);
+    }
+
+    /// The mailbox has no way to learn that a server-side poller stopped, so it
+    /// keeps the time of the last pointer: "quiet for ten minutes" is the whole
+    /// signal a client gets.
+    #[test]
+    fn the_mailbox_remembers_when_it_last_heard_anything() {
+        let mailbox = McpNoticeMailbox::default();
+        assert_eq!(mailbox.seconds_since_last_push(), None);
+        mailbox.push("walgit", "walgit://collab/board/x");
+        assert_eq!(mailbox.seconds_since_last_push(), Some(0));
     }
 
     #[tokio::test]

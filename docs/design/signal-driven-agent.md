@@ -417,7 +417,7 @@ cargo test -p kiqi-cli --lib --locked signal
 | 关注点 | 位置 |
 |---|---|
 | 共享宿主状态（预算 + 会话静音 + inbox） | `crates/kiqi-cli/src/signal_host.rs` |
-| durable inbox / 静音存储 | 会话值 `mcp.signals.inbox`、`mcp.signals.muted`（`ki.value` custom entry） |
+| durable inbox | 会话值 `mcp.signals.inbox`（`ki.value` custom entry） |
 | 智能体工具 | `crates/kiqi-cli/src/signals_tool.rs`（`signals`：list/status/defer/resolve/dismiss/mute/unmute） |
 | 用户命令 | `crates/kiqi-cli/src/interactive_tui/commands.rs`（`/signals [on\|off\|list]`） |
 | 顶层 `signals` 默认值 | `crates/kiqi-mcp/src/config.rs`（`SignalsDefaults` / `parse_signals_defaults` / `merge_signals_defaults` / `parse_servers_with_defaults`） |

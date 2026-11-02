@@ -41,7 +41,6 @@ pub(crate) struct SignalWakeState {
     muted_until_input: bool,
     /// Session-level mute (`/signals off`). Unlike the interrupt mute, only an
     /// explicit unmute clears it; user input does not.
-    session_muted: bool,
     /// Consecutive host-started goal continuations for the current goal.
     /// Bounded only for an unbounded goal; a goal with its own turn/time budget
     /// is bounded by the extension.
@@ -103,14 +102,6 @@ impl SignalWakeState {
 
     /// Session-level mute (persisted by the host). User input does NOT clear
     /// this; only an explicit `unmute` does.
-    pub(crate) fn set_session_muted(&mut self, muted: bool) {
-        self.session_muted = muted;
-    }
-
-    pub(crate) fn session_muted(&self) -> bool {
-        self.session_muted
-    }
-
     /// Decide whether this batch may wake the session, charging the budget of
     /// every eligible `auto` server when it may.
     ///
@@ -129,9 +120,6 @@ impl SignalWakeState {
     where
         F: Fn(&str, &str) -> Option<SignalsConfig>,
     {
-        if self.session_muted {
-            return WakeDecision::Skip("muted for this session");
-        }
         if self.muted_until_input {
             return WakeDecision::Skip("muted until the next user input");
         }
@@ -518,26 +506,6 @@ mod tests {
             WakeDecision::Skip("muted until the next user input")
         );
         state.record_user_input();
-        assert!(matches!(
-            state.decide(&b, NO_SESSION, now, &cfg),
-            WakeDecision::Wake(_)
-        ));
-    }
-
-    #[test]
-    fn session_mute_survives_user_input_until_explicitly_cleared() {
-        let mut state = SignalWakeState::new();
-        let cfg = configs(&[("docs", policy(WakeMode::Auto))]);
-        let b = batch(&[("docs", "file:///a.md")]);
-        let now = Instant::now();
-        state.set_session_muted(true);
-        state.record_user_input();
-        assert!(state.session_muted());
-        assert_eq!(
-            state.decide(&b, NO_SESSION, now, &cfg),
-            WakeDecision::Skip("muted for this session")
-        );
-        state.set_session_muted(false);
         assert!(matches!(
             state.decide(&b, NO_SESSION, now, &cfg),
             WakeDecision::Wake(_)

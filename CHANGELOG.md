@@ -35,6 +35,25 @@
 - **`subagent` 的超时上限收到 900s。** 它与 `proc` 授权是两条独立的路，之前一直是 3600，
   于是"单个委派不超过 15 分钟"在模型最常用的那个工具上留了个后门。
 
+### Fixed
+
+- **静默的订阅会自愈。** 服务端的 poller 可以悄无声息地停掉（一次 bucket 读失败、peer
+  关闭、通知发不出去、登记被别人摘掉），而客户端这边"订阅成功过"就永远显示 `live`——
+  `/mcp-doctor` 报 `subscribe: 1 configured, 1 live`，却一条通知都收不到。现在会话空闲且
+  5 分钟没收到任何指针时会重新 `resources/subscribe` 一遍：活着的订阅是幂等的，死掉的
+  poller 会被重建，重建了哪些写进诊断日志。
+- **`/mcp-doctor` 多一行 `last notice:`。** 沉默是唯一症状，所以要能看出沉默多久。
+
+### Removed
+
+- **会话级永久静音（`mcp.signals.muted`）删掉了。** 它由 agent 通过 `signals` 工具的
+  `mute` 动作设置、以会话值持久化、只有 `unmute` 能解，界面上完全看不见——一个 agent
+  悄悄关掉自己的通知通道，看起来和订阅坏掉一模一样（日志里只有 `signal recorded without
+  wake: muted for this session`）。唤醒本来就由每台服务器的 `signals.wake`、它的预算和
+  作用域更小的那个静音管：用户中断一次运行后「只记录、不唤醒」，下一次输入自动恢复。
+  连带移除：`signals` 工具的 `mute`/`unmute` 动作、`/signals on|off`、`signals.status` 的
+  `muted=` 字段。老会话里残留的 `mcp.signals.muted` 被忽略，无需迁移。
+
 ## [0.5.1] - 2026-11-02
 
 ### Fixed

@@ -1376,6 +1376,10 @@ pub struct McpManager {
     /// A boundary refresh consults this so it can never resurrect a name the
     /// policy excluded at build. `None` until the first merge.
     allowed_tools: Mutex<Option<HashSet<String>>>,
+    /// When the quiet-subscription sweep last ran. The sweep is called from a
+    /// 30s tick, and a client that re-subscribes on every tick would pay a
+    /// round trip per subscription per tick for nothing.
+    last_renew: std::sync::Mutex<std::time::Instant>,
     /// The MCP tool names actually present in the host registry, recorded by
     /// kiqi-cli at every merge/boundary replace. The replace removes exactly
     /// these — never the wider [`McpManager::owns_tool_name`] prefix, which
@@ -1394,6 +1398,7 @@ impl Default for McpManager {
             mailbox: Arc::new(McpNoticeMailbox::new()),
             configured_names: std::sync::RwLock::new(Vec::new()),
             allowed_tools: Mutex::new(None),
+            last_renew: std::sync::Mutex::new(std::time::Instant::now()),
             injected_tools: Mutex::new(None),
         }
     }
@@ -1438,6 +1443,7 @@ impl McpManager {
                 mailbox,
                 configured_names: std::sync::RwLock::new(configured_names),
                 allowed_tools: Mutex::new(None),
+                last_renew: std::sync::Mutex::new(std::time::Instant::now()),
                 injected_tools: Mutex::new(None),
             },
             issues,
@@ -1768,7 +1774,11 @@ impl McpManager {
     /// The rendered `/mcp-doctor` report: the shape the TUI prints, so the CLI
     /// and the tests share one renderer instead of drifting apart.
     pub fn doctor_report(&self) -> String {
-        render_doctor(&self.doctor(), self.pending_notice_count())
+        render_doctor(
+            &self.doctor(),
+            self.pending_notice_count(),
+            self.seconds_since_notice(),
+        )
     }
 
     /// How many notices are currently queued, WITHOUT draining them (drain
@@ -1888,6 +1898,73 @@ impl McpManager {
     /// server costs nothing.
     pub async fn probe_idle(&self) -> Vec<String> {
         self.probe_idle_with(LIVENESS_IDLE_AFTER).await
+    }
+
+    /// Re-send `resources/subscribe` for every configured uri, and report the
+    /// subscriptions that had to be re-established.
+    ///
+    /// A server-side poller can stop without telling anyone: walgit ends one on
+    /// a failed bucket read, a closed peer, a failed notification send, or a
+    /// dropped registry entry, and the client's own record still says "live".
+    /// `subscribe` is idempotent — a still-registered subscription answers Ok
+    /// without creating a second poller, and a dropped one is recreated — so
+    /// re-asking is the only way a client can heal itself.
+    ///
+    /// Returns the uris that were not live before this call and are now: those
+    /// are the subscriptions that had quietly died.
+    pub async fn renew_subscriptions(&self) -> Vec<String> {
+        let handles: Vec<Arc<ServerHandle>> = self.servers.read().unwrap().clone();
+        let mut healed = Vec::new();
+        for handle in handles {
+            for uri in &handle.config.subscribe {
+                let was_live = handle.subscriptions().iter().any(|(live, _)| live == uri);
+                if let Err(error) = handle
+                    .subscribe_uri(uri, SubscriptionOrigin::Config, None)
+                    .await
+                {
+                    eprintln!(
+                        "[ki mcp] server {}: re-subscribing {uri}: {error} — subscription lost",
+                        handle.config.name
+                    );
+                    continue;
+                }
+                if !was_live {
+                    healed.push(format!("{}: {uri}", handle.config.name));
+                }
+            }
+        }
+        healed
+    }
+
+    /// How long since the last pointer arrived, or `None` if none ever did.
+    pub fn seconds_since_notice(&self) -> Option<u64> {
+        self.mailbox.seconds_since_last_push()
+    }
+
+    /// [`McpManager::renew_subscriptions`], gated so a periodic tick can call it
+    /// unconditionally: it only acts when nothing has arrived for `quiet_for`
+    /// and at most once per `at_most_every`.
+    ///
+    /// The quiet test is the heart of it. A subscription that was live when it
+    /// was made stays "live" in this process forever, because the server never
+    /// reports that its poller stopped. Silence is therefore the only symptom,
+    /// and re-asking is the only cure.
+    pub async fn renew_if_quiet(
+        &self,
+        quiet_for: std::time::Duration,
+        at_most_every: std::time::Duration,
+    ) -> Vec<String> {
+        if self.last_renew.lock().unwrap().elapsed() < at_most_every {
+            return Vec::new();
+        }
+        let quiet = self
+            .seconds_since_notice()
+            .is_none_or(|secs| secs >= quiet_for.as_secs());
+        if !quiet {
+            return Vec::new();
+        }
+        *self.last_renew.lock().unwrap() = std::time::Instant::now();
+        self.renew_subscriptions().await
     }
 
     /// [`McpManager::probe_idle`] with an explicit idle threshold — tests probe
@@ -2975,7 +3052,11 @@ fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
 
 /// The rendered doctor report. Pure: the only input is the rows, so the format
 /// is testable without a live server.
-pub fn render_doctor(rows: &[ServerDiagnostic], pending_notices: usize) -> String {
+pub fn render_doctor(
+    rows: &[ServerDiagnostic],
+    pending_notices: usize,
+    last_notice: Option<u64>,
+) -> String {
     if rows.is_empty() {
         return "MCP doctor — no servers configured.\n  put them under `mcpServers` in \
                 ~/.ki/agent/settings.json (global) or <repo>/.ki/settings.json \
@@ -2993,8 +3074,17 @@ pub fn render_doctor(rows: &[ServerDiagnostic], pending_notices: usize) -> Strin
     let failed = rows.len() - connected - disabled;
     let mut out = format!(
         "MCP doctor — {} configured: {connected} connected, {disabled} disabled, \
-         {failed} failed; {pending_notices} notice(s) pending",
-        rows.len()
+         {failed} failed; {pending_notices} notice(s) pending\
+         \nlast notice: {}",
+        rows.len(),
+        match last_notice {
+            // Silence is how a dead server-side poller shows itself: the
+            // subscription still reads as live because nothing ever said
+            // otherwise.
+            None => "never".to_string(),
+            Some(0) => "just now".to_string(),
+            Some(secs) => format!("{secs}s ago"),
+        }
     );
     for row in rows {
         // `name`, `launch` and `reason` can all carry config or OS text; the
@@ -3263,7 +3353,7 @@ mod tests {
     fn doctor_report_states_status_subscriptions_and_hints() {
         let mut row = connected_row("walgit");
         row.unknown_keys = vec!["subscribeUri (did you mean `subscribe`?)".to_string()];
-        let report = render_doctor(&[row], 3);
+        let report = render_doctor(&[row], 3, None);
 
         assert!(
             report.starts_with(
@@ -3303,7 +3393,7 @@ mod tests {
         let mut row = connected_row("walgit");
         row.configured_subscribe
             .push("walgit://not-there".to_string());
-        let report = render_doctor(&[row], 0);
+        let report = render_doctor(&[row], 0, None);
         assert!(
             report.contains("configured but not subscribed: walgit://not-there"),
             "{report}"
@@ -3322,7 +3412,7 @@ mod tests {
             stderr_tail: vec!["npm ERR! could not determine executable".to_string()],
             ..Default::default()
         };
-        let report = render_doctor(&[row], 0);
+        let report = render_doctor(&[row], 0, None);
         assert!(report.contains("  status:    failed"), "{report}");
         assert!(report.contains("  reason:    spawn:"), "{report}");
         assert!(report.contains("             | npm ERR!"), "{report}");
@@ -3355,7 +3445,7 @@ mod tests {
             "   ".to_string(),
             "a".repeat(STDERR_REPORT_CHARS * 3),
         ];
-        let report = render_doctor(&[row], 0);
+        let report = render_doctor(&[row], 0, None);
 
         assert!(report.contains("| tabbed red"), "{report}");
         for forbidden in ['\u{1b}', '\u{7}', '\t', '\r'] {
@@ -3390,9 +3480,36 @@ mod tests {
         assert!(out.chars().count() <= REPORT_MAX_CHARS + 32);
     }
 
+    /// Silence is the only symptom of a dead server-side poller, so the report
+    /// has to say how long it has been silent.
+    #[test]
+    fn the_report_names_how_long_the_mailbox_has_been_quiet() {
+        let row = connected_row("walgit");
+        assert!(render_doctor(std::slice::from_ref(&row), 0, Some(600))
+            .contains("last notice: 600s ago"));
+        assert!(
+            render_doctor(std::slice::from_ref(&row), 0, None).contains("last notice: never"),
+            "a live subscription that never fired is the case this line exists for"
+        );
+    }
+
+    /// Nothing configured means nothing to re-subscribe: the sweep is cheap, but
+    /// it must not invent work (or panic) on a session that uses no MCP server.
+    #[tokio::test]
+    async fn renewing_an_empty_manager_reports_nothing() {
+        let (manager, issues) = McpManager::start(&[], Path::new(".")).await;
+        assert!(issues.is_empty());
+        assert!(manager.renew_subscriptions().await.is_empty());
+        assert!(manager.seconds_since_notice().is_none());
+        assert!(manager
+            .renew_if_quiet(std::time::Duration::ZERO, std::time::Duration::ZERO)
+            .await
+            .is_empty());
+    }
+
     #[test]
     fn doctor_report_without_servers_says_where_to_configure() {
-        let report = render_doctor(&[], 0);
+        let report = render_doctor(&[], 0, Some(42));
         assert!(report.contains("no servers configured"), "{report}");
         assert!(report.contains("mcpServers"), "{report}");
     }

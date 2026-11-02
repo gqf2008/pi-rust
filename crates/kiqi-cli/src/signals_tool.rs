@@ -8,7 +8,6 @@
 //! * `defer` — handle it later (kept, with an optional note),
 //! * `resolve` — done; remove it,
 //! * `dismiss` — judged irrelevant; remove it (optional reason),
-//! * `mute` / `unmute` — stop/resume signal-triggered wakes for this session.
 //!
 //! The inbox is a session value, so dispositions survive resume. The tool does
 //! not grant any new authority: reading a resource or acting on it still goes
@@ -32,7 +31,7 @@ use crate::signal_host::{InboxEntry, InboxStatus, Settle, SignalHost};
 pub enum SignalsAction {
     /// Show every open signal.
     List,
-    /// Show the session mute state and the number of open signals.
+    /// Show the attention inbox and the number of open signals.
     Status,
     /// Keep the signal for later, optionally with a note.
     Defer,
@@ -40,10 +39,6 @@ pub enum SignalsAction {
     Resolve,
     /// Mark the signal irrelevant and remove it, optionally with a reason.
     Dismiss,
-    /// Stop signal-triggered wakes for this session.
-    Mute,
-    /// Resume signal-triggered wakes for this session.
-    Unmute,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -70,8 +65,8 @@ impl SignalsTool {
             schema: Tool {
                 name: "signals".to_string(),
                 description: "Inspect and settle MCP resource signals recorded by the host. \
-Actions: list (open signals), status (mute state + count), defer (id, note), \
-resolve (id), dismiss (id, note), mute, unmute. Use defer when you decide to \
+Actions: list (open signals), status (count), defer (id, note), \
+resolve (id), dismiss (id, note). Use defer when you decide to \
 handle a signal later, resolve when it is done, and dismiss when it is not \
 relevant. Reading the resource itself still uses <server>__read_resource."
                     .to_string(),
@@ -124,8 +119,7 @@ impl AgentTool for SignalsTool {
             SignalsAction::Status => {
                 let entries = self.host.inbox_entries().await.map_err(AgentError::Tool)?;
                 Ok(AgentToolResult::text(format!(
-                    "MCP signals: muted={} open={}",
-                    self.host.session_muted(),
+                    "MCP signals: open={}",
                     entries.len()
                 )))
             }
@@ -155,26 +149,6 @@ impl AgentTool for SignalsTool {
                     .await
                     .map_err(AgentError::Tool)?;
                 Ok(AgentToolResult::text(message))
-            }
-            SignalsAction::Mute => {
-                self.host.set_session_muted(true);
-                if let Err(error) = self.host.persist_session_muted(true).await {
-                    self.host.set_session_muted(false);
-                    return Err(AgentError::Tool(error));
-                }
-                Ok(AgentToolResult::text(
-                    "MCP signal wake is muted for this session.",
-                ))
-            }
-            SignalsAction::Unmute => {
-                self.host.set_session_muted(false);
-                if let Err(error) = self.host.persist_session_muted(false).await {
-                    self.host.set_session_muted(true);
-                    return Err(AgentError::Tool(error));
-                }
-                Ok(AgentToolResult::text(
-                    "MCP signal wake is enabled for this session.",
-                ))
             }
         }
     }
@@ -289,18 +263,7 @@ mod tests {
         let resolved = call(&tool, serde_json::json!({ "action": "resolve", "id": 2 })).await;
         assert!(resolved.contains("Resolved signal 2"), "got {resolved:?}");
         let status = call(&tool, serde_json::json!({ "action": "status" })).await;
-        assert!(status.contains("muted=false open=1"), "got {status:?}");
-    }
-
-    #[tokio::test]
-    async fn mute_is_persisted_and_toggles_the_wake_state() {
-        let (tool, host) = tool();
-        let message = call(&tool, serde_json::json!({ "action": "mute" })).await;
-        assert!(message.contains("muted"), "got {message:?}");
-        assert!(host.session_muted());
-        let message = call(&tool, serde_json::json!({ "action": "unmute" })).await;
-        assert!(message.contains("enabled"), "got {message:?}");
-        assert!(!host.session_muted());
+        assert!(status.contains("open=1"), "got {status:?}");
     }
 
     #[tokio::test]

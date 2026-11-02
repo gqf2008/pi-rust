@@ -92,8 +92,8 @@ pub struct HarnessActionHost {
     /// it named before the swap.
     tool_context: kiqi_host::ToolCallContext,
     /// Shared MCP-signal state. The same swap must move this host onto the new
-    /// session, or `mcp.signals.muted` and the attention inbox keep landing in
-    /// the previous session's JSONL; `set_active_session` owns that move.
+    /// session, or the attention inbox keeps landing in the previous session's
+    /// JSONL; `set_active_session` owns that move.
     signal_host: Arc<crate::signal_host::SignalHost>,
     #[allow(dead_code)]
     runtime: Handle,
@@ -603,12 +603,32 @@ mod tests {
             .to_string()
     }
 
-    async fn persisted_mute(cwd: &str, id: &str) -> Option<bool> {
+    /// The inbox is the session-scoped signal state now: one pointer pushed
+    /// into the host must land in the *currently attached* session's file.
+    async fn persisted_inbox(cwd: &str, id: &str) -> usize {
         let session = crate::session::open_session_by_id(id, cwd)
             .await
             .unwrap_or_else(|error| panic!("could not open session {id}: {error}"));
         let values = SessionValues::load(&session).await.unwrap();
-        values.get_as::<bool>(crate::signal_host::SESSION_MUTE_KEY)
+        let inbox: serde_json::Value = values
+            .get_as(crate::signal_host::INBOX_KEY)
+            .unwrap_or(serde_json::Value::Null);
+        inbox
+            .get("entries")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len)
+    }
+
+    fn one_notice(uri: &str) -> kiqi_mcp::McpNoticeBatch {
+        kiqi_mcp::McpNoticeBatch {
+            notices: vec![kiqi_mcp::McpNotice {
+                server: "docs".to_string(),
+                uri: uri.to_string(),
+                content: None,
+                authored_sessions: Vec::new(),
+            }],
+            suppressed: 0,
+        }
     }
 
     /// The extension runtime actions (`new_session`/`fork`/`switch_session`) must
@@ -642,45 +662,55 @@ mod tests {
         );
         HarnessActionHost::set_harness(&cell, &harness);
 
-        // The harness starts in the initial session; A becomes the muted one.
+        // The harness starts in the initial session; A gets a pending pointer.
         let a = session_id(host.new_session(serde_json::json!({})).await.unwrap());
-        signal_host.set_session_muted(true);
-        signal_host.persist_session_muted(true).await.unwrap();
+        signal_host
+            .add_to_inbox(&one_notice("file:///a.md"))
+            .await
+            .unwrap();
 
         // Switching to a fresh B re-attaches the host (a write would otherwise
-        // fail with "no session attached") and loads B's per-session mute: B
-        // has none, so the flag from A must be cleared.
+        // fail with "no session attached"): B must not inherit A's inbox.
         let b = session_id(host.new_session(serde_json::json!({})).await.unwrap());
         assert!(
-            !signal_host.session_muted(),
-            "an unmuted session must clear the mute carried over from the previous session"
+            signal_host.inbox_entries().await.unwrap().is_empty(),
+            "a fresh session must not inherit the previous session's inbox"
         );
 
-        // A write must land in B, leaving A untouched. (Before the fix the
-        // persist failed against the still-attached initial session.)
-        signal_host.set_session_muted(false);
-        signal_host.persist_session_muted(false).await.unwrap();
-        assert_eq!(persisted_mute(&cwd_str, &b).await, Some(false));
+        // A write must land in B, leaving A untouched.
+        signal_host
+            .add_to_inbox(&one_notice("file:///b.md"))
+            .await
+            .unwrap();
+        assert_eq!(persisted_inbox(&cwd_str, &b).await, 1);
         assert_eq!(
-            persisted_mute(&cwd_str, &a).await,
-            Some(true),
+            persisted_inbox(&cwd_str, &a).await,
+            1,
             "B's write must not have reached A"
         );
 
-        // Switching back loads A's mute and retargets subsequent writes at A.
+        // Switching back retargets both the read and the subsequent writes at A.
         host.switch_session(serde_json::json!({ "id": a }))
             .await
             .unwrap();
-        assert!(
-            signal_host.session_muted(),
-            "switching back must load A's persisted mute"
+        assert_eq!(
+            signal_host.inbox_entries().await.unwrap().len(),
+            1,
+            "switching back must load A's persisted inbox"
         );
-        signal_host.set_session_muted(false);
-        signal_host.persist_session_muted(false).await.unwrap();
-        assert_eq!(persisted_mute(&cwd_str, &a).await, Some(false));
+        signal_host
+            .add_to_inbox(&one_notice("file:///a2.md"))
+            .await
+            .unwrap();
+        assert_eq!(persisted_inbox(&cwd_str, &a).await, 2);
+        assert_eq!(
+            persisted_inbox(&cwd_str, &b).await,
+            1,
+            "A's write must not have reached B"
+        );
 
         // `fork` goes through the same funnel. `fork_typed` forks at a message
-        // entry, and the mute writes above are custom entries, so give the
+        // entry, and the inbox writes above are custom entries, so give the
         // branch a message tip first.
         let harness = cell
             .get()
@@ -695,12 +725,19 @@ mod tests {
             .await
             .unwrap();
         let fork = session_id(host.fork(serde_json::json!({})).await.unwrap());
-        signal_host.set_session_muted(true);
-        signal_host.persist_session_muted(true).await.unwrap();
+        signal_host
+            .add_to_inbox(&one_notice("file:///fork.md"))
+            .await
+            .unwrap();
         assert_eq!(
-            persisted_mute(&cwd_str, &fork).await,
-            Some(true),
-            "the fork's mute must be written into the fork's file"
+            persisted_inbox(&cwd_str, &fork).await,
+            3,
+            "the fork starts from A's two entries and the write lands in the fork's file"
+        );
+        assert_eq!(
+            persisted_inbox(&cwd_str, &a).await,
+            2,
+            "forking must not write into the session it forked from"
         );
     }
 

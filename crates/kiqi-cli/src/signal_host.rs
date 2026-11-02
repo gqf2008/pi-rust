@@ -4,12 +4,19 @@
 //! `signal_wake` owns the decision policy; this module owns the things that
 //! outlive one decision:
 //!
-//! * the session-level mute (`mcp.signals.muted`), and
 //! * the attention inbox (`mcp.signals.inbox`): signals that were allowed to
 //!   wake the session, which the agent can `defer`, `resolve` or `dismiss`.
 //!
-//! Both are ordinary session values (`ki.value` custom entries), so they are
-//! durable, latest-wins, and survive recovery without a new storage primitive.
+//! The inbox is an ordinary session value (`ki.value` custom entries), so it is
+//! durable, latest-wins, and survives recovery without a new storage primitive.
+//!
+//! There is deliberately no session-level mute here. One existed
+//! (`mcp.signals.muted`, settable by the agent through the `signals` tool) and
+//! was removed: it was permanent until an explicit unmute, it was invisible in
+//! the UI, and an agent silently disabling its own notification channel looks
+//! exactly like a broken subscription. Waking is already governed by per-server
+//! `signals.wake`, its budgets, and the run-scoped mute below — never by a
+//! durable flag the user cannot see.
 
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,7 +28,6 @@ use serde::{Deserialize, Serialize};
 use crate::signal_wake::{SignalWakeState, WakeDecision};
 
 /// Session value: whether signal-triggered wakes are muted for this session.
-pub(crate) const SESSION_MUTE_KEY: &str = "mcp.signals.muted";
 /// Session value: the attention inbox.
 pub(crate) const INBOX_KEY: &str = "mcp.signals.inbox";
 /// Same bound as the notice mailbox: a burst must not grow the session file
@@ -99,36 +105,6 @@ impl SignalHost {
         self.session.lock().unwrap().clone()
     }
 
-    /// Attach `session` and load its persisted mute in one step. The two must
-    /// not be separable: a host attached to one session while holding another's
-    /// mute would persist the flag into the wrong file.
-    pub(crate) async fn attach_session_and_load_mute(
-        &self,
-        session: Session,
-    ) -> Result<(), String> {
-        self.attach_session(session);
-        self.load_session_mute().await
-    }
-
-    /// Load the persisted session mute into the wake state. Called after
-    /// [`attach_session`](Self::attach_session) (or via
-    /// [`attach_session_and_load_mute`](Self::attach_session_and_load_mute)).
-    ///
-    /// The mute is per-session, so an absent value means "unmuted": it
-    /// overwrites the previous flag rather than leaving it alone, otherwise
-    /// switching from a muted session to an unmuted one would keep the old mute.
-    pub(crate) async fn load_session_mute(&self) -> Result<(), String> {
-        let Some(session) = self.session() else {
-            return Ok(());
-        };
-        let values = SessionValues::load(&session)
-            .await
-            .map_err(|error| format!("could not read session values: {error}"))?;
-        let muted = values.get_as::<bool>(SESSION_MUTE_KEY).unwrap_or(false);
-        self.wake.lock().unwrap().set_session_muted(muted);
-        Ok(())
-    }
-
     pub(crate) fn record_user_input(&self) {
         self.wake.lock().unwrap().record_user_input();
     }
@@ -184,27 +160,6 @@ impl SignalHost {
             .lock()
             .unwrap()
             .decide(batch, current.as_deref(), now, config)
-    }
-
-    pub(crate) fn set_session_muted(&self, muted: bool) {
-        self.wake.lock().unwrap().set_session_muted(muted);
-    }
-
-    pub(crate) fn session_muted(&self) -> bool {
-        self.wake.lock().unwrap().session_muted()
-    }
-
-    /// Persist the session mute (latest-wins). The in-memory flag is set by the
-    /// caller before spawning this, so the UI reflects the change immediately.
-    pub(crate) async fn persist_session_muted(&self, muted: bool) -> Result<(), String> {
-        let session = self
-            .session()
-            .ok_or_else(|| "no session attached".to_string())?;
-        SessionValueWriter::new(session)
-            .set(SESSION_MUTE_KEY, serde_json::json!(muted))
-            .await
-            .map_err(|error| format!("could not persist the signal mute: {error}"))?;
-        Ok(())
     }
 
     /// Add a woken batch to the attention inbox, coalescing by `(server, uri)`.
@@ -509,44 +464,5 @@ mod tests {
         let entries = host.inbox_entries().await.unwrap();
         assert_eq!(entries.len(), MAX_INBOX_ENTRIES);
         assert_eq!(entries.first().unwrap().id, 4);
-    }
-
-    #[tokio::test]
-    async fn session_mute_round_trips_through_session_values() {
-        let host = host();
-        host.set_session_muted(true);
-        host.persist_session_muted(true).await.unwrap();
-        let values = SessionValues::load(&host.session().unwrap()).await.unwrap();
-        assert_eq!(values.get_as::<bool>(SESSION_MUTE_KEY), Some(true));
-        // Reload into a fresh wake state.
-        let fresh = SignalHost::new();
-        fresh.attach_session(host.session().unwrap());
-        fresh.load_session_mute().await.unwrap();
-        assert!(fresh.session_muted());
-    }
-
-    /// The mute follows the attached session, not the host: a session without a
-    /// mute clears whatever the previous session carried.
-    #[tokio::test]
-    async fn attaching_an_unmuted_session_clears_a_previous_mute() {
-        let muted_session = session();
-        let host = SignalHost::new();
-        host.attach_session(muted_session.clone());
-        host.set_session_muted(true);
-        host.persist_session_muted(true).await.unwrap();
-        assert!(host.session_muted());
-
-        // A fresh in-memory session has no `mcp.signals.muted` value.
-        host.attach_session_and_load_mute(session()).await.unwrap();
-        assert!(
-            !host.session_muted(),
-            "an unmuted session must clear the previous session's mute"
-        );
-
-        // Re-attaching the muted session brings the flag back.
-        host.attach_session_and_load_mute(muted_session)
-            .await
-            .unwrap();
-        assert!(host.session_muted());
     }
 }

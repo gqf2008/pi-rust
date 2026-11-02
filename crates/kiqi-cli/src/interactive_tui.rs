@@ -3803,6 +3803,21 @@ pub async fn interactive_tui(
                     for retired in reload_context.mcp.probe_idle().await {
                         diagnostic_log(&format!("[ki mcp] liveness: {retired}"));
                     }
+                    // A subscription reads as live forever once it was made:
+                    // the server never says its poller stopped. Silence is the
+                    // only symptom, so re-ask when nothing has arrived for
+                    // five minutes — `subscribe` is idempotent, and a poller
+                    // that died is recreated by it.
+                    for renewed in reload_context
+                        .mcp
+                        .renew_if_quiet(
+                            std::time::Duration::from_secs(300),
+                            std::time::Duration::from_secs(600),
+                        )
+                        .await
+                    {
+                        diagnostic_log(&format!("[ki mcp] re-subscribed: {renewed}"));
+                    }
                 }
             }
             Some(TuiMessage::McpInput) => {
@@ -4259,7 +4274,11 @@ pub async fn interactive_tui(
                 // doesn't work" needs (a reload would replace the evidence).
                 let mcp = ctx.reload_context.mcp.clone();
                 let rows = mcp.doctor();
-                let mut note = kiqi_mcp::render_doctor(&rows, mcp.pending_notice_count());
+                let mut note = kiqi_mcp::render_doctor(
+                    &rows,
+                    mcp.pending_notice_count(),
+                    mcp.seconds_since_notice(),
+                );
                 // What the settings say *now*: the next reload uses this, so a
                 // difference is the "I edited it and nothing happened" case. It
                 // compares names rather than counts — replacing one server with
