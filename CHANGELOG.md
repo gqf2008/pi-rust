@@ -14,6 +14,14 @@ carries the same notes.
 
 ## [0.5.1] - 2026-11-02
 
+### Fixed
+
+- **下载来的 `ki` 也能 `ki insmod --build` 了。** 那条路径用 `env!("CARGO")`——编译这个
+  二进制时的 cargo。对 `cargo run`/`cargo install` 正确，对 release 下载包则是 CI runner
+  的 toolchain 路径，于是 `ki insmod --build extensions/wasm/kiqi-orchestrator` 报
+  `run cargo for …: No such file or directory`。现在依次用继承的 `CARGO`、`PATH` 上的
+  `cargo`，最后才回退到编译期路径。
+
 ### Changed
 
 - **单个子代理任务的墙钟预算收到 15 分钟，并且必须显式给出。** 之前 `proc` 授权的

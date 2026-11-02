@@ -1571,6 +1571,46 @@ fn guest_build_cache(root: Option<&Path>) -> PathBuf {
 /// snapshot. Snapshots are retained in the cache because returning only a path
 /// gives us no reliable point at which to clean one up, and keeping it prevents
 /// a later build from replacing an artifact an earlier caller is still reading.
+#[cfg(test)]
+mod cargo_program_tests {
+    /// A release download must still find a `cargo` to build a guest with: the
+    /// compile-time path is the CI runner's toolchain and does not exist here.
+    #[test]
+    fn cargo_is_resolved_from_this_machine() {
+        let cargo = super::cargo_program();
+        assert!(
+            std::path::Path::new(&cargo).is_file(),
+            "cargo_program() resolved to {}, which is not a file on this machine",
+            cargo.display()
+        );
+    }
+}
+
+/// The `cargo` to build a guest with.
+///
+/// `env!("CARGO")` is the cargo that compiled *this* binary — right for a
+/// `cargo run`/`cargo install` build, useless for a release download, where it
+/// points at the CI runner's toolchain (`run cargo for …: No such file or
+/// directory`). Prefer an inherited `CARGO`, then whatever `cargo` PATH finds,
+/// and keep the compile-time value as the last resort so a checkout still works.
+fn cargo_program() -> std::ffi::OsString {
+    if let Some(cargo) = std::env::var_os("CARGO") {
+        if !cargo.is_empty() {
+            return cargo;
+        }
+    }
+    let exe = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join(exe);
+            if candidate.is_file() {
+                return candidate.into_os_string();
+            }
+        }
+    }
+    std::ffi::OsString::from(env!("CARGO"))
+}
+
 fn build_guest_in_cache(dir: &Path, cache: &Path) -> Result<PathBuf, String> {
     let manifest = dir.join("Cargo.toml");
     if !manifest.is_file() {
@@ -1595,7 +1635,7 @@ fn build_guest_in_cache(dir: &Path, cache: &Path) -> Result<PathBuf, String> {
     fs2::FileExt::lock_exclusive(&lock_file)
         .map_err(|error| format!("lock {}: {error}", lock_path.display()))?;
 
-    let output = std::process::Command::new(env!("CARGO"))
+    let output = std::process::Command::new(cargo_program())
         .args(["build", "--manifest-path"])
         .arg(&manifest)
         .args([
