@@ -22,10 +22,10 @@ ki insmod --build extensions/wasm/kiqi-subagents --id kiqi-subagents --yes
 The tool emits exactly the bytes the compile-time extension emits:
 
 ```json
-{"kind":"kiqi-delegation","task":"review","role":"worker","maxTurns":32,"timeoutSeconds":1800,"recursive":false}
+{"kind":"kiqi-delegation","task":"review","role":"worker","maxTurns":32,"timeoutSeconds":900,"recursive":false}
 ```
 
-Field order, clamping (`maxTurns` 1–32 default 8, `timeoutSeconds` 10–1800
+Field order, clamping (`maxTurns` 1–32 default 8, `timeoutSeconds` **required**, 10–900
 default 300, `role` default `worker`) and the two error strings are all kept
 identical, and the e2e test compares the envelope byte for byte.
 

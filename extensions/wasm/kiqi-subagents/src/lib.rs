@@ -32,7 +32,7 @@ use serde_json::Value;
 const ID: &str = "kiqi-subagents";
 const TOOL: &str = "delegate_task";
 const DESCRIPTION: &str = "Create a bounded, non-recursive subagent delegation envelope.";
-const SCHEMA: &str = r#"{"type":"object","properties":{"task":{"type":"string","maxLength":20000},"role":{"type":"string"},"maxTurns":{"type":"integer","minimum":1,"maximum":32},"timeoutSeconds":{"type":"integer","minimum":10,"maximum":1800}},"required":["task"]}"#;
+const SCHEMA: &str = r#"{"type":"object","properties":{"task":{"type":"string","maxLength":20000},"role":{"type":"string"},"maxTurns":{"type":"integer","minimum":1,"maximum":32},"timeoutSeconds":{"type":"integer","minimum":10,"maximum":900,"description":"Required: the wall-clock budget for this delegation (10-900s). There is no default; a child with no budget can hang."}},"required":["task","timeoutSeconds"]}"#;
 
 struct Subagents;
 
@@ -135,11 +135,18 @@ fn delegate_task(arguments: &str) -> Result<String, types::ExtensionError> {
         .and_then(Value::as_u64)
         .unwrap_or(8)
         .clamp(1, 32);
+    // Required, with no fallback: the ceiling only means something if every
+    // delegation is forced to state its budget.
     let timeout = params
         .get("timeoutSeconds")
         .and_then(Value::as_u64)
-        .unwrap_or(300)
-        .clamp(10, 1800);
+        .ok_or_else(|| {
+            types::ExtensionError::InvalidArguments(
+                "`timeoutSeconds` is required (10-900): a delegation without a budget can hang"
+                    .to_string(),
+            )
+        })?
+        .clamp(10, 900);
     Ok(envelope(&task, &role, max_turns, timeout))
 }
 

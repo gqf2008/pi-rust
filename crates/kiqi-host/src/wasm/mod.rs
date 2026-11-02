@@ -2182,7 +2182,7 @@ fn split_host_port(address: &str) -> Result<(String, u16), CapabilityError> {
 }
 
 /// The effective per-child budget for `proc`: the grant's value clamped to its
-/// own cap (600s by default, 1800s at most — deliberately independent of
+/// own cap (600s by default, 900s at most — deliberately independent of
 /// `exec`'s 300s, which is the point of a separate capability) and floored at
 /// 1s (the parse layer rejects 0, so only an in-code grant can say it).
 fn effective_proc_timeout(timeout_seconds: u64) -> std::time::Duration {

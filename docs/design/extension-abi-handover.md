@@ -78,7 +78,7 @@
 | `net-http` | `{hosts:[…]}` | 逐跳白名单（重定向也查）；响应体上限 **8 MiB** |
 | `fs` | `{cwd: extension-data\|project}`（老文件裸 `true` 照读为 data 监禁） | 监禁在 `extensions/<id>/data/`（词法 + 符号链接两层），监禁即策略 |
 | `exec` | `{commands:[…], cwd?, timeout-seconds?}` | 裸命令名（无 shell）；cwd 随授权给范围：`extension-data`（默认，关在 data 目录）或 `project`（关在**项目目录** = 宿主进程 cwd，`ki` 从不 chdir），词法 + 符号链接两层与 `fs` 同款；环境清空只回填 `PATH`；输出各 **256 KiB**；超时随授权（默认 **30s**、上限 **300s**，CLI 拒超、宿主兜底 clamp）；子进程独立进程组、结束即收整组 |
-| `proc` | `{commands:[…], cwd?, timeout-seconds?, max-open?}` | **调用内**可交互子进程（spawn/write/read-line/wait/kill）；命令白名单、cwd 同 exec 的 scope、`--timeout` 默认 **600s**/上限 1800s、`--max-open` 默认 **100**/上限 256；句柄只活一次调用，返回即杀组收尸 |
+| `proc` | `{commands:[…], cwd?, timeout-seconds?, max-open?}` | **调用内**可交互子进程（spawn/write/read-line/wait/kill）；命令白名单、cwd 同 exec 的 scope、`--timeout` 默认 **600s**/上限 900s、`--max-open` 默认 **100**/上限 256；句柄只活一次调用，返回即杀组收尸 |
 | `net-sockets` | `{hosts:[…]}` | host 白名单；**宿主持 socket**，guest 只拿 `u32` 句柄 |
 
 ### 0.8.0 的五个 key（全部 deny-by-default，`--yes` 不授予）

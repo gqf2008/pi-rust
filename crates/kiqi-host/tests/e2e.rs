@@ -3690,7 +3690,7 @@ fn subagents_guest_emits_the_byte_stable_delegation_envelope() {
     assert!(!outcome.is_error);
     assert_eq!(
         text_of(&outcome),
-        r#"{"kind":"kiqi-delegation","task":"review","role":"worker","maxTurns":32,"timeoutSeconds":1800,"recursive":false}"#
+        r#"{"kind":"kiqi-delegation","task":"review","role":"worker","maxTurns":32,"timeoutSeconds":900,"recursive":false}"#
     );
     assert_eq!(outcome.details, serde_json::Value::Null);
 

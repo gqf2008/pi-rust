@@ -1439,7 +1439,7 @@ CAPABILITIES:
                   directory), --timeout <seconds> (default 30, at most 300)
     proc          talk to a child process for the length of one tool call
                   (spawn/write/read-line/wait/kill); same --command/--cwd, plus
-                  --timeout <seconds> (default 600, at most 1800) and
+                  --timeout <seconds> (default 600, at most 900) and
                   --max-open <n> (default 100)
     net-sockets   raw TCP; --host <host> (repeatable, `*` allows any)
 
@@ -2356,7 +2356,7 @@ mod tests {
     }
 
     /// The `--timeout` ceiling is per-capability: `proc` accepts its own, longer
-    /// budget (default 600, at most 1800) while `exec` keeps its 300s cap.
+    /// budget (default 600, at most 900) while `exec` keeps its 300s cap.
     #[test]
     fn proc_and_exec_timeouts_use_their_own_caps() {
         let proc_args = |seconds: &str| {
@@ -2372,10 +2372,10 @@ mod tests {
         let target = parse_target(&proc_args("600")).expect("600 is proc's default budget");
         assert_eq!(target.options.timeout_seconds, Some(600));
         assert!(
-            parse_target(&proc_args("1800")).is_ok(),
+            parse_target(&proc_args("900")).is_ok(),
             "proc's cap is inclusive"
         );
-        assert!(parse_target(&proc_args("1801")).is_err(), "past proc's cap");
+        assert!(parse_target(&proc_args("901")).is_err(), "past proc's cap");
         assert!(
             parse_target(&proc_args("0")).is_err(),
             "zero is rejected everywhere"

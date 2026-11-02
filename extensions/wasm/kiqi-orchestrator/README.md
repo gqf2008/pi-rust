@@ -15,6 +15,8 @@ per-read timeouts until every node reaches a terminal state.
 - `waitSeconds: 0` (background waves) is **refused**: children die with the
   call, so "return and collect later" would strand them.
 - `waitSeconds: N` kills and fails whatever is still running after N seconds.
+- Every node carries its own `timeoutSeconds` (required, 10–900); the host's
+  `proc` grant caps the child at 900s regardless.
 - Absent: the wave waits until it drains, each node bounded by its own
   `timeoutSeconds`.
 - **Esc/abort**: the guest polls `proc.cancel-requested`; a cancelled call
@@ -50,7 +52,7 @@ contains.
 
 ```bash
 ki insmod --build extensions/wasm/kiqi-orchestrator --id kiqi-orchestrator --yes
-ki extension grant kiqi-orchestrator proc --command ki --cwd project --timeout 1800
+ki extension grant kiqi-orchestrator proc --command ki --cwd project --timeout 900
 ki extension grant kiqi-orchestrator exec --command sh --command test --cwd project --timeout 300
 ki extension grant kiqi-orchestrator fs --cwd project
 ```

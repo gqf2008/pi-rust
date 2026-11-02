@@ -246,9 +246,12 @@ pub struct ExecGrant {
 /// capability (a session is not a bounded one-shot command).
 pub const PROC_TIMEOUT_DEFAULT_SECONDS: u64 = 600;
 
-/// The largest budget a `proc` grant can ask for (the orchestrator's subagent
-/// ceiling, reused so the repo has one "very long child" number).
-pub const PROC_TIMEOUT_MAX_SECONDS: u64 = 1800;
+/// The largest budget a `proc` grant can ask for. Fifteen minutes: a single
+/// delegated task that has not finished by then is out of control (it is not
+/// making progress the caller can steer), and this number is the one wall an
+/// extension cannot talk its way past — `grant --timeout` past it is rejected
+/// and a hand-edited grant is clamped at runtime.
+pub const PROC_TIMEOUT_MAX_SECONDS: u64 = 900;
 
 /// How many children one call may hold open by default.
 pub const PROC_MAX_OPEN_DEFAULT: u32 = 100;

@@ -50,7 +50,7 @@ const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
 const GOALS_FILE: &str = ".ki/goals.json";
 const GUIDE_HEADING: &str = "## Subagent orchestration";
 
-const GUIDE_SECTION: &str = "## Subagent orchestration\n\nFor work that has several steps, or steps that can run in parallel, use the\n`plan` and `dispatch` tools instead of doing everything inline:\n\n1. `plan` with action=set: write the task graph as nodes, each with an `id`, a\n   self-contained `task`, and its `deps`.\n2. `dispatch`: run the current ready wave. Nodes whose dependencies are done run\n   in parallel (up to `maxParallel`).\n3. Read the results, then `plan` with action=update (add/remove/re-dep/reset\n   nodes) and `dispatch` again until the goal is met.\n\nA subagent starts fresh and cannot see this conversation, so each node's `task`\nmust contain everything it needs. Prefer this over hand-rolling the whole\nworkflow with `bash`.\n\nTwo defaults are too tight for a real task and must be raised per node:\n\n- `timeoutSeconds` defaults to **300**. A node that runs a build or the full\n  test suite easily exceeds it, and the call then fails with\n  `subagent timed out after 300s`. Set it explicitly (up to 1800) when the task\ntouches cargo, a browser, or a long script.\n- `maxTurns` defaults to **8** (max 32). Reading code, editing, running gates,\n  checking mutations, and committing does not fit in 8 turns. A node that runs\nthe budget out stops halfway and reports unfinished work as if it were done.\n\nA node that exits early is therefore usually a budget problem, not a logic\nproblem: raise the two numbers before suspecting the task text.\n\nFor independent tasks whose results you do NOT need in this turn, prefer the\n`subagent` tool: it starts a background agent and returns immediately, so\nseveral run in parallel and their answers arrive as follow-up messages. Use\nplan/dispatch when the work has dependencies or you must use the results now.";
+const GUIDE_SECTION: &str = "## Subagent orchestration\n\nFor work that has several steps, or steps that can run in parallel, use the\n`plan` and `dispatch` tools instead of doing everything inline:\n\n1. `plan` with action=set: write the task graph as nodes, each with an `id`, a\n   self-contained `task`, and its `deps`.\n2. `dispatch`: run the current ready wave. Nodes whose dependencies are done run\n   in parallel (up to `maxParallel`).\n3. Read the results, then `plan` with action=update (add/remove/re-dep/reset\n   nodes) and `dispatch` again until the goal is met.\n\nA subagent starts fresh and cannot see this conversation, so each node's `task`\nmust contain everything it needs. Prefer this over hand-rolling the whole\nworkflow with `bash`.\n\nEach node states its own budget:\n\n- `timeoutSeconds` is **required** per node (10-900) and has no default. A node\n  that runs a build or the full test suite needs more than a short one, and a\n  node with no budget at all can hang the wave; past 900s the host kills the\n  child whatever the node asked for.\n- `maxTurns` defaults to **8** (max 32). Reading code, editing, running gates,\n  checking mutations, and committing does not fit in 8 turns. A node that runs\nthe budget out stops halfway and reports unfinished work as if it were done.\n\nA node that exits early is therefore usually a budget problem, not a logic\nproblem: raise the two numbers before suspecting the task text.\n\nFor independent tasks whose results you do NOT need in this turn, prefer the\n`subagent` tool: it starts a background agent and returns immediately, so\nseveral run in parallel and their answers arrive as follow-up messages. Use\nplan/dispatch when the work has dependencies or you must use the results now.";
 
 // ---------------------------------------------------------------------------
 // Graph (ported from the compile-time extension's graph.rs)
@@ -58,7 +58,10 @@ const GUIDE_SECTION: &str = "## Subagent orchestration\n\nFor work that has seve
 
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const MIN_TIMEOUT_SECS: u64 = 10;
-const MAX_TIMEOUT_SECS: u64 = 1800;
+/// Fifteen minutes per node, matching the host's `proc` ceiling
+/// (`PROC_TIMEOUT_MAX_SECONDS`): a delegated task still running after that is
+/// not making steerable progress, and the caller has already lost sight of it.
+const MAX_TIMEOUT_SECS: u64 = 900;
 const MAX_TASK_BYTES: usize = 20_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
@@ -157,8 +160,20 @@ impl Node {
                 true
             }
         });
+        // Required, not defaulted: a node without a budget is an unbounded
+        // child, and the whole point of the ceiling is that no delegation runs
+        // without one.
+        let timeout_secs = value
+            .get("timeoutSeconds")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                format!(
+                    "node `{id}` needs an explicit `timeoutSeconds` ({MIN_TIMEOUT_SECS}-{MAX_TIMEOUT_SECS}); \
+                     a node without a budget can hang the whole wave"
+                )
+            })?;
         let timeout_secs = clamp(
-            value.get("timeoutSeconds").and_then(Value::as_u64),
+            Some(timeout_secs),
             DEFAULT_TIMEOUT_SECS,
             MIN_TIMEOUT_SECS,
             MAX_TIMEOUT_SECS,
@@ -1066,7 +1081,7 @@ fn spawn_node(node: &Node, program: &str) -> Result<u32, String> {
     proc::spawn(program, &args, None).map_err(|error| match error {
         types::CapabilityError::Denied(reason) => format!(
             "{reason} — the node children need `ki extension grant {ID} proc \\
-             --command {program} --cwd project --timeout 1800`"
+             --command {program} --cwd project --timeout 900`"
         ),
         types::CapabilityError::Failed(reason) => reason,
     })

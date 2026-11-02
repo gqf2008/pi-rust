@@ -12,6 +12,18 @@ carries the same notes.
 
 ## [Unreleased]
 
+### Changed
+
+- **单个子代理任务的墙钟预算收到 15 分钟，并且必须显式给出。** 之前 `proc` 授权的
+  上限是 1800s（30 分钟），`kiqi-orchestrator` 的节点 `timeoutSeconds` 默认为 300、
+  可忽略，`kiqi-subagents` 的 `timeoutSeconds` 也是可选——一个卡住的委派最长可以占
+  半小时，而调用方既没设预算也拿不到信号。现在：`PROC_TIMEOUT_MAX_SECONDS` 收到
+  **900s**（`ki extension grant … proc --timeout` 超过 900 直接拒绝，手改授权文件也会在
+  运行时被夹到 900 并告警，扩展无法绕过）；`kiqi-orchestrator` 的每个节点必须写
+  `timeoutSeconds`（10–900，缺了就报错，不再默认 300）；`kiqi-subagents` 的
+  `timeoutSeconds` 同样必填、上限 900。仍在 900s 内的长任务（cargo 全量测试、浏览器页）
+  不受影响。
+
 ### Added
 
 - **空闲时的 MCP 服务器死亡能被发现了。** 之前只在「用得到」时才检查连接：调用时看

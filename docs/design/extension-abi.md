@@ -198,7 +198,7 @@ SessionStart→Shutdown 间维持服务线程——见 `rpi-package/packages/kiq
 >
 > 2026-10-15（第二批）：`kiqi-orchestrator` 从 `rpi-package` 收编为编译期插件
 > （`extensions/kiqi-orchestrator`，默认 feature），但**不迁 wasm**——它是长生命周期编排：
-> 子代理是可活到 1800s 的 `ki -p` 子进程（exec 预算上限 300s）、`dispatch` 的后台节点
+> 子代理是可活到 900s 的 `ki -p` 子进程（exec 预算上限 300s）、`dispatch` 的后台节点
 > worker 要在工具调用之间持续存活（wasm guest 调用间无线程）、子进程要整组收杀
 > （wasm 没有进程组概念）。wasm 化它需要宿主先长出「会话级长生命周期子进程句柄」这类
 > 新能力，属未来的设计活；exec cwd scope（§6.30）解决的是 lens 那种有界短任务。
@@ -791,7 +791,7 @@ stdin/stdout，调用结束杀掉（`extensions/kiqi-codegraph/src/lib.rs:315`�
 被有意排除在本能力之外（那是宿主拥有调度权的另一件事，见方案 §9）。
 
 **授权与强制**（新可授权能力 `proc`，策略随授权走）：`{commands, cwd, timeout-seconds, max-open}`，
-`--command`/`--cwd` 与 `exec` 同一套，`--timeout` **默认 600s、上限 1800s**（刻意不复用 `exec` 的
+`--command`/`--cwd` 与 `exec` 同一套，`--timeout` **默认 600s、上限 900s**（刻意不复用 `exec` 的
 30s/300s——会话不是有界一次性命令），`--max-open` 默认 100、上限 256。命令裸名 + 白名单、
 cwd 走**同一对** `jail_under`/`symlink_checked_under`（与 §6.30 同源，不再各写一份）、
 环境清空只回填 `PATH`、子进程独立进程组。三处防阻塞：stdout 行线程 + 有界 channel（聊天止于
@@ -948,7 +948,7 @@ interface proc {
   检查；`subagent` 在 spawn 前、以及每个读 slice（`POLL_SLICE_MS = 100`）前检查。
   命中后杀掉仍存的子进程并返回 `cancelled by the host`（`dispatch` 走
   `fail_remaining`）。宿主在调用返回时仍会统一收尸，这条只是让长等待提前结束 —
-  单次 `subagent` 因此不再等满 `timeoutSeconds`（默认 300 s）而占着插件的调用锁。
+  单次 `subagent` 因此不再等满 `timeoutSeconds`（必填，上限 900 s）而占着插件的调用锁。
 - **兼容性**：这是宿主提供的**新增导入**，旧 guest 不引用它，仍按 0.7.1 实例化；
   因此包版本不抬，避免让所有已安装 guest 一起失效。
 - **构建**：`extensions/wasm/kiqi-wasm-bindings/build.rs` 增加
