@@ -12,6 +12,35 @@ carries the same notes.
 
 ## [Unreleased]
 
+### Added
+
+- **派出去的活在自己的 worktree 里做。** 两个子代理在同一个目录里改同一批文件，写在后
+  面的那个会覆盖前面的——这是"并行"在 ki 里一直不安全的原因。`subagent` 工具现在默认给
+  每个子进程一个独立 checkout：`ki --worktree <name>` 在 `.ki/worktrees/<name>` 上新建
+  分支 `ki/wt-<name>`（base 取当前分支，没有就 `origin/main`，再没有 `main`；`ki/wt-*`
+  永远不会被选成 base），子进程整条命都在那儿跑。子进程退出后由父进程收尾：先 `rebase`
+  到最新 base（冲突就停在 worktree 里，主线不动），再跑 `verify`（工具参数或
+  `KI_WORKTREE_VERIFY`，失败同样停在 worktree），全绿才 `merge --ff-only` 落主线。
+  `worktree: false` 可以关掉（任务本来就要共用同一批文件时）。
+- **`ki worktree status|merge|abandon|prune`。** 看有哪些活着的 worktree、重试合并、放弃
+  并归档、清理已经进主线的。未合并的**永不按时间自动删**，超过 5 天只在 `status` 里标
+  `stale`。
+- **证据留存。** 合并完成或放弃的 worktree 会把 `manifest.json`（base、改动文件、验证
+  命令与结果、状态）和 `change.patch` 落到 `.ki/worktrees/archive/<id>/`，再删掉
+  checkout——"最终状态正确"和"事后能查到底改了什么"要同时成立。
+
+### Changed
+
+- **编排提示词把"能并行就并行"写成规则。** 之前只写"建议用 plan/dispatch"，于是可以拿
+  todo 列表当计划、一个 subagent 干完六项活。现在明确：todo 是给用户看进度，执行计划是
+  图；同层有 ≥2 个就绪节点必须同一波发出，只派一个要能说出为什么（"改同一批文件"是分解
+  失败，不是理由）。
+
+### Fixed
+
+- **`subagent` 的超时上限收到 900s。** 它与 `proc` 授权是两条独立的路，之前一直是 3600，
+  于是"单个委派不超过 15 分钟"在模型最常用的那个工具上留了个后门。
+
 ## [0.5.1] - 2026-11-02
 
 ### Fixed

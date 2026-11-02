@@ -135,6 +135,7 @@ async fn run_inner() -> i32 {
         // Kernel-flavoured spellings for the wasm tier.
         Some("insmod") => return crate::extension_cli::insmod(&argv[1..]),
         Some("rmmod") => return crate::extension_cli::rmmod(&argv[1..]),
+        Some("worktree") => return crate::worktree::run(&argv[1..]),
         // These removed commands are intentionally rejected instead of falling
         // through to the prompt path: a retired command must never silently
         // become a prompt run (that is exactly the `ki package` hang the
@@ -167,10 +168,26 @@ async fn run_inner() -> i32 {
         return code;
     }
 
-    let cwd = match resolve_cwd() {
+    let mut cwd = match resolve_cwd() {
         Ok(cwd) => cwd,
         Err(code) => return code,
     };
+
+    // `--worktree <name>`: delegate work into its own checkout before anything
+    // reads the project (settings, trust, extensions, sessions). Everything
+    // below then behaves as if ki had been started in that directory.
+    if let Some(name) = parsed.worktree.clone() {
+        match crate::worktree::enter(&cwd, &name) {
+            Ok(path) => {
+                eprintln!("[ki worktree] {}", path.display());
+                cwd = path;
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                return EXIT_USAGE;
+            }
+        }
+    }
 
     // ---- Legacy-layout migration (flat ~/.ki → ~/.ki/agent/) ----
     // Best-effort; never blocks startup. Skipped when KI_CODING_AGENT_DIR is

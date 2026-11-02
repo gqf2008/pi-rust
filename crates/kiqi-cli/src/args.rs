@@ -154,6 +154,11 @@ pub struct Args {
     pub models: Option<Vec<String>>,
     pub session_dir: Option<PathBuf>,
     pub no_session: bool,
+    /// `--worktree <name>`: run this session inside `.ki/worktrees/<name>` on
+    /// branch `ki/wt-<name>`, creating it from the current branch when missing.
+    /// A subagent gets its own checkout this way, so parallel children cannot
+    /// overwrite each other's files.
+    pub worktree: Option<String>,
     pub name: Option<String>,
 
     pub tools: Option<Vec<String>>,
@@ -381,6 +386,9 @@ pub fn parse_args(args: &[String]) -> Args {
             "--continue" | "-c" => result.continue_session = true,
             "--resume" | "-r" => result.resume = true,
             "--no-session" => result.no_session = true,
+            "--worktree" => {
+                result.worktree = take_value(&mut result, "--worktree");
+            }
             "--no-tools" | "-nt" => result.no_tools = true,
             "--no-builtin-tools" | "-nbt" => result.no_builtin_tools = true,
             "--no-skills" | "-ns" => result.no_skills = true,
@@ -662,6 +670,10 @@ pub fn print_help() {
   --session <id|path>            Use a specific session (partial UUID or file)
   --session-dir <dir>            Directory for session storage
   --no-session                   Ephemeral mode (do not persist the session)
+  --worktree <name>              Work in `.ki/worktrees/<name>` (branch
+                                 `ki/wt-<name>`), created from the current
+                                 branch; keeps delegated work out of the main
+                                 checkout
   --name, -n <name>              Set the session display name
   --tools, -t <list>             Comma-separated allowlist of tool names to enable
   --exclude-tools, -xt <list>    Comma-separated denylist of tool names to disable

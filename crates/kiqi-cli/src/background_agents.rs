@@ -34,7 +34,11 @@ const EXCLUDED_TOOLS: &str = "subagent,plan,dispatch";
 
 pub(crate) const MAX_TASK_BYTES: usize = 20_000;
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 900;
-pub(crate) const MAX_TIMEOUT_SECS: u64 = 3_600;
+/// Same ceiling as `proc`: a delegated task that has not finished in fifteen
+/// minutes is not making progress the caller can steer, and `subagent` is the
+/// tool the model actually reaches for — a 3600 here would leave that wall
+/// open behind the grant path.
+pub(crate) const MAX_TIMEOUT_SECS: u64 = 900;
 
 /// One work-view row for a running (or just-finished) background agent.
 #[derive(Debug, Clone, Default)]
@@ -78,6 +82,19 @@ pub(crate) struct StartSpec {
     /// (a custom program gets no `ki`-specific flags, like the orchestrator's
     /// hermetic seam).
     pub program: Option<std::path::PathBuf>,
+    /// Run the child in its own worktree (`.ki/worktrees/<name>`) and merge the
+    /// result back when it exits. `None` keeps it in the caller's checkout.
+    pub worktree: Option<WorktreePlan>,
+}
+
+/// Where a delegated task's isolated checkout lives, and how it is verified
+/// before its branch is allowed into the base.
+#[derive(Debug, Clone, Default)]
+pub struct WorktreePlan {
+    pub name: String,
+    /// Command run inside the worktree before the fast-forward; a failure
+    /// leaves the worktree in place (the base branch is never half-applied).
+    pub verify: Option<String>,
 }
 
 struct Running {
@@ -213,6 +230,11 @@ impl BackgroundAgents {
         for name in kiqi_agent::env::SUBAGENT_PARENT_ENV {
             command.env_remove(name);
         }
+        if let Some(plan) = spec.worktree.as_ref() {
+            if custom.is_none() {
+                command.arg("--worktree").arg(&plan.name);
+            }
+        }
         if let Some(provider) = spec.provider.as_deref() {
             command.arg("--provider").arg(provider);
         }
@@ -241,6 +263,7 @@ impl BackgroundAgents {
             return Err(format!("cannot send the task to the subagent: {error}"));
         }
 
+        let spec_worktree = spec.worktree.clone();
         let cancel = CancellationToken::new();
         self.inner.running.lock().unwrap().insert(
             id.clone(),
@@ -263,6 +286,7 @@ impl BackgroundAgents {
                 timeout_secs,
                 cancel,
                 child,
+                spec_worktree,
             )
             .await;
         });
@@ -280,6 +304,7 @@ async fn supervise(
     timeout_secs: u64,
     cancel: CancellationToken,
     mut child: tokio::process::Child,
+    worktree: Option<WorktreePlan>,
 ) {
     let started = Instant::now();
     let budget_ms = timeout_secs * 1_000;
@@ -373,6 +398,17 @@ async fn supervise(
             .unwrap_or_else(|| "(no output)".to_string())
     };
 
+    // The child is gone; hand its checkout back. This runs before the observer
+    // is told the agent finished, so the follow-up message already says whether
+    // the work landed — a merge conflict must not look like success.
+    let mut summary = summary;
+    let mut ok = ok;
+    if let Some(plan) = worktree {
+        let merged = merge_worktree(&plan);
+        summary = format!("{summary}\n\n{merged}");
+        ok = ok && !merged.contains("not merged");
+    }
+
     let update = NodeUpdate {
         id: id.clone(),
         state: if ok { "done" } else { "failed" }.to_string(),
@@ -394,6 +430,44 @@ async fn supervise(
     if let Some(observer) = observer {
         observer.node(&update);
         observer.finished(&finished);
+    }
+}
+
+/// A fresh worktree name. The counter keeps them readable, the timestamp keeps
+/// two ki processes from picking the same one.
+pub fn next_worktree_name() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.subsec_nanos())
+        .unwrap_or(0);
+    format!("subagent-{:x}{:x}", std::process::id(), nanos)
+}
+
+/// Rebase, verify and fast-forward a finished child's worktree.
+///
+/// Reported as text because it rides in the follow-up message: the caller has to
+/// learn that its work did *not* land, not just that the child exited zero.
+fn merge_worktree(plan: &WorktreePlan) -> String {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => return format!("worktree `{}`: {error}", plan.name),
+    };
+    let repo = match crate::worktree::repo_root(&cwd) {
+        Ok(repo) => repo,
+        Err(error) => return format!("worktree `{}`: {error}", plan.name),
+    };
+    match crate::worktree::finish(&repo, &plan.name, plan.verify.as_deref()) {
+        Ok(outcome) => {
+            let archived = repo.join(".ki/worktrees/archive").join(&plan.name);
+            format!(
+                "worktree `{}`: {} (evidence in {})",
+                plan.name,
+                outcome.describe(),
+                archived.display()
+            )
+        }
+        Err(error) => format!("worktree `{}`: {error}", plan.name),
     }
 }
 
@@ -593,6 +667,7 @@ mod tests {
                 provider: None,
                 model: None,
                 program: Some(script),
+                worktree: None,
             })
             .await
             .expect("started");
@@ -653,6 +728,7 @@ mod tests {
             provider: None,
             model: None,
             program: Some(script.clone()),
+            worktree: None,
         };
         agents.start(spec()).await.expect("first");
         agents.start(spec()).await.expect("second");
@@ -686,6 +762,7 @@ mod tests {
                 provider: None,
                 model: None,
                 program: Some(script),
+                worktree: None,
             })
             .await
             .expect("started");
@@ -710,6 +787,7 @@ mod tests {
                 provider: None,
                 model: None,
                 program: None,
+                worktree: None,
             })
             .await
             .expect_err("too large");

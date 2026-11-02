@@ -25,7 +25,7 @@ pub struct SubagentInput {
     /// The task for the child agent. It starts fresh and cannot see this
     /// conversation, so the task must contain everything it needs.
     pub task: String,
-    /// Kill the child after this many seconds (default 900, max 3600).
+    /// Kill the child after this many seconds (default 900, max 900).
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
     /// Provider override for the child (defaults to the child's own config).
@@ -34,6 +34,20 @@ pub struct SubagentInput {
     /// Model override for the child.
     #[serde(default)]
     pub model: Option<String>,
+    /// Give the child its own git worktree (`.ki/worktrees/<name>`, branch
+    /// `ki/wt-<name>`) and merge the result back when it exits. On by default:
+    /// two children sharing the caller's checkout overwrite each other's files.
+    #[serde(default = "worktree_default")]
+    pub worktree: bool,
+    /// Command to run inside the worktree before its branch is fast-forwarded
+    /// (e.g. `cargo test -p foo`). A failure leaves the worktree in place and
+    /// the follow-up message says the work did not land.
+    #[serde(default)]
+    pub verify: Option<String>,
+}
+
+fn worktree_default() -> bool {
+    true
 }
 
 pub struct SubagentTool {
@@ -47,7 +61,9 @@ impl SubagentTool {
             schema: Tool {
                 name: "subagent".to_string(),
                 description: "Start a child agent on a bounded task in the background and \
-return immediately. Independent calls run in parallel. The child starts fresh and \
+return immediately. Independent calls run in parallel, each in its own git worktree \
+(`worktree: true`, the default) so they cannot overwrite each other; the result is \
+merged back (and `verify`d, if given) when the child exits. The child starts fresh and \
 cannot see this conversation, so the task must contain everything it needs. When the \
 child finishes, its answer arrives as a follow-up user message — call this, then keep \
 working or end the turn; do not poll. Results are not available until that message \
@@ -97,19 +113,29 @@ impl AgentTool for SubagentTool {
             .timeout_seconds
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .clamp(10, MAX_TIMEOUT_SECS);
+        let worktree = input.worktree.then(|| background_agents::WorktreePlan {
+            name: background_agents::next_worktree_name(),
+            verify: input.verify,
+        });
+        let worktree_name = worktree.as_ref().map(|plan| plan.name.clone());
         let spec = StartSpec {
             task: input.task,
             timeout_secs,
             provider: input.provider,
             model: input.model,
             program: None,
+            worktree,
         };
         let id = background_agents::global()
             .start(spec)
             .await
             .map_err(AgentError::Tool)?;
+        let where_ = match worktree_name {
+            Some(name) => format!(" in worktree `{name}`"),
+            None => String::new(),
+        };
         Ok(AgentToolResult::text(format!(
-            "Started background {id} (timeout {timeout_secs}s). It runs on its own; \
+            "Started background {id}{where_} (timeout {timeout_secs}s). It runs on its own; \
 its result will arrive as a follow-up message. Continue with other work or end the \
 turn — do not wait for it."
         )))

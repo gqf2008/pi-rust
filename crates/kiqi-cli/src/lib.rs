@@ -82,6 +82,7 @@ pub mod updates;
 #[cfg(feature = "extension-wasm")]
 pub mod wasm_oauth;
 pub mod wasm_provider;
+pub mod worktree;
 
 /// Crate version, surfaced by `ki --version`. Mirrors the TS `VERSION` export
 /// (sourced from `package.json`; here from `env!("CARGO_PKG_VERSION")`).
