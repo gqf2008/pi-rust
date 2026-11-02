@@ -133,11 +133,6 @@ impl OsExecutionEnv {
         }
     }
 
-    pub fn with_shell_path(mut self, shell_path: PathBuf) -> Self {
-        self.shell_path = Some(shell_path);
-        self
-    }
-
     pub fn with_shell_env(mut self, env: HashMap<String, String>) -> Self {
         self.shell_env = Some(env);
         self

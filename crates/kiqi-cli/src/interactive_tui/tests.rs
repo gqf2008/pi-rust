@@ -350,7 +350,9 @@ fn test_tui_state() -> Arc<TuiState> {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
+        extension_session: Arc::new(std::sync::Mutex::new(
+            kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+        )),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -1316,8 +1318,8 @@ fn test_slash_command_dispatch() {
     resolves_to("/think", "/thinking"); // alias
     resolves_to("/tools", "/tools");
     resolves_to("/images", "/images");
-    resolves_to("/context", "/context");
-    // Out-of-v1-scope commands resolve to their own UnsupportedCommand entry.
+    resolves_to("/clone", "/fork"); // alias
+                                    // Out-of-v1-scope commands resolve to their own UnsupportedCommand entry.
     resolves_to("/settings", "/settings");
     resolves_to("/name", "/name");
     resolves_to("/export", "/export");
@@ -1364,7 +1366,7 @@ fn test_registry_visible_entries_cover_dispatch() {
         );
     }
     // Hidden commands stay off the list.
-    for hidden in ["/context", "/q", "/m", "/v", "/think", "/resume", "/?"] {
+    for hidden in ["/q", "/m", "/v", "/think", "/resume", "/?"] {
         assert!(
             !names.contains(&hidden.to_string()),
             "{hidden} should be hidden from autocomplete"
@@ -1442,7 +1444,9 @@ fn test_agent_event_mapping_creates_assistant_and_tool() {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
+        extension_session: Arc::new(std::sync::Mutex::new(
+            kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+        )),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -1935,7 +1939,9 @@ fn test_autocomplete_slash_suggestions_render() {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
+        extension_session: Arc::new(std::sync::Mutex::new(
+            kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+        )),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -2038,7 +2044,9 @@ fn test_select_list_swap_restores_editor() {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
+        extension_session: Arc::new(std::sync::Mutex::new(
+            kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+        )),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -2144,7 +2152,9 @@ fn test_message_history_browse_restores_draft() {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
+        extension_session: Arc::new(std::sync::Mutex::new(
+            kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+        )),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -2253,7 +2263,9 @@ fn test_accept_top_suggestion_replaces_prefix() {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
+        extension_session: Arc::new(std::sync::Mutex::new(
+            kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+        )),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),
@@ -2348,7 +2360,9 @@ fn autocomplete_test_state(max_visible: usize) -> Arc<TuiState> {
         scoped_edit: std::sync::Mutex::new(None),
         markdown_transformer: Arc::new(std::sync::Mutex::new(None)),
         extension_claimed_keys: Mutex::new(Default::default()),
-        extension_session: Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
+        extension_session: Arc::new(std::sync::Mutex::new(
+            kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+        )),
         search: Arc::new(AltScreenSearch::new()),
         search_bar: Arc::new(SearchBar::new()),
         pending_container: Arc::new(Container::new()),

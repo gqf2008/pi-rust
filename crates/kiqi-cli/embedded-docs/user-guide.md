@@ -159,7 +159,7 @@ ANTHROPIC_AUTH_TOKEN=token
 --tools <list>          只允许指定工具
 --exclude-tools <list>  禁用指定工具
 --no-tools              禁用所有工具
---no-builtin-tools      禁用内置工具（read/bash/edit/write/docs）
+--no-builtin-tools      `--no-tools` 的别名（v1 没有"只关内置、保留扩展"这种模式）
 --no-skills             跳过技能发现
 --no-prompt-templates   跳过 prompt-template 发现
 --no-context-files      跳过 AGENTS.md/CLAUDE.md 发现

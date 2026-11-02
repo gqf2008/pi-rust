@@ -372,8 +372,10 @@ mod tests {
     fn before_request_emits_before_agent_start_once_and_forwards_messages() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let seen = collect_events();
-        let hooks = ExtensionProviderHooks::from_session(&ExtensionSession::none())
-            .expect("a sink is installed");
+        let hooks = ExtensionProviderHooks::from_session(
+            &ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+        )
+        .expect("a sink is installed");
 
         let ctx = Context {
             system_prompt: Some("sys".into()),
@@ -425,8 +427,10 @@ mod tests {
             assert_eq!(event.tag, EventTag::BeforeProviderRequest);
             crate::compiled::CompiledVerdict::Patch(json!({"headers": {"x-trace": "abc"}}))
         }));
-        let hooks = ExtensionProviderHooks::from_session(&ExtensionSession::none())
-            .expect("a sink is installed");
+        let hooks = ExtensionProviderHooks::from_session(
+            &ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+        )
+        .expect("a sink is installed");
         let patch = hooks
             .before_request(
                 &model(),
@@ -446,15 +450,20 @@ mod tests {
     fn without_a_sink_the_bridge_is_not_installed() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::compiled::clear_compiled_event_sink();
-        assert!(ExtensionProviderHooks::from_session(&ExtensionSession::none()).is_none());
+        assert!(ExtensionProviderHooks::from_session(
+            &ExtensionSession::none_with_compiled_sink_and_caps(None, None)
+        )
+        .is_none());
     }
 
     #[test]
     fn before_request_sanitizes_base_url_in_both_observation_payloads() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let seen = collect_events();
-        let hooks = ExtensionProviderHooks::from_session(&ExtensionSession::none())
-            .expect("a sink is installed");
+        let hooks = ExtensionProviderHooks::from_session(
+            &ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+        )
+        .expect("a sink is installed");
         hooks.before_request(
             &model(),
             &Context::default(),

@@ -129,7 +129,7 @@ pub(super) async fn switch_to_session(
             // `SessionTree`: the active session moved — extensions (compiled +
             // wasm) re-restore their state from the new branch. Fired after
             // the swap so handlers observe the NEW session; advisory.
-            crate::session::notify_session_tree(reload_context).await;
+            crate::session::notify_session_tree(reload_context);
             chat.clear();
             add_welcome_message(chat);
             render_session_history(
@@ -275,7 +275,7 @@ pub(super) async fn fork_session(
     // `SessionTree`: the active session moved to the fresh fork — extensions
     // (compiled + wasm) re-restore from the new (empty) branch. Fired after
     // the swap so handlers observe the NEW session; advisory.
-    crate::session::notify_session_tree(reload_context).await;
+    crate::session::notify_session_tree(reload_context);
     chat.clear();
     add_welcome_message(chat);
     render_session_history(

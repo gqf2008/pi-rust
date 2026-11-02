@@ -234,7 +234,6 @@ handle，`poll` 必须非阻塞并响应取消标记，`cancel` 只置位不释�
   "append_system_prompt": "prompts/append-system.md",
   "skills_dir": "skills",
   "skill_dirs": ["skills"],
-  "extension_dirs": [".ki/extensions"],
   "disable_context_files": true,
   "artifacts_dir": "artifacts",
   "provider": "<default-provider>"

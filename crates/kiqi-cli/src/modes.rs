@@ -1073,21 +1073,8 @@ pub async fn interactive(
     // ---- Session lifecycle (P1): BeforeTuiStart ----
     // `BeforeTuiStart`: extensions prepare (connect a server, load a resource)
     // before the interactive UI initializes. Observer-only: the extension
-    // contract has no veto, so the returned option is always `None` and this
-    // never exits the TUI path.
-    if let Some(reason) = crate::session::dispatch_session_event_async(
-        reload_context,
-        kiqi_host::EventTag::BeforeTuiStart,
-    )
-    .await
-    {
-        eprintln!("[ki] startup vetoed by extension: {reason}");
-        // The session is built (and its MCP servers already spawned) before this
-        // veto, so the teardown advisory must still run — otherwise the servers'
-        // process trees survive with only the non-awaited `Drop` backstop.
-        crate::session::dispatch_session_shutdown_advisory(reload_context).await;
-        return crate::app::EXIT_VETOED;
-    }
+    // contract has no veto.
+    crate::session::dispatch_session_event(reload_context, kiqi_host::EventTag::BeforeTuiStart);
 
     // Check if TUI is supported
     let force_tui = std::env::var("KI_FORCE_TUI")
@@ -1836,7 +1823,7 @@ mod tests {
     /// A `ReloadContext` with an extension-free session; the lifecycle
     /// dispatch reaches the process sink installed by the test.
     fn shutdown_test_context() -> crate::session::ReloadContext {
-        let session = kiqi_host::ExtensionSession::none();
+        let session = kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(None, None);
         let (emitter, _) = kiqi_agent::CollectorEmitter::new();
         crate::session::ReloadContext {
             extension_session: Arc::new(Mutex::new(session)),

@@ -159,7 +159,7 @@ ANTHROPIC_AUTH_TOKEN=token
 --tools <list>          只允许指定工具
 --exclude-tools <list>  禁用指定工具
 --no-tools              禁用所有工具
---no-builtin-tools      禁用内置工具（read/bash/edit/write/docs）
+--no-builtin-tools      `--no-tools` 的别名（v1 没有"只关内置、保留扩展"这种模式）
 --no-skills             跳过技能发现
 --no-prompt-templates   跳过 prompt-template 发现
 --no-context-files      跳过 AGENTS.md/CLAUDE.md 发现
@@ -198,8 +198,8 @@ ki extension list|show|grant|revoke|rename
 启动 TUI 时，`Context` 会列出实际加载成功的系统提示词和项目指令文件路径，
 包括 `SYSTEM.md`、`APPEND_SYSTEM.md` 以及 `AGENTS.md` / `CLAUDE.md`。
 项目 `SYSTEM.md` 和 `APPEND_SYSTEM.md` 优先于全局同名文件；清单只显示生效的来源。
-没有加载文件时，启动页会省略 `Context`。`/context` 可查看当前完整资源清单，
-成功执行 `/reload` 后，启动页的 `Context` 和 `/context` 都会更新。
+没有加载文件时，启动页会省略 `Context`。`/usage` 会先列出当前完整资源清单再给统计，
+成功执行 `/reload` 后，启动页的 `Context` 和 `/usage` 的清单都会更新。
 设置 `quietStartup: true` 可隐藏启动资源清单。
 
 ### 更新日志

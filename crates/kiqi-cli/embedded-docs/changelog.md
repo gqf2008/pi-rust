@@ -25,6 +25,13 @@
 
 ### Changed
 
+- **同一个开关的三种拼法收成一个。** `--local-only` / `--package-only` /
+  `--project-only` 本来就是一起 OR 的两个字段，现在是一个；`--no-builtin-tools` 变成
+  `--no-tools` 的别名（v1 没有"只关内置、保留扩展"这种模式，帮助里写明了）；`/clone`
+  变成 `/fork` 的别名；`/context` 并进 `/usage`（它本身最后一句就是 `/usage`，面板里
+  显示的也是同一份资源清单）；`docs` 工具的 `authoring`、`debugging` 两个主题讲的是已
+  退役的 cdylib / `ki dev` 流程，删掉。
+
 - **编排提示词把"能并行就并行"写成规则。** 之前只写"建议用 plan/dispatch"，于是可以拿
   todo 列表当计划、一个 subagent 干完六项活。现在明确：todo 是给用户看进度，执行计划是
   图；同层有 ≥2 个就绪节点必须同一波发出，只派一个要能说出为什么（"改同一批文件"是分解
@@ -45,6 +52,24 @@
 - **`/mcp-doctor` 多一行 `last notice:`。** 沉默是唯一症状，所以要能看出沉默多久。
 
 ### Removed
+
+- **一批没人走到的东西删掉了（约 3000 行）。**
+  * 扩展否决运行的整条通道：`dispatch_empty_event_with` 恒返回 `false`，于是 8 处"扩展
+    否决了这次运行"的分支和 `EXIT_VETOED` 永远不可达。
+  * stdio 抢占子系统：`owns_stdio` 恒 `false`、`claim` 无人调用，`State.conflict` 永不
+    置位，两条"两个实例抢同一根线"的错误路径不可达。
+  * `find`/`grep`/`ls`/`image` 四个工具：前三个在注册表里被显式排除并各有测试断言"不许
+    注册"，第四个没有调用者——图片处理实际由 `kiqi-harness/src/image_tool.rs` 与
+    `kiqi-tools::image_processing` 承担。
+  * 只存不读的配置键：`shellPath`、`retry.provider`、`modelOverrides`、`branchSummary`、
+    `extensionDirs`、`outputPad`（最后这个连 UI 侧的 `set_output_pad` 都没有调用者）。
+    老 `settings.json` 里留着这些键会被 serde 忽略，不需要迁移。
+  * `ResourceKind::Extensions` 与三个 `*_extension_dirs()`：wasm 发现走
+    `agent_dir()/extensions`，这三条只有测试在用。
+  * 恒空的 `load_all()` / `Registered` / `install_guest_error_sink()`、`ExtensionSession`
+    里三个只有测试用的构造器、`compiled.rs`/`actions.rs` 里六个"FFI 调用者已经没了"的
+    包装、5 处没有 subscriber 的 `tracing::warn!`、`experimental.rs`（`KI_EXPERIMENTAL`
+    只被它自己读）、`auth.rs` 里只为消警告存在的 `_keep_btreemap`。
 
 - **会话级永久静音（`mcp.signals.muted`）删掉了。** 它由 agent 通过 `signals` 工具的
   `mute` 动作设置、以会话值持久化、只有 `unmute` 能解，界面上完全看不见——一个 agent

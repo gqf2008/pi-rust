@@ -237,20 +237,6 @@ impl kiqi_host::InjectApi for ActionCaps {
     }
 }
 
-/// An extension the host registered at build time.
-pub struct Registered {
-    pub id: &'static str,
-    pub extension: Box<dyn Extension>,
-}
-
-/// Every first-party extension compiled into this binary.
-///
-/// Empty since the compiled-in channel was retired (2026-10-21): first-party
-/// extensions ship as wasm guests (`extensions/wasm/kiqi-*`), and the cdylib
-/// channel was retired on 2026-10-26, so no crate is linked into the binary
-/// here. The historical
-/// `extension-kiqi-*` cfg blocks below stay as design history; those features no
-/// longer exist, so they can never be enabled.
 /// 把 extension-host 的 guest 失败诊断接进 ki 自己的运行时日志
 /// （`<agent_dir>/logs/ki.log`）。进程级一次：首次设置生效；之后任何
 /// WasmExtension guest 的 trap/失败都会出现在 ki 的诊断日志里。
@@ -261,15 +247,6 @@ pub(crate) fn install_guest_error_sink() {
             crate::interactive_tui::diagnostic_log(&format!("[{extension}] {op} failed: {error}"));
         },
     ));
-}
-
-/// Lean build (the `extension-wasm` feature off): there is no wasm backend, so
-/// there is no guest error sink to install.
-#[cfg(not(feature = "extension-wasm"))]
-pub(crate) fn install_guest_error_sink() {}
-
-pub fn load_all() -> Vec<Registered> {
-    Vec::new()
 }
 
 /// Capabilities owned by the host, so they can be handed to an extension per call.
@@ -369,7 +346,7 @@ pub fn reload_caps(
 ///
 /// It also installs the closure as the **process-global fallback** and returns
 /// it, so the caller can mount the same sink on the session's
-/// `RegistrySnapshot` (`ExtensionSession::none_with_compiled_sink`). Session
+/// `RegistrySnapshot` (`ExtensionSession::none_with_compiled_sink_and_caps`). Session
 /// dispatch then goes through that snapshot and never consults the global slot,
 /// which is what keeps concurrent sessions (ACP) isolated; the global slot stays
 /// the fallback for call sites without a snapshot (and for tests).
@@ -1532,21 +1509,21 @@ pub fn compiled_extension_hosts() -> Vec<std::sync::Arc<ExtensionHost>> {
         .clone()
 }
 
-/// Wrap every registered extension with its isolation boundary.
+/// Wrap every loaded extension with its isolation boundary.
+///
+/// Nothing is compiled into the binary (the compiled-in channel was retired on
+/// 2026-10-21 and the cdylib channel on 2026-10-26), so the only extensions are
+/// wasm guests discovered beside the host.
 pub fn load_hosts() -> Vec<ExtensionHost> {
-    let mut hosts: Vec<ExtensionHost> = load_all()
-        .into_iter()
-        .map(|registered| ExtensionHost::new(registered.id, registered.extension))
-        .collect();
-    // Wasm extensions live beside the compiled ones: `extensions/<id>/extension.wasm`
-    // with `extensions/<id>/grants.json` (the user's authorization, read by
+    // Wasm extensions live at `extensions/<id>/extension.wasm` with
+    // `extensions/<id>/grants.json` (the user's authorization, read by
     // `WasmExtension::load`).
     #[cfg(feature = "extension-wasm")]
     if let Some(extensions_dir) = kiqi_host::grants::agent_dir().map(|root| root.join("extensions"))
     {
-        hosts.extend(load_wasm_hosts(&extensions_dir));
+        return load_wasm_hosts(&extensions_dir);
     }
-    hosts
+    Vec::new()
 }
 
 /// Check a component against its digest sidecar before it is loaded.
@@ -2781,69 +2758,6 @@ mod tests {
         .expect("component registration reaches the status mailbox");
     }
 
-    #[test]
-    fn registry_exposes_the_first_party_extensions() {
-        let extensions = load_all();
-        // No extension is in the default build any more: permission policy moved
-        // into the host (`crate::permissions`). Assert the registry is still
-        // coherent (no duplicate ids) so `extensions` is used in every config.
-        let mut ids: Vec<&str> = extensions.iter().map(|entry| entry.id).collect();
-        let registered = ids.len();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(ids.len(), registered, "duplicate extension id in registry");
-
-        #[cfg(feature = "extension-kiqi-permissions")]
-        {
-            let permissions = extensions
-                .iter()
-                .find(|entry| entry.id == "kiqi-permissions")
-                .expect("the feature is on, so kiqi-permissions is registered");
-            let tools = permissions.extension.tools();
-            assert_eq!(tools.len(), 1);
-            assert_eq!(tools[0].name, "permissions");
-        }
-
-        #[cfg(feature = "extension-kiqi-todo")]
-        let todo = extensions
-            .iter()
-            .find(|entry| entry.id == "kiqi-todo")
-            .expect("the feature is on, so kiqi-todo is registered");
-
-        #[cfg(feature = "extension-kiqi-todo")]
-        {
-            let tools = todo.extension.tools();
-            assert_eq!(tools.len(), 1);
-            assert_eq!(tools[0].name, "todo");
-            assert!(tools[0].parameters["properties"]["action"].is_object());
-
-            assert_eq!(todo.extension.commands()[0].name, "todos");
-            assert!(todo.extension.probe_points().is_empty());
-        }
-
-        // kiqi-langfuse is the last package ported off the native ABI. It is not
-        // in the default build any more, so its three tools are asserted only
-        // when the feature is on (CI checks that configuration).
-        #[cfg(feature = "extension-kiqi-langfuse")]
-        {
-            let langfuse = extensions
-                .iter()
-                .find(|entry| entry.id == "kiqi-langfuse")
-                .expect("the feature is on, so kiqi-langfuse is registered");
-            let langfuse_tools = langfuse.extension.tools();
-            let names: Vec<&str> = langfuse_tools
-                .iter()
-                .map(|tool| tool.name.as_str())
-                .collect();
-            assert_eq!(
-                names,
-                vec!["langfuse_score", "langfuse_prompt", "langfuse_trace"]
-            );
-            assert!(langfuse.extension.commands().is_empty());
-            assert!(langfuse.extension.probe_points().is_empty());
-        }
-    }
-
     /// A host that answers the two actions this test needs and refuses the
     /// rest, so the adapter is exercised over the real spawn/park seam.
     #[derive(Default)]
@@ -3583,50 +3497,6 @@ mod tests {
                 )
                 .is_ok());
         }
-    }
-
-    /// Drives the compiled kiqi-todo through the trait; runs where that extension
-    /// is built (the default build has no compiled extensions with tools).
-    #[cfg(feature = "extension-kiqi-todo")]
-    #[test]
-    fn a_registered_extension_runs_through_the_trait_without_any_ffi() {
-        let extensions = load_all();
-        let todo = extensions.iter().find(|e| e.id == "kiqi-todo").unwrap();
-        let silent = Silent;
-        let caps = HostCaps::observer(&silent);
-
-        let added = todo
-            .extension
-            .call(
-                "todo",
-                &serde_json::json!({"action": "add", "text": "wire the registry"}),
-                &caps,
-                &NoProgress,
-            )
-            .unwrap();
-        assert!(!added.is_error);
-        // The state rides the details channel, which is how it survives
-        // fork/switch once the host persists it with the tool result.
-        assert_eq!(added.details["action"], "add");
-        // Order-independent: the extension instance (and therefore its list) is
-        // process-wide, so tests do not start from an empty list.
-        let stored = added.details["todos"]
-            .as_array()
-            .expect("details carries the task list")
-            .iter()
-            .any(|todo| todo["text"] == "wire the registry");
-        assert!(
-            stored,
-            "the added task is in the details: {}",
-            added.details
-        );
-
-        // Unknown tools are an extension error, not a panic or a crash.
-        let err = todo
-            .extension
-            .call("nope", &serde_json::json!({}), &caps, &NoProgress)
-            .unwrap_err();
-        assert!(matches!(err, kiqi_host::ExtensionError::UnknownTool(_)));
     }
 
     /// The wasm orchestrator polls `proc.cancel-requested`; a cancelled tool

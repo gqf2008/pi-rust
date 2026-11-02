@@ -31,11 +31,6 @@ pub const EXIT_USAGE: i32 = 2;
 /// The exit code for a runtime failure (model-resolution, harness-build, or
 /// run failure). Mirrors TS `process.exitCode` set from `runPrintMode`.
 pub const EXIT_RUNTIME: i32 = 1;
-/// The exit code for "an extension refused to start". Lifecycle events are
-/// observer-only since the C-ABI registration machine was removed
-/// (`docs/design/extension-abi.md` §6.49), so this is no longer produced; it is
-/// kept so scripts and the existing branches stay stable.
-pub const EXIT_VETOED: i32 = 3;
 
 /// Read a long-flag value from argv, supporting both `--flag <value>` and
 /// `--flag=value`, without disturbing the normal parser. Used for the early
@@ -76,7 +71,9 @@ pub async fn run() -> i32 {
     crate::timings::reset(crate::timings::TimingNamespace::Main);
     // extension-host 的 guest 失败诊断（tracing::warn）在 ki 里没有 subscriber，
     // 会整体被丢弃——接进 ki 自己的运行时日志（agent_dir/logs/ki.log），
-    // 与 MCP signal、goal continuation 的诊断走同一处。
+    // 与 MCP signal、goal continuation 的诊断走同一处。只在 wasm 后端编进
+    // 本二进制时存在。
+    #[cfg(feature = "extension-wasm")]
     crate::extensions::install_guest_error_sink();
     let code = run_inner().await;
     // A `--worktree` run settles its own checkout: landing it (or refusing to)
@@ -327,30 +324,7 @@ async fn run_inner() -> i32 {
                 return EXIT_RUNTIME;
             }
         };
-    // ---- post-load stdin claim + initial message ----
-    // Extensions are loaded by `build()` (above). An extension may have declared
-    // `{"ownsStdio":true}`: this process's stdio belongs to it (an ACP/MCP stdio
-    // server), so the host must neither drain stdin nor run a prompt/TUI mode
-    // that writes to stdout. Only now — after load — do we know. `--mode
-    // rpc`/`--server` already skipped the drain via `wants_rpc_channel`.
-    let stdio_claimed = reload_context
-        .extension_session
-        .lock()
-        .map(|session| session.owns_stdio())
-        .unwrap_or(false);
-    let stdio_lifecycle = reload_context
-        .extension_session
-        .lock()
-        .ok()
-        .and_then(|session| session.action_bridge())
-        .map(|bridge| bridge.stdio_lifecycle());
-    if let Some(lifecycle) = &stdio_lifecycle {
-        if let Err(error) = lifecycle.validate() {
-            eprintln!("error: {error}");
-            return EXIT_RUNTIME;
-        }
-    }
-    let stdin_text = if wants_rpc_channel || stdio_claimed {
+    let stdin_text = if wants_rpc_channel {
         None
     } else {
         read_piped_stdin()
@@ -386,14 +360,6 @@ async fn run_inner() -> i32 {
     } else {
         mode
     };
-
-    // An extension that claimed stdio owns this process's stdin/stdout: force the
-    // headless Rpc lifecycle (dispatch startup events, then wait for completion)
-    // and let the extension's own protocol server read/write stdio. This is
-    // authoritative — it must win over TTY detection and KI_FORCE_TUI,
-    // otherwise the host would start a TUI/print run that writes to a stream the
-    // extension owns.
-    let mode = if stdio_claimed { RunMode::Rpc } else { mode };
 
     let exit_code = match mode {
         RunMode::Print => {
@@ -444,70 +410,44 @@ async fn run_inner() -> i32 {
             // up on SessionShutdown, exactly as in interactive mode. This is why
             // `ki --server` works headless: the SessionStart hook fires and the
             // extension brings up the TCP server.
-            let veto = crate::session::dispatch_session_event_async(
+            crate::session::dispatch_session_event(
                 &reload_context,
                 kiqi_host::EventTag::BeforeTuiStart,
-            )
-            .await;
-            if let Some(reason) = veto {
-                eprintln!("[ki] startup vetoed by extension: {reason}");
-                // The MCP servers were spawned during the harness build, before
-                // this veto; reap their process trees through the same advisory
-                // path every other teardown uses.
-                crate::session::dispatch_session_shutdown_advisory(&reload_context).await;
-                EXIT_VETOED
+            );
+            crate::session::dispatch_session_event(
+                &reload_context,
+                kiqi_host::EventTag::SessionStart,
+            );
+
+            let code = if parsed.unknown_flags.contains_key("server") {
+                // Server mode: the extension owns the process's I/O. Wait for
+                // Ctrl+C, then dispatch SessionShutdown before unloading
+                // extensions.
+                eprintln!(
+                    "[ki] running in headless mode (no TUI); extension owns stdio; Ctrl+C to stop"
+                );
+                let _ = tokio::signal::ctrl_c().await;
+                0
             } else {
-                if let Some(reason) = crate::session::dispatch_session_event_async(
-                    &reload_context,
-                    kiqi_host::EventTag::SessionStart,
+                // `--mode rpc`: JSONL command loop over stdio — the
+                // server-side agent that kiqi-server spawns and that
+                // `ki --connect` talks to. The extension `UiDialog`
+                // mailbox is bridged over the same channel so a permission
+                // gate can ask the client mid-run.
+                crate::modes::rpc(
+                    &harness,
+                    Some(event_rx),
+                    model_catalog,
+                    reload_context.ui_dialog.clone(),
+                    reload_context.mcp.clone(),
                 )
                 .await
-                {
-                    tracing::warn!(
-                        "[ki] extension vetoed SessionStart (headless, advisory): {reason}"
-                    );
-                }
+            };
 
-                let code = if parsed.unknown_flags.contains_key("server") || stdio_claimed {
-                    // Server mode OR an extension-claimed stdio server: the extension
-                    // owns the process's I/O. Wait for its completion or Ctrl+C,
-                    // then dispatch SessionShutdown before unloading extensions.
-                    eprintln!(
-                        "[ki] running in headless mode (no TUI); extension owns stdio; Ctrl+C to stop"
-                    );
-                    if stdio_claimed {
-                        let lifecycle = stdio_lifecycle
-                            .as_ref()
-                            .expect("stdio owner requires an action bridge");
-                        tokio::select! {
-                            code = lifecycle.wait() => code,
-                            _ = tokio::signal::ctrl_c() => 0,
-                        }
-                    } else {
-                        let _ = tokio::signal::ctrl_c().await;
-                        0
-                    }
-                } else {
-                    // `--mode rpc`: JSONL command loop over stdio — the
-                    // server-side agent that kiqi-server spawns and that
-                    // `ki --connect` talks to. The extension `UiDialog`
-                    // mailbox is bridged over the same channel so a permission
-                    // gate can ask the client mid-run.
-                    crate::modes::rpc(
-                        &harness,
-                        Some(event_rx),
-                        model_catalog,
-                        reload_context.ui_dialog.clone(),
-                        reload_context.mcp.clone(),
-                    )
-                    .await
-                };
-
-                // `SessionShutdown`: the headless session is over — advisory
-                // veto (warn and continue; the process is already closing).
-                crate::session::dispatch_session_shutdown_advisory(&reload_context).await;
-                code
-            }
+            // `SessionShutdown`: the headless session is over — the process is
+            // already closing, so the advisory only flushes and reaps.
+            crate::session::dispatch_session_shutdown_advisory(&reload_context).await;
+            code
         }
     };
 

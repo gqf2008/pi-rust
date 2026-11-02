@@ -357,16 +357,6 @@ impl AssistantMessageComponent {
         self.rebuild_content(&blocks);
     }
 
-    /// Set output padding. Rebuilds the last content (mirrors TS).
-    pub fn set_output_pad(&self, pad: usize) {
-        let blocks = {
-            let mut opts = self.options.lock().unwrap();
-            opts.output_pad = pad;
-            self.last_blocks.lock().unwrap().clone()
-        };
-        self.rebuild_content(&blocks);
-    }
-
     /// Check if has tool calls.
     pub fn has_tool_calls(&self) -> bool {
         *self.has_tool_calls.lock().unwrap()

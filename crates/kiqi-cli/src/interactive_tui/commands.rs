@@ -513,24 +513,12 @@ impl SlashCommand for ForkCommand {
     fn name(&self) -> &'static str {
         "/fork"
     }
+    /// `/clone` is the upstream spelling for duplicating the current session.
+    fn aliases(&self) -> &'static [&'static str] {
+        &["/clone"]
+    }
     fn description(&self) -> &'static str {
         "Fork the session into a new one"
-    }
-    fn execute(&self, ctx: &CommandContext, _args: &str) {
-        let _ = ctx.tx.send(TuiMessage::ForkSession);
-    }
-}
-
-/// `/clone` is the upstream spelling for duplicating the current session.
-/// Reuse the same durable fork path as `/fork`; both create a child session
-/// and rebind the live harness to it.
-pub(super) struct CloneCommand;
-impl SlashCommand for CloneCommand {
-    fn name(&self) -> &'static str {
-        "/clone"
-    }
-    fn description(&self) -> &'static str {
-        "Duplicate the current session"
     }
     fn execute(&self, ctx: &CommandContext, _args: &str) {
         let _ = ctx.tx.send(TuiMessage::ForkSession);
@@ -745,38 +733,24 @@ impl SlashCommand for ShareCommand {
     }
 }
 
-/// `/context` — lists discovered context files, skills, and prompt templates.
-/// Hidden from autocomplete (needs the resources snapshot to be meaningful as a
-/// discovery surface; like `/name`, it's recognized-v1 but kept off the list).
-pub(super) struct ContextCommand;
-impl SlashCommand for ContextCommand {
-    fn name(&self) -> &'static str {
-        "/context"
-    }
-    fn visible(&self) -> bool {
-        false
-    }
-    fn execute(&self, ctx: &CommandContext, _args: &str) {
-        let resources = ctx.resources.lock().unwrap().clone();
-        show_context_panel(&ctx.chat, &resources);
-        // Live session stats are async, so ask the main loop to append them.
-        let _ = ctx.tx.send(TuiMessage::ShowUsage);
-        ctx.tui.request_render(false);
-    }
-}
-
 /// `/usage` — token/cost/cache totals read through the product-layer
 /// `AgentSession`. This is the same numbers the footer shows, but expanded and
 /// with the cache-hit breakdown that the one-line footer cannot fit.
+///
+/// Also shows the context panel (discovered context files, skills, prompt
+/// templates) that the retired `/context` command printed.
 pub(super) struct UsageCommand;
 impl SlashCommand for UsageCommand {
     fn name(&self) -> &'static str {
         "/usage"
     }
     fn description(&self) -> &'static str {
-        "Show token, cost, and cache totals for this session"
+        "Show context files plus token, cost, and cache totals for this session"
     }
     fn execute(&self, ctx: &CommandContext, _args: &str) {
+        let resources = ctx.resources.lock().unwrap().clone();
+        show_context_panel(&ctx.chat, &resources);
+        // Live session stats are async, so ask the main loop to append them.
         let _ = ctx.tx.send(TuiMessage::ShowUsage);
         ctx.tui.request_render(false);
     }
@@ -892,7 +866,6 @@ pub(super) fn build_builtin_registry() -> CommandRegistry {
     r.register(Arc::new(CompactCommand));
     r.register(Arc::new(CopyCommand));
     r.register(Arc::new(HotkeysCommand));
-    r.register(Arc::new(ContextCommand));
     r.register(Arc::new(SkillCommand));
     r.register(Arc::new(UsageCommand));
     r.register(Arc::new(SignalsCommand));
@@ -906,7 +879,6 @@ pub(super) fn build_builtin_registry() -> CommandRegistry {
     r.register(Arc::new(ImportCommand));
     r.register(Arc::new(ShareCommand));
     r.register(Arc::new(ForkCommand));
-    r.register(Arc::new(CloneCommand));
     r.register(Arc::new(TreeCommand));
     r.register(Arc::new(TrustCommand));
     r.register(Arc::new(LoginCommand));

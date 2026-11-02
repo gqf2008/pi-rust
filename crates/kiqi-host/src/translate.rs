@@ -385,28 +385,6 @@ fn build_data_event(tag: EventTag, data: &str) -> Event {
     Event::new(tag, serde_json::from_str(data).unwrap_or(Value::Null))
 }
 
-/// Fan a **no-payload lifecycle event** (`BeforeTuiStart` / `SessionStart` /
-/// `SessionShutdown`) out to the compiled extensions.
-///
-/// The extension contract's `EventAction` has no abort/veto, so this never
-/// returns a reason; the signature is kept for the callers that used to honor a
-/// native veto.
-pub async fn dispatch_lifecycle_event(tag: EventTag) -> Option<String> {
-    dispatch_lifecycle_event_with(None, tag).await
-}
-
-/// [`dispatch_lifecycle_event`] through `snapshot`'s sink, falling back to the
-/// process-global sink when the snapshot has none.
-pub async fn dispatch_lifecycle_event_with(
-    snapshot: Option<&RegistrySnapshot>,
-    tag: EventTag,
-) -> Option<String> {
-    // Same fan-out as the no-payload data funnel; only the return shape differs
-    // (the extension contract has no veto, so this never reports a reason).
-    dispatch_empty_event_with(snapshot, tag);
-    None
-}
-
 impl AgentEmitter for ExtensionEmitter {
     fn emit(&self, event: AgentEvent) -> BoxFuture<'static, ()> {
         // Translate + dispatch synchronously (the emitter's emit is awaited by
@@ -781,16 +759,20 @@ mod tests {
         let b: Arc<Mutex<Vec<EventTag>>> = Arc::new(Mutex::new(Vec::new()));
         let record_a = Arc::clone(&a);
         let record_b = Arc::clone(&b);
-        let session_a =
-            ExtensionSession::none_with_compiled_sink(Some(Arc::new(move |_, event| {
+        let session_a = ExtensionSession::none_with_compiled_sink_and_caps(
+            Some(Arc::new(move |_, event| {
                 record_a.lock().unwrap().push(event.tag);
                 CompiledVerdict::Continue
-            })));
-        let session_b =
-            ExtensionSession::none_with_compiled_sink(Some(Arc::new(move |_, event| {
+            })),
+            None,
+        );
+        let session_b = ExtensionSession::none_with_compiled_sink_and_caps(
+            Some(Arc::new(move |_, event| {
                 record_b.lock().unwrap().push(event.tag);
                 CompiledVerdict::Continue
-            })));
+            })),
+            None,
+        );
 
         assert!(!dispatch_empty_event_with(
             session_a.snapshot(),
@@ -835,7 +817,7 @@ mod tests {
             CompiledVerdict::Continue
         }));
 
-        let session = ExtensionSession::none();
+        let session = ExtensionSession::none_with_compiled_sink_and_caps(None, None);
         assert!(!dispatch_empty_event_with(
             session.snapshot(),
             EventTag::SessionStart
@@ -856,10 +838,13 @@ mod tests {
 
         let seen: Arc<Mutex<Vec<EventTag>>> = Arc::new(Mutex::new(Vec::new()));
         let record = Arc::clone(&seen);
-        let session = ExtensionSession::none_with_compiled_sink(Some(Arc::new(move |_, event| {
-            record.lock().unwrap().push(event.tag);
-            CompiledVerdict::Continue
-        })));
+        let session = ExtensionSession::none_with_compiled_sink_and_caps(
+            Some(Arc::new(move |_, event| {
+                record.lock().unwrap().push(event.tag);
+                CompiledVerdict::Continue
+            })),
+            None,
+        );
 
         let emitter = ExtensionEmitter::for_session(&session);
         emitter.try_emit(AgentEvent::AgentStart);

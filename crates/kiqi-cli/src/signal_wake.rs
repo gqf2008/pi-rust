@@ -39,8 +39,6 @@ pub(crate) struct SignalWakeState {
     /// signals are recorded but never wake the session — pressing Esc must not
     /// be followed by the agent getting up again on its own.
     muted_until_input: bool,
-    /// Session-level mute (`/signals off`). Unlike the interrupt mute, only an
-    /// explicit unmute clears it; user input does not.
     /// Consecutive host-started goal continuations for the current goal.
     /// Bounded only for an unbounded goal; a goal with its own turn/time budget
     /// is bounded by the extension.

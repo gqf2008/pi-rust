@@ -42,7 +42,6 @@ pub mod configure;
 pub mod cron;
 pub mod docs_tool;
 pub(crate) mod env_lock;
-pub mod experimental;
 pub mod export;
 pub mod extension_api;
 pub mod extension_cli;

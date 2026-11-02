@@ -10,7 +10,7 @@
 //!   constants, `grants` (capability/authorization model) and `dialogs`.
 //! - **Dispatch spine (un-gated)**: `registry`, the `translate` funnels,
 //!   the `compiled` sink that fans events into every wasm host, the action
-//!   bridge + UI mailboxes, the stdio lifecycle, and the C-ABI bus types in
+//!   bridge + UI mailboxes, and the C-ABI bus types in
 //!   [`abi`] (internal wire format; no `libloading` since the cdylib channel
 //!   was retired on 2026-10-26).
 //! - **Wasm backend (`wasm` feature)**: [`wasm`] binds `extensions/kiqi-extension.wit`
@@ -1102,12 +1102,10 @@ pub use tool::ToolCallContext;
 pub use translate::{
     dispatch_before_provider_request, dispatch_before_provider_request_with, dispatch_data_event,
     dispatch_data_event_claiming, dispatch_data_event_claiming_with, dispatch_data_event_with,
-    dispatch_empty_event, dispatch_empty_event_with, dispatch_lifecycle_event,
-    dispatch_lifecycle_event_with, dispatch_to_handlers, dispatch_to_handlers_with,
-    ExtensionEmitter, TeeEmitter,
+    dispatch_empty_event, dispatch_empty_event_with, dispatch_to_handlers,
+    dispatch_to_handlers_with, ExtensionEmitter, TeeEmitter,
 };
 
-pub use stdio::StdioLifecycle;
 mod actions;
 mod compiled;
 mod editor_text;
@@ -1116,7 +1114,6 @@ mod provider_hooks;
 mod registry;
 mod resources;
 mod status;
-mod stdio;
 mod tool;
 mod translate;
 

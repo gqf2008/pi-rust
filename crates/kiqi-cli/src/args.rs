@@ -164,7 +164,6 @@ pub struct Args {
     pub tools: Option<Vec<String>>,
     pub exclude_tools: Option<Vec<String>>,
     pub no_tools: bool,
-    pub no_builtin_tools: bool,
 
     /// `--no-skills`/`-ns`: skip skill discovery, the `<available_skills>`
     /// system-prompt listing, and the model-facing `skill` tool.
@@ -199,11 +198,9 @@ pub struct Args {
     /// directory (repeated).
     pub prompt_template: Vec<PathBuf>,
 
-    /// `--local-only`: load only explicitly supplied extension paths.
-    pub dev_local_only: bool,
-    /// `--package-only` / `--project-only`: load project resources and
-    /// extensions from the active project's settings, excluding global ones.
-    pub project_only: bool,
+    /// `--local-only` / `--package-only` / `--project-only`: restrict resource
+    /// discovery to the active project, excluding global resources.
+    pub local_only: bool,
 
     pub verbose: bool,
     pub help: bool,
@@ -390,13 +387,12 @@ pub fn parse_args(args: &[String]) -> Args {
                 result.worktree = take_value(&mut result, "--worktree");
             }
             "--no-tools" | "-nt" => result.no_tools = true,
-            "--no-builtin-tools" | "-nbt" => result.no_builtin_tools = true,
+            "--no-builtin-tools" | "-nbt" => result.no_tools = true,
             "--no-skills" | "-ns" => result.no_skills = true,
             "--no-prompt-templates" | "-np" => result.no_prompt_templates = true,
             "--no-context-files" | "-nc" => result.no_context_files = true,
             "--no-extensions" | "-ne" => result.no_extensions = true,
-            "--local-only" => result.dev_local_only = true,
-            "--package-only" | "--project-only" => result.project_only = true,
+            "--local-only" | "--package-only" | "--project-only" => result.local_only = true,
             "--extensions-dir" | "-ed" => {
                 if let Some(v) = take_value(&mut result, &flag_key) {
                     result.extensions_dir.push(PathBuf::from(v));
@@ -678,7 +674,7 @@ pub fn print_help() {
   --tools, -t <list>             Comma-separated allowlist of tool names to enable
   --exclude-tools, -xt <list>    Comma-separated denylist of tool names to disable
   --no-tools, -nt                Disable all tools
-  --no-builtin-tools, -nbt       Disable the built-in tools (read, bash, edit, write, docs, permissions)
+  --no-builtin-tools, -nbt       Alias of --no-tools
   --no-skills, -ns               Skip skill discovery (no <available_skills> block or skill tool)
   --no-prompt-templates, -np     Skip prompt-template discovery (/expand templates)
   --no-context-files, -nc        Skip AGENTS.md/CLAUDE.md discovery (no <project_context>)
@@ -686,11 +682,9 @@ pub fn print_help() {
                                  channel was removed; wasm extensions use `ki insmod`)
   --extensions-dir, -ed <dir>    Accepted for compatibility only; no longer loads
                                  extensions (wasm guests live in $KI_AGENT_DIR/extensions)
-  --local-only                   Restrict skills/prompt templates to the project
-                                 (no global discovery; explicit --skill/--prompt-template
-                                 paths still load)
-  --package-only, --project-only Load project skills/prompts from the active
-                                 project; exclude global resources
+  --local-only, --package-only, --project-only
+                                 Restrict resource discovery to the active project
+                                 (no global resources)
   --debug-system-prompt          Print the resolved system-prompt sections to stderr (verification)
   --verbose                      Show startup warnings (e.g. ignored flags)
   --help, -h                     Show this help
@@ -1317,16 +1311,27 @@ mod tests {
         // (kept after the `ki dev` channel retired).
         let a = parse_args(&s(&["--local-only"]));
         assert!(a.errors.is_empty());
-        assert!(a.dev_local_only);
+        assert!(a.local_only);
         assert!(a.ignored.is_empty());
     }
 
     #[test]
     fn project_only_aliases_are_honored() {
-        for flag in ["--package-only", "--project-only"] {
+        // All three spellings collapse onto the one `local_only` switch.
+        for flag in ["--local-only", "--package-only", "--project-only"] {
             let a = parse_args(&s(&[flag]));
             assert!(a.errors.is_empty());
-            assert!(a.project_only);
+            assert!(a.local_only);
+            assert!(a.ignored.is_empty());
+        }
+    }
+
+    #[test]
+    fn no_builtin_tools_is_an_alias_of_no_tools() {
+        for flag in ["--no-tools", "-nt", "--no-builtin-tools", "-nbt"] {
+            let a = parse_args(&s(&[flag]));
+            assert!(a.errors.is_empty());
+            assert!(a.no_tools, "{flag} should set no_tools");
             assert!(a.ignored.is_empty());
         }
     }

@@ -466,7 +466,8 @@ pub(super) fn add_note_message(container: &Arc<Container>, text: &str) {
     container.add_child(Arc::new(Spacer::new(1)));
 }
 
-/// Render the `/context` panel: a transcript message listing the discovered
+/// Render the context panel (printed by `/usage`): a transcript message
+/// listing the discovered
 /// context files, skills, and prompt templates loaded for this session
 /// (Part A resource discovery). Reads the shared resources snapshot, initialized
 /// at startup and refreshed on reload, without awaiting the harness accessor.

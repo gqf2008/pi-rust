@@ -129,47 +129,8 @@ async fn build_session(
     )
     .await
     .map_err(|error| format!("harness build failed: {error}"))?;
-    // An extension declaring `{"ownsStdio": true}` owns this process's stdio (it
-    // is an ACP/MCP stdio server itself). The TUI/RPC arms detect this after
-    // load and yield the streams (`app.rs` post-load stdin claim); an ACP
-    // server cannot — stdout IS the JSON-RPC wire — so the only honest move
-    // is to refuse the session before the two servers corrupt each other.
-    let owns_stdio = reload_context
-        .extension_session
-        .lock()
-        .map(|session| session.owns_stdio())
-        .unwrap_or(false);
-    if owns_stdio {
-        let message = "an installed extension declares ownsStdio and owns this process's stdio; `ki acp serve` cannot share the wire".to_string();
-        eprintln!("error: acp session/new: {message}");
-        // Unlike the app.rs RPC precedent this mirrors — which exits the
-        // process, tearing every cdylib down with it — this server keeps
-        // running, so the loaded extensions must be given the shutdown
-        // advisory (flush + worker stop) before their context drops, and a
-        // retried session/new must not stack on an untorn-down first build.
-        crate::session::dispatch_session_shutdown_advisory(&reload_context).await;
-        return Err(message);
-    }
-    if let Some(reason) = crate::session::dispatch_session_event_async(
-        &reload_context,
-        kiqi_host::EventTag::BeforeTuiStart,
-    )
-    .await
-    {
-        eprintln!("[ki] startup vetoed by extension: {reason}");
-        crate::session::dispatch_session_shutdown_advisory(&reload_context).await;
-        return Err(format!("startup vetoed by extension: {reason}"));
-    }
-    if let Some(reason) = crate::session::dispatch_session_event_async(
-        &reload_context,
-        kiqi_host::EventTag::SessionStart,
-    )
-    .await
-    {
-        // No tracing subscriber is installed anywhere in kiqi-cli, so a
-        // `tracing::warn!` here would vanish; §6 sends everything to stderr.
-        eprintln!("[ki] extension vetoed SessionStart (headless, advisory): {reason}");
-    }
+    crate::session::dispatch_session_event(&reload_context, kiqi_host::EventTag::BeforeTuiStart);
+    crate::session::dispatch_session_event(&reload_context, kiqi_host::EventTag::SessionStart);
     // The protocol crate never sees the reload context itself — only the two
     // things it drives across the wire: the MCP manager (boundary drain) and
     // the pre-built shutdown future (which owns the context, so the cdylibs

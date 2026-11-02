@@ -17,7 +17,7 @@
 //!
 //! **Trust gate:** project resource dirs are only *reached* when the session
 //! treats the project as trusted — `session.rs` selects `skill_dirs(cwd)` /
-//! `prompt_template_dirs(cwd)` / `extension_dirs(cwd)` when trusted and the
+//! `prompt_template_dirs(cwd)` when trusted and the
 //! global-only lists otherwise. There is no interactive trust prompt in v1:
 //! `resolve_project_trust` defaults to `true` and only says otherwise when a
 //! decision was stored for that directory (`config::project_trust_decision`,
@@ -365,31 +365,10 @@ pub fn global_prompt_template_dirs() -> Vec<PathBuf> {
     global_resource_dirs("prompts", ResourceKind::Prompts)
 }
 
-/// The ordered Rust extension directories for a project. Configured paths are
-/// added before conventional directories so an explicit project path can be
-/// used for development while `.ki` defaults stay lower precedence.
-pub fn extension_dirs(cwd: &Path) -> Vec<PathBuf> {
-    let mut dirs = project_resource_dirs(cwd, "extensions", ResourceKind::Extensions);
-    if let Some(g) = global_dir("extensions") {
-        dirs.extend(configured_global_dirs(g.clone(), ResourceKind::Extensions));
-        dirs.push(g);
-    }
-    dirs
-}
-
-pub fn project_extension_dirs(cwd: &Path) -> Vec<PathBuf> {
-    project_resource_dirs(cwd, "extensions", ResourceKind::Extensions)
-}
-
-pub fn global_extension_dirs() -> Vec<PathBuf> {
-    global_resource_dirs("extensions", ResourceKind::Extensions)
-}
-
 #[derive(Clone, Copy)]
 enum ResourceKind {
     Skills,
     Prompts,
-    Extensions,
 }
 
 fn project_resource_dirs(cwd: &Path, sub: &str, kind: ResourceKind) -> Vec<PathBuf> {
@@ -442,7 +421,6 @@ fn configured_paths(
     let values = match kind {
         ResourceKind::Skills => settings.skill_dirs.as_ref(),
         ResourceKind::Prompts => settings.prompt_dirs.as_ref(),
-        ResourceKind::Extensions => settings.extension_dirs.as_ref(),
     };
     values
         .map(|paths| crate::settings::resolve_configured_paths(base, paths))
@@ -637,9 +615,9 @@ mod tests {
         }
     }
 
-    /// `.agents` is a convention for `AGENTS.md` + `skills/`. Reading prompts or
-    /// extensions from it would accept a directory that convention never defined,
-    /// and would quietly widen what a project can inject — while the user docs say
+    /// `.agents` is a convention for `AGENTS.md` + `skills/`. Reading prompts
+    /// from it would accept a directory that convention never defined, and would
+    /// quietly widen what a project can inject — while the user docs say
     /// `.agents` supplies only those two things.
     #[test]
     fn only_skills_are_loaded_from_the_shared_project_dir() {
@@ -649,15 +627,11 @@ mod tests {
             "{skills:?}"
         );
 
-        for (label, dirs) in [
-            ("prompts", project_prompt_template_dirs(Path::new("/proj"))),
-            ("extensions", extension_dirs(Path::new("/proj"))),
-        ] {
-            assert!(
-                !dirs.iter().any(|d| d.starts_with("/proj/.agents")),
-                "{label} must not be read from .agents: {dirs:?}"
-            );
-        }
+        let prompts = project_prompt_template_dirs(Path::new("/proj"));
+        assert!(
+            !prompts.iter().any(|d| d.starts_with("/proj/.agents")),
+            "prompts must not be read from .agents: {prompts:?}"
+        );
     }
 
     #[test]
@@ -721,7 +695,7 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(".ki")).unwrap();
         std::fs::write(
             tmp.path().join(".ki/settings.json"),
-            r#"{"skills":["shared-skills"],"promptDirs":["prompt-pack"],"extensionDirs":["target/debug"]}"#,
+            r#"{"skills":["shared-skills"],"promptDirs":["prompt-pack"]}"#,
         )
         .unwrap();
 
@@ -731,10 +705,6 @@ mod tests {
 
         let prompts = prompt_template_dirs(tmp.path());
         assert_eq!(prompts[0], tmp.path().join("prompt-pack"));
-
-        let extensions = extension_dirs(tmp.path());
-        assert_eq!(extensions[0], tmp.path().join("target/debug"));
-        assert!(extensions.contains(&tmp.path().join(".ki/extensions")));
     }
 
     #[test]

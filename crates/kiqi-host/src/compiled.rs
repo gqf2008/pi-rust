@@ -1,8 +1,8 @@
 //! Extension event fan-out.
 //!
 //! Extensions observe events through [`crate::Extension::on_event`]; this module
-//! is the seam. The dispatch funnels in [`crate::translate`] call
-//! [`dispatch_observe`] / [`dispatch_claiming`] / [`dispatch_provider_gate`], and
+//! is the seam. The dispatch funnels in [`crate::translate`] call the
+//! `*_with` variants, and
 //! the host installs a [`CompiledEventSink`] whose closure drives every loaded
 //! wasm host. No sink installed (a bare `kiqi-host` build, or tests) makes every
 //! call a no-op.
@@ -99,16 +99,6 @@ pub fn clear_compiled_event_sink() {
     *sink_slot().write().unwrap() = None;
 }
 
-/// Fan one event out to the compiled/wasm extensions, if a sink is installed.
-/// Observe fan-out: a busy extension is skipped, never waited for.
-///
-/// Compatibility entry point (no session snapshot): the `_with` form is what the
-/// dispatch funnels use now, and they pass `None` for this same global path.
-#[allow(dead_code)] // kept as the named no-snapshot entry point; funnels call `_with`
-pub(crate) fn dispatch_observe(event: &Event) -> CompiledVerdict {
-    dispatch_observe_with(None, event)
-}
-
 /// Observe fan-out through `sink` when the session has one, else the global
 /// fallback. `None` means "this call site has no session sink".
 pub(crate) fn dispatch_observe_with(
@@ -118,15 +108,6 @@ pub(crate) fn dispatch_observe_with(
     dispatch_with(sink, DispatchMode::Observe, event)
 }
 
-/// Routing variant: the caller acts on the verdict, so a busy extension is waited
-/// for rather than skipped.
-///
-/// Compatibility entry point; see [`dispatch_observe`].
-#[allow(dead_code)] // kept as the named no-snapshot entry point; funnels call `_with`
-pub(crate) fn dispatch_claiming(event: &Event) -> CompiledVerdict {
-    dispatch_claiming_with(None, event)
-}
-
 /// Claiming fan-out through `sink` when the session has one, else the global
 /// fallback.
 pub(crate) fn dispatch_claiming_with(
@@ -134,15 +115,6 @@ pub(crate) fn dispatch_claiming_with(
     event: &Event,
 ) -> CompiledVerdict {
     dispatch_with(sink, DispatchMode::Claiming, event)
-}
-
-/// Provider-gate variant: asks only the patch-capable hosts and returns the
-/// merged patch, if any. The caller applies it; an observe fan-out never does.
-///
-/// Compatibility entry point; see [`dispatch_observe`].
-#[allow(dead_code)] // kept as the named no-snapshot entry point; funnels call `_with`
-pub(crate) fn dispatch_provider_gate(event: &Event) -> Option<Value> {
-    dispatch_provider_gate_with(None, event)
 }
 
 /// Provider-gate variant through `sink` when the session has one, else the
@@ -253,7 +225,10 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_compiled_event_sink();
         let event = Event::new(EventTag::SessionStart, Value::Null);
-        assert_eq!(dispatch_observe(&event), CompiledVerdict::Continue);
+        assert_eq!(
+            dispatch_observe_with(None, &event),
+            CompiledVerdict::Continue
+        );
     }
 
     /// A claim from the compiled side reaches the routing dispatcher, so a

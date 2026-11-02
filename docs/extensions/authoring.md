@@ -275,7 +275,7 @@ ki package unlink my-kiqi-extension
 ```
 
 动态 `resources_discover` 适合根据运行环境决定路径；固定资源优先使用 manifest 或
-约定目录，便于安装器、欢迎页和 `/context` 在扩展代码运行前发现它们。
+约定目录，便于安装器、欢迎页和 `/usage` 在扩展代码运行前发现它们。
 
 > **wasm 插件不用 `resources_discover`**：0.8.0 的权威路径是包约定
 > `resources.json` + `resources/<kind>/`，`ki insmod` 复制它们并写 `resources.sha256`，

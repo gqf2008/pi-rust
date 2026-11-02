@@ -18,7 +18,6 @@
 //! Provider-specific OAuth implementations belong in extensions. The host only
 //! understands the standard OAuth action response and scoped credential format.
 
-use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use crate::config::{
@@ -528,13 +527,6 @@ Notes:
 ",
         name = crate::APP_NAME
     );
-}
-
-// Keep BTreeMap imported for future header-bearing credential variants without
-// triggering an unused-import in the current v1 shape.
-#[allow(dead_code)]
-fn _keep_btreemap() -> Option<BTreeMap<String, String>> {
-    None
 }
 
 #[cfg(test)]

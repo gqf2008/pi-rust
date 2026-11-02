@@ -399,12 +399,9 @@ pub async fn build_with_selection(
     let extension_caps_host = Arc::clone(&host_arc);
     // `runtime` is reused below by the compiled capability adapter, so clone it.
     //
-    // B5d: build the initial bridge WITH a reload callback backed by a session-
-    // long `ReloadMailbox` (cloned into `ReloadContext` + handed to the TUI). A
-    // extension's `runtime_action(Reload)` then signals the TUI's main loop instead
-    // of hitting the "not configured" fallback. The same mailbox is reused on
-    // `/reload` (the fresh bridge carries `ctx.mailbox`), so the bridge always
-    // points at the one TUI-installed sender across reloads.
+    // B5d: the session keeps a long `ReloadMailbox` (cloned into `ReloadContext`
+    // + handed to the TUI) so `/reload` can hand the NEW bridge the same
+    // mailbox set the TUI already attached to.
     let reload_mailbox = kiqi_host::ReloadMailbox::new();
     // Session-scoped UI-dialog mailbox (runtime action 17 / `ask_user`). The
     // initial bridge carries it and the TUI attaches itself once it starts
@@ -428,10 +425,8 @@ pub async fn build_with_selection(
         ext_status_mailbox.clone(),
         editor_text_mailbox.clone(),
     ));
-    let action_bridge = kiqi_host::ActionBridge::with_reload_and_ui(
-        runtime.clone(),
+    let action_bridge = kiqi_host::ActionBridge::with_mailboxes(
         host_arc,
-        kiqi_host::reload_callback_from_mailbox(reload_mailbox.clone()),
         ui_dialog_mailbox.clone(),
         ext_status_mailbox.clone(),
         editor_text_mailbox.clone(),
@@ -658,7 +653,7 @@ pub async fn build_with_selection(
     let mut skill_diags: Vec<kiqi_harness::skills::SkillDiagnostic> = Vec::new();
     let mut resource_diags: Vec<kiqi_harness::diagnostics::ResourceDiagnostic> = Vec::new();
     if !args.no_skills {
-        let mut dirs = if args.dev_local_only || args.project_only {
+        let mut dirs = if args.local_only {
             project_skill_dirs(cwd)
         } else if project_trusted {
             skill_dirs(cwd)
@@ -684,7 +679,7 @@ pub async fn build_with_selection(
     let mut prompt_diags: Vec<kiqi_harness::prompt_templates::PromptTemplateDiagnostic> =
         Vec::new();
     if !args.no_prompt_templates {
-        let mut dirs = if args.dev_local_only || args.project_only {
+        let mut dirs = if args.local_only {
             project_prompt_template_dirs(cwd)
         } else if project_trusted {
             prompt_template_dirs(cwd)
@@ -1191,13 +1186,12 @@ fn extension_tool_call_hook(
 //     new session's keepalive holds the fresh mappings).
 //
 // The reload is a `kiqi-cli` concern (NOT a harness op): `kiqi-extensions`
-// carries only the `ActionBridge` staleness flag + a `ReloadMailbox` `()` signal
-// (no pi-cli `TuiMessage` type — leaf DAG preserved). The TUI owns the mailbox
-// receiver + the actual reload routine; an extension's
-// `runtime_action(Reload)` signals the mailbox and returns `Ok(null)`
-// immediately so the calling extension's cdylib is NOT unmapped while its
-// `runtime_action` frame is still on the stack (the self-unmapping race a
-// synchronous extension-initiated reload would have).
+// carries only the `ActionBridge` staleness flag (no pi-cli `TuiMessage` type —
+// leaf DAG preserved). The TUI owns the `ReloadMailbox` receiver + the actual
+// reload routine; an extension's `runtime_action(Reload)` signals the mailbox
+// and returns `Ok(null)` immediately so the calling extension's cdylib is NOT
+// unmapped while its `runtime_action` frame is still on the stack (the
+// self-unmapping race a synchronous extension-initiated reload would have).
 //
 // `reload_extension_resources` is the shared routine both `/reload` (TUI) and
 // an extension's `runtime_action(Reload)` (via the mailbox) drive. It is `pub` so
@@ -1280,12 +1274,10 @@ pub struct ReloadContext {
     /// half stays live the whole session (the TUI's drain task holds the
     /// receiver), so we keep a handle to re-wrap.
     pub broadcast: Arc<dyn kiqi_agent::AgentEmitter>,
-    /// The session-long reload mailbox (B5d). Build creates one, installs it on
-    /// the initial `ActionBridge` via [`reload_callback_from_mailbox`], and hands
-    /// a clone to the TUI. The TUI installs its `TuiMessage` sender so an extension's
-    /// `runtime_action(Reload)` signals the main loop — the reload routine reuses
-    /// THIS mailbox (not a fresh default) when building the fresh bridge, so the
-    /// bridge always carries the mailbox the TUI installed across reloads.
+    /// The session-long reload mailbox (B5d). Build creates one and hands it to
+    /// the TUI, which installs its sender there; the reload routine reuses THIS
+    /// mailbox (not a fresh default) when it builds the fresh bridge, so a
+    /// rotation never strands the mailbox the TUI installed.
     pub mailbox: kiqi_host::ReloadMailbox,
     /// Session-long UI-dialog mailbox (runtime action 17). The initial bridge
     /// carries it; the TUI attaches itself and polls `take_pending` from its key
@@ -1298,22 +1290,20 @@ pub struct ReloadContext {
     /// and so the `Drop` of the last builder is a backstop. The tool adapters
     /// also hold `Arc`s into it, which is why the field is an `Arc`.
     pub mcp: Arc<kiqi_mcp::McpManager>,
-    /// Shared MCP-signal state: the wake budget, the durable session mute, and
-    /// the attention inbox. Created before the tools (the `signals` tool holds
+    /// Shared MCP-signal state: the wake budget, the user-interrupt mute
+    /// (`muted_until_input`: records only until the next input), and the
+    /// attention inbox. Created before the tools (the `signals` tool holds
     /// it) and shared with the TUI boundary and `/signals`.
     pub(crate) signal_host: Arc<crate::signal_host::SignalHost>,
 }
 
-/// Dispatch a no-payload lifecycle event (e.g. `SessionStart`, `SessionShutdown`,
-/// the kiqi-specific `BeforeTuiStart`, `SessionTree`) to the compiled/wasm sink.
+/// Fan a no-payload lifecycle event (e.g. `SessionStart`, `SessionShutdown`,
+/// the kiqi-specific `BeforeTuiStart`, `SessionTree`) out to this session's
+/// compiled/wasm sink.
 ///
 /// Lifecycle events are observer-only: the extension contract's `EventAction`
-/// has no veto, so this always returns `None`. The signature is kept because
-/// every run shape funnels its shutdown through here.
-pub async fn dispatch_session_event_async(
-    reload_context: &ReloadContext,
-    tag: kiqi_host::EventTag,
-) -> Option<String> {
+/// has no veto, so there is nothing to report back.
+pub fn dispatch_session_event(reload_context: &ReloadContext, tag: kiqi_host::EventTag) {
     // Use THIS session's sink (never the process-global one) so ACP's concurrent
     // sessions do not receive each other's lifecycle events.
     let snapshot = reload_context
@@ -1321,7 +1311,7 @@ pub async fn dispatch_session_event_async(
         .lock()
         .unwrap()
         .snapshot_arc();
-    kiqi_host::dispatch_lifecycle_event_with(snapshot.as_deref(), tag).await
+    kiqi_host::dispatch_empty_event_with(snapshot.as_deref(), tag);
 }
 
 /// Notify extensions the session moved to a different point of its tree — `/tree`
@@ -1335,12 +1325,8 @@ pub async fn dispatch_session_event_async(
 /// Callers fire this only AFTER the move completed (`navigate_tree` /
 /// `set_active_session` returned), so a handler reading
 /// [`kiqi_host::SessionRead::session_branch`] observes the NEW branch.
-pub(crate) async fn notify_session_tree(reload_context: &ReloadContext) {
-    if let Some(reason) =
-        dispatch_session_event_async(reload_context, kiqi_host::EventTag::SessionTree).await
-    {
-        tracing::warn!("[ki] extension vetoed SessionTree (advisory): {reason}");
-    }
+pub(crate) fn notify_session_tree(reload_context: &ReloadContext) {
+    dispatch_session_event(reload_context, kiqi_host::EventTag::SessionTree);
 }
 
 /// Dispatch `SessionShutdown` (observer-only: the session is already closing).
@@ -1359,11 +1345,7 @@ pub async fn dispatch_session_shutdown_advisory(reload_context: &ReloadContext) 
     // path can leave a process tree behind, independent of what an extension does
     // below. Idempotent; the `Drop` chain is the backstop.
     reload_context.mcp.shutdown().await;
-    if let Some(reason) =
-        dispatch_session_event_async(reload_context, kiqi_host::EventTag::SessionShutdown).await
-    {
-        tracing::warn!("[ki] extension vetoed SessionShutdown (ignored, closing): {reason}");
-    }
+    dispatch_session_event(reload_context, kiqi_host::EventTag::SessionShutdown);
 }
 
 /// Join extension teardown before unloading modules. A detached timed-out handler
@@ -1516,11 +1498,8 @@ where
     };
     let host_for_extensions = Arc::clone(&host);
 
-    let reload_cb = kiqi_host::reload_callback_from_mailbox(ctx.mailbox.clone());
-    let fresh_bridge = kiqi_host::ActionBridge::with_reload_and_ui(
-        ctx.runtime.clone(),
+    let fresh_bridge = kiqi_host::ActionBridge::with_mailboxes(
         host,
-        reload_cb,
         ctx.ui_dialog.clone(),
         ctx.ext_status.clone(),
         ctx.editor_text.clone(),
@@ -1868,7 +1847,6 @@ where
 struct ReloadSettingsFields {
     skill_dirs: Option<Vec<String>>,
     prompt_dirs: Option<Vec<String>>,
-    extension_dirs: Option<Vec<String>>,
 }
 
 impl From<crate::settings::Settings> for ReloadSettingsFields {
@@ -1876,7 +1854,6 @@ impl From<crate::settings::Settings> for ReloadSettingsFields {
         Self {
             skill_dirs: settings.skill_dirs,
             prompt_dirs: settings.prompt_dirs,
-            extension_dirs: settings.extension_dirs,
         }
     }
 }
@@ -1888,7 +1865,7 @@ struct ReloadSettingsSnapshot {
 }
 
 fn reload_reads_settings(args: &Args) -> bool {
-    !args.dev_local_only && (!args.no_extensions || !args.no_skills || !args.no_prompt_templates)
+    !args.local_only && (!args.no_extensions || !args.no_skills || !args.no_prompt_templates)
 }
 
 /// Strictly read the settings fields consumed while preparing a reload. The
@@ -1947,7 +1924,7 @@ where
 
     let skill_base_dirs = if args.no_skills {
         Vec::new()
-    } else if args.dev_local_only || args.project_only {
+    } else if args.local_only {
         project_skill_dirs(cwd)
     } else if project_trusted {
         skill_dirs(cwd)
@@ -1957,7 +1934,7 @@ where
 
     let prompt_base_dirs = if args.no_prompt_templates {
         Vec::new()
-    } else if args.dev_local_only || args.project_only {
+    } else if args.local_only {
         project_prompt_template_dirs(cwd)
     } else if project_trusted {
         prompt_template_dirs(cwd)
@@ -2004,8 +1981,8 @@ pub(crate) fn resolve_project_trust(args: &Args, cwd: &Path) -> bool {
         .unwrap_or(true)
 }
 
-/// Build the tool list per `--tools`/`--exclude-tools`/`--no-tools`/
-/// `--no-builtin-tools`. Mirrors the TS `tools`/`excludeTools`/`noTools`
+/// Build the tool list per `--tools`/`--exclude-tools`/`--no-tools`.
+/// Mirrors the TS `tools`/`excludeTools`/`noTools`
 /// resolution in `createAgentSession`.
 /// Default bash timeout: 120s when the model doesn't pass one (prevents a
 /// forgotten `timeout` from hanging the run forever — the "卡住" report).
@@ -2124,13 +2101,6 @@ fn build_tools(
                 all.retain(|(name, _)| default_tools.iter().any(|t| t == name));
             }
         }
-    }
-
-    // `--no-builtin-tools` disables the built-in set but would keep
-    // extension/custom tools — v1 has none, so it's equivalent to `--no-tools`
-    // here. We honor it by clearing the built-ins.
-    if args.no_builtin_tools {
-        all.clear();
     }
 
     // Allowlist (`--tools`): keep only named built-ins.
@@ -3721,7 +3691,9 @@ mod tests {
         let hook = extension_tool_call_hook(
             project.path().to_path_buf(),
             true,
-            std::sync::Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
+            std::sync::Arc::new(std::sync::Mutex::new(
+                kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+            )),
         );
 
         // Deny wins, and the reason names both the rule and the tool.
@@ -3791,7 +3763,9 @@ mod tests {
             extension_tool_call_hook(
                 project.path().to_path_buf(),
                 project_trusted,
-                std::sync::Arc::new(std::sync::Mutex::new(kiqi_host::ExtensionSession::none())),
+                std::sync::Arc::new(std::sync::Mutex::new(
+                    kiqi_host::ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+                )),
             )
         };
 
@@ -4151,7 +4125,7 @@ mod tests {
             .contains("could not load global settings"));
 
         let local_only = Args {
-            dev_local_only: true,
+            local_only: true,
             ..Args::default()
         };
         assert!(validate_settings_for_reload(&local_only, &cwd, true).is_ok());
@@ -4830,14 +4804,15 @@ mod tests {
 
         let session_calls = Arc::new(AtomicUsize::new(0));
         let session_counter = Arc::clone(&session_calls);
-        let session = ExtensionSession::none_with_compiled_sink(Some(std::sync::Arc::new(
-            move |_mode, event| {
+        let session = ExtensionSession::none_with_compiled_sink_and_caps(
+            Some(std::sync::Arc::new(move |_mode, event| {
                 if event.tag == kiqi_host::EventTag::SessionShutdown {
                     session_counter.fetch_add(1, Ordering::SeqCst);
                 }
                 kiqi_host::CompiledVerdict::Continue
-            },
-        )));
+            })),
+            None,
+        );
 
         super::shutdown_extensions_for_reload(session.snapshot_arc())
             .await
@@ -4872,7 +4847,9 @@ mod tests {
             kiqi_host::CompiledVerdict::Continue
         }));
         let reload_context = ReloadContext {
-            extension_session: Arc::new(Mutex::new(ExtensionSession::none())),
+            extension_session: Arc::new(Mutex::new(
+                ExtensionSession::none_with_compiled_sink_and_caps(None, None),
+            )),
             skill_cell: crate::skill_tool::new_skill_cell(),
             tool_context: kiqi_host::ToolCallContext::default(),
             action_bridge: Arc::new(Mutex::new(None)),
@@ -4898,7 +4875,7 @@ mod tests {
             mcp: Arc::new(kiqi_mcp::McpManager::empty()),
         };
 
-        super::notify_session_tree(&reload_context).await;
+        super::notify_session_tree(&reload_context);
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,

@@ -1,14 +1,14 @@
 //! The extension→host action bridge and its mailboxes.
 //!
-//! [`ActionBridge`] carries the session's action host, reload callback and the
+//! [`ActionBridge`] carries the session's action host and the
 //! UI/status/editor mailboxes. Historically an extension reached them through
 //! the C-ABI `runtime_action` trampoline; that FFI entry was removed with the
 //! rest of the C-ABI registration machine (`docs/design/extension-abi.md`
 //! §6.49). Wasm guests reach the same host through the typed `SessionRead` /
 //! `SessionControl` / `InjectApi` / `UiApi` capabilities in `HostCaps`.
 //!
-//! The bridge survives because `kiqi-cli` still uses it for its stdio lifecycle,
-//! its `/reload` staleness flag, and the shared mailboxes the TUI polls.
+//! The bridge survives because `kiqi-cli` still uses it for its `/reload`
+//! staleness flag and the shared mailboxes the TUI polls.
 //!
 //! ## Cycle-free leaf DAG
 //!
@@ -21,8 +21,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-
-use tokio::runtime::Handle;
 
 /// A pending host UI request emitted by an extension runtime action.
 ///
@@ -416,17 +414,13 @@ pub trait RuntimeActionHost: Send + Sync {
     }
 }
 
-/// The session's extension action state: the harness host, reload callback and
-/// the UI/status/editor mailboxes. Wasm guests reach the host through the typed
+/// The session's extension action state: the harness host and the
+/// UI/status/editor mailboxes. Wasm guests reach the host through the typed
 /// capabilities in `HostCaps`; the C-ABI `runtime_action` trampoline that used
 /// to dereference this struct was removed (`docs/design/extension-abi.md`
 /// §6.49).
 ///
-/// `runtime: Handle` is captured at build time (the host is on the runtime when
-/// it constructs the bridge). `host` is the `kiqi-cli` impl over the harness.
-/// `reload` is a CLI-owned callback that re-runs extension discovery + Part-A
-/// loaders (a CLI concern, NOT a harness op) — wired by `kiqi-cli` via
-/// [`reload_callback_from_mailbox`].
+/// `host` is the `kiqi-cli` impl over the harness.
 ///
 /// ## Staleness (B5d)
 ///
@@ -435,18 +429,10 @@ pub trait RuntimeActionHost: Send + Sync {
 /// [`invalidate`](Self::invalidate) on the old bridge, and swaps the new one in;
 /// the old bridge's component registrations are dropped with it.
 pub struct ActionBridge {
-    stdio: crate::StdioLifecycle,
     extension_identity: Option<(u64, String)>,
     component_owners: Arc<std::sync::Mutex<Vec<u64>>>,
-    /// Captured at build time from a thread running the target runtime.
-    #[allow(dead_code)] // the FFI trampoline that spawned on it is gone
-    pub(crate) runtime: Handle,
     /// The host impl (`HarnessActionHost` in kiqi-cli).
     pub(crate) host: Arc<dyn RuntimeActionHost>,
-    /// B5d reload callback; `None` until the TUI wires `/reload`.
-    #[allow(dead_code)] // kept for the CLI reload plumbing; no FFI caller any more
-    pub(crate) reload:
-        Option<Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>>,
     /// Session-scoped UI mailbox. It is cloned into reload-created bridges so
     /// a TUI attachment and in-flight requests survive extension reloads.
     ui_dialog: UiDialogMailbox,
@@ -464,124 +450,34 @@ pub struct ActionBridge {
 }
 
 impl ActionBridge {
-    /// Build a bridge. The `Handle` MUST be captured from a thread running the
-    /// target runtime (pi-cli builds the bridge on the async main thread).
-    pub fn new(runtime: Handle, host: Arc<dyn RuntimeActionHost>) -> Arc<Self> {
-        Arc::new(Self {
-            stdio: crate::StdioLifecycle::default(),
-            extension_identity: None,
-            component_owners: Arc::new(std::sync::Mutex::new(Vec::new())),
-            runtime,
+    /// Build a bridge over `host` with fresh session mailboxes.
+    pub fn new(host: Arc<dyn RuntimeActionHost>) -> Arc<Self> {
+        Self::with_mailboxes(
             host,
-            reload: None,
-            ui_dialog: UiDialogMailbox::new(),
-            ext_status: crate::status::ExtensionStatusMailbox::new(),
-            editor_text: crate::editor_text::EditorTextMailbox::new(),
-            active: Arc::new(AtomicBool::new(true)),
-        })
-    }
-
-    /// Same as [`new`](Self::new) with a reload callback (B5d wires this via
-    /// [`reload_callback_from_mailbox`]).
-    pub fn with_reload(
-        runtime: Handle,
-        host: Arc<dyn RuntimeActionHost>,
-        reload: Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>,
-    ) -> Arc<Self> {
-        Self::with_reload_and_ui(
-            runtime,
-            host,
-            reload,
             UiDialogMailbox::new(),
             crate::status::ExtensionStatusMailbox::new(),
             crate::editor_text::EditorTextMailbox::new(),
         )
     }
 
-    /// Build a bridge with an explicit session-scoped UI mailbox.
-    pub fn with_ui_dialog(
-        runtime: Handle,
+    /// Build a bridge carrying an explicit, session-scoped mailbox set, so a
+    /// reload-created bridge shares the mailboxes the TUI already attached to
+    /// (`/reload` swaps the bridge, not the mailboxes).
+    pub fn with_mailboxes(
         host: Arc<dyn RuntimeActionHost>,
-        ui_dialog: UiDialogMailbox,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            stdio: crate::StdioLifecycle::default(),
-            extension_identity: None,
-            component_owners: Arc::new(std::sync::Mutex::new(Vec::new())),
-            runtime,
-            host,
-            reload: None,
-            ui_dialog,
-            ext_status: crate::status::ExtensionStatusMailbox::new(),
-            editor_text: crate::editor_text::EditorTextMailbox::new(),
-            active: Arc::new(AtomicBool::new(true)),
-        })
-    }
-
-    /// `with_reload` variant that preserves a mailbox across bridge swaps.
-    pub fn with_reload_and_ui(
-        runtime: Handle,
-        host: Arc<dyn RuntimeActionHost>,
-        reload: Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>,
         ui_dialog: UiDialogMailbox,
         ext_status: crate::status::ExtensionStatusMailbox,
         editor_text: crate::editor_text::EditorTextMailbox,
     ) -> Arc<Self> {
         Arc::new(Self {
-            stdio: crate::StdioLifecycle::default(),
             extension_identity: None,
             component_owners: Arc::new(std::sync::Mutex::new(Vec::new())),
-            runtime,
             host,
-            reload: Some(reload),
             ui_dialog,
             ext_status,
             editor_text,
             active: Arc::new(AtomicBool::new(true)),
         })
-    }
-
-    #[allow(dead_code)] // only tests construct per-extension scopes now
-    pub(crate) fn for_extension(&self, name: &str) -> Arc<Self> {
-        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let owner = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        self.component_owners
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(owner);
-        Arc::new(Self {
-            component_owners: self.component_owners.clone(),
-            stdio: self.stdio.clone(),
-            extension_identity: Some((owner, name.to_owned())),
-            runtime: self.runtime.clone(),
-            host: self.host.clone(),
-            reload: self.reload.clone(),
-            ui_dialog: self.ui_dialog.clone(),
-            ext_status: self.ext_status.clone(),
-            editor_text: self.editor_text.clone(),
-            active: self.active.clone(),
-        })
-    }
-
-    pub fn stdio_lifecycle(&self) -> crate::StdioLifecycle {
-        self.stdio.clone()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn claim_stdio(&self) -> Result<(), String> {
-        let (id, name) = self
-            .extension_identity
-            .as_ref()
-            .ok_or("missing extension identity")?;
-        self.stdio.claim(*id, name)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn release_stdio_claim(&self) {
-        if let Some((id, _)) = &self.extension_identity {
-            self.stdio.release_failed_registration(*id);
-            self.ext_status.remove_owner(*id);
-        }
     }
 
     /// Clone the session mailbox for TUI attachment or a reload-created bridge.
@@ -622,9 +518,9 @@ impl ActionBridge {
     /// B5d: clone the host impl so a `/reload` can build a FRESH `ActionBridge`
     /// over the SAME `RuntimeActionHost` (the host's harness cell already points
     /// at the live harness — the harness is NOT rebuilt on reload — so the host
-    /// is reusable across reloads; only the bridge's staleness flag + reload
-    /// callback differ). The fresh bridge gets a fresh `active` flag (true) +
-    /// the reload callback the TUI installed; the old bridge is `invalidate`d.
+    /// is reusable across reloads; only the bridge's staleness flag differs). The
+    /// fresh bridge gets a fresh `active` flag (true); the old bridge is
+    /// `invalidate`d.
     pub fn clone_host(&self) -> Arc<dyn RuntimeActionHost> {
         Arc::clone(&self.host)
     }
@@ -689,11 +585,12 @@ impl ReloadMailbox {
     }
 }
 
-/// Build the reload callback the bridge carries, backed by a [`ReloadMailbox`].
-/// When an extension calls `runtime_action(Reload)`, the bridge's spawn site awaits
-/// this callback, which signals the TUI (if installed) and returns; the extension
-/// receives `Ok(null)` and the TUI performs the reload asynchronously. If no
-/// TUI is installed, the callback returns without signalling and the host's
+/// Build a reload callback backed by a [`ReloadMailbox`].
+///
+/// Calling it signals the TUI (if installed) and returns; the TUI performs the
+/// reload asynchronously, so the calling extension's cdylib is not unmapped
+/// while its `runtime_action` frame is still on the stack. If no TUI is
+/// installed the callback returns without signalling, and the host's
 /// [`RuntimeActionHost::reload`] fallback surfaces the "not configured" error.
 pub fn reload_callback_from_mailbox(
     mailbox: ReloadMailbox,
@@ -706,9 +603,8 @@ pub fn reload_callback_from_mailbox(
     })
 }
 
-// `Handle` is Send+Sync, `Arc<dyn RuntimeActionHost>` (with `Send + Sync` bound)
-// is Send+Sync, and the reload closure is `Send + Sync` — so `ActionBridge` is
-// naturally Send+Sync; no manual unsafe impl needed.
+// `Arc<dyn RuntimeActionHost>` (with its `Send + Sync` bound) is Send+Sync — so
+// `ActionBridge` is naturally Send+Sync; no manual unsafe impl needed.
 
 impl Drop for ActionBridge {
     fn drop(&mut self) {
@@ -864,110 +760,5 @@ mod tests {
         assert_eq!(mailbox.pending_len(), 1);
         mailbox.take_pending().unwrap();
         assert!(mailbox.take_pending().is_none());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn component_bridge_isolates_extensions_and_cleans_up_reload_and_drop() {
-        let host = Arc::new(StubHost);
-        let root = ActionBridge::new(tokio::runtime::Handle::current(), host);
-        let a = root.for_extension("a");
-        let b = root.for_extension("b");
-        let mailbox = root.extension_status_mailbox();
-        for extension in [&a, &b] {
-            let (owner, _) = extension.extension_identity.as_ref().unwrap();
-            extension
-                .ext_status
-                .component(
-                    *owner,
-                    serde_json::json!({
-                        "op": "register", "id": "same", "slot": "footer.after"
-                    }),
-                )
-                .unwrap();
-        }
-        assert_eq!(mailbox.panels().len(), 2);
-        drop(a);
-        assert_eq!(mailbox.panels().len(), 1);
-        root.invalidate();
-        assert!(mailbox.panels().is_empty());
-    }
-
-    /// A minimal host for the bridge tests: everything is unimplemented.
-    struct StubHost;
-
-    #[async_trait::async_trait]
-    impl RuntimeActionHost for StubHost {
-        async fn send_message(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn send_user_message(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn append_entry(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn set_session_name(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn get_active_tools(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn set_active_tools(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn set_model(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn get_thinking_level(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn set_thinking_level(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn compact(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn get_system_prompt(
-            &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn new_session(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn fork(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn navigate_tree(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn switch_session(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn reload(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
-        async fn get_cli_flag(&self, _: serde_json::Value) -> Result<serde_json::Value, String> {
-            unreachable!()
-        }
     }
 }

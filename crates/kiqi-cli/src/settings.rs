@@ -14,8 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{self, strip_line_comments, ConfigError};
 
-/// `retry` — upstream's `RetrySettings`. `provider` is parsed but unused: it
-/// configures the provider SDK's own retry loop, which ki does not run.
+/// `retry` — upstream's `RetrySettings`.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RetrySettings {
@@ -27,10 +26,6 @@ pub struct RetrySettings {
     pub base_delay_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_agent_delay_ms: Option<u64>,
-    /// upstream's nested `retry.provider`. Kept so a copied file round-trips;
-    /// ki has no provider-SDK retry loop to configure.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<serde_json::Value>,
 }
 
 /// `compaction` — upstream's `CompactionSettings`.
@@ -41,25 +36,10 @@ pub struct CompactionSettingsJson {
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reserve_tokens: Option<i64>,
+    /// Reserve tokens for compaction. `modelOverrides` has no harness
+    /// equivalent and is ignored by serde.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_recent_tokens: Option<i64>,
-    /// Per-model overrides. Kept for round-tripping; the harness has no
-    /// per-model compaction override.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_overrides: Option<serde_json::Value>,
-}
-
-/// `branchSummary` — upstream's `BranchSummarySettings`.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct BranchSummarySettings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reserve_tokens: Option<i64>,
-    /// When true, upstream skips its "Summarize branch?" prompt and defaults to
-    /// *no* summary. ki has no such prompt, so this is what makes the key mean
-    /// something: `Some(true)` suppresses the summary.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skip_prompt: Option<bool>,
 }
 
 /// `steeringMode` / `followUpMode` — upstream's queue drain modes.
@@ -110,13 +90,6 @@ pub struct Settings {
     #[serde(default)]
     pub session_dir: Option<PathBuf>,
 
-    /// Custom shell binary. upstream's `shellPath`. Parsed for fidelity, but
-    /// **not consumed yet**: nothing in pi-tools carries a shell binary, so
-    /// honouring it means plumbing one through `BashToolOptions` /
-    /// `ShellCaptureOptions` first.
-    #[serde(default)]
-    pub shell_path: Option<String>,
-
     /// Prefix prepended to every bash command (upstream's `shellCommandPrefix`,
     /// e.g. `shopt -s expand_aliases`).
     #[serde(default)]
@@ -137,16 +110,6 @@ pub struct Settings {
     #[serde(default)]
     pub compaction: Option<CompactionSettingsJson>,
 
-    /// Branch-summary settings. Mirrors upstream `branchSummary`.
-    ///
-    /// Parsed for shape fidelity, but **nothing consumes it yet**: ki's
-    /// `navigate_tree` ignores its `summarize` argument outright (`_summarize`),
-    /// and `generate_branch_summary` has no production caller. Until
-    /// navigation-with-summary is wired, these keys cannot change behaviour — see
-    /// the doc comment on the accessors.
-    #[serde(default)]
-    pub branch_summary: Option<BranchSummarySettings>,
-
     /// How queued steering messages are drained. upstream default:
     /// `"one-at-a-time"` (matches the harness's `QueueMode` default).
     #[serde(default)]
@@ -165,10 +128,6 @@ pub struct Settings {
     /// a compatibility shorthand.
     #[serde(default, alias = "prompts")]
     pub prompt_dirs: Option<Vec<String>>,
-    /// Additional Rust cdylib extension directories. `extensions` is accepted
-    /// as a compatibility shorthand.
-    #[serde(default, alias = "extensions")]
-    pub extension_dirs: Option<Vec<String>>,
     /// upstream keybinding overrides. Values may be a key string, an array
     /// of key strings, or an empty array to unbind an action.
     #[serde(default)]
@@ -211,11 +170,6 @@ pub struct Settings {
     /// When false, text selection requires explicit copy action.
     #[serde(default)]
     pub fullscreen_copy_on_select: Option<bool>,
-    /// Horizontal padding in terminal columns added to each side of the chat
-    /// transcript (user/assistant messages and thinking). upstream `outputPad`
-    /// (its only legal values are 0 and 1).
-    #[serde(default)]
-    pub output_pad: Option<usize>,
     /// Show transcript notices for prompt-cache costs and provider recovery
     /// diagnostics. upstream `showCacheMissNotices` (default `false`).
     #[serde(default)]
@@ -315,26 +269,6 @@ impl Settings {
             settings.keep_recent_tokens = keep_recent_tokens;
         }
         settings
-    }
-
-    /// Tokens reserved for a branch summary's prompt + output.
-    ///
-    /// Not consumed yet: `AgentLane::navigate_tree` ignores `summarize`, so no
-    /// branch summary is ever generated from this path. Wiring it means
-    /// implementing navigation-with-summary in the harness, not reading a key.
-    pub fn branch_summary_reserve_tokens(&self) -> Option<i64> {
-        self.branch_summary.as_ref().and_then(|s| s.reserve_tokens)
-    }
-
-    /// Whether branch summaries are suppressed (upstream's `skipPrompt`).
-    ///
-    /// Not consumed yet, for the same reason as
-    /// [`Self::branch_summary_reserve_tokens`].
-    pub fn branch_summary_skipped(&self) -> bool {
-        self.branch_summary
-            .as_ref()
-            .and_then(|s| s.skip_prompt)
-            .unwrap_or(false)
     }
 
     /// Default steering-queue drain mode (upstream default: one-at-a-time).
@@ -652,12 +586,6 @@ fn save_settings_to_path(
                 .map(|v| serde_json::Value::Number(v.into())),
         ),
         (
-            "outputPad",
-            settings
-                .output_pad
-                .map(|v| serde_json::Value::Number(v.into())),
-        ),
-        (
             "autocompleteMaxVisible",
             settings
                 .autocomplete_max_visible
@@ -752,7 +680,6 @@ mod tests {
         assert!(s.theme.is_none());
         assert!(s.skill_dirs.is_none());
         assert!(s.prompt_dirs.is_none());
-        assert!(s.extension_dirs.is_none());
     }
 
     /// `mcpServers` is carried through as raw JSON so `kiqi-mcp` can validate it
@@ -830,10 +757,6 @@ mod tests {
         assert_eq!(
             settings[0].skill_dirs.as_deref(),
             Some(["kiqi-skills".to_string()].as_slice())
-        );
-        assert_eq!(
-            settings[0].extension_dirs.as_deref(),
-            Some(["kiqi-ext".to_string()].as_slice())
         );
     }
 
@@ -943,11 +866,6 @@ mod scoped_tests {
             settings.shell_command_prefix.as_deref(),
             Some("shopt -s expand_aliases")
         );
-        // `shellPath` is parsed (native's shape round-trips) but nothing consumes
-        // it yet — see its doc comment for why.
-        let with_shell: Settings =
-            serde_json::from_str(r#"{"shellPath": "/usr/bin/zsh"}"#).unwrap();
-        assert_eq!(with_shell.shell_path.as_deref(), Some("/usr/bin/zsh"));
     }
 
     /// `httpProxy` is stored in native's shape for the client setup to apply.
@@ -1029,8 +947,7 @@ mod scoped_tests {
         let settings: Settings = serde_json::from_str(
             r#"{
                 "enabledModels": ["a", "b"],
-                "httpIdleTimeoutMs": 1500,
-                "branchSummary": { "reserveTokens": 4242, "skipPrompt": true }
+                "httpIdleTimeoutMs": 1500
             }"#,
         )
         .expect("native key names parse");
@@ -1045,8 +962,6 @@ mod scoped_tests {
             Some(1500),
             "native's `httpIdleTimeoutMs` must be read"
         );
-        assert_eq!(settings.branch_summary_reserve_tokens(), Some(4242));
-        assert!(settings.branch_summary_skipped());
     }
     #[test]
     fn save_load_scoped_models_roundtrip() {
@@ -1139,13 +1054,12 @@ mod scoped_tests {
         // Regression: `fullscreenCopyOnSelect` and `httpIdleTimeout` used to be
         // read but never written back, so `/settings` changes silently
         // vanished. The newer `/settings` rows (showImages,
-        // showCacheMissNotices, outputPad) must round-trip too.
+        // showCacheMissNotices) must round-trip too.
         let (_tmp, _guard) = with_temp_env();
         let path = config::settings_path().unwrap();
         let mut settings = Settings::default();
         settings.show_images = Some(false);
         settings.show_cache_miss_notices = Some(true);
-        settings.output_pad = Some(0);
         settings.fullscreen_copy_on_select = Some(false);
         settings.http_idle_timeout = Some(serde_json::json!(30_000));
         settings.show_terminal_progress = Some(false);
@@ -1155,7 +1069,6 @@ mod scoped_tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(raw["showImages"], false);
         assert_eq!(raw["showCacheMissNotices"], true);
-        assert_eq!(raw["outputPad"], 0);
         assert_eq!(raw["fullscreenCopyOnSelect"], false);
         assert_eq!(raw["httpIdleTimeout"], 30_000);
         assert_eq!(raw["showTerminalProgress"], false);
@@ -1164,7 +1077,6 @@ mod scoped_tests {
         let reloaded = load_settings().unwrap();
         assert_eq!(reloaded.show_images(), Some(false));
         assert_eq!(reloaded.show_cache_miss_notices, Some(true));
-        assert_eq!(reloaded.output_pad, Some(0));
         assert_eq!(reloaded.fullscreen_copy_on_select, Some(false));
         assert_eq!(reloaded.http_idle_timeout_ms(), Some(30_000));
         assert_eq!(reloaded.show_terminal_progress(), Some(false));

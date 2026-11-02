@@ -203,7 +203,7 @@ trait SlashCommand: Send + Sync {
         &[]
     }
     /// Whether the canonical name appears in the `/` autocomplete list. Hidden
-    /// commands (`/context`, `/name`, …) return `false`.
+    /// commands (`/name`, …) return `false`.
     fn visible(&self) -> bool {
         true
     }
@@ -590,7 +590,7 @@ enum TuiMessage {
     ExportSession,
     /// Export session with specific format
     ExportSessionWithFormat(crate::export::ExportFormat),
-    /// Show live usage/context stats (from `/usage` and `/context`).
+    /// Show live usage/context stats (from `/usage`).
     ShowUsage,
     /// Fork the current session into a new one and switch to it (from `/fork`).
     ForkSession,
@@ -1414,9 +1414,10 @@ pub async fn interactive_tui(
     // the template's frontmatter description (or a fallback) so the autocomplete
     // popover shows what each template does.
     //
-    // Build autocomplete from the initial templates. /context shares a resource
-    // snapshot that the async reload handler refreshes, so its blocking command
-    // can list the current files without awaiting the harness accessor.
+    // Build autocomplete from the initial templates. `/usage` also prints the
+    // context panel from a resource snapshot that the async reload handler
+    // refreshes, so its blocking command can list the current files without
+    // awaiting the harness accessor.
     let template_slash_commands: Vec<SlashCommandEntry> = resources_snapshot
         .prompt_templates
         .clone()
@@ -1920,7 +1921,7 @@ pub async fn interactive_tui(
     // ---- B5d: extension→TUI reload bridge ----
     // An extension's `runtime_action(Reload)` can't drive the reload synchronously
     // (its cdylib would be unmapped while the call frame is still on the stack).
-    // Instead the `ActionBridge`'s reload callback signals `reload_context.mailbox`
+    // Instead the signal goes through `reload_context.mailbox`
     // (an `UnboundedSender<()>`); this task drains those signals and forwards
     // `TuiMessage::ReloadExtensions` into the main loop, which runs the shared
     // `reload_extension_resources` routine asynchronously. The mailbox is the
@@ -3517,16 +3518,9 @@ pub async fn interactive_tui(
     // ---- Session lifecycle (P1): SessionStart ----
     // The TUI + key worker are up and the session is ready to accept input.
     // Notify subscribed extensions now so they can initialize session-scoped
-    // state. A veto here is **advisory** (the session is already up) — warn and
-    // continue. No-op when no extension subscribes.
-    if let Some(reason) = crate::session::dispatch_session_event_async(
-        reload_context,
-        kiqi_host::EventTag::SessionStart,
-    )
-    .await
-    {
-        tracing::warn!("[ki] extension vetoed SessionStart (advisory): {reason}");
-    }
+    // state. Observer-only: the extension contract has no veto. No-op when no
+    // extension subscribes.
+    crate::session::dispatch_session_event(reload_context, kiqi_host::EventTag::SessionStart);
 
     // ---- Initial prompts (run before reading from the channel) ----
     let mut prompts: Vec<String> = Vec::new();
@@ -3703,8 +3697,9 @@ pub async fn interactive_tui(
                             );
                         } else if skills.is_empty() {
                             // Name every directory the loader reads (mirrors
-                            // the `/context` panel): a partial hint sends
-                            // people to a directory ki may never look at.
+                            // the context panel `/usage` prints): a partial
+                            // hint sends people to a directory ki may never
+                            // look at.
                             text.push_str(
                                 "  (none discovered — create .ki/skills/, .agents/skills/, \
                                  ~/.ki/agent/skills/ or ~/.agents/skills/)\n",
@@ -3992,7 +3987,7 @@ pub async fn interactive_tui(
                             // `SessionTree`: the active point moved — extensions
                             // (compiled + wasm) re-restore their state from the
                             // new branch. Advisory; fired after the move.
-                            crate::session::notify_session_tree(reload_context).await;
+                            crate::session::notify_session_tree(reload_context);
                         }
                         kiqi_harness::agent_harness::NavigationOutcome::Failed {
                             error, ..

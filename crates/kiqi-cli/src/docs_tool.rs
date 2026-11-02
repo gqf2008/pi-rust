@@ -29,12 +29,6 @@ struct DocPage {
 
 static DOCS: &[DocPage] = &[
     DocPage {
-        topic: "authoring",
-        description: "扩展开发（cdylib 通道已退役，保留为历史规范）：统一 C ABI 入口、工具生命周期、事件处理器、资源发现、ki dev 旧流程与发布检查清单；wasm 见 ki insmod 与 extensions/kiqi-extension.wit",
-        content: include_str!("../embedded-docs/extension-authoring.md"),
-        aliases: &["package-authoring", "extension-authoring", "create-package", "create-extension"],
-    },
-    DocPage {
         topic: "guide",
         description: "完整使用手册：安装、模型、CLI、.ki 资源、Rust 扩展、SDK、排错和发布",
         content: include_str!("../embedded-docs/user-guide.md"),
@@ -64,12 +58,6 @@ static DOCS: &[DocPage] = &[
         content: include_str!("../embedded-docs/architecture.md"),
         aliases: &["design", "crates", "sdk"],
     },
-    DocPage {
-        topic: "debugging",
-        description: "扩展调试（cdylib 通道已退役，保留为历史规范）：事件日志、ki dev-local 旧流程、常见失败定位；wasm 插件见 ki insmod 与 ki extension list",
-        content: include_str!("../embedded-docs/rust-debugging.md"),
-        aliases: &["rust", "rust-debug", "extension-debug", "troubleshoot", "debug"],
-    },
 ];
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -92,7 +80,7 @@ impl DocsTool {
         Self {
             schema: Tool {
                 name: "docs".to_string(),
-                description: "Look up ki usage documentation. Omit topic (or use topic=list) to list topics; pass a topic such as guide, authoring, agent, debugging, architecture, or overview. Add query to find relevant sections. Use this before guessing ki commands, creating an agent project or extension, extension APIs, or .ki configuration.".to_string(),
+                description: "Look up ki usage documentation. Omit topic (or use topic=list) to list topics; pass a topic such as guide, agent, architecture, or overview. Add query to find relevant sections. Use this before guessing ki commands, creating an agent project or extension, extension APIs, or .ki configuration.".to_string(),
                 parameters: kiqi_ai::types::Schema::new(
                     serde_json::to_value(params).unwrap_or_default(),
                 ),
@@ -253,20 +241,12 @@ mod tests {
         let output = execute(serde_json::json!({})).await;
         assert!(output.contains("overview"));
         assert!(output.contains("guide"));
-        assert!(output.contains("authoring"));
         assert!(output.contains("- agent:"));
-        assert!(output.contains("debugging"));
-        assert!(output.contains("统一 C ABI"));
+        assert!(!output.contains("- authoring:"));
+        assert!(!output.contains("- debugging:"));
         assert!(!output.contains("ABI v3/v2"));
         assert!(!output.contains("- extensions:"));
         assert!(!output.contains("- compatibility:"));
-    }
-
-    #[tokio::test]
-    async fn returns_rust_debugging_guide() {
-        let output = execute(serde_json::json!({"topic": "debugging", "query": "ki dev"})).await;
-        assert!(output.contains("ki dev"));
-        assert!(output.contains("cdylib"));
     }
 
     #[tokio::test]
@@ -274,18 +254,6 @@ mod tests {
         let output = execute(serde_json::json!({"topic": "guide", "query": "cdylib"})).await;
         assert!(output.contains("cdylib"));
         assert!(output.contains("Rust"));
-    }
-
-    #[tokio::test]
-    async fn returns_extension_authoring_practices() {
-        let output = execute(serde_json::json!({"topic": "authoring", "query": "ki dev"})).await;
-        assert!(output.contains("ki dev"));
-
-        // The cdylib build contract is a separate section from the `ki dev`
-        // workflow text, so query for it directly rather than relying on both
-        // terms co-occurring in one excerpt window.
-        let cdylib = execute(serde_json::json!({"topic": "authoring", "query": "cdylib"})).await;
-        assert!(cdylib.contains("cdylib"));
     }
 
     #[tokio::test]

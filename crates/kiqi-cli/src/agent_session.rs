@@ -315,7 +315,7 @@ impl AgentSession {
         })
     }
 
-    /// The summed usage across every assistant message (for `/context`).
+    /// The summed usage across every assistant message (for `/usage`).
     pub async fn total_usage(&self) -> HarnessResult<Usage> {
         let mut total = Usage::zero();
         for entry in self.entries().await? {
