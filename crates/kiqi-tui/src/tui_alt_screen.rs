@@ -142,6 +142,9 @@ pub struct TuiAltScreen {
     /// were actually there. Rendering the components again would answer at a
     /// different width and miss every panel the chat container does not own.
     last_frame: Mutex<Vec<String>>,
+    /// Last frame written by `KI_TUI_DUMP_FRAMES`, so a still screen does not
+    /// append the same rows again.
+    dumped_frame: Mutex<Vec<String>>,
     /// The drag in progress (or the one just copied), drawn as inverse video so
     /// the selection is visible — the whole point of "选择复制".
     selection: Mutex<Option<crate::tui::ScreenSelection>>,
@@ -232,6 +235,7 @@ impl TuiAltScreen {
             full_redraw_count: Mutex::new(0),
             previous_screen: Mutex::new(Vec::new()),
             last_frame: Mutex::new(Vec::new()),
+            dumped_frame: Mutex::new(Vec::new()),
             selection: Mutex::new(None),
             scroll_top: Mutex::new(0),
             stick_to_bottom: Mutex::new(true),
@@ -1069,6 +1073,7 @@ impl TuiAltScreen {
         if let Ok(mut last) = self.last_frame.lock() {
             last.clone_from(&visible);
         }
+        self.dump_frame(&visible);
 
         // Check for full redraw
         let previous = self
@@ -1120,6 +1125,38 @@ impl TuiAltScreen {
         // Store current screen
         if let Ok(mut prev) = self.previous_screen.lock() {
             *prev = visible;
+        }
+    }
+
+    /// Append every distinct frame to `KI_TUI_DUMP_FRAMES` (when set).
+    ///
+    /// A frame that looks wrong on screen is otherwise unreachable: by the time
+    /// it is seen, the grid that produced it is gone. Dumping the composed rows
+    /// lets the screen and the intent be compared line by line. Escape
+    /// sequences are stripped, so the file is the text the terminal was handed.
+    fn dump_frame(&self, visible: &[String]) {
+        let Some(path) = std::env::var_os("KI_TUI_DUMP_FRAMES") else {
+            return;
+        };
+        let Ok(mut dumped) = self.dumped_frame.lock() else {
+            return;
+        };
+        if dumped.as_slice() == visible {
+            return;
+        }
+        dumped.clear();
+        dumped.extend_from_slice(visible);
+        let mut body = String::new();
+        for (row, line) in visible.iter().enumerate() {
+            body.push_str(&format!("{row:03}|{}\n", crate::ansi::strip_ansi(line)));
+        }
+        body.push_str("----\n");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = std::io::Write::write_all(&mut file, body.as_bytes());
         }
     }
 
