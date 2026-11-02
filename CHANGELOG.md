@@ -12,6 +12,8 @@ carries the same notes.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-02
+
 ### Changed
 
 - **单个子代理任务的墙钟预算收到 15 分钟，并且必须显式给出。** 之前 `proc` 授权的
