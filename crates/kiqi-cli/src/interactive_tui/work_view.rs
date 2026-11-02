@@ -126,9 +126,22 @@ fn on_panel(row: &str) -> String {
 /// the box (auto width), not to the screen.
 fn frame(body: &[String], width: usize) -> Vec<String> {
     const TITLE: &str = "WORK · drag title to move · /work to close";
-    const MAX_WIDTH: usize = 140;
+    /// A terminal has no alpha: every cell this box asks for is a cell the
+    /// transcript underneath loses. Auto width still follows the content, but
+    /// only up to three fifths of the screen — one long line used to stretch
+    /// the box to 94% of a 149-column terminal, leaving a large empty interior
+    /// and a sliver of session text on the left, which reads as a broken
+    /// layout.
+    const SHARE_OF_SCREEN: usize = 3;
+    const HARD_MAX_WIDTH: usize = 140;
     const MIN_WIDTH: usize = 60;
     let visible = |row: &str| kiqi_tui::ansi::visible_width(row);
+    let ceiling = width
+        .saturating_mul(SHARE_OF_SCREEN)
+        .saturating_div(5)
+        .min(HARD_MAX_WIDTH)
+        .max(MIN_WIDTH)
+        .min(width.saturating_sub(6));
     let inner = body
         .iter()
         .map(|row| visible(row))
@@ -136,7 +149,9 @@ fn frame(body: &[String], width: usize) -> Vec<String> {
         .unwrap_or(0)
         .max(visible(TITLE) + 1)
         .max(MIN_WIDTH)
-        .min(width.saturating_sub(6).min(MAX_WIDTH));
+        // Four cells go to the border and its padding, so the *box* is what the
+        // ceiling above limits.
+        .min(ceiling.saturating_sub(4));
     let mut rows = Vec::with_capacity(body.len() + 2);
     // Widths are display cells, not bytes: the border glyphs are three bytes
     // and the interpunct two, so `str::len()` here left the top border five
@@ -153,6 +168,45 @@ fn frame(body: &[String], width: usize) -> Vec<String> {
     }
     rows.push(format!("└{}┘", "─".repeat(inner + 2)));
     rows.into_iter().map(|row| on_panel(&row)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row_widths(rows: &[String]) -> Vec<usize> {
+        rows.iter()
+            .map(|row| kiqi_tui::ansi::visible_width(row))
+            .collect()
+    }
+
+    #[test]
+    fn a_long_line_cannot_stretch_the_box_across_the_screen() {
+        let rows = frame(&["x".repeat(400)], 149);
+        let widths = row_widths(&rows);
+        assert!(
+            widths.iter().all(|&w| w == widths[0]),
+            "the framed rows must share one width: {widths:?}"
+        );
+        assert!(
+            widths[0] <= 149 * 3 / 5,
+            "the box is {} of 149 columns, so the transcript has {} left",
+            widths[0],
+            149 - widths[0]
+        );
+        assert!(widths[0] >= 60, "the box collapsed to {}", widths[0]);
+    }
+
+    #[test]
+    fn a_narrow_terminal_keeps_the_box_inside_it() {
+        let rows = frame(&["y".repeat(200)], 50);
+        let widths = row_widths(&rows);
+        assert!(
+            widths[0] <= 44,
+            "a {}-column box does not fit a 50-column terminal",
+            widths[0]
+        );
+    }
 }
 
 pub(super) struct WorkView {
