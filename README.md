@@ -73,14 +73,13 @@ ki --version
 The crates are not published to crates.io, so `cargo install kiqi-cli` does not work —
 it would fetch a different (or no) package.
 
-**Package managers:** not available yet. `gqf2008/homebrew-tap` and
-`gqf2008/scoop-bucket` do not exist, and the `bigfish1913` taps belong to an
-unrelated project — they carry that project's `rpi` formula/manifest, not `ki` — so
-`brew install ki` / `scoop install ki` have nothing to install. `packaging/` holds
-a formula and manifests that have never been published. The open winget PRs
-(`#441442`, `#444745`) are for the other project's `bigfish1913.rpi`, not `ki`.
-
-Use the prebuilt installer or a source build until then.
+**Package managers:** `gqf2008/homebrew-tap` and `gqf2008/scoop-bucket` carry
+ki 0.5.3 (`brew tap gqf2008/tap && brew install ki`, or
+`scoop bucket add gqf2008 https://github.com/gqf2008/scoop-bucket && scoop install ki`).
+The `bigfish1913` taps belong to an unrelated project — they carry that project's
+`rpi` formula/manifest, not `ki`. The `gqf2008.ki` winget submission is
+[PR #469391](https://github.com/microsoft/winget-pkgs/pull/469391), pending a
+moderator merge.
 
 **Offline examples** — the smallest agent, no credentials and no network:
 
@@ -336,7 +335,7 @@ permission requests bridged to the client. See
 
 | | |
 | --- | --- |
-| Current release | **[0.4.7](https://github.com/gqf2008/pi-rust/releases/tag/v0.4.7)** (all crates share one workspace version) |
+| Current release | **[0.5.3](https://github.com/gqf2008/pi-rust/releases/tag/v0.5.3)** (all crates share one workspace version) |
 | Stability | `kiqi-ai`, `kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-host` are the intended stable surface |
 | MSRV | 1.96 |
 | Platforms | Linux, macOS, Windows (CI runs the suite on Linux) |
