@@ -53,6 +53,12 @@
 
 ### Removed
 
+- **`doneWhen: "board-open-0"` 这个魔法串删掉了。** 它让宿主在 AgentEnd 跑一次
+  `walgit collab board` 并数 `== open (0) ==`，而通用的 `doneWhenCmd`
+  （`walgit collab board | grep -q '== open (0) =='`）本来就能表达同一件事，还带沙箱与
+  超时。`doneWhen` 现在只是给模型和用户看的文字说明，宿主不求值——本机唯一带这个值的
+  goal 早已 archived + complete，不需要迁移。
+
 - **一批没人走到的东西删掉了（约 3000 行）。**
   * 扩展否决运行的整条通道：`dispatch_empty_event_with` 恒返回 `false`，于是 8 处"扩展
     否决了这次运行"的分支和 `EXIT_VETOED` 永远不可达。

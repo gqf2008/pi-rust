@@ -28,10 +28,9 @@ pub(crate) struct ActiveGoal {
     pub turns_used: u32,
     pub max_turns: Option<u32>,
     pub deadline_ms: Option<i64>,
-    /// Explicit stop condition. The host currently recognizes the literal
-    /// `"board-open-0"`: it runs `walgit collab board` at the AgentEnd boundary
-    /// and skips auto-continue when the board has no open cards. Unknown
-    /// conditions are documented to the model but not evaluated by the host.
+    /// A human-readable stop condition, carried for the model and the user.
+    /// The host does not evaluate it: anything a host could check is expressed
+    /// as [`Self::done_when_cmd`], which runs a real command at AgentEnd.
     pub done_when: Option<String>,
     /// A host-run command evaluated at AgentEnd with a short timeout; exit 0
     /// marks the goal done and stops auto-continue. It runs under the same
@@ -139,14 +138,6 @@ pub(crate) async fn next_headless_continuation(
         return None;
     }
     let goal = active_goal(cwd)?;
-    if goal.done_when.as_deref() == Some("board-open-0")
-        && crate::interactive_tui::events::board_open_zero(cwd).await
-    {
-        crate::interactive_tui::diagnostic_log(
-            "[ki goal] doneWhen 'board-open-0' satisfied; not auto-continuing",
-        );
-        return None;
-    }
     if let Some(cmd) = goal.done_when_cmd.as_deref() {
         if crate::interactive_tui::events::done_when_cmd_satisfied(cwd, cmd).await {
             crate::interactive_tui::diagnostic_log(&format!(
@@ -175,9 +166,6 @@ pub(crate) async fn next_headless_continuation(
 /// Whether a `walgit collab board` rendering says there are no open cards.
 /// The board prints headings such as `== open (0) ==`; a substring check would
 /// also match `10`, so match the trimmed line exactly.
-pub(crate) fn board_has_no_open_cards(stdout: &str) -> bool {
-    stdout.lines().any(|line| line.trim() == "== open (0) ==")
-}
 
 pub(crate) fn unix_millis() -> i64 {
     SystemTime::now()
@@ -285,12 +273,12 @@ mod tests {
                     "title": "finish the board",
                     "status": "active",
                     "started_at": 10,
-                    "done_when": "board-open-0"
+                    "done_when": "all cards merged"
                 }
             }),
         );
         let goal = active_goal(tmp.path()).expect("active goal");
-        assert_eq!(goal.done_when.as_deref(), Some("board-open-0"));
+        assert_eq!(goal.done_when.as_deref(), Some("all cards merged"));
     }
 
     #[test]
@@ -312,13 +300,6 @@ mod tests {
             goal.done_when_cmd.as_deref(),
             Some("walgit collab board | grep -q '== open (0) =='")
         );
-    }
-
-    #[test]
-    fn board_open_zero_marker_is_matched_exactly() {
-        assert!(board_has_no_open_cards("== open (0) ==\n"));
-        assert!(!board_has_no_open_cards("== open (1) ==\n"));
-        assert!(!board_has_no_open_cards(" == open (0) == trailing\n"));
     }
 
     #[test]
