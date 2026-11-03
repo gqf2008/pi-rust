@@ -19,7 +19,11 @@
 
 set -euo pipefail
 
-VERSION="${1:?usage: refresh-channels.sh X.Y.Z}"
+VERSION="${1:?usage: refresh-channels.sh X.Y.Z [YYYY-MM-DD]}"
+# The release date is a fact about the release, not about when this script happens
+# to run. release.sh passes its --date through; a bare invocation falls back to
+# today (UTC), which matches the old behaviour.
+RELEASE_DATE="${2:-}"
 REPO="gqf2008/pi-rust"
 TAG="v$VERSION"
 
@@ -106,11 +110,14 @@ perl -pi -e "s/\"version\": \"$OLD\"/\"version\": \"$VERSION\"/; s/v$OLD/v$VERSI
 # winget
 # --------------------------------------------------------------------------
 note "packaging/winget/*.yaml"
-DATE=$(date -u +%Y-%m-%d)
+DATE="${RELEASE_DATE:-$(date -u +%Y-%m-%d)}"
 OLD_WINGET=$(grep -m1 -oE 'InstallerSha256: [0-9A-Fa-f]+' packaging/winget/gqf2008.ki.installer.yaml | grep -oE '[0-9A-Fa-f]{64}')
 [[ -n "$OLD_WINGET" ]] || die "could not read the winget InstallerSha256"
 WIN_UPPER=$(printf '%s' "$SHA_WIN_X64" | tr 'a-f' 'A-F')
-perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/; s/v$OLD/v$VERSION/g; s/$OLD_WINGET/$WIN_UPPER/; s/ReleaseDate: [0-9-]+/ReleaseDate: \"$DATE\"/" \
+# The manifest stores the date quoted (winget's schema wants a string, not a YAML
+# timestamp); the pattern must tolerate the quotes or the substitution silently
+# no-ops, which is how 0.4.6-0.5.3 all kept the 2026-10-28 date.
+perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/; s/v$OLD/v$VERSION/g; s/$OLD_WINGET/$WIN_UPPER/; s/ReleaseDate: \"?[0-9-]+\"?/ReleaseDate: \"$DATE\"/" \
   packaging/winget/gqf2008.ki.installer.yaml
 perl -pi -e "s/PackageVersion: $OLD/PackageVersion: $VERSION/; s/v$OLD/v$VERSION/g" \
   packaging/winget/gqf2008.ki.locale.en-US.yaml

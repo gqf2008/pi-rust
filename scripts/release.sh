@@ -231,7 +231,7 @@ phase_wait() {
 
 phase_channels() {
   note "refresh install channels for $release_version"
-  step bash scripts/refresh-channels.sh "$release_version"
+  step bash scripts/refresh-channels.sh "$release_version" "$RELEASE_DATE"
 }
 
 phase_commit_channels() {
