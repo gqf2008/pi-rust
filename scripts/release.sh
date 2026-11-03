@@ -154,6 +154,11 @@ phase_changelog() {
 }
 
 phase_docs() {
+  # 三处「当前版本」是手写行，bump 不碰它们；不同步就会让
+  # check-release-version-consistency.sh 在 tag 之后判红（0.5.4 实际发生过）。
+  note "update the current-release rows"
+  step perl -pi -e "s#\*\*\[[0-9.]+\]\(https://github\.com/gqf2008/pi-rust/releases/tag/v[0-9.]+\)\*\*#**[${release_version}](https://github.com/gqf2008/pi-rust/releases/tag/v${release_version})**#g" README.md docs/kiqi-tool/README.md
+  step perl -pi -e "s#Current release: \*\*[0-9.]+\*\*#Current release: **${release_version}**#" ROADMAP.md
   note "sync embedded docs"
   step bash scripts/sync-embedded-docs.sh
 }
@@ -167,6 +172,8 @@ phase_validate() {
   helper=$(git rev-parse --git-path kiqi-release-helper.exe)
   step rustc --edition=2021 release-helper.rs -o "$helper"
   step "$helper" validate "$release_version" --allow-dirty
+  # 版本号在这一步之前已经改完（bump + docs），所以这里能直接判一致性。
+  step sh scripts/check-release-version-consistency.sh
 }
 
 phase_commit() {
