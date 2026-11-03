@@ -474,6 +474,20 @@ impl Drop for ChildTransport {
 pub const LIVENESS_IDLE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 /// How long a `ping` may take before the connection counts as wedged.
 pub const LIVENESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Longest the notification stream waits between reconnect attempts. rmcp's
+/// default has no ceiling: it doubles from a second, so one server restart can
+/// leave notices dead for hours while the connection still answers pings.
+pub const RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The reconnect policy for a server's notification stream: retry forever, at
+/// most [`RECONNECT_MAX_DELAY`] apart.
+fn reconnect_policy() -> std::sync::Arc<rmcp::transport::common::client_side_sse::ExponentialBackoff> {
+    // The type is `#[non_exhaustive]`, so start from its default (retry forever,
+    // doubling from one second) and only put a ceiling on the delay.
+    let mut policy = rmcp::transport::common::client_side_sse::ExponentialBackoff::default();
+    policy.max_delay = Some(RECONNECT_MAX_DELAY);
+    std::sync::Arc::new(policy)
+}
 
 pub(crate) struct ServerHandle {
     config: ServerConfig,
@@ -2305,6 +2319,14 @@ async fn spawn_http_client(
         custom_headers.insert(header_name, header_value);
     }
     let mut config = StreamableHttpClientTransportConfig::with_uri(http.url.as_str());
+    // The notification stream reconnects on its own, but rmcp's default policy
+    // doubles the delay from one second with no ceiling: a server restart that
+    // lasts a minute leaves the next attempt hours away, and every failed
+    // attempt pushes it further out. The session then still looks connected —
+    // pings and tool calls go over POST and keep working — while notices are
+    // silently gone. Cap the wait so a restarted server is picked up again
+    // within [`RECONNECT_MAX_DELAY`].
+    config.retry_config = reconnect_policy();
     if let Some(token) = auth_header {
         config = config.auth_header(token);
     }
@@ -3290,6 +3312,33 @@ fn doctor_hints(row: &ServerDiagnostic) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that restarts must be picked up again quickly. rmcp's default
+    /// policy doubles from a second with no ceiling, which is how a session can
+    /// look connected (pings over POST still work) while its notices are gone
+    /// for hours: the next attempt sits further out than anyone will wait.
+    #[test]
+    fn a_lost_notification_stream_is_retried_within_the_cap() {
+        use rmcp::transport::common::client_side_sse::SseRetryPolicy;
+        let policy = reconnect_policy();
+        assert!(
+            policy.retry(0).unwrap() <= RECONNECT_MAX_DELAY,
+            "the first retry respects the cap"
+        );
+        assert_eq!(policy.retry(0).unwrap(), std::time::Duration::from_secs(1));
+        assert_eq!(policy.retry(2).unwrap(), std::time::Duration::from_secs(4));
+        assert!(
+            policy.retry(2).unwrap() < RECONNECT_MAX_DELAY,
+            "the delay still backs off below the cap"
+        );
+        for attempt in [10usize, 30, 200, 5000] {
+            let delay = policy.retry(attempt).expect("the policy never gives up");
+            assert!(
+                delay <= RECONNECT_MAX_DELAY,
+                "attempt {attempt} waits {delay:?}, over the cap"
+            );
+        }
+    }
 
     /// The transcript writer asks the manager which notices are news; a pointer
     /// the model was already given (and has not read since) must not come back.
