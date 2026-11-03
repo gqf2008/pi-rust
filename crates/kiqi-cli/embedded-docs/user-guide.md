@@ -407,6 +407,20 @@ ki worktree prune                  # 只清理分支已被 base 包含的（未�
 ki --tools read,bash,edit,write,docs -p "检查并修改项目文件"
 ```
 
+### 会话内定时与变化探针（`cron` / `watch`）
+
+`cron` 管理 `<项目>/.ki/cron.json`：`list` / `add` / `remove`。任务按 5 字段 cron（本地时间，
+也接受 `@hourly`/`@daily`/`@weekly`/`@monthly`）到点触发——`prompt` 原文作为 user 消息注入，
+`command` 在会话工作目录执行后把合并输出注入。错过的分钟直接跳过，不补跑。
+
+`watch` 管理 `<项目>/.ki/watch.json`：每条按 `intervalSecs`（默认 60，范围 5–3600）跑一次
+`command`，输出（退出码 + 合并后的 stdout/stderr）与上一次不同时才把 `prompt` 和新输出注入；
+会话打开后的第一轮只建立基线，不会一上来就报一次"变化"。
+
+两者都只在**交互式会话**里调度：`-p`、`--mode json`、`--server`、ACP serve 不启动调度器。
+两者都受项目信任门控制——项目不受信任时不读取、不调度，工具也会拒绝写入。手动编辑这两
+个文件同样有效，调度器按 mtime 热重载。
+
 ## 5. 项目目录和资源优先级
 
 ki 会优先使用 ki 自己的目录，同时兼容原 Pi 的 `.pi` 布局：
@@ -415,6 +429,8 @@ ki 会优先使用 ki 自己的目录，同时兼容原 Pi 的 `.pi` 布局：
 项目/
 ├── .ki/
 │   ├── settings.json
+│   ├── cron.json
+│   ├── watch.json
 │   ├── SYSTEM.md
 │   ├── APPEND_SYSTEM.md
 │   ├── skills/

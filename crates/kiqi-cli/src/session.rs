@@ -2077,6 +2077,30 @@ fn build_tools(
         ),
     ];
 
+    // Session-scoped scheduling. Both tools edit the config file the session's
+    // scheduler watches; the trust closure is re-evaluated on every call so a
+    // `/trust no` mid-session also stops new jobs from being written.
+    {
+        let trust_args = args.clone();
+        let trust_cwd = cwd.to_path_buf();
+        let trust: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || crate::session::resolve_project_trust(&trust_args, &trust_cwd));
+        all.push((
+            "cron",
+            HarnessTool::new(crate::cron_tool::create_cron_tool(
+                cwd.to_path_buf(),
+                Arc::clone(&trust),
+            )),
+        ));
+        all.push((
+            "watch",
+            HarnessTool::new(crate::watch_tool::create_watch_tool(
+                cwd.to_path_buf(),
+                trust,
+            )),
+        ));
+    }
+
     // Progressive skill loading: the system prompt lists skills, this tool
     // loads one body on demand (and re-reads it, so edits are current).
     if !args.no_skills {

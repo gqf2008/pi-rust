@@ -40,6 +40,7 @@ pub mod changelog;
 pub mod config;
 pub mod configure;
 pub mod cron;
+pub mod cron_tool;
 pub mod docs_tool;
 pub(crate) mod env_lock;
 pub mod export;
@@ -61,6 +62,7 @@ pub mod provider_config;
 pub mod remote;
 pub mod resource_dirs;
 pub mod resume_picker;
+pub mod schedule_file;
 pub mod session;
 pub mod session_cwd;
 pub mod session_driver;
@@ -81,6 +83,8 @@ pub mod updates;
 #[cfg(feature = "extension-wasm")]
 pub mod wasm_oauth;
 pub mod wasm_provider;
+pub mod watch;
+pub mod watch_tool;
 pub mod worktree;
 
 /// Crate version, surfaced by `ki --version`. Mirrors the TS `VERSION` export

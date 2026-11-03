@@ -1555,6 +1555,21 @@ pub async fn interactive_tui(
         Arc::clone(&cron_dedup),
     );
 
+    // 会话内变化探针：`.ki/watch.json` 存在且项目受信任时启动。基线跨
+    // `/reload` 的代际共享，重建后不会把"没变化"误报成一次变化。
+    let watch_baselines: crate::watch::WatchBaselines =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut session_watch = start_session_watch(
+        &cwd,
+        project_trusted,
+        args,
+        &lane,
+        &state,
+        &tx,
+        &tui,
+        Arc::clone(&watch_baselines),
+    );
+
     let _compaction_watcher = harness.watch({
         let state = Arc::clone(&state);
         let tui = Arc::clone(&tui);
@@ -4356,6 +4371,9 @@ pub async fn interactive_tui(
                 if let Some(cron) = session_cron.take() {
                     cron.stop();
                 }
+                if let Some(watch) = session_watch.take() {
+                    watch.stop();
+                }
                 // B5d: drive the shared reload routine on the async runtime,
                 // then surface the outcome. `reload_context` was passed into
                 // `interactive_tui` and is the same `Arc<ReloadContext>` the
@@ -4422,6 +4440,16 @@ pub async fn interactive_tui(
                     &tui,
                     Arc::clone(&cron_dedup),
                 );
+                session_watch = start_session_watch(
+                    &cwd,
+                    cron_project_trusted,
+                    args,
+                    &lane,
+                    &state,
+                    &tx,
+                    &tui,
+                    Arc::clone(&watch_baselines),
+                );
                 tui.request_render(false);
             }
             Some(TuiMessage::ExtensionCommandDone(outcome)) => {
@@ -4485,6 +4513,9 @@ pub async fn interactive_tui(
     // 会话结束：先标记关闭，再停调度线程并取消、join 全部在途命令。
     if let Some(cron) = session_cron.take() {
         cron.stop();
+    }
+    if let Some(watch) = session_watch.take() {
+        watch.stop();
     }
     // Drop the reload bridge: clearing the mailbox closes the signal channel,
     // the drain task's `recv` returns `None`, and the task exits. (Aborting is

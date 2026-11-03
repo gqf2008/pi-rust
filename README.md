@@ -221,9 +221,11 @@ every layer is a library, so the same pieces work inside your own process:
   granted.
 - **One implementation, two surfaces.** The global CLI and an embedded agent load
   the same tools. You do not maintain an extension and a library variant separately.
-- **Scheduled prompts, in-session.** `prompt` or `command` jobs in `.ki/cron.json`
-  fire while an interactive session is open and arrive in the transcript as a user
-  message the agent can act on.
+- **Scheduled prompts and change probes, in-session.** The `cron` tool manages
+  `.ki/cron.json` (`prompt` or `command` jobs on a cron schedule); the `watch` tool
+  manages `.ki/watch.json` (probe a command every N seconds and wake the agent only
+  when its output changes). Both fire while an interactive session is open and
+  arrive in the transcript as a user message the agent can act on.
 
 ### How it compares
 

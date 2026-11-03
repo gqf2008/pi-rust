@@ -1075,7 +1075,7 @@ pub fn run_job_command(cwd: &Path, command: &str, timeout_secs: u64) -> io::Resu
     run_job_command_cancellable(cwd, command, timeout_secs, None)
 }
 
-fn run_job_command_cancellable(
+pub(crate) fn run_job_command_cancellable(
     cwd: &Path,
     command: &str,
     timeout_secs: u64,
@@ -1403,10 +1403,11 @@ impl CronSink for SessionCronSink {
     }
 }
 
-/// 项目受信任且配置文件存在时启动调度线程；否则返回 `None`，什么都不启动。
+/// 项目受信任时启动调度线程；否则返回 `None`，什么都不启动。
 ///
-/// 只在交互式会话里调用（见模块文档）。启动后配置文件的增删改由线程按 mtime
-/// 自行重载；信任状态也会重新求值，撤销后线程退出，不需要调用方再介入。
+/// 只在交互式会话里调用（见模块文档）。配置文件是否存在不参与判定：线程按 mtime
+/// 自行发现文件的创建、修改与删除，所以会话中途由 `cron` 工具新建的任务会立即生效。
+/// 信任状态也会重新求值，撤销后线程退出，不需要调用方再介入。
 pub fn start_if_configured(
     cwd: &Path,
     inject: Arc<dyn CronInject>,
@@ -1435,8 +1436,9 @@ fn start_if_configured_with_clock(
     trust: CronTrust,
     dedup: Arc<CronDedup>,
 ) -> Option<CronHandle> {
-    // 不做“先检查文件、稍后再检查信任”：不受信任时连元数据都不读取。
-    if !trust() || !config_path(cwd).is_file() {
+    // 不受信任时连元数据都不读取。文件是否存在不再作为启动条件：`cron` 工具
+    // 可以在会话中途创建 `.ki/cron.json`，调度线程必须已经在跑才能看到它。
+    if !trust() {
         return None;
     }
     let workers = Arc::new(CronWorkerState::default());
@@ -2472,7 +2474,7 @@ trusted"
     }
 
     #[test]
-    fn start_if_configured_starts_nothing_without_a_file() {
+    fn start_if_configured_starts_without_a_file() {
         let dir = tempfile::tempdir().unwrap();
         let mock = MockInject::new();
         let (log, _lines) = recording_log();
@@ -2484,7 +2486,10 @@ trusted"
             Arc::new(|| true),
             Arc::new(CronDedup::default()),
         );
-        assert!(started.is_none(), "没有 .ki/cron.json 就不该启动调度线程");
+        // The `cron` tool can create the file mid-session, so the thread must be
+        // up before the file exists and discover it by mtime.
+        assert!(started.is_some(), "调度线程必须能在文件出现前就启动");
+        started.unwrap().stop();
     }
 
     #[test]
