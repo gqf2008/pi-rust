@@ -130,6 +130,13 @@ jobs:
           sh scripts/tests/doc-paths.sh
           sh scripts/check-doc-paths.sh
 
+      # The READMEs and ROADMAP state the current release by hand, and nothing
+      # read those rows when `release.sh` bumped the workspace version: all three
+      # still said 0.4.7 through 0.5.3, and the embedded docs copy shipped that
+      # in `ki docs overview`. Offline: it only compares the files.
+      - name: Verify the current-release claims match the workspace version
+        run: sh scripts/check-release-version-consistency.sh
+
       - name: Verify the per-agent collab setup script
         run: sh scripts/tests/setup-collab-agents.sh
 

@@ -67,6 +67,7 @@ cargo test  --workspace --locked
 sh scripts/check-offline-lock.sh
 sh scripts/check-ci-locked.sh
 sh scripts/check-doc-paths.sh
+sh scripts/check-release-version-consistency.sh
 sh scripts/sync-embedded-docs.sh   # 改了 CHANGELOG.md / README.md 后必须跑
 sh scripts/check-abi-sections.sh   # 改了 docs/design/extension-abi.md 后必须跑
 sh scripts/tests/docs-install-path.sh
