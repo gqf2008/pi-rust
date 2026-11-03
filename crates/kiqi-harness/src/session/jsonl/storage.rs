@@ -326,16 +326,6 @@ impl JsonlSessionStorage {
         self.metadata.clone()
     }
 
-    /// Enqueue a mutating operation onto the tail chain. Mirrors TS `enqueue`.
-    #[allow(dead_code)]
-    async fn enqueue<T>(
-        &self,
-        op: impl std::future::Future<Output = SessionResult<T>>,
-    ) -> SessionResult<T> {
-        let _g = self.tail.lock().await;
-        op.await
-    }
-
     /// Append a mutation line to the file (no in-memory apply). Mirrors TS
     /// `appendMutation`.
     async fn append_mutation_line(&self, mutation: &SessionMutation) -> SessionResult<()> {
@@ -382,6 +372,10 @@ fn chain_onto_lane_leaf(mutation: SessionMutation, state: &SessionState) -> Sess
     }
 }
 
+// Each mutating method below inlines the stamp→persist→apply sequence while
+// holding the `tail` lock (the same serialization the TS `tail` Promise chain
+// provides). It cannot be factored into a shared `enqueue(&self, op)` helper:
+// closures cannot capture `&self` across an await of a method on `self`.
 #[async_trait]
 impl SessionStorage for JsonlSessionStorage {
     fn metadata(&self) -> SessionMetadata {
@@ -588,26 +582,6 @@ fn is_assistant_frame_append(line: &str) -> bool {
     value.get("kind").and_then(serde_json::Value::as_str) == Some("record")
         && value.get("type").and_then(serde_json::Value::as_str) == Some("assistant_frame")
         && value.get("op").and_then(serde_json::Value::as_str) == Some("append")
-}
-
-// The `enqueue` closure approach above fights the borrow checker (closures
-// can't capture `&self` across an await of a method on `self`). The trait impl
-// therefore inlines the stamp→persist→apply sequence directly per method,
-// holding the `tail` lock across the whole op (the same serialization the TS
-// `tail` Promise chain provides). `enqueue` + `self_append_and_apply` are kept
-// only as documentation of the intent and are unused.
-#[allow(dead_code)]
-async fn self_append_and_apply(
-    _storage: &JsonlSessionStorage,
-    _m: &SessionMutation,
-) -> SessionResult<()> {
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn self_fs_placeholder() -> Arc<dyn FileSystem> {
-    // unreachable placeholder for the never-called enqueue path.
-    unreachable!("enqueue path is not used; trait impls inline the op")
 }
 
 /// Build a complete sibling temporary file, then atomically rename it over the

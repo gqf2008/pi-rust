@@ -478,29 +478,6 @@ fn layout_scroll_view(
     }
 }
 
-/// Translate a box and its children by a delta.
-#[allow(dead_code)]
-fn translate_box(lbox: &mut LayoutBox, delta_y: i32) {
-    if delta_y >= 0 {
-        lbox.rect.y += delta_y as usize;
-    } else {
-        lbox.rect.y = lbox.rect.y.saturating_sub((-delta_y) as usize);
-    }
-    for child in &mut lbox.children {
-        translate_box(child, delta_y);
-    }
-}
-
-/// Update clips for a box and its children.
-#[allow(dead_code)]
-fn update_clips(lbox: &mut LayoutBox, parent_clip: LayoutRect) {
-    lbox.clip = parent_clip.intersect(&lbox.rect);
-    let child_clip = lbox.clip;
-    for child in &mut lbox.children {
-        update_clips(child, child_clip);
-    }
-}
-
 /// Paint a box and its children into the screen buffer.
 fn paint_box(lbox: &LayoutBox, screen: &mut [String], total_width: usize) {
     if let Some(ref lines) = lbox.lines {

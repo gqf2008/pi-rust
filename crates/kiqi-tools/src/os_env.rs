@@ -906,7 +906,6 @@ impl Shell for OsExecutionEnv {
         cmd.stderr(std::process::Stdio::piped());
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
             cmd.process_group(0); // child becomes its own group leader.
         }
         #[cfg(windows)]

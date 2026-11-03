@@ -4625,7 +4625,7 @@ async fn the_skills_listing_reaches_the_provider_without_the_skill_body() {
         }
     }
 
-    let mut script = FauxScript::default();
+    let script = FauxScript::default();
     script.set_responses(vec![FauxStep::text("Done.")]);
     let faux = FauxProvider::new(script);
     let model = faux.default_model().clone();

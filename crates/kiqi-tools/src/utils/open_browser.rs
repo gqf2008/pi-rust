@@ -131,7 +131,6 @@ pub fn open_file(path: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     // Commented out on purpose: this calls `open_browser`, which really spawns
     // the platform launcher (on Windows `rundll32 url.dll,FileProtocolHandler`),

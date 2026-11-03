@@ -275,10 +275,3 @@ fn turn_start_index_walks_back_to_user_or_branch_summary() {
     // No turn start before index 1 with start_index 1 → None.
     assert_eq!(find_turn_start_index(&entries, 1, 1), None);
 }
-
-// Suppress unused import warning for `find_turn_start_index`-only edge case above
-// where the compile-time dead-code analysis is conservative across test fns.
-#[allow(dead_code)]
-fn _suppress_unused() {
-    let _ = Api::AnthropicMessages;
-}

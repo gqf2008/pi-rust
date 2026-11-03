@@ -36,9 +36,9 @@ use kiqi_harness::session::memory::{CounterIdGenerator, FakeClock};
 use kiqi_harness::session::types::{
     BranchBounds, EntryOrder, EntryQuery, ForkOptions, LanePointer, LaneRecord, LogItem,
     LogOptions, OperationIntent, OperationStartedRecord, ProvisionedEntry, ProvisionedKind,
-    RecordBase, SessionCreateOptions, SessionMetadata, SessionMutation, SessionStorage,
+    RecordBase, SessionMutation, SessionStorage,
 };
-use kiqi_tools::env::{FileContent, FileInfo, FileKind, FileSystem};
+use kiqi_tools::env::{FileContent, FileInfo, FileSystem};
 use kiqi_tools::error::{FileError, FileErrorCode};
 
 // ---------------------------------------------------------------------------
@@ -831,20 +831,4 @@ fn operation_started(id: &str, lane: &str) -> LaneRecord {
             resume_data: None,
         },
     })
-}
-
-// Silence unused-import warnings if a helper goes unused in a subset build.
-#[allow(dead_code)]
-fn _anchor_traits() {
-    let _ = SessionCreateOptions {
-        id: None,
-        parent_session_id: None,
-        metadata: None,
-    };
-    let _ = SessionMetadata {
-        id: String::new(),
-        created_at: 0,
-        parent_session_id: None,
-    };
-    let _ = FileKind::File;
 }

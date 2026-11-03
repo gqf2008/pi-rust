@@ -24,7 +24,7 @@ use crate::env::{
 };
 #[cfg(test)]
 use crate::error::ExecutionErrorCode;
-use crate::error::{io_to_file_code, ExecutionError, FileError, FileErrorCode};
+use crate::error::{ExecutionError, FileError, FileErrorCode};
 use crate::file_mutation_queue::{MutatingEnv, MutationQueueRegistry};
 
 /// An in-memory file: bytes + mtime counter.
@@ -833,14 +833,6 @@ fn unique_suffix(n: i64) -> String {
         s.insert(0, '0');
     }
     s
-}
-
-/// io classification helper re-exported for env consumers (e.g. `OsExecutionEnv`
-/// test doubles). Kept here so the in-memory env can classify synthetic errors
-/// without duplicating the table.
-#[allow(dead_code)]
-fn unused_io_reexport(_: std::io::Error) -> FileErrorCode {
-    io_to_file_code(&std::io::Error::from(std::io::ErrorKind::Other))
 }
 
 #[cfg(test)]
