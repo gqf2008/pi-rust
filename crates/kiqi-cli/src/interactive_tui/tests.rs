@@ -3496,3 +3496,56 @@ fn work_summary_box_borders_line_up() {
         "ragged box: {widths:?} {rows:?}"
     );
 }
+
+/// A queued message is a preview line, not a document.
+///
+/// The dock has no scroll region: rendering a steering message in full grew the
+/// dock past the screen, squeezed the transcript to its one-row minimum, and
+/// left the work box and the "jump to latest" indicator composited over stale
+/// rows. A cron job whose prompt is a 40-line brief made that happen every few
+/// minutes.
+#[test]
+fn a_long_queued_message_stays_a_one_line_preview() {
+    let state = test_tui_state();
+    let long = (1..=40)
+        .map(|index| format!("line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    state.set_pending_queue(kiqi_harness::agent_harness::QueuedMessages {
+        steering: vec![long],
+        follow_up: Vec::new(),
+        images: Vec::new(),
+    });
+    let rows = state.pending_container().render(120);
+    assert!(
+        rows.len() <= 5,
+        "the dock slot must not grow with the message: {} rows",
+        rows.len()
+    );
+    let joined = kiqi_tui::ansi::strip_ansi(&rows.join("\n"));
+    assert!(joined.contains("Steering: line 1"), "{joined}");
+    assert!(!joined.contains("line 40"), "{joined}");
+}
+
+#[test]
+fn many_queued_messages_fold_into_a_count() {
+    let state = test_tui_state();
+    let messages = |count: usize| {
+        (1..=count)
+            .map(|index| format!("message {index}"))
+            .collect::<Vec<_>>()
+    };
+    state.set_pending_queue(kiqi_harness::agent_harness::QueuedMessages {
+        steering: messages(6),
+        follow_up: messages(4),
+        images: Vec::new(),
+    });
+    let rows = state.pending_container().render(120);
+    assert!(
+        rows.len() <= 9,
+        "ten queued entries must not become ten dock rows: {}",
+        rows.len()
+    );
+    let joined = kiqi_tui::ansi::strip_ansi(&rows.join("\n"));
+    assert!(joined.contains("more queued"), "{joined}");
+}

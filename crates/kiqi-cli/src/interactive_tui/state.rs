@@ -1049,6 +1049,23 @@ pub(super) fn navigate_history(state: &Arc<TuiState>, editor: &Arc<Editor>, dire
     }
 }
 
+/// A queued message is shown as one preview line, never in full: the dock has
+/// no scroll region, so a pasted 40-line prompt used to grow the dock past the
+/// screen, squeeze the transcript to its one-row minimum, and leave the work
+/// box and jump indicator composited over stale content.
+const PENDING_PREVIEW_CHARS: usize = 120;
+/// How many queued entries the dock lists before folding the rest into a count.
+const PENDING_PREVIEW_ENTRIES: usize = 3;
+
+fn pending_preview(text: &str) -> String {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    kiqi_tui::utils::truncate_to_width(first, PENDING_PREVIEW_CHARS, "…")
+}
+
 impl TuiState {
     pub(super) fn cancel_js_preparation(&self) -> bool {
         let cancellation = self.js_preparation_cancel.lock().unwrap().take();
@@ -1146,16 +1163,35 @@ impl TuiState {
         }
         let colors = current_theme().colors;
         container.add_child(Arc::new(Spacer::new(1)));
-        for text in &messages.steering {
+        for text in messages.steering.iter().take(PENDING_PREVIEW_ENTRIES) {
             container.add_child(Arc::new(Text::new(
-                colors.muted.fg(&format!("Steering: {text}")),
+                colors
+                    .muted
+                    .fg(&format!("Steering: {}", pending_preview(text))),
                 1,
                 0,
             )));
         }
-        for text in &messages.follow_up {
+        for text in messages.follow_up.iter().take(PENDING_PREVIEW_ENTRIES) {
             container.add_child(Arc::new(Text::new(
-                colors.muted.fg(&format!("Follow-up: {text}")),
+                colors
+                    .muted
+                    .fg(&format!("Follow-up: {}", pending_preview(text))),
+                1,
+                0,
+            )));
+        }
+        let hidden = messages
+            .steering
+            .len()
+            .saturating_sub(PENDING_PREVIEW_ENTRIES)
+            + messages
+                .follow_up
+                .len()
+                .saturating_sub(PENDING_PREVIEW_ENTRIES);
+        if hidden > 0 {
+            container.add_child(Arc::new(Text::new(
+                colors.muted.fg(&format!("… {hidden} more queued")),
                 1,
                 0,
             )));
