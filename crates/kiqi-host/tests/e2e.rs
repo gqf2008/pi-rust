@@ -7,13 +7,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use kiqi_host::wasm::{Grants, NetHttpGrant, WasmExtension};
 use kiqi_host::{
-    Block, CancelProbe, Event, EventAction, EventTag, Extension, ExtensionError, HostCaps, Log,
-    LogLevel, Progress, ProgressSink, Verdict,
+    Block, Event, EventAction, EventTag, Extension, ExtensionError, HostCaps, Log, LogLevel,
+    Progress, ProgressSink, Verdict,
 };
 
 struct RecordingSink {
@@ -2442,11 +2441,6 @@ fn fs_project_scope_reads_and_writes_the_project_tree() {
     )
     .expect("load");
 
-    let log = NullLog;
-    let caps = HostCaps::observer(&log);
-    let sink = RecordingSink {
-        blocks: Mutex::new(Vec::new()),
-    };
     // The conformance tool's fs probe writes `conformance/probe.txt` then reads
     // it back — inside the project directory when the scope is `project`.
     let outcome = call_main_tool(&extension, serde_json::json!({})).expect("call");

@@ -2361,8 +2361,8 @@ fn run_with_limits(
     let mut child = command
         .spawn()
         .map_err(|error| CapabilityError::Failed(format!("spawn `{cmd}`: {error}")))?;
-    let mut stdout = child.stdout.take().expect("piped stdout");
-    let mut stderr = child.stderr.take().expect("piped stderr");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
     let stdout_reader = std::thread::spawn(move || drain_capped(stdout, OUTPUT_CAP));
     let stderr_reader = std::thread::spawn(move || drain_capped(stderr, OUTPUT_CAP));
 

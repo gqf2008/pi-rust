@@ -14,8 +14,8 @@ use crate::providers::{DELTA_FLUSH_BYTES, DELTA_FLUSH_INTERVAL};
 use crate::strict_schema::strict_tool_parameters;
 use crate::types::{
     Api, AssistantMessage, AssistantMessageEvent, ConstrainedSamplingConfig, Content, Context,
-    DoneReason, ErrorReason, ImageContent, InputModality, Message, StopReason, ThinkingLevel, Tool,
-    ToolCall, ToolCallType, Usage, UserContent,
+    DoneReason, ErrorReason, ImageContent, Message, StopReason, ThinkingLevel, Tool, ToolCall,
+    ToolCallType, Usage, UserContent,
 };
 use crate::AiError;
 use async_trait::async_trait;

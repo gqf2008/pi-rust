@@ -4186,21 +4186,21 @@ mod tests {
     #[test]
     fn provider_header_hooks_are_partitioned_and_after_response_is_dropped() {
         let caps = empty_caps();
-        let (observe_host, observe_counts) = gate_probe(
+        let (_observe_host, _observe_counts) = gate_probe(
             "observe",
             Some(gate_policy(true, false, 500)),
             serde_json::Value::Null,
             None,
             kiqi_host::EventAction::Continue,
         );
-        let (patch_host, patch_counts) = gate_probe(
+        let (_patch_host, _patch_counts) = gate_probe(
             "patch",
             Some(gate_policy(false, true, 500)),
             serde_json::Value::Null,
             None,
             kiqi_host::EventAction::Continue,
         );
-        let (none_host, none_counts) = gate_probe(
+        let (_none_host, _none_counts) = gate_probe(
             "none",
             Some(gate_policy(false, false, 500)),
             serde_json::Value::Null,

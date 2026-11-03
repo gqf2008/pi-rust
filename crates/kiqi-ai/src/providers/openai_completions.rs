@@ -23,8 +23,8 @@ use crate::providers::anthropic::sse::SseEventStream;
 use crate::providers::{DELTA_FLUSH_BYTES, DELTA_FLUSH_INTERVAL};
 use crate::types::{
     Api, AssistantMessage, AssistantMessageEvent, Content, Context, DoneReason, ErrorReason,
-    InputModality, Message, StopReason, ThinkingContent, ThinkingContentType, ThinkingLevel,
-    ToolCall, ToolCallType, Usage, UserContent,
+    Message, StopReason, ThinkingContent, ThinkingContentType, ThinkingLevel, ToolCall,
+    ToolCallType, Usage, UserContent,
 };
 use crate::AiError;
 
@@ -1037,8 +1037,8 @@ mod tests {
     use super::*;
     use crate::model::OpenaiCompletionsCompat;
     use crate::types::{
-        AssistantMessage, AssistantMessageEvent, ImageContent, ImageContentType, Message,
-        StopReason, Tool, ToolResultMessage, ToolResultRole, UserMessage,
+        AssistantMessage, AssistantMessageEvent, ImageContent, ImageContentType, InputModality,
+        Message, StopReason, Tool, ToolResultMessage, ToolResultRole, UserMessage,
     };
     use std::time::Duration;
 
