@@ -712,6 +712,14 @@ mod tests {
             assert!(status.success(), "git {args:?}");
         };
         run(&["init", "--quiet", "-b", "main"]);
+        // Identity lives in the repo config, not in the ambient environment:
+        // `finish()` shells out to plain `git merge`/`git commit`, so a CI
+        // runner without a `user.email` would fail where a developer machine
+        // succeeds. Signing is off for the same reason (a runner may carry a
+        // `commit.gpgsign` default with no key).
+        run(&["config", "user.name", "t"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "commit.gpgsign", "false"]);
         std::fs::write(dir.join("a.txt"), "one\n").unwrap();
         run(&["add", "."]);
         run(&["commit", "--quiet", "-m", "one"]);
