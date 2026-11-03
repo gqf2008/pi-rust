@@ -48,11 +48,11 @@ pub struct CronToolInput {
     pub name: Option<String>,
     /// Five-field cron expression, or `@hourly` / `@daily` / `@weekly` / `@monthly`.
     pub schedule: Option<String>,
-    /// Text injected as a user message when the job fires. Mutually exclusive
-    /// with `command`.
+    /// Text injected as a user message when the job fires. Combine it with
+    /// `command` to say what the output means for you.
     pub prompt: Option<String>,
     /// Shell command run in the session working directory when the job fires;
-    /// its merged output is injected. Mutually exclusive with `prompt`.
+    /// its merged output is injected after `prompt`, when both are set.
     pub command: Option<String>,
     /// Command timeout in seconds (default 60, max 600).
     #[serde(alias = "timeout_secs")]
@@ -230,20 +230,13 @@ fn build_entry(input: &CronToolInput) -> Result<Value, AgentError> {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let (prompt, command) = match (prompt, command) {
-        (Some(_), Some(_)) => {
-            return Err(AgentError::Validation(
-                "`prompt` and `command` are mutually exclusive".into(),
-            ))
-        }
-        (None, None) => {
-            return Err(AgentError::Validation(
-                "one of `prompt` or `command` is required".into(),
-            ))
-        }
-        (Some(prompt), None) => (Some(prompt), None),
-        (None, Some(command)) => (None, Some(command)),
-    };
+    // Both are allowed: `prompt` says what to do with the output, `command`
+    // produces it. At least one is required.
+    if prompt.is_none() && command.is_none() {
+        return Err(AgentError::Validation(
+            "one of `prompt` or `command` is required (they can be combined)".into(),
+        ));
+    }
 
     let mut entry = serde_json::Map::new();
     entry.insert("name".into(), json!(name));
@@ -310,9 +303,11 @@ fn describe(path: &std::path::Path, file: &ScheduleFile) -> String {
                         .next_due(now)
                         .map(|when| when.format("%Y-%m-%d %H:%M").to_string())
                         .unwrap_or_else(|| "never".to_string());
-                    let kind = match &job.action {
-                        crate::cron::JobAction::Prompt(_) => "prompt",
-                        crate::cron::JobAction::Command(_) => "command",
+                    let kind = match (&job.action.prompt, &job.action.command) {
+                        (Some(_), Some(_)) => "prompt+command",
+                        (Some(_), None) => "prompt",
+                        (None, Some(_)) => "command",
+                        (None, None) => "empty",
                     };
                     out.push_str(&format!(
                         "\n- {name} [{}] {spec} ({kind}) next {next}",
@@ -359,9 +354,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_prompt_and_command_together() {
-        let error = build_entry(&input(Some("x"), Some("true"), "@hourly")).unwrap_err();
-        assert!(error.to_string().contains("mutually exclusive"), "{error}");
+    fn accepts_prompt_and_command_together() {
+        let entry = build_entry(&input(Some("act on it"), Some("true"), "@hourly")).unwrap();
+        assert_eq!(entry["prompt"], serde_json::json!("act on it"));
+        assert_eq!(entry["command"], serde_json::json!("true"));
     }
 
     #[test]

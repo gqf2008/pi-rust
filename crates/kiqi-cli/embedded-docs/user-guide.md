@@ -410,8 +410,10 @@ ki --tools read,bash,edit,write,docs -p "检查并修改项目文件"
 ### 会话内定时与变化探针（`cron` / `watch`）
 
 `cron` 管理 `<项目>/.ki/cron.json`：`list` / `add` / `remove`。任务按 5 字段 cron（本地时间，
-也接受 `@hourly`/`@daily`/`@weekly`/`@monthly`）到点触发——`prompt` 原文作为 user 消息注入，
-`command` 在会话工作目录执行后把合并输出注入。错过的分钟直接跳过，不补跑。
+也接受 `@hourly`/`@daily`/`@weekly`/`@monthly`）到点触发。`prompt` 与 `command` 至少给一个，
+**也可以同时给**：只有 `prompt` 时原文作为 user 消息注入；只有 `command` 时在会话工作目录执行、
+注入合并输出；两者都有时先注入 `prompt`（说明看到这份输出该干什么），再附输出。错过的分钟
+直接跳过，不补跑。
 
 `watch` 管理 `<项目>/.ki/watch.json`：每条按 `intervalSecs`（默认 60，范围 5–3600）跑一次
 `command`，输出（退出码 + 合并后的 stdout/stderr）与上一次不同时才把 `prompt` 和新输出注入；

@@ -62,12 +62,23 @@ pub fn config_path(cwd: &Path) -> PathBuf {
 }
 
 /// 任务被触发后要做的事。
+///
+/// `prompt` 与 `command` 可以各自单独出现，也可以同时出现：只有命令时注入的是
+/// 命令输出；两者都有时，先注入 `prompt`（它说明「看到这份输出该干什么」），再附
+/// 输出。解析器保证至少有一个。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum JobAction {
+pub struct JobAction {
     /// 原文作为一条 user 消息注入。
-    Prompt(String),
+    pub prompt: Option<String>,
     /// 在会话工作目录执行；stdout 与 stderr 合并后交给 agent。
-    Command(String),
+    pub command: Option<String>,
+}
+
+impl JobAction {
+    /// 解析器保证至少有一项；这里的 `false` 只可能来自手工构造。
+    fn is_empty(&self) -> bool {
+        self.prompt.is_none() && self.command.is_none()
+    }
 }
 
 /// 一个合法任务。调度器只负责判定到期并把它交给 [`CronSink`]。
@@ -280,31 +291,21 @@ fn parse_job(
     let schedule = Schedule::parse(schedule_spec)
         .map_err(|err| ConfigError::job(&name, "schedule", err.to_string()))?;
 
-    let action = match (object.get("prompt"), object.get("command")) {
-        (Some(_), Some(_)) => {
-            return Err(ConfigError::job(
-                &name,
-                "prompt",
-                "`prompt` 与 `command` 只能有其一",
-            ));
-        }
-        (None, None) => {
-            return Err(ConfigError::job(
-                &name,
-                "prompt",
-                "必须提供 `prompt` 或 `command`",
-            ));
-        }
-        (Some(Value::String(prompt)), None) => JobAction::Prompt(prompt.clone()),
-        (Some(other), None) => {
+    let prompt = match object.get("prompt") {
+        None => None,
+        Some(Value::String(prompt)) => Some(prompt.clone()),
+        Some(other) => {
             return Err(ConfigError::job(
                 &name,
                 "prompt",
                 format!("必须是字符串，实际是{}", json_type(other)),
             ));
         }
-        (None, Some(Value::String(command))) => JobAction::Command(command.clone()),
-        (None, Some(other)) => {
+    };
+    let command = match object.get("command") {
+        None => None,
+        Some(Value::String(command)) => Some(command.clone()),
+        Some(other) => {
             return Err(ConfigError::job(
                 &name,
                 "command",
@@ -312,6 +313,14 @@ fn parse_job(
             ));
         }
     };
+    let action = JobAction { prompt, command };
+    if action.is_empty() {
+        return Err(ConfigError::job(
+            &name,
+            "prompt",
+            "必须提供 `prompt` 或 `command`（两者可以同时提供）",
+        ));
+    }
 
     let enabled = match object.get("enabled") {
         None => true,
@@ -925,6 +934,14 @@ pub fn command_injection_text(name: &str, output: &CommandOutput) -> String {
     format!("⏰ cron:{name} 命令输出（退出码 {code}）\n\n{body}")
 }
 
+/// 带任务说明的命令注入文本：先给「看到这份输出该干什么」，再给输出。
+///
+/// 只有 `command` 的任务注入的是纯输出；两者都有的任务用这个，让叫醒时既带着
+/// 目的也带着数据。
+pub fn command_prompt_injection_text(name: &str, prompt: &str, output: &CommandOutput) -> String {
+    format!("{prompt}\n\n{}", command_injection_text(name, output))
+}
+
 /// 平台 shell：Unix `sh -c`，Windows `cmd /C`（不弹控制台窗口）。
 #[cfg(unix)]
 fn shell_command(command: &str) -> Command {
@@ -1304,7 +1321,7 @@ impl SessionCronSink {
 
     /// 启动一条命令任务。`fire` 本身不阻塞调度线程：命令在自己的线程里跑完
     /// 再把输出注入，因此同一分钟里排队的其他任务不会被一条慢命令拖住。
-    fn fire_command(&self, name: &str, command: &str, timeout_secs: u64) {
+    fn fire_command(&self, name: &str, command: &str, timeout_secs: u64, prompt: Option<&str>) {
         self.workers.reap_finished();
         {
             let mut running = self.workers.running.lock().unwrap();
@@ -1320,6 +1337,7 @@ impl SessionCronSink {
         let cwd = self.cwd.clone();
         let name = name.to_string();
         let command = command.to_string();
+        let prompt = prompt.map(str::to_string);
         let inject = Arc::clone(&self.inject);
         let log = Arc::clone(&self.log);
         let workers = Arc::clone(&self.workers);
@@ -1351,7 +1369,12 @@ impl SessionCronSink {
                                 "cron: 任务 `{worker_name}` 的命令超时（{timeout_secs}s），已终止"
                             ));
                         }
-                        let text = command_injection_text(&worker_name, &output);
+                        let text = match &prompt {
+                            Some(prompt) => {
+                                command_prompt_injection_text(&worker_name, prompt, &output)
+                            }
+                            None => command_injection_text(&worker_name, &output),
+                        };
                         if let Err(error) = inject.inject(text) {
                             log(&format!("cron: 注入失败：{error}"));
                         }
@@ -1388,13 +1411,18 @@ impl CronSink for SessionCronSink {
             ));
             return;
         }
-        match &job.action {
-            JobAction::Prompt(prompt) => {
+        match (&job.action.prompt, &job.action.command) {
+            (Some(prompt), None) => {
                 self.deliver(prompt_injection_text(&job.name, prompt));
             }
-            JobAction::Command(command) => {
-                self.fire_command(&job.name, command, job.timeout_secs);
+            (None, Some(command)) => {
+                self.fire_command(&job.name, command, job.timeout_secs, None);
             }
+            (Some(prompt), Some(command)) => {
+                self.fire_command(&job.name, command, job.timeout_secs, Some(prompt));
+            }
+            // 解析器保证至少有一项；手工构造的空 action 不产生注入。
+            (None, None) => {}
         }
     }
 
@@ -1645,13 +1673,19 @@ mod tests {
         assert_eq!(load.jobs.len(), 2);
         assert_eq!(
             load.jobs[0].action,
-            JobAction::Prompt("总结今天的变更".to_string())
+            JobAction {
+                prompt: Some("总结今天的变更".to_string()),
+                command: None
+            }
         );
         assert!(load.jobs[0].enabled);
         assert_eq!(load.jobs[0].timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(
             load.jobs[1].action,
-            JobAction::Command("cargo check".to_string())
+            JobAction {
+                prompt: None,
+                command: Some("cargo check".to_string())
+            }
         );
         assert_eq!(load.jobs[1].timeout_secs, 120);
 
@@ -1672,14 +1706,12 @@ mod tests {
             {"name": "good", "schedule": "@hourly", "prompt": "duplicate"}
         ]"#;
         let load = parse_config(raw);
-        assert_eq!(load.jobs.len(), 1, "{:?}", load.jobs);
+        // `both` is a legal job now: prompt and command may be combined.
+        assert_eq!(load.jobs.len(), 2, "{:?}", load.jobs);
         assert_eq!(load.jobs[0].name, "good");
-        assert_eq!(load.errors.len(), 5, "{:?}", load.errors);
+        assert_eq!(load.errors.len(), 4, "{:?}", load.errors);
 
         let rendered: Vec<String> = load.errors.iter().map(ToString::to_string).collect();
-        assert!(rendered
-            .iter()
-            .any(|e| e.contains("both") && e.contains("prompt")));
         assert!(rendered
             .iter()
             .any(|e| e.contains("neither") && e.contains("prompt")));
@@ -1773,7 +1805,13 @@ mod tests {
         let next_minute = now + ChronoDuration::minutes(1);
         assert_eq!(core.tick(next_minute).len(), 1);
         let fired = core.tick(now + ChronoDuration::minutes(2));
-        assert_eq!(fired[0].action, JobAction::Prompt("ping".to_string()));
+        assert_eq!(
+            fired[0].action,
+            JobAction {
+                prompt: Some("ping".to_string()),
+                command: None
+            }
+        );
     }
 
     #[test]
@@ -2029,7 +2067,10 @@ mod tests {
 
         sink.fire(&synthetic_job(
             "digest",
-            JobAction::Prompt("总结今天的变更".to_string()),
+            JobAction {
+                prompt: Some("总结今天的变更".to_string()),
+                command: None,
+            },
             60,
         ));
 
@@ -2055,7 +2096,10 @@ mod tests {
 
         sink.fire(&synthetic_job(
             "build",
-            JobAction::Command("printf 'out'; printf 'err' >&2".to_string()),
+            JobAction {
+                prompt: None,
+                command: Some("printf 'out'; printf 'err' >&2".to_string()),
+            },
             10,
         ));
 
@@ -2081,7 +2125,10 @@ mod tests {
         );
         let job = synthetic_job(
             "slow",
-            JobAction::Command("sleep 0.4; printf done".to_string()),
+            JobAction {
+                prompt: None,
+                command: Some("sleep 0.4; printf done".to_string()),
+            },
             10,
         );
 
@@ -2116,7 +2163,10 @@ mod tests {
 
         sink.fire(&synthetic_job(
             "digest",
-            JobAction::Prompt("x".to_string()),
+            JobAction {
+                prompt: Some("x".to_string()),
+                command: None,
+            },
             60,
         ));
 
@@ -2520,5 +2570,31 @@ trusted"
             1,
             "调度线程必须已经退出，不再持有 sink"
         );
+    }
+
+    #[test]
+    fn a_job_can_carry_both_prompt_and_command() {
+        let load = parse_config(
+            r#"[{"name":"a","schedule":"@hourly","prompt":"act","command":"printf x"}]"#,
+        );
+        assert!(load.is_ok(), "{:?}", load.errors);
+        assert_eq!(load.jobs[0].action.prompt.as_deref(), Some("act"));
+        assert_eq!(load.jobs[0].action.command.as_deref(), Some("printf x"));
+    }
+
+    #[test]
+    fn combined_injection_leads_with_the_prompt() {
+        let output = CommandOutput {
+            exit_code: Some(0),
+            text: "x".to_string(),
+            truncated: false,
+            timed_out: false,
+        };
+        let text = command_prompt_injection_text("a", "看到 x 就处理", &output);
+        assert!(
+            text.starts_with("看到 x 就处理\n\n⏰ cron:a 命令输出"),
+            "{text}"
+        );
+        assert!(text.contains("x"));
     }
 }
