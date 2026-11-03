@@ -684,12 +684,14 @@ mod tests {
             .await
             .unwrap()
             .unwrap_err();
+        // The wording around the timeout belongs to reqwest and depends on how
+        // late the deadline lands (headers vs body), so only the fact that it
+        // says "timed out" is ours to promise.
         let message = error.to_string();
         assert!(
-            message.contains("error decoding response body"),
-            "{message}"
+            message.to_lowercase().contains("timed out"),
+            "a body timeout must say so: {message}"
         );
-        assert!(message.to_lowercase().contains("timed out"), "{message}");
         server.abort();
     }
 }
