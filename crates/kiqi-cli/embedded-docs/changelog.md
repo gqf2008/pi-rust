@@ -8,12 +8,6 @@
   但它的默认退避从 1 秒开始**成倍增长且没有上限**：服务器重启一分钟，下一次尝试就在几小时
   之后，每次失败再翻一倍。这期间会话看起来一切正常（ping 和工具调用走 POST 照样成功），
   只是通知静悄悄地没了。现在退避封顶 30 秒。
-
-
-## [0.5.2] - 2026-11-03
-
-### Fixed
-
 - **MCP 通知不会再「到了但看不见」。** 一条通知在回合进行中到达时，走的是 steer
   队列，而 steer 只在步与步之间被消费：回合先结束，通知就永远躺在队列里——磁盘上有记
   录，屏幕上一片空白（用户原话：「控制台上啥也没有」）。现在通知直接写进会话记录，
@@ -21,6 +15,14 @@
   轮而不是干等。还有第三层：会话记录本身不会自己画出来（自定义消息只在 agent loop 发
   `message_start` 时渲染），所以「跳过唤醒」和「回合进行中」两条路径现在都会额外画一行
   通知，文本与记录同源。
+- **空闲会话的订阅会自愈。** MCP 订阅属于会话；rmcp 重启后新会话没有订阅，而 ki 只在
+  `ensure_live`（下一次请求）里恢复订阅，空闲会话因此一直收不到通知。空闲看门狗现在每
+  30 秒恢复一次订阅。
+
+
+## [0.5.2] - 2026-11-03
+
+### Fixed
 
 - `/goal resume` 现在真的会开工。以前只有「目标 key 变了」才会自动起一轮，而 resume
   一个本来就 active 的目标（典型场景：按过 Esc，自动续跑被静音）不改 key —— 命令回了
@@ -2123,7 +2125,11 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 Early crates.io publications while the workspace layout, provider layer and
 agent loop were being established. See `git log` for details.
 
-[Unreleased]: https://github.com/gqf2008/pi-rust/compare/v0.4.7...HEAD
+[Unreleased]: https://github.com/gqf2008/pi-rust/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/gqf2008/pi-rust/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/gqf2008/pi-rust/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/gqf2008/pi-rust/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/gqf2008/pi-rust/compare/v0.4.7...v0.5.0
 [0.3.3]: https://github.com/bigfish1913/pi-rust/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/bigfish1913/pi-rust/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/bigfish1913/pi-rust/compare/v0.3.0...v0.3.1
