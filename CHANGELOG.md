@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- `/goal resume` 现在真的会开工。以前只有「目标 key 变了」才会自动起一轮，而 resume
+  一个本来就 active 的目标（典型场景：按过 Esc，自动续跑被静音）不改 key —— 命令回了
+  「resumed」，会话却一直空转。`/goal resume` / `/goal start` 现在被当作明确的工作
+  请求：解除 Esc 的静音并立刻起一轮。预算用尽时不再是静默失败，日志会写明用满的额度
+  和 `/goal limit` 的补救方式。
+
 ### Added
 
 - **派出去的活在自己的 worktree 里做。** 两个子代理在同一个目录里改同一批文件，写在后

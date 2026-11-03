@@ -45,6 +45,22 @@ pub(crate) struct ActiveGoal {
 /// `show`/`list`/`update` leave the key untouched and must stay passive, while
 /// `start` (new key) and `resume` (no active goal before) begin working
 /// immediately — the user asking for a goal *is* the request to execute it.
+/// Whether `/goal <args>` is an explicit "keep working" request.
+///
+/// [`goal_became_active`] only fires when the goal *key* changes, so resuming a
+/// goal that is already active — the common case after an Esc muted
+/// continuation — looked like a no-op and the session sat idle. A `/goal
+/// resume` (or `start`) that leaves a goal active is user intent either way.
+pub(crate) fn explicit_continuation(command: &str, arguments: &str) -> bool {
+    if command.trim_start_matches('/') != "goal" {
+        return false;
+    }
+    matches!(
+        arguments.split_whitespace().next(),
+        Some("resume" | "start")
+    )
+}
+
 pub(crate) fn goal_became_active(before: Option<&str>, after: Option<&str>) -> bool {
     after.is_some() && after != before
 }
@@ -54,6 +70,21 @@ impl ActiveGoal {
     /// resets the host's continuation counter.
     pub(crate) fn key(&self) -> String {
         format!("{}@{}", self.title, self.started_at)
+    }
+
+    /// What is left of the budget, for the "why did nothing run" diagnostic.
+    pub(crate) fn budget_snapshot(&self) -> String {
+        let turns = match self.max_turns {
+            Some(max) => format!("{} / {} turns", self.turns_used, max),
+            None => format!("{} turns", self.turns_used),
+        };
+        match self.deadline_ms {
+            Some(deadline) => format!(
+                "{turns}, deadline {}s",
+                (deadline - unix_millis()).div_euclid(1000)
+            ),
+            None => turns,
+        }
     }
 
     /// Whether the goal still has budget left. The extension enforces the same
@@ -181,6 +212,19 @@ mod tests {
     fn write_goal(dir: &Path, value: serde_json::Value) {
         std::fs::create_dir_all(dir.join(".ki")).unwrap();
         std::fs::write(dir.join(GOAL_FILE), value.to_string()).unwrap();
+    }
+
+    #[test]
+    fn an_explicit_goal_resume_counts_even_when_the_key_is_unchanged() {
+        assert!(explicit_continuation("goal", "resume"));
+        assert!(explicit_continuation("/goal", "start ship the board"));
+        assert!(
+            !explicit_continuation("goal", "show"),
+            "bookkeeping is passive"
+        );
+        assert!(!explicit_continuation("goal", "pause"));
+        assert!(!explicit_continuation("goal", ""));
+        assert!(!explicit_continuation("plan", "resume"), "other commands");
     }
 
     #[test]

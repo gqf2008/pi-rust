@@ -175,9 +175,7 @@ ANTHROPIC_AUTH_TOKEN=token
 --append-system-prompt <text>  追加系统提示词（可重复）
 --debug-system-prompt   把解析后的系统提示词各段打印到 stderr
 --verbose               显示启动警告（如被忽略的 flag）
---server [--port <n>] [--bind <ip>]
-                        无头服务端（启动时打印 token）
---connect <host:port>   远程客户端 TUI（零本地资源）
+--connect <host:port>   远程客户端 TUI（零本地资源；服务端不在本仓）
 --token <token>         远程认证 token（也支持环境变量 KI_SERVER_TOKEN）
 ```
 
@@ -360,12 +358,13 @@ Windows 上两个已知坑（`/mcp-doctor` 会提示）：stdio 服务器**不�
 `AGENT_ID_ENV`）——服务器需要的其它变量（`APPDATA`、`LOCALAPPDATA`、`PATHEXT`…）必须写进它
 的 `env`。
 
-### 远程模式（`--server` / `--connect`）
+### 远程模式（`--connect`）
 
-把 agent 跑在无头服务端，另一个进程用 TUI 远程驱动。客户端**无任何本地 agent 资源**。
+把 agent 跑在服务端，另一个进程用 TUI 远程驱动。客户端**无任何本地 agent 资源**。
+**服务端不在本仓**：`ki` 只提供客户端，`--server`/`--port`/`--bind` 这组开关属于服务端
+实现（另一处代码），本仓里连解析都没有——所以 `ki --server` 不会启动任何东西。
 
 ```bash
-ki --server --port 9899          # 服务端：启动时打印 token
 ki --connect 127.0.0.1:9899 --token <token>   # 客户端
 
 # 或通过环境变量传递 token

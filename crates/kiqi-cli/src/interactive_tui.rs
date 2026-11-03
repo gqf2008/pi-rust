@@ -4416,13 +4416,21 @@ pub async fn interactive_tui(
                 // its first run right here; bookkeeping commands (`show`,
                 // `list`, `update`) leave the key unchanged and stay passive.
                 let goal_before = outcome.goal_before.clone();
+                // `/goal resume` on a goal that is *already* active changes no
+                // key, so "a new goal appeared" is not the only way to ask for
+                // work: saying resume is itself the request, and without this
+                // it silently did nothing — including leaving the abort mute
+                // (Esc) in place, which suppressed exactly what it was asked to
+                // restart.
+                let explicit_resume =
+                    crate::goal_drive::explicit_continuation(&outcome.name, &outcome.arguments);
                 handle_command_outcome(&ctx, outcome);
                 let goal_after = crate::goal_drive::active_goal(&cwd).map(|goal| goal.key());
-                if crate::goal_drive::goal_became_active(
+                let asked_to_work = crate::goal_drive::goal_became_active(
                     goal_before.as_deref(),
                     goal_after.as_deref(),
-                ) && *state.status.lock().unwrap() == RunStatus::Idle
-                {
+                ) || (explicit_resume && goal_after.is_some());
+                if asked_to_work && *state.status.lock().unwrap() == RunStatus::Idle {
                     // An explicit `/goal` is user intent, so it also lifts the
                     // abort mute (`record_abort` otherwise suppresses goal
                     // continuation until the user speaks) and gives the new

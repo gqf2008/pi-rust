@@ -2554,8 +2554,6 @@ mod tests {
     #[cfg(feature = "extension-kiqi-todo")]
     #[tokio::test]
     async fn a_compiled_extension_tool_runs_from_the_harness_tool_list() {
-        use kiqi_agent::agent_tool::AgentTool;
-
         let hosts = compiled_extension_hosts();
         let caps = OwnedCaps {
             session: None,
@@ -2888,7 +2886,6 @@ mod tests {
             .unwrap();
         let fake = std::sync::Arc::new(FakeHost::default());
         let caps_host = ActionCaps::new(fake.clone(), runtime.handle().clone());
-        let silent = Silent;
         // `inject` is granted deliberately: kiqi-goal cannot advance without it,
         // which is the capability gate doing its job.
         //
@@ -2897,15 +2894,6 @@ mod tests {
         // in a child process whose cwd is a tempdir, otherwise the extension writes
         // `.ki/goals.json` into this checkout (`goals_path()` uses the process
         // cwd).
-        let caps = HostCaps {
-            session: Some(&caps_host),
-            control: Some(&caps_host),
-            inject: Some(&caps_host),
-            ui: None,
-            log: &silent,
-            cancel: None,
-        };
-
         // The adapter really crosses the spawn/park seam.
         assert_eq!(
             caps_host.active_tools(),
@@ -4786,7 +4774,6 @@ mod tests {
     }
 
     async fn tool_text(tool: &kiqi_harness::types::HarnessTool) -> String {
-        use kiqi_agent::agent_tool::AgentTool;
         let result = tool
             .tool
             .execute(
@@ -4875,7 +4862,6 @@ mod tests {
     /// the rebuilt adapters get carry the very mailbox the TUI is attached to.
     #[tokio::test]
     async fn reload_caps_carry_the_session_ui_mailboxes() {
-        use kiqi_host::UiApi;
         let ui_dialog = kiqi_host::UiDialogMailbox::new();
         ui_dialog.attach();
         let caps = reload_caps(

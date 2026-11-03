@@ -29,6 +29,10 @@ pub(super) struct ExtensionCommandOutcome {
     /// the file already holds the new goal, which is why an explicit `/goal` sat
     /// idle until the user typed something.
     pub(super) goal_before: Option<String>,
+    /// The arguments the command was invoked with, so the caller can tell
+    /// "`/goal resume`" (an explicit request to keep working) from "`/goal
+    /// show`" (bookkeeping that must stay passive).
+    pub(super) arguments: String,
 }
 
 /// The pure routing decision for a command result.
@@ -136,6 +140,7 @@ fn spawn_call(
                 name: thread_name,
                 result,
                 goal_before,
+                arguments,
             }));
         });
     if let Err(error) = spawned {

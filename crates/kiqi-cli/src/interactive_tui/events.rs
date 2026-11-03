@@ -375,6 +375,12 @@ pub(super) async fn maybe_continue_goal(
         }
     }
     if !goal.can_continue(crate::goal_drive::unix_millis()) {
+        // A spent budget used to end here silently: `/goal resume` printed
+        // "resumed" and nothing ever ran. Say why, and say how to lift it.
+        super::diagnostic_log(&format!(
+            "[ki goal] not auto-continuing: budget spent ({}) — /goal limit to raise it",
+            goal.budget_snapshot()
+        ));
         return;
     }
     let unbounded = goal.max_turns.is_none() && goal.deadline_ms.is_none();
