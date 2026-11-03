@@ -97,6 +97,6 @@ task publish RELEASE_BUMP=none -- --from channels
 ## The channel sources of truth
 
 `packaging/{homebrew,scoop,winget}` are the originals; the tap/bucket repos are
-copies. `scripts/refresh-channels.sh` rewrites them from the **real** release
-`.sha256` sidecars — never a template — so a manifest always points at a real
-asset carrying its real checksum.
+copies. `scripts/refresh-channels.sh` rewrites them from the GitHub API's asset
+digests (falling back to the `.sha256` sidecars) — never a template — so a
+manifest always points at a real asset carrying its real checksum.

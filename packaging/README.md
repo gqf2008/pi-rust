@@ -16,10 +16,14 @@ taps, or winget package are published; the catalogue, README and
 `docs-install-path.sh` state that, and the site no longer promises
 `cargo install`/`ki install` for unpublished packages.
 
-The manifests and scripts already point at `gqf2008/pi-rust` v0.4.7 with real
-digests. Publishing is a later owner decision: create the `gqf2008` taps, run
-`scripts/push-taps.sh`, submit a `gqf2008.ki` winget manifest, and publish the
-crates; only then should the catalogue claims change.
+**Superseded:** the `gqf2008` taps were created on 2026-10-27 and now carry the
+current release; winget submissions stay open PRs until a moderator merges them
+(see Status).
+
+The manifests and scripts already point at `gqf2008/pi-rust` releases with real
+digests (currently v0.5.3). Publishing is a later owner decision: create the
+`gqf2008` taps, run `scripts/push-taps.sh`, submit a `gqf2008.ki` winget
+manifest, and publish the crates; only then should the catalogue claims change.
 
 ## Status
 
@@ -28,9 +32,9 @@ crates; only then should the catalogue claims change.
 | `cargo install kiqi-cli` | crates.io | **not published** | every crate is `publish = false`; use `install.sh` or a source build |
 | `curl … install.sh \| sh` | [`scripts/install.sh`](../scripts/install.sh) | **live** | none |
 | `cargo binstall kiqi-cli` | [`crates/kiqi-cli/Cargo.toml`](../crates/kiqi-cli/Cargo.toml) | **not available** | takes effect only after the crates are published (`publish = false` today) |
-| Homebrew | `gqf2008/homebrew-tap` | **not published** | create the tap, then `scripts/push-taps.sh`; `bigfish1913/homebrew-tap` serves `rpi`, not `ki` |
-| Scoop | `gqf2008/scoop-bucket` | **not published** | create the bucket, then `scripts/push-taps.sh`; `bigfish1913/scoop-bucket` serves `rpi`, not `ki` |
-| winget | [open at `microsoft/winget-pkgs#441442`](https://github.com/microsoft/winget-pkgs/pull/441442) | **not published** | the open PRs are for the unrelated fork's `bigfish1913.rpi` package; no `gqf2008.ki` submission exists |
+| Homebrew | `gqf2008/homebrew-tap` | **published (0.5.3)** | `brew tap gqf2008/tap && brew install ki`; `bigfish1913/homebrew-tap` serves `rpi`, not `ki` |
+| Scoop | `gqf2008/scoop-bucket` | **published (0.5.3)** | `scoop bucket add gqf2008 https://github.com/gqf2008/scoop-bucket && scoop install ki`; `bigfish1913/scoop-bucket` serves `rpi`, not `ki` |
+| winget | [open at `microsoft/winget-pkgs#469391`](https://github.com/microsoft/winget-pkgs/pull/469391) | **submitted, pending moderator merge** | PR #469391 adds `gqf2008.ki` 0.5.3 under `manifests/g/…`; #441442 is the unrelated `bigfish1913.rpi` package |
 
 The files in this directory are the source of truth for the two taps; the tap
 repos are copies. `scripts/push-taps.sh` refuses to run unless the target
@@ -58,9 +62,9 @@ Add `-- --dry-run` to print the plan without executing anything.
 `.github/workflows/release-binaries.yml` publishes one archive per target, **with
 the binary at the archive root** and a `.sha256` beside every archive.
 
-The table below records the original four targets and the digests that v0.3.2
-actually published — asset names changed after it (`kiqi-v…` → `ki-v…`, and the
-version now comes without its `v` prefix; see `refresh-channels.sh`). The workflow
+The table below records the four targets and the digests the current release
+actually published — asset names changed after v0.3.2 (`kiqi-v…` → `ki-v…`, and
+the version now comes without its `v` prefix; see `refresh-channels.sh`). The workflow
 also builds Intel macOS as `ki-v<version>-x86_64-apple-darwin.tar.gz`, with a
 matching `.sha256`; this asset is available in releases whose tag includes that
 target.
@@ -84,12 +88,14 @@ Two consequences worth knowing:
 ## Refresh procedure for a new release
 
 `curl` against `github.com/.../releases/download/...` returns nothing from some
-networks (this machine included), so use `gh`, which goes through the API:
+networks (this machine included), and `gh release download` follows the same
+release-asset host. Read the digests from the API instead, which is what
+`scripts/refresh-channels.sh` does:
 
 ```bash
 TAG=v0.5.3                      # the tag being packaged
-gh release download "$TAG" --pattern "*.sha256" --dir /tmp/kiqi-sha --clobber
-cat /tmp/kiqi-sha/*.sha256
+gh api "repos/gqf2008/pi-rust/releases/tags/$TAG" \
+  --jq '.assets[] | .name + " " + (.digest // "NO_DIGEST")'
 ```
 
 Then update, in this order:
@@ -112,11 +118,10 @@ installer entry. That is what the newest manifests merged into
 
 ### Submitting to winget
 
-Done for 0.3.3 — [PR #441442](https://github.com/microsoft/winget-pkgs/pull/441442)
-(the 0.3.2 submission, #441408, was closed as superseded rather than left open:
-two open PRs for one package is duplicate work for a moderator, and the CLA
-signature carries over). For the next version, repeat it without cloning the
-866 MB monorepo; every step below is a server-side API call:
+Submitted for 0.5.3 — [PR #469391](https://github.com/microsoft/winget-pkgs/pull/469391)
+(an earlier 0.4.7 submission, #467025, was closed). For the next version, repeat
+it without cloning the 866 MB monorepo; every step below is a server-side API
+call:
 
 ```bash
 V=0.3.4
@@ -125,7 +130,7 @@ gh repo fork microsoft/winget-pkgs --clone=false       # 2. server-side fork, no
 UP=$(gh api repos/microsoft/winget-pkgs/commits/master --jq .sha)
 gh api --method POST repos/<you>/winget-pkgs/git/refs \
   -f ref="refs/heads/kiqi-$V" -f sha="$UP"               # 3. branch off upstream master
-# 4. PUT each file to manifests/b/gqf2008/ki/$V/ via the contents API.
+# 4. PUT each file to manifests/g/gqf2008/ki/$V/ via the contents API.
 #    Use `--input` with a JSON body: the README-sized payloads blow past the
 #    ~32 KB command-line limit if you pass them with -f content=.
 gh pr create --repo microsoft/winget-pkgs --base master --head <you>:kiqi-$V \
@@ -147,21 +152,20 @@ as part of work for an employer. If you are, use `agree company="…"`.
 Verified on this machine:
 
 - `winget validate packaging/winget` validated the old `0.3.21` manifests. The
-  `gqf2008.ki` / `0.4.1` manifests were edited in this batch and have not been
-  re-validated here (no `winget` on this machine).
-- The current v0.4.7 URLs and hashes were read from the GitHub API
-  (`releases/tags/v0.4.7`, `assets[].digest`), not copied from a template. The
-  `v0.3.2` table below is historical and is not what the manifests carry now.
+  current `gqf2008.ki` manifests have not been re-validated here (no `winget`
+  on this machine).
+- The current v0.5.3 URLs and hashes were read from the GitHub API
+  (`releases/tags/v0.5.3`, `assets[].digest`), not copied from a template.
 - `scoop/ki.json` parses, and its `bin` (`ki.exe`) matches the zip's root
   entry produced by the workflow's `7z a -tzip … .` step.
-- The v0.4.7 digests recorded in `scoop/ki.json` and `homebrew/ki.rb` match
-  the GitHub API's `assets[].digest` (Windows zip `1edc47c0…e273`, macOS arm64
-  tarball `f7f894fa…ceec`), and the API's asset list confirms the filenames the
+- The v0.5.3 digests recorded in `scoop/ki.json` and `homebrew/ki.rb` match
+  the GitHub API's `assets[].digest` (Windows zip `48b253f2…5c49`, macOS arm64
+  tarball `beb7d34d…4942`), and the API's asset list confirms the filenames the
   manifests build. A downloaded archive was not re-hashed in this pass; older
   releases had `ki.exe` at the zip root, which is what `bin` claims.
-- The `gqf2008/*` taps do **not** exist yet, so `brew install ki` and
-  `scoop install ki` remain unavailable; `scripts/push-taps.sh` preflights both
-  repos and refuses to push elsewhere.
+- The `gqf2008/*` taps exist and carry the current release; `brew install ki` /
+  `scoop install ki` were not exercised here. `scripts/push-taps.sh` preflights
+  both repos and refuses to push elsewhere.
 
 **Not** verified here, and worth one manual pass before relying on them:
 
