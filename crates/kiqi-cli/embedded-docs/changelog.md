@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.5.4] - 2026-11-04
+
 ### Fixed
 
 - **排队消息不再把 dock 撑爆。** 待发送区（`Steering:` / `Follow-up:`）以前把整条消息
