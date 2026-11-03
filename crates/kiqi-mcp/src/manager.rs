@@ -481,7 +481,8 @@ pub const RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration::from_s
 
 /// The reconnect policy for a server's notification stream: retry forever, at
 /// most [`RECONNECT_MAX_DELAY`] apart.
-fn reconnect_policy() -> std::sync::Arc<rmcp::transport::common::client_side_sse::ExponentialBackoff> {
+fn reconnect_policy() -> std::sync::Arc<rmcp::transport::common::client_side_sse::ExponentialBackoff>
+{
     // The type is `#[non_exhaustive]`, so start from its default (retry forever,
     // doubling from one second) and only put a ceiling on the delay.
     let mut policy = rmcp::transport::common::client_side_sse::ExponentialBackoff::default();
@@ -591,6 +592,54 @@ impl ServerHandle {
     ///
     /// `Ok(true)` pinged and answered, `Ok(false)` skipped (recently active or
     /// already retired), `Err` is a reason to retire the connection.
+    /// Restore the per-session subscriptions after rmcp re-initialized the
+    /// session. The rotation flag is normally consumed by the next request
+    /// through [`Self::ensure_live`], but an idle session makes no requests —
+    /// and an idle session is exactly where a subscription that silently went
+    /// away stays unnoticed. Returns a diagnostic when it acted.
+    async fn restore_after_rotation(&self) -> Option<String> {
+        if !self
+            .shared
+            .http_session_rotated
+            .swap(false, Ordering::AcqRel)
+        {
+            return None;
+        }
+        let guard = self.client.lock().await;
+        let Some(client) = guard.as_ref() else {
+            // Retired: the reconnect path restores subscriptions anyway.
+            return None;
+        };
+        let peer = client.peer().clone();
+        drop(guard);
+        match restore_subscriptions(
+            &peer,
+            &self.config.name,
+            &self.shared.subscriptions,
+            &self.mailbox,
+            None,
+            self.config.timeout,
+        )
+        .await
+        {
+            Ok(()) => Some(format!(
+                "{}: restored {} subscription(s) on the new session",
+                self.config.name,
+                self.shared.subscriptions.lock().unwrap().len()
+            )),
+            Err(error) => {
+                // Keep the flag so the next boundary tries again.
+                self.shared
+                    .http_session_rotated
+                    .store(true, Ordering::Release);
+                Some(format!(
+                    "{}: restoring subscriptions failed: {error}",
+                    self.config.name
+                ))
+            }
+        }
+    }
+
     async fn probe_if_idle(&self, idle_for: std::time::Duration) -> Result<bool, String> {
         if self.stopped.load(Ordering::Acquire)
             || self.last_active.lock().unwrap().elapsed() < idle_for
@@ -1981,12 +2030,37 @@ impl McpManager {
         self.renew_subscriptions().await
     }
 
+    /// Set the state rmcp's transparent re-initialization leaves behind, so a
+    /// test can drive the idle-path subscription restore without simulating a
+    /// server restart. Returns false when no such server is connected.
+    #[doc(hidden)]
+    pub fn mark_session_rotated_for_test(&self, server: &str) -> bool {
+        let handles = self.servers.read().unwrap().clone();
+        match handles.iter().find(|handle| handle.server_name() == server) {
+            Some(handle) => {
+                handle
+                    .shared
+                    .http_session_rotated
+                    .store(true, Ordering::Release);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// [`McpManager::probe_idle`] with an explicit idle threshold — tests probe
     /// a connection they just made, which the real threshold would skip.
     pub async fn probe_idle_with(&self, idle_after: std::time::Duration) -> Vec<String> {
         let handles: Vec<Arc<ServerHandle>> = self.servers.read().unwrap().clone();
         let mut retired = Vec::new();
         for handle in handles {
+            // A session that was re-initialized carried its subscriptions away:
+            // restore them before pinging, so a restart is repaired on the next
+            // tick instead of on the next tool call (which an idle session may
+            // never make).
+            if let Some(message) = handle.restore_after_rotation().await {
+                retired.push(message);
+            }
             match handle.probe_if_idle(idle_after).await {
                 Ok(_) => {}
                 Err(error) => {

@@ -1513,6 +1513,40 @@ async fn doctor_never_echoes_escape_sequences_from_server_stderr() {
 
 /// A server that died while the session sat idle is invisible to every other
 /// check: no call means no transport check, and no notification means no wake.
+/// A re-initialized session took its resource subscriptions with it. The next
+/// tool call would restore them, but an idle session makes none — so the idle
+/// tick has to repair the subscription itself, or notices stay dead until the
+/// model happens to call the server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rotated_session_is_resubscribed_without_a_tool_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (manager, issues) =
+        McpManager::start(&[stdio_server("probe", vec![], 10, true)], tmp.path()).await;
+    assert!(issues.is_empty(), "start issues: {issues:?}");
+
+    let quiet = manager.probe_idle_with(Duration::ZERO).await;
+    assert!(
+        quiet.iter().all(|message| !message.contains("restored")),
+        "nothing rotated yet: {quiet:?}"
+    );
+
+    assert!(
+        manager.mark_session_rotated_for_test("probe"),
+        "the server is connected"
+    );
+    let messages = manager.probe_idle_with(Duration::ZERO).await;
+    assert!(
+        messages.iter().any(|message| message.contains("restored")),
+        "the idle tick must restore the subscriptions: {messages:?}"
+    );
+
+    let after = manager.probe_idle_with(Duration::ZERO).await;
+    assert!(
+        after.iter().all(|message| !message.contains("restored")),
+        "the rotation flag is consumed once: {after:?}"
+    );
+}
+
 /// The watchdog pings it and retires the connection, so the next call
 /// reconnects instead of failing forever against a corpse.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
