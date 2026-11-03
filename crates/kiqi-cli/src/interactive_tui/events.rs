@@ -222,11 +222,22 @@ pub(super) fn soft_interrupt_run(
 /// Drain MCP notices at a boundary and, when the policy allows, emit the wake
 /// trigger. Shared by `AgentEnd` and the idle pump so both paths use exactly
 /// one policy and one ordering (record first, then decide).
+/// Draw a notice batch in the transcript. The text comes from the same
+/// [`kiqi_mcp::notice_message`] the record is built from, so the visible row and
+/// the recorded entry cannot say different things.
+pub(super) fn add_notice_row(chat: &Arc<kiqi_tui::Container>, batch: &kiqi_mcp::McpNoticeBatch) {
+    if let kiqi_agent::AgentMessage::Custom(custom) = kiqi_mcp::notice_message(batch) {
+        add_note_message(chat, &super::sessions::custom_message_fallback(&custom));
+    }
+}
+
 pub(super) async fn handle_signal_boundary(
     harness: &AgentHarness,
     mcp: &Arc<kiqi_mcp::McpManager>,
     wake_state: &Arc<crate::signal_host::SignalHost>,
     tx: &mpsc::UnboundedSender<TuiMessage>,
+    chat: &Arc<kiqi_tui::Container>,
+    tui: &Arc<kiqi_tui::TuiAltScreen>,
 ) -> bool {
     let batch = kiqi_mcp::boundary::take_mcp_boundary(harness, mcp).await;
     if batch.is_empty() {
@@ -275,6 +286,14 @@ pub(super) async fn handle_signal_boundary(
             true
         }
         crate::signal_wake::WakeDecision::Skip(reason) => {
+            // No run will start, so the transcript entry is the ONLY thing that
+            // could reach the user — and a session record does not draw itself
+            // (that only happens when the agent loop emits `message_start` for a
+            // custom message, which an appended record never does). Without this
+            // row the notice is recorded and invisible: the user saw exactly
+            // that. The wake path needs none of this; its run draws the prompt.
+            add_notice_row(chat, &batch);
+            tui.request_render(false);
             if any_auto {
                 // Only `auto` servers produce a skip line: with the default
                 // `off`, every notification would otherwise log, which is noise.
@@ -530,7 +549,7 @@ pub(super) async fn handle_agent_event(
             // Same boundary, same reason: MCP resource-update notices gathered
             // during the run append now, never mid-run. The record goes in
             // FIRST (I1); the wake decision only adds a short trigger after it.
-            let woke = handle_signal_boundary(harness, mcp, wake_state, tx).await;
+            let woke = handle_signal_boundary(harness, mcp, wake_state, tx, chat, tui).await;
             if !woke {
                 maybe_continue_goal(lane, wake_state, tx).await;
                 // Anything still queued at this boundary was never deliverable

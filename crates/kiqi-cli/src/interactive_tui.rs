@@ -1890,6 +1890,8 @@ pub async fn interactive_tui(
         let mcp_mui = Arc::clone(&reload_context.mcp);
         let state_mui = state.clone();
         let harness_mui = harness.clone();
+        let chat_mui = chat_container.clone();
+        let tui_mui = tui.clone();
         tokio::spawn(async move {
             loop {
                 mcp_mui.wait_for_notice().await;
@@ -1914,6 +1916,10 @@ pub async fn interactive_tui(
                             "warning: mcp: could not record the signal: {error}"
                         ));
                     }
+                    // The record alone is invisible: nothing draws a session
+                    // entry. Draw the row here, because this path starts no run.
+                    add_notice_row(&chat_mui, &batch);
+                    tui_mui.request_render(false);
                 } else if tx_mui.send(TuiMessage::McpInput).is_err() {
                     break;
                 }
@@ -3823,7 +3829,15 @@ pub async fn interactive_tui(
                 // input, but never while a run is active. If a non-run command
                 // is in flight, leave the notice for AgentEnd.
                 if *state.status.lock().unwrap() == RunStatus::Idle {
-                    handle_signal_boundary(&harness, &reload_context.mcp, &signal_wake, &tx).await;
+                    handle_signal_boundary(
+                        &harness,
+                        &reload_context.mcp,
+                        &signal_wake,
+                        &tx,
+                        &chat_container,
+                        &tui,
+                    )
+                    .await;
                 }
             }
             Some(TuiMessage::GoalContinue(prompt)) => {
