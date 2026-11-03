@@ -38,6 +38,15 @@ pub enum WatchAction {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WatchModeInput {
+    /// Probe the command every interval (default).
+    Probe,
+    /// Start the command once and stream its output; report when it exits.
+    Resident,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchToolInput {
     pub action: WatchAction,
@@ -49,7 +58,12 @@ pub struct WatchToolInput {
     pub command: Option<String>,
     /// Message injected together with the new output when the probe changes.
     pub prompt: Option<String>,
-    /// Seconds between probes (5..=3600, default 60).
+    /// `probe` (default): run the command every interval and compare output.
+    /// `resident`: start it once and stream; output is batched per interval and
+    /// the exit code is reported when the process ends.
+    pub mode: Option<WatchModeInput>,
+    /// For `probe`, seconds between probes; for `resident`, the batching window.
+    /// Range 5..=3600, default 60.
     #[serde(alias = "interval_secs")]
     pub interval_secs: Option<u64>,
     /// Per-probe timeout in seconds (1..=600, default 60).
@@ -74,10 +88,11 @@ impl WatchTool {
                 description: "Manage this session's change-driven probes in `.ki/watch.json`. \
                     `list` shows them; `add` registers one (`name` + `command` + `prompt`, \
                     optional `intervalSecs`/`timeoutSecs`); `remove` deletes it by name. \
-                    The command is probed every interval; when its output (or exit code) \
-                    differs from the previous probe, the prompt and the new output are \
-                    injected into the conversation. The first probe only records a baseline. \
-                    Probes tick only while an interactive session is open in this directory."
+                    By default (`mode: probe`) the command is probed every interval; when its output \
+                    (or exit code) differs from the previous probe, the prompt and the new \
+                    output are injected. With `mode: resident` the command is started once and \
+                    its output is batched per interval; the exit code is reported when it ends. \
+                    Probes and residents tick only while an interactive session is open here."
                     .to_string(),
                 parameters: kiqi_ai::types::Schema::new(
                     serde_json::to_value(params).unwrap_or_default(),
@@ -229,6 +244,15 @@ fn build_entry(input: &WatchToolInput) -> Result<Value, AgentError> {
     entry.insert("name".into(), json!(name));
     entry.insert("command".into(), json!(command));
     entry.insert("prompt".into(), json!(prompt));
+    if let Some(mode) = &input.mode {
+        entry.insert(
+            "mode".into(),
+            json!(match mode {
+                WatchModeInput::Probe => "probe",
+                WatchModeInput::Resident => "resident",
+            }),
+        );
+    }
     if let Some(interval) = input.interval_secs {
         entry.insert("intervalSecs".into(), json!(interval));
     }
@@ -300,6 +324,7 @@ mod tests {
             name: Some("ci".into()),
             command: Some("gh run list".into()),
             prompt: prompt.map(str::to_string),
+            mode: None,
             interval_secs: interval,
             timeout_secs: None,
             enabled: None,

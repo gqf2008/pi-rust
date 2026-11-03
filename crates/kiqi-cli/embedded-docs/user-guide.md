@@ -415,9 +415,19 @@ ki --tools read,bash,edit,write,docs -p "检查并修改项目文件"
 注入合并输出；两者都有时先注入 `prompt`（说明看到这份输出该干什么），再附输出。错过的分钟
 直接跳过，不补跑。
 
-`watch` 管理 `<项目>/.ki/watch.json`：每条按 `intervalSecs`（默认 60，范围 5–3600）跑一次
-`command`，输出（退出码 + 合并后的 stdout/stderr）与上一次不同时才把 `prompt` 和新输出注入；
-会话打开后的第一轮只建立基线，不会一上来就报一次"变化"。
+`watch` 管理 `<项目>/.ki/watch.json`，有两种 `mode`：
+
+- **`probe`（默认）**：每条按 `intervalSecs`（默认 60，范围 5–3600）跑一次 `command`，输出
+  （退出码 + 合并后的 stdout/stderr）与上一次不同时才把 `prompt` 和新输出注入；会话打开后的
+  第一轮只建立基线，不会一上来就报一次"变化"。适合 `gh run list` 这类一次性查询。
+- **`resident`**：命令**只启动一次**并常驻，stdout/stderr 持续读取、按 `intervalSecs` 合并成
+  一批注入；进程退出时立即注入退出码与剩余输出。适合 `tail -f`、`gh run watch`、
+  `inotifywait`。常驻进程在会话结束、`/reload`、或条目被删除/修改时杀整个进程组。
+
+```json
+{ "name": "ci", "mode": "resident", "command": "gh run watch",
+  "prompt": "CI 有新进展：判断是否需要处理。", "intervalSecs": 30 }
+```
 
 两者都只在**交互式会话**里调度：`-p`、`--mode json`、`--server`、ACP serve 不启动调度器。
 两者都受项目信任门控制——项目不受信任时不读取、不调度，工具也会拒绝写入。手动编辑这两

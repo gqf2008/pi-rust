@@ -944,14 +944,14 @@ pub fn command_prompt_injection_text(name: &str, prompt: &str, output: &CommandO
 
 /// 平台 shell：Unix `sh -c`，Windows `cmd /C`（不弹控制台窗口）。
 #[cfg(unix)]
-fn shell_command(command: &str) -> Command {
+pub(crate) fn shell_command(command: &str) -> Command {
     let mut process = Command::new("sh");
     process.arg("-c").arg(command);
     process
 }
 
 #[cfg(windows)]
-fn shell_command(command: &str) -> Command {
+pub(crate) fn shell_command(command: &str) -> Command {
     use std::os::windows::process::CommandExt;
     let mut process = Command::new("cmd");
     process.arg("/C").arg(command).creation_flags(0x0800_0000); // CREATE_NO_WINDOW
@@ -966,30 +966,30 @@ const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// 不能简单地在末尾追加 `2>&1`——那只会重定向最后一条简单命令。
 /// Unix 用 shell 自己的 `exec 2>&1`，Windows 用括号分组。
 #[cfg(unix)]
-fn shell_wrapped(command: &str) -> String {
+pub(crate) fn shell_wrapped(command: &str) -> String {
     format!("exec 2>&1; {command}")
 }
 
 #[cfg(windows)]
-fn shell_wrapped(command: &str) -> String {
+pub(crate) fn shell_wrapped(command: &str) -> String {
     format!("( {command} ) 2>&1")
 }
 
 /// 持有整个命令进程树的句柄。直接 shell 退出后，进程组/job 仍然有效，
 /// 因而看门狗可以继续终止持有合并管道的后代。
 #[cfg(unix)]
-struct ProcessTree {
+pub(crate) struct ProcessTree {
     pgid: nix::unistd::Pid,
 }
 
 #[cfg(unix)]
 impl ProcessTree {
-    fn prepare(command: &mut Command) {
+    pub(crate) fn prepare(command: &mut Command) {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
 
-    fn attach(child: &std::process::Child) -> io::Result<Self> {
+    pub(crate) fn attach(child: &std::process::Child) -> io::Result<Self> {
         let pgid = i32::try_from(child.id())
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "进程组 ID 超出范围"))?;
         Ok(Self {
@@ -997,24 +997,24 @@ impl ProcessTree {
         })
     }
 
-    fn kill(&self) {
+    pub(crate) fn kill(&self) {
         let _ = nix::sys::signal::killpg(self.pgid, nix::sys::signal::Signal::SIGKILL);
     }
 }
 
 #[cfg(windows)]
-struct ProcessTree(std::os::windows::io::OwnedHandle);
+pub(crate) struct ProcessTree(std::os::windows::io::OwnedHandle);
 
 #[cfg(windows)]
 impl ProcessTree {
-    fn prepare(command: &mut Command) {
+    pub(crate) fn prepare(command: &mut Command) {
         use std::os::windows::process::CommandExt;
         use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
         // 在 shell 创建任何后代之前挂起，先加入 job 再恢复主线程。
         command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
     }
 
-    fn attach(child: &std::process::Child) -> io::Result<Self> {
+    pub(crate) fn attach(child: &std::process::Child) -> io::Result<Self> {
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         use windows_sys::Win32::System::JobObjects::*;
         // SAFETY: 返回的 job 由 OwnedHandle 接管；子进程句柄在调用期间有效。
@@ -1041,7 +1041,7 @@ impl ProcessTree {
         }
     }
 
-    fn kill(&self) {
+    pub(crate) fn kill(&self) {
         use std::os::windows::io::AsRawHandle;
         // SAFETY: self 在调用期间持有有效 job 句柄。
         unsafe {

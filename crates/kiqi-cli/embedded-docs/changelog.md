@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Added
+
+- **`watch` 可以常驻了。** `.ki/watch.json` 新增 `mode`：`probe`（默认，按间隔起一次命令比对
+  输出）之外多了 `resident`——命令只启动一次并常驻，stdout/stderr 按 `intervalSecs` 合并注入，
+  进程退出时立即报告退出码与剩余输出。会话结束、`/reload`、条目删除或修改时杀整个进程组。
+  `watch` 工具同步支持 `mode`。
+
 ## [0.5.4] - 2026-11-04
 
 ### Fixed

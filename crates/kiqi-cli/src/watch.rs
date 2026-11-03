@@ -47,12 +47,31 @@ pub fn config_path(cwd: &Path) -> PathBuf {
     cwd.join(WATCH_CONFIG_RELATIVE)
 }
 
+/// 探测方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchMode {
+    /// 每个 `intervalSecs` 起一次命令、比一次输出（默认）。
+    Probe,
+    /// 命令只起一次、常驻，输出按 `intervalSecs` 合并注入；进程退出时报告。
+    Resident,
+}
+
+impl WatchMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WatchMode::Probe => "probe",
+            WatchMode::Resident => "resident",
+        }
+    }
+}
+
 /// 一条合法的 watch。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchSpec {
     pub name: String,
     pub command: String,
     pub prompt: String,
+    pub mode: WatchMode,
     pub interval_secs: u64,
     pub timeout_secs: u64,
     pub enabled: bool,
@@ -75,6 +94,7 @@ const WATCH_FIELDS: &[&str] = &[
     "name",
     "command",
     "prompt",
+    "mode",
     "intervalSecs",
     "timeoutSecs",
     "enabled",
@@ -234,6 +254,28 @@ fn parse_watch(
     let command = string_field("command")?;
     let prompt = string_field("prompt")?;
 
+    let mode = match object.get("mode") {
+        None => WatchMode::Probe,
+        Some(Value::String(mode)) => match mode.trim() {
+            "probe" => WatchMode::Probe,
+            "resident" => WatchMode::Resident,
+            other => {
+                return Err(ConfigError {
+                    job: Some(name),
+                    field: Some("mode".to_string()),
+                    message: format!("必须是 `probe` 或 `resident`，实际是 `{other}`"),
+                })
+            }
+        },
+        Some(other) => {
+            return Err(ConfigError {
+                job: Some(name),
+                field: Some("mode".to_string()),
+                message: format!("必须是字符串，实际是{}", json_type(other)),
+            })
+        }
+    };
+
     let enabled = match object.get("enabled") {
         None => true,
         Some(Value::Bool(enabled)) => *enabled,
@@ -316,6 +358,7 @@ fn parse_watch(
         name,
         command,
         prompt,
+        mode,
         interval_secs,
         timeout_secs,
         enabled,
@@ -407,7 +450,8 @@ impl WatchCore {
     pub fn tick(&mut self, now: Instant) -> Vec<WatchSpec> {
         let mut due = Vec::new();
         for watch in &self.watches {
-            if !watch.enabled {
+            // 常驻条目由 sink 单独托管，不参与周期探测。
+            if !watch.enabled || watch.mode == WatchMode::Resident {
                 continue;
             }
             let ready = match self.last_probe.get(&watch.name) {
@@ -428,7 +472,11 @@ impl WatchCore {
     /// 距离下一次需要醒来还有多久（绝不 0，避免忙等）。
     pub fn time_until_next_tick(&self, now: Instant) -> Duration {
         let mut wait = CONFIG_POLL_INTERVAL;
-        for watch in self.watches.iter().filter(|watch| watch.enabled) {
+        for watch in self
+            .watches
+            .iter()
+            .filter(|watch| watch.enabled && watch.mode == WatchMode::Probe)
+        {
             let due_in = match self.last_probe.get(&watch.name) {
                 None => Duration::ZERO,
                 Some(previous) => Duration::from_secs(watch.interval_secs)
@@ -446,6 +494,9 @@ impl WatchCore {
 pub trait WatchSink: Send + Sync + 'static {
     fn fire(&self, watch: &WatchSpec);
     fn diagnostic(&self, _message: &str) {}
+
+    /// 每次配置重载后调用：让常驻条目与当前配置一致（启动新增、停止删除或改动的）。
+    fn sync_resident(&self, _watches: &[WatchSpec]) {}
 }
 
 /// 后台调度线程句柄。`stop`（或 drop）会唤醒线程并等待它退出。
@@ -453,6 +504,7 @@ pub struct WatchHandle {
     stop: std::sync::mpsc::Sender<()>,
     thread: Option<JoinHandle<()>>,
     workers: Option<Arc<WatchWorkerState>>,
+    residents: Option<Arc<ResidentState>>,
 }
 
 impl WatchHandle {
@@ -461,6 +513,7 @@ impl WatchHandle {
         sink: Arc<dyn WatchSink>,
         trust: CronTrust,
         workers: Arc<WatchWorkerState>,
+        residents: Arc<ResidentState>,
     ) -> Self {
         let config_path = config_path(cwd);
         let (stop, stop_rx) = std::sync::mpsc::channel();
@@ -480,6 +533,8 @@ impl WatchHandle {
                             .join("；");
                         sink.diagnostic(&message);
                     }
+                    // 常驻条目由 sink 托管：配置变了就让它与当前列表对齐。
+                    sink.sync_resident(core.watches());
                 }
                 let wait = core.time_until_next_tick(now);
                 for watch in core.tick(now) {
@@ -498,6 +553,7 @@ impl WatchHandle {
             stop,
             thread: Some(thread),
             workers: Some(workers),
+            residents: Some(residents),
         }
     }
 
@@ -512,6 +568,9 @@ impl WatchHandle {
         }
         if let Some(workers) = &self.workers {
             workers.cancel_and_join();
+        }
+        if let Some(residents) = &self.residents {
+            residents.stop_all();
         }
     }
 }
@@ -578,9 +637,11 @@ pub struct SessionWatchSink {
     shutting_down: Arc<AtomicBool>,
     workers: Arc<WatchWorkerState>,
     baselines: WatchBaselines,
+    residents: Arc<ResidentState>,
 }
 
 impl SessionWatchSink {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cwd: PathBuf,
         inject: Arc<dyn CronInject>,
@@ -588,6 +649,7 @@ impl SessionWatchSink {
         shutting_down: Arc<AtomicBool>,
         workers: Arc<WatchWorkerState>,
         baselines: WatchBaselines,
+        residents: Arc<ResidentState>,
     ) -> Self {
         Self {
             cwd,
@@ -596,7 +658,32 @@ impl SessionWatchSink {
             shutting_down,
             workers,
             baselines,
+            residents,
         }
+    }
+
+    fn spawn_resident(&self, spec: &WatchSpec) -> Option<ResidentRunner> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let spec = spec.clone();
+        let name = spec.name.clone();
+        let cwd = self.cwd.clone();
+        let inject = Arc::clone(&self.inject);
+        let log = Arc::clone(&self.log);
+        let shutting_down = Arc::clone(&self.shutting_down);
+        let fingerprint = resident_fingerprint(&spec);
+        let thread = thread::Builder::new()
+            .name(format!("ki-watch-resident-{name}"))
+            .spawn(move || run_resident(spec, stop_thread, cwd, inject, log, shutting_down))
+            .map_err(|error| {
+                (self.log)(&format!("watch: 无法为 `{name}` 启动常驻线程：{error}"));
+            })
+            .ok()?;
+        Some(ResidentRunner {
+            stop,
+            fingerprint,
+            thread,
+        })
     }
 
     fn is_shutting_down(&self) -> bool {
@@ -720,6 +807,226 @@ impl WatchSink for SessionWatchSink {
     fn diagnostic(&self, message: &str) {
         (self.log)(&format!("watch: {message}"));
     }
+
+    fn sync_resident(&self, watches: &[WatchSpec]) {
+        if self.is_shutting_down() {
+            return;
+        }
+        let desired: Vec<&WatchSpec> = watches
+            .iter()
+            .filter(|watch| watch.enabled && watch.mode == WatchMode::Resident)
+            .collect();
+        let mut runners = self.residents.runners.lock().unwrap();
+
+        let stale: Vec<String> = runners
+            .iter()
+            .filter(
+                |(name, runner)| match desired.iter().find(|spec| &&spec.name == name) {
+                    None => true,
+                    Some(spec) => resident_fingerprint(spec) != runner.fingerprint,
+                },
+            )
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in stale {
+            if let Some(runner) = runners.remove(&name) {
+                runner.stop.store(true, Ordering::SeqCst);
+                let _ = runner.thread.join();
+            }
+        }
+
+        for spec in desired {
+            if runners.contains_key(&spec.name) {
+                continue;
+            }
+            if let Some(runner) = self.spawn_resident(spec) {
+                runners.insert(spec.name.clone(), runner);
+            }
+        }
+    }
+}
+
+/// 常驻条目：一条长跑进程及其停止开关。
+struct ResidentRunner {
+    stop: Arc<AtomicBool>,
+    fingerprint: String,
+    thread: JoinHandle<()>,
+}
+
+/// 一代会话里所有常驻 watch。句柄停止时统一杀进程组并回收线程。
+#[derive(Default)]
+pub(crate) struct ResidentState {
+    runners: Mutex<HashMap<String, ResidentRunner>>,
+}
+
+impl ResidentState {
+    fn stop_all(&self) {
+        let runners = std::mem::take(&mut *self.runners.lock().unwrap());
+        for (_, runner) in runners {
+            runner.stop.store(true, Ordering::SeqCst);
+            let _ = runner.thread.join();
+        }
+    }
+}
+
+/// 配置指纹：命令/说明/节奏任一变化就重启常驻进程。
+fn resident_fingerprint(spec: &WatchSpec) -> String {
+    format!(
+        "{}\n{}\n{}\n{}",
+        spec.command, spec.prompt, spec.interval_secs, spec.timeout_secs
+    )
+}
+
+/// 常驻输出的聚合缓冲：只保留最近 [`cron::MAX_OUTPUT_BYTES`] 字节。
+#[derive(Default)]
+struct OutputBuffer {
+    text: String,
+    lines: usize,
+}
+
+impl OutputBuffer {
+    fn push(&mut self, chunk: &str) {
+        if !chunk.is_empty() {
+            self.lines += 1;
+        }
+        self.text.push_str(chunk);
+        if self.text.len() > cron::MAX_OUTPUT_BYTES {
+            let mut cut = self.text.len() - cron::MAX_OUTPUT_BYTES;
+            while cut < self.text.len() && !self.text.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.text.drain(..cut);
+        }
+    }
+
+    fn take(&mut self) -> Option<(String, usize)> {
+        if self.text.trim().is_empty() {
+            self.text.clear();
+            self.lines = 0;
+            return None;
+        }
+        let lines = self.lines;
+        self.lines = 0;
+        Some((std::mem::take(&mut self.text), lines))
+    }
+}
+
+/// 常驻进程的主循环：起一次命令、持续读输出、按节奏合并注入、退出时报告。
+fn run_resident(
+    spec: WatchSpec,
+    stop: Arc<AtomicBool>,
+    cwd: PathBuf,
+    inject: Arc<dyn CronInject>,
+    log: CronLog,
+    shutting_down: Arc<AtomicBool>,
+) {
+    use std::io::BufRead;
+    use std::process::Stdio;
+
+    let merged = cron::shell_wrapped(&spec.command);
+    let mut process = cron::shell_command(&merged);
+    process
+        .current_dir(&cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    cron::ProcessTree::prepare(&mut process);
+    let mut child = match process.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            log(&format!("watch: 常驻 `{}` 无法启动：{error}", spec.name));
+            return;
+        }
+    };
+    let tree = match cron::ProcessTree::attach(&child) {
+        Ok(tree) => tree,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            log(&format!(
+                "watch: 常驻 `{}` 进程组不可用：{error}",
+                spec.name
+            ));
+            return;
+        }
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        log(&format!("watch: 常驻 `{}` 的 stdout 未接管", spec.name));
+        return;
+    };
+
+    let buffer = Arc::new(Mutex::new(OutputBuffer::default()));
+    let done = Arc::new(AtomicBool::new(false));
+    let reader_buffer = Arc::clone(&buffer);
+    let reader_done = Arc::clone(&done);
+    let reader = thread::spawn(move || {
+        let mut stdout = std::io::BufReader::new(stdout);
+        let mut chunk = Vec::new();
+        loop {
+            chunk.clear();
+            match stdout.read_until(b'\n', &mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let text = String::from_utf8_lossy(&chunk);
+                    reader_buffer.lock().unwrap().push(&text);
+                }
+            }
+        }
+        reader_done.store(true, Ordering::SeqCst);
+    });
+
+    let interval = Duration::from_secs(spec.interval_secs);
+    let mut last_flush = Instant::now()
+        .checked_sub(interval)
+        .unwrap_or_else(Instant::now);
+    let mut status: Option<std::process::ExitStatus> = None;
+
+    loop {
+        if stop.load(Ordering::SeqCst) || shutting_down.load(Ordering::SeqCst) {
+            tree.kill();
+            let _ = child.kill();
+            let _ = child.wait();
+            break;
+        }
+        if status.is_none() {
+            if let Ok(Some(exited)) = child.try_wait() {
+                status = Some(exited);
+            }
+        }
+        if last_flush.elapsed() >= interval {
+            last_flush = Instant::now();
+            if let Some((body, lines)) = buffer.lock().unwrap().take() {
+                let text = format!(
+                    "{}\n\n⏰ watch:{} 新输出（{lines} 行）\n\n{body}",
+                    spec.prompt, spec.name
+                );
+                if let Err(error) = inject.inject(text) {
+                    log(&format!("watch: 注入失败：{error}"));
+                }
+            }
+        }
+        if status.is_some() && done.load(Ordering::SeqCst) {
+            let code = status.and_then(|status| status.code()).unwrap_or(-1);
+            let tail = buffer
+                .lock()
+                .unwrap()
+                .take()
+                .map(|(body, _)| body)
+                .unwrap_or_else(|| "(无输出)".to_string());
+            let text = format!(
+                "{}\n\n⏰ watch:{} 进程退出（退出码 {code}）\n\n{tail}",
+                spec.prompt, spec.name
+            );
+            if let Err(error) = inject.inject(text) {
+                log(&format!("watch: 注入失败：{error}"));
+            }
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let _ = reader.join();
 }
 
 /// 项目受信任时启动探测线程；否则返回 `None`。配置文件由线程按 mtime 自行发现。
@@ -737,6 +1044,7 @@ pub fn start_if_configured(
         return None;
     }
     let workers = Arc::new(WatchWorkerState::default());
+    let residents = Arc::new(ResidentState::default());
     let sink = Arc::new(SessionWatchSink::new(
         cwd.to_path_buf(),
         inject,
@@ -744,8 +1052,9 @@ pub fn start_if_configured(
         shutting_down,
         Arc::clone(&workers),
         baselines,
+        Arc::clone(&residents),
     ));
-    Some(WatchHandle::start(cwd, sink, trust, workers))
+    Some(WatchHandle::start(cwd, sink, trust, workers, residents))
 }
 
 #[cfg(test)]
@@ -757,6 +1066,7 @@ mod tests {
             name: name.to_string(),
             command: "true".to_string(),
             prompt: "changed".to_string(),
+            mode: WatchMode::Probe,
             interval_secs,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             enabled: true,
@@ -838,5 +1148,32 @@ mod tests {
         assert!(text.contains("watch:ci"));
         assert!(text.contains("退出码 3"));
         assert!(text.contains("boom"));
+    }
+
+    #[test]
+    fn mode_defaults_to_probe_and_accepts_resident() {
+        let default = parse_config(r#"[{"name":"a","command":"true","prompt":"x"}]"#);
+        assert_eq!(default.watches[0].mode, WatchMode::Probe);
+
+        let resident = parse_config(
+            r#"[{"name":"a","command":"tail -f log","prompt":"x","mode":"resident"}]"#,
+        );
+        assert!(resident.is_ok(), "{:?}", resident.errors);
+        assert_eq!(resident.watches[0].mode, WatchMode::Resident);
+
+        let bogus = parse_config(r#"[{"name":"a","command":"true","prompt":"x","mode":"stream"}]"#);
+        assert_eq!(bogus.watches.len(), 0);
+        assert!(bogus.errors[0].to_string().contains("probe"));
+    }
+
+    #[test]
+    fn resident_watches_are_not_probed_on_a_schedule() {
+        let mut core = WatchCore::new(PathBuf::from("/nonexistent/watch.json"));
+        let mut resident = spec("a", 5);
+        resident.mode = WatchMode::Resident;
+        core.watches = vec![resident];
+        let start = Instant::now();
+        assert!(core.tick(start).is_empty());
+        assert!(core.tick(start + Duration::from_secs(60)).is_empty());
     }
 }
