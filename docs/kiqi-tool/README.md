@@ -316,7 +316,7 @@ permission requests bridged to the client. See
 
 | | |
 | --- | --- |
-| Current release | **[0.5.3](https://github.com/gqf2008/pi-rust/releases/tag/v0.5.3)** (all crates share one workspace version) |
+| Current release | **[0.5.4](https://github.com/gqf2008/pi-rust/releases/tag/v0.5.4)** (all crates share one workspace version) |
 | Stability | `kiqi-ai`, `kiqi-agent`, `kiqi-tools`, `kiqi-harness`, `kiqi-host` are the intended stable surface |
 | MSRV | 1.96 |
 | Platforms | Linux, macOS, Windows (CI runs the suite on Linux) |

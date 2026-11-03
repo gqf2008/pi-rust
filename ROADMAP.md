@@ -4,7 +4,7 @@ This is a direction document, not a commitment. It records what the project is
 working on next and why, so that issues and PRs can be judged against it. For
 what has already shipped, see [CHANGELOG.md](CHANGELOG.md).
 
-Current release: **0.5.3**. Install with `scripts/install.sh` / `install.ps1`, or
+Current release: **0.5.4**. Install with `scripts/install.sh` / `install.ps1`, or
 build from source — the crates are not on crates.io; the Homebrew/Scoop taps
 carry the current release and the winget submission is pending review
 (`packaging/README.md`).
