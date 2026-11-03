@@ -340,6 +340,45 @@ pub(crate) async fn done_when_cmd_satisfied(cwd: &std::path::Path, cmd: &str) ->
     }
 }
 
+/// Turn anything left in the queue into a real prompt.
+///
+/// Steering is only consumed between steps, so an entry written after the last
+/// step of a run is never delivered and never shown: the notice that exposed
+/// this sat in the queue with the run already over, and the user saw nothing.
+/// Whatever the queue still holds at a run boundary is therefore promoted to a
+/// submitted prompt, which starts a run instead of waiting for one.
+pub(super) async fn resume_parked_queue(
+    lane: &Arc<dyn AgentLane>,
+    wake_state: &Arc<crate::signal_host::SignalHost>,
+    tx: &mpsc::UnboundedSender<TuiMessage>,
+) {
+    if wake_state.muted_until_input() {
+        return;
+    }
+    let Ok(queued) = lane.queued_messages().await else {
+        return;
+    };
+    if queued.steering.is_empty() && queued.follow_up.is_empty() {
+        return;
+    }
+    let Ok(cleared) = lane.clear_queue().await else {
+        return;
+    };
+    let text = cleared
+        .steering
+        .iter()
+        .chain(cleared.follow_up.iter())
+        .cloned()
+        .collect::<Vec<String>>()
+        .join("\n\n");
+    if text.trim().is_empty() {
+        return;
+    }
+    // Through the normal input path, so the bubble is rendered, the message is
+    // remembered for recall, and the run starts exactly like a typed prompt.
+    let _ = tx.send(TuiMessage::UserInput(text, cleared.images));
+}
+
 /// After a run ends, keep an active goal moving. The goal extension injects the
 /// goal into context but cannot start runs; without this the session would sit
 /// idle between turns. A signal wake in the same boundary wins (its run already
@@ -494,6 +533,10 @@ pub(super) async fn handle_agent_event(
             let woke = handle_signal_boundary(harness, mcp, wake_state, tx).await;
             if !woke {
                 maybe_continue_goal(lane, wake_state, tx).await;
+                // Anything still queued at this boundary was never deliverable
+                // by the loop (it drains steering between steps, not after the
+                // last one), so it would sit there unseen. Promote it instead.
+                resume_parked_queue(lane, wake_state, tx).await;
             }
             // The run drained the queue; refresh so consumed entries drop out
             // of the pending-messages display.

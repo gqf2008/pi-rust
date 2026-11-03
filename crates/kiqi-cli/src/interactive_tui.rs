@@ -1888,7 +1888,6 @@ pub async fn interactive_tui(
     let mui_handle = {
         let tx_mui = tx.clone();
         let mcp_mui = Arc::clone(&reload_context.mcp);
-        let lane_mui = lane.clone();
         let state_mui = state.clone();
         let harness_mui = harness.clone();
         tokio::spawn(async move {
@@ -1899,17 +1898,21 @@ pub async fn interactive_tui(
                     if batch.is_empty() {
                         continue;
                     }
-                    let message = kiqi_mcp::notice_message(&batch);
-                    if let Err(error) = lane_mui.steer(message).await {
+                    // Record it, do NOT steer it. A steer is only consumed
+                    // between steps, so a notice that lands just before the run
+                    // ends stays in the queue forever: invisible in the UI (the
+                    // user saw nothing at all) and never read by the model. The
+                    // transcript entry is durable, rendered, and picked up by the
+                    // next context build — and if the run is still going, its
+                    // remaining steps see it the same way a steer would.
+                    if let Err(error) = harness_mui
+                        .session()
+                        .append_message(kiqi_mcp::notice_message(&batch))
+                        .await
+                    {
                         diagnostic_log(&format!(
-                            "warning: mcp: could not queue the signal into the active run: {error}"
+                            "warning: mcp: could not record the signal: {error}"
                         ));
-                        // The run may have ended between the status check and
-                        // the steer; persist rather than lose the notice.
-                        let _ = harness_mui
-                            .session()
-                            .append_message(kiqi_mcp::notice_message(&batch))
-                            .await;
                     }
                 } else if tx_mui.send(TuiMessage::McpInput).is_err() {
                     break;
