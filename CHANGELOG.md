@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-03
+
 ### Fixed
 
 - `/goal resume` 现在真的会开工。以前只有「目标 key 变了」才会自动起一轮，而 resume
