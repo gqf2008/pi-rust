@@ -194,7 +194,16 @@ fn context_badge(footer: &FooterComponent, colors: &kiqi_tui::theme::ThemeColors
     const CELLS: usize = 8;
     let (percent, tokens, window) = footer.context_badge();
     let Some(percent) = percent else {
-        return colors.dim.fg("context ?");
+        // No percentage without a window: models configured without
+        // `contextWindow` (or a session that has not answered yet) still have a
+        // token count worth showing. With nothing at all, draw nothing rather
+        // than a placeholder that reads like a broken bar.
+        return match tokens {
+            Some(tokens) if tokens > 0 => colors
+                .dim
+                .fg(&format!("ctx {} tok", compact_tokens(tokens))),
+            _ => String::new(),
+        };
     };
     let filled = (((percent / 100.0) * CELLS as f64).round() as usize).min(CELLS);
     let bar: String = (0..CELLS)
@@ -342,9 +351,22 @@ mod tests {
     }
 
     #[test]
-    fn unknown_context_renders_a_placeholder() {
+    fn unknown_context_renders_nothing_or_the_token_count() {
+        // Nothing known yet: no placeholder on the row.
         let header = HeaderComponent::new(Arc::new(FooterComponent::new()));
+        header.set_cwd("/work/project");
         let rows = plain(&header.render(80));
-        assert!(rows[1].contains("context ?"), "{rows:?}");
+        assert!(!rows[1].contains("context"), "{rows:?}");
+        assert!(!rows[1].contains('%'), "{rows:?}");
+
+        // Tokens without a window (a model configured without `contextWindow`):
+        // show the count, not a percentage that cannot be computed.
+        let footer = Arc::new(FooterComponent::new());
+        footer.set_context_tokens(Some(84_000));
+        let header = HeaderComponent::new(footer);
+        header.set_cwd("/work/project");
+        let rows = plain(&header.render(80));
+        assert!(rows[1].contains("ctx 84K tok"), "{rows:?}");
+        assert!(!rows[1].contains('%'), "{rows:?}");
     }
 }
