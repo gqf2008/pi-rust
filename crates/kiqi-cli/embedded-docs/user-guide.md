@@ -456,21 +456,45 @@ ki 会优先使用 ki 自己的目录，同时兼容原 Pi 的 `.pi` 布局：
 
 项目 `.ki` 优先于项目 `.pi`。全局资源默认位于 `~/.ki/agent/`，包括 `settings.json`、`models.json`、`skills/`、`prompts/`、`themes/`、`extensions/` 和 `packages/`。同名资源发生冲突时，项目资源优先于全局资源，`.ki` 优先于 `.pi`。
 
-`.agents` 是一个跨工具共享约定（Claude Code、skills 生态都用它），ki 也会读取它：
+`.agents` 是一个跨工具共享约定（Claude Code、skills 生态都用它），ki 读它的 `AGENTS.md` 与 `skills/`。
 
-| 技能目录 | 说明 |
+### 上下文文件（AGENTS.md / CLAUDE.md）
+
+- **信任与开关**：只在项目受信任、且没传 `--no-context-files`（`-nc`）时读取；不受信任的项目一个文件都不读。
+- **每个目录只取一个文件**，按候选顺序取第一个存在的：
+
+  ```
+  AGENTS.override.md → AGENTS.md → AGENTS.MD → CLAUDE.md → CLAUDE.MD
+  ```
+
+  `AGENTS.override.md` 用来压过同目录的 `AGENTS.md`；大写 `.MD` 是给大小写不敏感文件系统的兜底。
+- **整体顺序「越通用越靠前」**，按 canonical path 去重：
+  1. `~/.agents/AGENTS.md`（跨工具共享）
+  2. `~/.ki/agent/AGENTS.md`（ki 专用；全局、通用的常驻指令放前两者）
+  3. `cwd` 的祖先目录，浅的在前，`<项目>/AGENTS.md` 最后
+- 内容渲染成系统提示里的 `<project_context>` 块，每个文件一个 `<project_instructions path="…">`。
+- `SYSTEM.md` / `APPEND_SYSTEM.md` 是另一条路径（替换/追加系统提示本身），不参与上面这套排序。
+
+### Skill 发现
+
+目录顺序如下，**名字冲突时先出现的赢**：
+
+| 顺序 | 目录 |
 |---|---|
-| `<项目>/.ki/skills` | 项目技能（最高优先级） |
-| `<项目>/.agents/skills` | 项目技能（共享约定） |
-| 配置的全局 `skillDirs` | 自定义全局技能 |
-| `~/.ki/agent/skills` | ki 全局技能 |
-| `~/.agents/skills` | 用户级共享技能（最低优先级） |
+| 1 | 项目 `settings.json` 配置的 `skillDirs` |
+| 2 | `<项目>/.ki/skills` |
+| 3 | `<项目>/.agents/skills`（共享约定） |
+| 4 | 全局 `settings.json` 配置的 `skillDirs` |
+| 5 | `~/.ki/agent/skills` |
+| 6 | `~/.agents/skills`（最低优先级） |
 
-上下文文件按「越通用越靠前」排列：`~/.agents/AGENTS.md` → `~/.ki/agent/AGENTS.md` → 祖先目录 → `<项目>/AGENTS.md`。全局、通用的常驻指令放 `~/.agents/AGENTS.md`，只针对 ki 的放 `~/.ki/agent/AGENTS.md`；文件不存在时静默跳过。
+之后追加 `--skill` 参数、扩展 `resources_discover` 报上来的路径，以及扩展 resources 提供的 skills（同样排在最后）。
 
-技能是**渐进式加载**的：系统提示只放名称、描述和位置，完整 `SKILL.md` 在任务匹配时才读取。但列表本身有成本——描述无法省（模型靠它路由），实测 64 个技能的 `<available_skills>` 段约 39 KB / 7–9k tokens，**每次请求都要付一次**。想保留技能但不让某条进提示，给它写 `disable-model-invocation: true`。
-
-`~/.agents` 只提供 `AGENTS.md` 与 `skills/`，ki 不从那里找 prompts、themes 或 extensions。项目 `.agents/skills` 与 `.ki/skills` 同规则：默认加载；项目被标记不可信或传 `--no-approve` 时项目级目录整体不读。
+- **信任门**：项目不受信任（或被 `--no-approve` 标记）时只取全局那半（4–6 与 CLI/扩展来源），项目目录整体不读；`--local-only` 反过来，只取项目那半。
+- **扫描规则**：目录递归找 `SKILL.md`；传入的路径也可以直接是单个 `.md` 文件（扩展发现的就是这种），名字取 frontmatter 的 `name`，缺省取父目录名。目录不存在静默跳过；frontmatter 非法只记诊断，`--verbose` 才打印。
+- **渐进式加载**：系统提示只放 `<available_skills>` 清单（名称、描述、位置），正文在任务匹配时由 `skill` 工具按 `location` 现读，所以改了 `SKILL.md` 立即生效；正文后还会附一级目录列表，方便用 `read` 取 `references/`、`scripts/`。
+- 列表本身有成本——描述无法省（模型靠它路由），实测 64 个技能的 `<available_skills>` 段约 39 KB / 7–9k tokens，**每次请求都要付一次**。想保留技能但不让某条进提示，给它写 `disable-model-invocation: true`，它就只能 `/skill <name>` 显式调用。
+- `--no-skills`（`-ns`）整体关闭技能发现。
 
 项目级 `.ki/settings.json` 可以追加资源目录：
 
