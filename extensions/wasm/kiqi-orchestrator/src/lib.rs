@@ -24,7 +24,7 @@
 //! sees the guidance).
 
 use kiqi_wasm_bindings::bindings::exports::kiqi::extension::extension_api::Guest;
-use kiqi_wasm_bindings::bindings::kiqi::extension::{exec, fs, proc, progress, types};
+use kiqi_wasm_bindings::bindings::kiqi::extension::{exec, fs, log, proc, progress, types};
 
 mod child_progress;
 
@@ -412,12 +412,42 @@ fn bump_generation() -> u64 {
 
 /// Whether `kiqi-goal` has an active goal in this project — the compile-time
 /// `active_goal_in_project` gate, reading `.ki/goals.json` through the `fs`
-/// grant. Fail-closed: any read or parse problem is "no goal".
+/// grant.
+///
+/// Fail-closed, but **not silent** about why: a denied read means the fs grant's
+/// scope does not cover the project (an install from before fs inherited the
+/// project tree), and a read that failed for any reason other than "no such
+/// file" is a real problem. Both are logged; only the ordinary "no goal file"
+/// stays quiet.
 fn active_goal_in_project() -> bool {
-    let Ok(bytes) = fs::read(GOALS_FILE) else {
-        return false;
-    };
-    let Ok(text) = std::str::from_utf8(&bytes) else {
+    match fs::read(GOALS_FILE) {
+        Ok(bytes) => goal_active(&bytes),
+        Err(types::CapabilityError::Denied(reason)) => {
+            log::write(
+                types::LogLevel::Warn,
+                &format!(
+                    "orchestrator: reading {GOALS_FILE} was denied ({reason}); the fs grant's                      scope does not cover the project, so the orchestration guidance stays off.                      Re-grant it with `ki extension grant kiqi-orchestrator fs --cwd project`."
+                ),
+            );
+            false
+        }
+        Err(types::CapabilityError::Failed(reason)) => {
+            if !is_missing_file(&reason) {
+                log::write(
+                    types::LogLevel::Warn,
+                    &format!(
+                        "orchestrator: could not read {GOALS_FILE} ({reason}); the orchestration                          guidance stays off"
+                    ),
+                );
+            }
+            false
+        }
+    }
+}
+
+/// Pure half of the gate: does this file content hold an active goal?
+fn goal_active(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
     };
     let Ok(value) = serde_json::from_str::<Value>(text) else {
@@ -427,6 +457,16 @@ fn active_goal_in_project() -> bool {
         return false;
     };
     !active.is_null() && active.get("status").and_then(Value::as_str) == Some("active")
+}
+
+/// The host reports a missing file as `failed("read <path>: <os error>")`; that
+/// is the ordinary "no goal yet" case, not a diagnostic-worthy failure. Both
+/// the Unix and the Windows wording are accepted.
+fn is_missing_file(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("no such file")
+        || lower.contains("not found")
+        || lower.contains("cannot find the file")
 }
 
 /// Session switch → cancel running children, drop the graph. Same contract as
@@ -1292,5 +1332,23 @@ mod tests {
     fn the_guest_no_longer_offers_a_blocking_subagent() {
         let names: Vec<String> = tools().into_iter().map(|tool| tool.name).collect();
         assert_eq!(names, vec!["plan".to_string(), "dispatch".to_string()]);
+    }
+
+    #[test]
+    fn goal_gate_reads_only_an_active_goal() {
+        assert!(goal_active(br#"{"active":{"status":"active"}}"#));
+        assert!(!goal_active(br#"{"active":{"status":"complete"}}"#));
+        assert!(!goal_active(br#"{"active":null}"#));
+        assert!(!goal_active(br#"{}"#));
+        // Broken JSON is "no goal", not a panic.
+        assert!(!goal_active(b"{"));
+    }
+
+    #[test]
+    fn only_a_missing_file_stays_quiet() {
+        assert!(is_missing_file("read /p/.ki/goals.json: No such file or directory (os error 2)"));
+        assert!(is_missing_file("read C:\\p: The system cannot find the file specified."));
+        assert!(!is_missing_file("read /p/.ki/goals.json: Permission denied (os error 13)"));
+        assert!(!is_missing_file("fs is not granted"));
     }
 }

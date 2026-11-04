@@ -54,16 +54,17 @@ contains.
 ki insmod --build extensions/wasm/kiqi-orchestrator --id kiqi-orchestrator --yes
 ki extension grant kiqi-orchestrator proc --command ki --cwd project --timeout 900
 ki extension grant kiqi-orchestrator exec --command sh --command test --cwd project --timeout 300
-ki extension grant kiqi-orchestrator fs --cwd project
+# `fs` needs no extra grant: a fresh fs grant inherits the host's project tree.
 ```
 
 - `proc --command ki`: the subagent/dispatch children (`ki` resolved from PATH).
 - `exec` `sh`/`test`: only for nodes declaring `verify`/`expectFile`. Nodes
   without them need neither.
-- `fs --cwd project`: reads `.ki/goals.json` to gate the guidance (below).
-  `insmod --yes` grants a newly declared `fs` at the default scope (the extension's
-  own data directory), which this guest cannot read the project file from — the
-  explicit `--cwd project` grant above is what scopes it, so run it too.
+- `fs`: reads `.ki/goals.json` to gate the guidance (below). A fresh `fs` grant
+  covers the project tree, so `insmod --yes` is enough. An install made before
+  that default changed carries the old data-dir jail; the guest logs the denial
+  and the fix (`ki extension grant kiqi-orchestrator fs --cwd project`) instead
+  of silently leaving the guidance off.
 
 ## Differences from the compile-time extension
 

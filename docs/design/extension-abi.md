@@ -858,8 +858,10 @@ e2e 三条：八工具面与 schema 形状、**探测决策**（有/无索引两
 项目目录、codegraph 探测靠 `test` 命令，根源都是它。本轮补齐：`fs` 授权从裸 `true` 变为
 `{ "cwd": "extension-data" | "project" }`，**老文件 `"fs": true` 经自定义反序列化照读为 data 监禁**
 （零迁移）；宿主三个 fs 调用点收敛到一个 `fs_checked`（jail + symlink 同一对函数，与 exec/proc
-同源）。默认不变（data 监狱）；`--cwd project` 后 guest 可读写项目树内的文件——
-这是「编译期插件能做到、wasm 层此前做不到」清单上的又一项消除。
+同源）。**2026-11-05 改默认**：`fs` 未显式指定 scope 时继承 host 的项目树（`project`），
+`--cwd extension-data` 才是显式回到 data 监狱。理由是扩展的 fs 权限应当等于 host 的
+fs 权限（能读宿主能读的项目状态），`exec`/`proc` 的默认仍是 data 监狱——它们执行的是
+子进程，收窄比放宽安全。旧 `"fs": true` 与新的默认同义。
 
 e2e：project scope 下 fixture 的 fs 往返落在项目树内；data-dir 默认行为不变；
 CLI `grant fs --cwd project` 的 JSON 往返有单测钉住。

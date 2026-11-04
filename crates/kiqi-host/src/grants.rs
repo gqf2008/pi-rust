@@ -342,8 +342,12 @@ where
     let value = Option::<Value>::deserialize(deserializer)?;
     Ok(match value {
         None | Some(Value::Bool(false)) | Some(Value::Null) => None,
+        // `"fs": true` is the pre-scope spelling. It now means what a fresh
+        // grant means: the host's filesystem (the project), not the data-dir
+        // jail. The old spelling never expressed a jail choice — it predates
+        // scopes — so reading it as one was an accident of the migration.
         Some(Value::Bool(true)) => Some(FsGrant {
-            cwd: ExecCwd::ExtensionData,
+            cwd: ExecCwd::Project,
         }),
         Some(other) => {
             Some(serde_json::from_value::<FsGrant>(other).map_err(serde::de::Error::custom)?)
@@ -1820,10 +1824,12 @@ impl Grants {
                         "`fs` takes no --timeout/--max-open (its policy is the jail scope)"
                     ));
                 }
-                // The default stays the data-dir jail; `--cwd project` opts
-                // into the project tree.
+                // `fs` inherits the host's view by default: a granted file
+                // capability reaches the project tree (the host's own working
+                // set), not just the extension's data dir. `--cwd
+                // extension-data` is the explicit opt-in to the old jail.
                 self.fs = Some(FsGrant {
-                    cwd: options.cwd.unwrap_or(ExecCwd::ExtensionData),
+                    cwd: options.cwd.unwrap_or(ExecCwd::Project),
                 });
             }
             "exec" => {
@@ -2403,9 +2409,11 @@ mod tests {
         assert!(!grants.granted().contains(&"proc"));
     }
 
-    /// The fs scope: default is the data-dir jail, `--cwd project` opts into
-    /// the project tree, and the JSON stays round-trippable — with legacy
-    /// `"fs": true` files reading as the data-dir scope.
+    /// The fs scope: a fresh grant inherits the host's project tree (the
+    /// capability means "read the files the host can read"), `--cwd
+    /// extension-data` opts back into the data-dir jail, and the JSON stays
+    /// round-trippable — legacy `"fs": true` files mean the same as a fresh
+    /// grant, because that spelling predates scopes and never expressed a jail.
     #[test]
     fn fs_grant_carries_a_scope() {
         let mut grants = Grants::default();
@@ -2413,8 +2421,25 @@ mod tests {
         let grant = grants.fs.as_ref().unwrap();
         assert_eq!(
             grant.cwd,
+            ExecCwd::Project,
+            "a fresh fs grant inherits the host's project tree"
+        );
+
+        grants
+            .grant(
+                "fs",
+                vec![],
+                GrantOptions {
+                    cwd: Some(ExecCwd::ExtensionData),
+                    timeout_seconds: None,
+                    max_open: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            grants.fs.as_ref().unwrap().cwd,
             ExecCwd::ExtensionData,
-            "default is the data jail"
+            "the data-dir jail is the explicit opt-in"
         );
 
         grants
@@ -2436,12 +2461,12 @@ mod tests {
         let reparsed: Grants = serde_json::from_value(json).unwrap();
         assert_eq!(reparsed, grants);
 
-        // Legacy form: the bare `true` reads as the data-dir scope.
+        // Legacy form: the bare `true` means the same as a fresh grant.
         let legacy: Grants = serde_json::from_value(serde_json::json!({"fs": true})).unwrap();
         assert_eq!(
             legacy.fs.as_ref().unwrap().cwd,
-            ExecCwd::ExtensionData,
-            "an old \"fs\": true keeps its historical meaning"
+            ExecCwd::Project,
+            "an old \"fs\": true inherits the host's project tree"
         );
         assert!(legacy.allows_host("anything") == false || true); // fs grants no hosts
     }

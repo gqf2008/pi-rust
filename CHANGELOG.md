@@ -2,6 +2,18 @@
 
 ### Changed
 
+- **扩展的 `fs` 权限继承 host。** 未显式指定 scope 的 `fs` 授权现在覆盖**项目树**
+  （host 的工作目录），而不是扩展自己的数据目录；`--cwd extension-data` 才是显式回到
+  data 监狱。语义对齐「扩展的 fs 权限等于 host 的 fs 权限」：装了 goal/orchestrator
+  这类要读项目状态的扩展，不再需要额外一条 `ki extension grant … fs --cwd project`。
+  旧的 `"fs": true` 与新默认同义；`exec`/`proc` 的默认仍是 data 监狱（执行子进程，收窄
+  比放宽安全）。
+- **读取 `.ki/goals.json` 失败不再静默。** 授权范围不含项目时，orchestrator 会写一条
+  warn 日志说明「指引关闭 + 重建授权的命令」；只有「文件不存在」保持安静，其他读取
+  失败也会留痕。
+
+### Changed
+
 - **编排图默认跑满 16 路。** `dispatch` 的 `maxParallel` 默认值从 4 提到上限 16（仍可显式
   调小）；`plan` / `dispatch` 的工具描述和编排指引明确要求大任务拆成**宽图**——每个可独立
   验收的单元一个节点，只在真有顺序依赖时加 `deps`，就绪波次按图能给的宽度跑满。宿主侧的
