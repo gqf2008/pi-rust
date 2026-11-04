@@ -67,8 +67,10 @@ ki extension grant kiqi-orchestrator fs --cwd project
 
 ## Differences from the compile-time extension
 
-1. **Blocking waves** (above); `maxParallel` is capped by the grant's
-   `max-open` (default 100 ≥ the tool's 16 cap).
+1. **Blocking waves** (above); `maxParallel` **defaults to 16** (the cap) and is
+   bounded by the grant's `max-open` (default 100). The default used to be 4,
+   which quietly ran a wide ready set as a queue; a large task is expected to
+   decompose into many nodes and dispatch them at the full width.
 2. **`maxTurns` is not enforced on the child** — the env knob
    (`KI_MAX_TURNS_PER_RUN`) has no `proc` equivalent. Accepted for schema
    parity, recorded, not enforced.

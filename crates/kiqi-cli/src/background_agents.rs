@@ -40,6 +40,15 @@ pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 900;
 /// open behind the grant path.
 pub(crate) const MAX_TIMEOUT_SECS: u64 = 900;
 
+/// How many background subagents may run at once.
+///
+/// This is the host-side half of the same budget the orchestrator's `dispatch`
+/// uses: sixteen children in flight is the ceiling the product promises, and a
+/// seventeenth is refused rather than queued silently (a queued child whose
+/// caller has already returned has no order it can honour). The check and the
+/// reservation happen under one lock, so two racing calls cannot both pass it.
+pub(crate) const MAX_CONCURRENT_SUBAGENTS: usize = 16;
+
 /// One work-view row for a running (or just-finished) background agent.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NodeUpdate {
@@ -178,6 +187,11 @@ impl BackgroundAgents {
     }
 
     /// Spawn one child and return its work-view id. Returns as soon as the
+    /// Give back a reserved slot when the child never reached the supervisor.
+    fn release(&self, id: &str) {
+        self.inner.running.lock().unwrap().remove(id);
+    }
+
     /// process is up; the supervisor task owns it from there.
     pub(crate) async fn start(&self, spec: StartSpec) -> Result<String, String> {
         let task = spec.task.trim().to_string();
@@ -198,11 +212,38 @@ impl BackgroundAgents {
             .take(160)
             .collect();
 
+        // Reserve a slot before spawning: the cap must refuse *before* a child
+        // exists, and the check plus the insert have to be one critical section
+        // or two racing calls both pass it.
+        let cancel = CancellationToken::new();
+        {
+            let mut running = self.inner.running.lock().unwrap();
+            if running.len() >= MAX_CONCURRENT_SUBAGENTS {
+                return Err(format!(
+                    "{MAX_CONCURRENT_SUBAGENTS} subagents are already running; wait for one to \
+                     finish, or put the remaining work in the orchestration graph's next wave"
+                ));
+            }
+            running.insert(
+                id.clone(),
+                Running {
+                    task: task.clone(),
+                    started: Instant::now(),
+                    cancel: cancel.clone(),
+                },
+            );
+        }
+
         let custom = spec.program.clone();
         let program = match custom.clone() {
             Some(program) => program,
-            None => std::env::current_exe()
-                .map_err(|error| format!("cannot find the ki binary: {error}"))?,
+            None => match std::env::current_exe() {
+                Ok(path) => path,
+                Err(error) => {
+                    self.release(&id);
+                    return Err(format!("cannot find the ki binary: {error}"));
+                }
+            },
         };
         let mut command = tokio::process::Command::new(program);
         if custom.is_none() {
@@ -241,17 +282,27 @@ impl BackgroundAgents {
         if let Some(model) = spec.model.as_deref() {
             command.arg("--model").arg(model);
         }
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("cannot start a subagent: {error}"))?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "subagent has no stdin".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "subagent has no stdout".to_string())?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                self.release(&id);
+                return Err(format!("cannot start a subagent: {error}"));
+            }
+        };
+        let mut stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                self.release(&id);
+                return Err("subagent has no stdin".to_string());
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                self.release(&id);
+                return Err("subagent has no stdout".to_string());
+            }
+        };
         // The task rides stdin; EOF tells the child the prompt is complete.
         if let Err(error) = async {
             stdin.write_all(task.as_bytes()).await?;
@@ -260,19 +311,11 @@ impl BackgroundAgents {
         .await
         {
             let _ = child.kill().await;
+            self.release(&id);
             return Err(format!("cannot send the task to the subagent: {error}"));
         }
 
         let spec_worktree = spec.worktree.clone();
-        let cancel = CancellationToken::new();
-        self.inner.running.lock().unwrap().insert(
-            id.clone(),
-            Running {
-                task: task.clone(),
-                started: Instant::now(),
-                cancel: cancel.clone(),
-            },
-        );
 
         let inner = Arc::clone(&self.inner);
         let agent_id = id.clone();
@@ -792,5 +835,66 @@ mod tests {
             .await
             .expect_err("too large");
         assert!(error.contains("at most"), "{error}");
+    }
+
+    /// Sixteen in flight is the product's ceiling; a seventeenth call is
+    /// refused before any child is spawned, and the refusal does not consume a
+    /// slot.
+    #[tokio::test]
+    async fn the_seventeenth_subagent_is_refused() {
+        let agents = BackgroundAgents::new();
+        {
+            let mut running = agents.inner.running.lock().unwrap();
+            for n in 0..MAX_CONCURRENT_SUBAGENTS {
+                running.insert(
+                    format!("filler#{n}"),
+                    Running {
+                        task: "x".into(),
+                        started: Instant::now(),
+                        cancel: CancellationToken::new(),
+                    },
+                );
+            }
+        }
+        let error = agents
+            .start(StartSpec {
+                task: "do the work".into(),
+                timeout_secs: 30,
+                provider: None,
+                model: None,
+                program: Some(std::path::PathBuf::from("/bin/true")),
+                worktree: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.contains("16 subagents"), "{error}");
+        assert_eq!(
+            agents.inner.running.lock().unwrap().len(),
+            MAX_CONCURRENT_SUBAGENTS,
+            "a refused call must not reserve a slot"
+        );
+    }
+
+    /// One slot free: the call proceeds (and the reservation is released when
+    /// the child cannot be started).
+    #[tokio::test]
+    async fn a_failed_spawn_gives_the_slot_back() {
+        let agents = BackgroundAgents::new();
+        let error = agents
+            .start(StartSpec {
+                task: "do the work".into(),
+                timeout_secs: 30,
+                provider: None,
+                model: None,
+                program: Some(std::path::PathBuf::from("/nonexistent/ki-binary")),
+                worktree: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.contains("cannot start a subagent"), "{error}");
+        assert!(
+            agents.inner.running.lock().unwrap().is_empty(),
+            "the reserved slot must be released when the spawn fails"
+        );
     }
 }
