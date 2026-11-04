@@ -128,6 +128,44 @@ grep -q 'PackageIdentifier: gqf2008.ki' "$ROOT/packaging/winget/gqf2008.ki.yaml"
     status=1
 }
 
+# --- 4. Untracked files cannot ride a release, and the refresh is pushed -----
+# Preflight used to ignore untracked files (`--untracked-files=no`) while
+# `phase_commit` staged with `-A`: a stray `.env` in the checkout passed
+# preflight and was published with the tag. And the channel-refresh commit is
+# created *after* `phase_push`, so without a push of its own a pipeline-only
+# release left the refreshed manifests local while origin/main kept the old
+# packaging.
+phase_body() {
+    sed -n "/^phase_$1() {/,/^}/p" "$RELEASE"
+}
+if grep -v '^[[:space:]]*#' "$RELEASE" | grep -q -- '--untracked-files=no'; then
+    echo "FAIL: preflight still hides untracked files while phase_commit stages them" >&2
+    status=1
+fi
+phase_body commit | grep -q 'git add -u' || {
+    echo "FAIL: phase_commit does not stage tracked modifications with 'git add -u'" >&2
+    status=1
+}
+if phase_body commit | grep -q 'git add -A'; then
+    echo "FAIL: phase_commit still stages everything with 'git add -A'" >&2
+    status=1
+fi
+phase_body commit_channels | grep -q 'git add packaging/' || {
+    echo "FAIL: phase_commit_channels does not stage only packaging/" >&2
+    status=1
+}
+phase_body commit_channels | grep -q 'git push "\$PUSH_REMOTE" HEAD' || {
+    echo "FAIL: phase_commit_channels never pushes the refresh commit" >&2
+    status=1
+}
+# The consistency gate now also checks the packaging manifests, which the
+# channels phase refreshes *after* validate; the validate step must declare that
+# they are still pending, or every release cut fails on its own tag.
+phase_body validate | grep -q 'KI_RELEASE_PENDING_CHANNELS=1' || {
+    echo "FAIL: phase_validate does not mark the channels refresh as pending" >&2
+    status=1
+}
+
 if [ "$status" -eq 0 ]; then
     echo "release.sh: asset names match the workflow, push target is 'origin', channels target gqf2008"
 fi

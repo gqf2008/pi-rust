@@ -74,7 +74,55 @@ if [ -n "$roadmap" ] && [ "$roadmap" != "$VERSION" ]; then
     status=1
 fi
 
+# Package-manager prose must not hard-code a version.
+#
+# The README used to say the taps "carry ki 0.5.3" for three releases after that
+# was false, because nothing scanned the sentence: the row checks above only
+# look at `| Current release |`. A version belongs in that row; the tap sentence
+# says "the current release".
+for file in README.md docs/kiqi-tool/README.md; do
+    hits=$(grep -nE 'tap|brew|scoop' "$ROOT/$file" \
+        | grep -E '[0-9]+\.[0-9]+\.[0-9]+' \
+        | grep -v 'Current release' || true)
+    if [ -n "$hits" ]; then
+        echo "FAIL: $file hard-codes a version in a package-manager sentence (say 'the current release'):" >&2
+        printf '%s\n' "$hits" | sed 's/^/      /' >&2
+        status=1
+    fi
+done
+
+# The channel docs must describe the release that actually exists.
+#
+# `release.sh` refreshes the channels *after* `phase_validate`, so during a cut
+# the packaging tree still names the previous release. The pipeline sets
+# KI_RELEASE_PENDING_CHANNELS=1 for that one invocation; CI and every other
+# caller get the full check.
+if [ "${KI_RELEASE_PENDING_CHANNELS:-0}" = "1" ]; then
+    echo "note: channels refresh still pending (KI_RELEASE_PENDING_CHANNELS=1); skipping packaging checks"
+else
+#   * the digest table's own label: `sha256 (v0.5.6)`
+#   * status prose: `published (0.5.6)` / `currently v0.5.6`
+label=$(grep -m1 -oE 'sha256 \(v[0-9.]+\)' "$ROOT/packaging/README.md" | sed -E 's/.*\(v//; s/\)$//')
+if [ -n "$label" ] && [ "$label" != "$VERSION" ]; then
+    echo "FAIL: packaging/README.md's digest table is labelled v$label; the workspace version is $VERSION" >&2
+    status=1
+fi
+claims=$(grep -nE 'published \(v?[0-9]+\.[0-9]+\.[0-9]+\)|currently v[0-9]+\.[0-9]+\.[0-9]+' \
+    "$ROOT/packaging/README.md" || true)
+if [ -n "$claims" ]; then
+    while IFS= read -r line; do
+        case "$line" in
+            *"$VERSION"*) ;;
+            *) echo "FAIL: packaging/README.md names a stale release: $line" >&2; status=1 ;;
+        esac
+    done <<EOF
+$claims
+EOF
+fi
+
+fi
+
 if [ "$status" -eq 0 ]; then
-    echo "current-release claims agree with the workspace version ($VERSION): README.md, docs/kiqi-tool/README.md, ROADMAP.md"
+    echo "current-release claims agree with the workspace version ($VERSION): README.md, docs/kiqi-tool/README.md, ROADMAP.md, packaging/README.md"
 fi
 exit "$status"

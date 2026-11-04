@@ -32,12 +32,35 @@ note() { echo "» $*"; }
 
 cd "$(git rev-parse --show-toplevel)"
 
-OLD=$(grep -m1 -oE '"version": "[0-9.]+"' packaging/scoop/ki.json | grep -oE '[0-9.]+')
+# The version every manifest currently names. Keying the "already refreshed"
+# gate on Scoop alone made a half-applied refresh look complete: the script
+# rewrites Scoop before winget and the README table, so an interruption left
+# those two stale while a re-run printed "already at X" and exited 0.
+version_of() {
+  case "$1" in
+    homebrew) grep -m1 -oE 'version "[0-9.]+"' packaging/homebrew/ki.rb | grep -oE '[0-9.]+' ;;
+    scoop) grep -m1 -oE '"version": "[0-9.]+"' packaging/scoop/ki.json | grep -oE '[0-9.]+' ;;
+    winget) grep -m1 -oE 'PackageVersion: [0-9.]+' packaging/winget/gqf2008.ki.installer.yaml | grep -oE '[0-9.]+' ;;
+    readme) grep -m1 -oE 'sha256 \(v[0-9.]+\)' packaging/README.md | sed -E 's/.*\(v//; s/\)$//' ;;
+    *) die "unknown manifest: $1" ;;
+  esac
+}
+OLD=$(version_of scoop || true)
 [[ -n "$OLD" ]] || die "could not read the current version from packaging/scoop/ki.json"
+HB_NOW=$(version_of homebrew || true)
+WG_NOW=$(version_of winget || true)
+RD_NOW=$(version_of readme || true)
 # A re-cut release re-uploads the same tag's assets, so the version is already
 # current while the digests are stale. FORCE=1 refreshes without a bump.
-[[ "$OLD" != "$VERSION" ]] || [[ "${FORCE:-0}" == 1 ]] \
-  || { note "manifests already at $VERSION"; exit 0; }
+if [[ "${FORCE:-0}" != "1" ]] \
+  && [[ "$HB_NOW" == "$VERSION" && "$OLD" == "$VERSION" \
+     && "$WG_NOW" == "$VERSION" && "$RD_NOW" == "$VERSION" ]]; then
+  note "manifests already at $VERSION"
+  exit 0
+fi
+if [[ "$HB_NOW" != "$OLD" || "$OLD" != "$WG_NOW" || "$WG_NOW" != "$RD_NOW" ]]; then
+  note "  manifests disagree before refresh (homebrew=${HB_NOW:-?} scoop=${OLD:-?} winget=${WG_NOW:-?} readme=${RD_NOW:-?}); refreshing all"
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -138,16 +161,57 @@ if [[ -n "$README_OLD" ]]; then
   perl -pi -e "s/sha256 \(v$README_OLD/sha256 (v$VERSION/; s/TAG=v$README_OLD/TAG=v$VERSION/g; s/v$README_OLD-/v$VERSION-/g" packaging/README.md
 fi
 perl -pi -e "s/kiqi-v$VERSION-/ki-v$VERSION-/g" packaging/README.md
-OLD_TABLE=()
-while IFS= read -r hash; do
-  OLD_TABLE+=("$hash")
-done < <(grep -oE '\| `[0-9a-f]{64}` \|' packaging/README.md | grep -oE '[0-9a-f]{64}')
-if [[ "${#OLD_TABLE[@]}" -eq 4 ]]; then
-  # Table order: linux x86_64, linux aarch64, apple aarch64, windows.
-  perl -pi -e "s/${OLD_TABLE[0]}/$SHA_LINUX_X64/" packaging/README.md
-  perl -pi -e "s/${OLD_TABLE[1]}/$SHA_LINUX_ARM/" packaging/README.md
-  perl -pi -e "s/${OLD_TABLE[2]}/$SHA_MAC_ARM/" packaging/README.md
-  perl -pi -e "s/${OLD_TABLE[3]}/$SHA_WIN_X64/" packaging/README.md
+# Rows are keyed by their Target column, not by position. The old code collected
+# "rows with a hash" and mapped them by ordinal, so adding the Intel-macOS row (or
+# reordering the table) shipped stale or misassigned digests with exit 0.
+# A target the script does not know is a hard error in the verification step below.
+SHA_MAC_X64=""
+if grep -q 'x86_64-apple-darwin' packaging/README.md; then
+  SHA_MAC_X64=$(sha "ki-v$VERSION-x86_64-apple-darwin.tar.gz")
 fi
+KI_SHA_LINUX_X64=$SHA_LINUX_X64 KI_SHA_LINUX_ARM=$SHA_LINUX_ARM \
+KI_SHA_MAC_ARM=$SHA_MAC_ARM KI_SHA_MAC_X64=$SHA_MAC_X64 KI_SHA_WIN=$SHA_WIN_X64 \
+  perl -pi -e '
+    BEGIN {
+      %sha = (
+        "x86_64-unknown-linux-gnu"  => $ENV{KI_SHA_LINUX_X64},
+        "aarch64-unknown-linux-gnu" => $ENV{KI_SHA_LINUX_ARM},
+        "aarch64-apple-darwin"      => $ENV{KI_SHA_MAC_ARM},
+        "x86_64-apple-darwin"       => $ENV{KI_SHA_MAC_X64},
+        "x86_64-pc-windows-msvc"    => $ENV{KI_SHA_WIN},
+      );
+    }
+    if (/^\| `([a-z0-9_-]+)` \| `ki-v[0-9.]+-[a-z0-9_-]+\.(?:tar\.gz|zip)` \| `[0-9a-f]{64}` \|$/) {
+      my $target = $1;
+      if (defined $sha{$target} && $sha{$target} ne "") {
+        s/\| `[0-9a-f]{64}` \|$/| `$sha{$target}` |/;
+      }
+    }
+  ' packaging/README.md
+
+# Verify the whole refresh instead of trusting the substitutions: every manifest
+# names $VERSION and every table row carries the digest fetched for its target.
+# A silent no-op (format drift, a new target) now fails here instead of shipping.
+note "verify"
+for pair in "homebrew:$(version_of homebrew || true)" "scoop:$(version_of scoop || true)" \
+            "winget:$(version_of winget || true)" "readme:$(version_of readme || true)"; do
+  name=${pair%%:*}
+  got=${pair#*:}
+  [[ "$got" == "$VERSION" ]] || die "$name is at ${got:-?}, expected $VERSION"
+done
+perl -ne 'if (/^\| `([a-z0-9_-]+)` \| `ki-v[0-9.]+-[a-z0-9_-]+\.(?:tar\.gz|zip)` \| `([0-9a-f]{64})` \|$/) { print "$1 $2\n" }' \
+  packaging/README.md > "$tmp/readme_rows"
+[[ -s "$tmp/readme_rows" ]] || die "no sha256 rows parsed from packaging/README.md"
+while read -r target digest; do
+  case "$target" in
+    x86_64-unknown-linux-gnu) want=$SHA_LINUX_X64 ;;
+    aarch64-unknown-linux-gnu) want=$SHA_LINUX_ARM ;;
+    aarch64-apple-darwin) want=$SHA_MAC_ARM ;;
+    x86_64-apple-darwin) want=$SHA_MAC_X64 ;;
+    x86_64-pc-windows-msvc) want=$SHA_WIN_X64 ;;
+    *) die "unknown target in the packaging/README sha table: $target" ;;
+  esac
+  [[ "$digest" == "$want" ]] || die "sha table row $target has $digest, expected $want"
+done < "$tmp/readme_rows"
 
 note "done — review the diff, then commit the channel refresh"

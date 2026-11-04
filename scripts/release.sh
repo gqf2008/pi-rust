@@ -118,8 +118,11 @@ release_tag=""
 phase_preflight() {
   note "preflight"
   [[ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" == "true" ]] || die "not a git repo"
-  [[ -z "$(git status --porcelain --untracked-files=no)" ]] \
-    || die "working tree has tracked changes; commit or stash first"
+  # Untracked files count too: `phase_commit` stages what the bump wrote, and a
+  # stray `.env`/scratch file left in the checkout must not ride a release
+  # commit to origin. (`--untracked-files=no` used to hide exactly those.)
+  [[ -z "$(git status --porcelain)" ]] \
+    || die "working tree has tracked or untracked changes; commit or stash first"
   [[ -z "$(git tag --list "$release_tag")" ]] || die "tag $release_tag already exists"
   local current
   current=$(grep -m1 -oE '^version = "[0-9.]+"' Cargo.toml | grep -oE '[0-9.]+') \
@@ -173,12 +176,17 @@ phase_validate() {
   step rustc --edition=2021 release-helper.rs -o "$helper"
   step "$helper" validate "$release_version" --allow-dirty
   # 版本号在这一步之前已经改完（bump + docs），所以这里能直接判一致性。
-  step sh scripts/check-release-version-consistency.sh
+  # 打包清单是 channels 阶段才刷新的，此刻仍是上一个版本——显式声明这一点，
+  # 让门禁跳过分发面检查（CI 不设这个变量，跑全量）。
+  step env KI_RELEASE_PENDING_CHANNELS=1 sh scripts/check-release-version-consistency.sh
 }
 
 phase_commit() {
   note "commit the version bump"
-  step git add -A
+  # `-u` stages modifications/deletions of tracked files only. The bump and the
+  # docs phase only rewrite tracked files, so an untracked leftover cannot be
+  # swept in even when the pipeline starts at `--from bump` (preflight skipped).
+  step git add -u
   # Re-running a release whose bump already landed leaves an empty index;
   # `git commit` would exit 1 there and abort the pipeline under `set -e`.
   if [[ "$DRY_RUN" != "1" ]] && git diff --cached --quiet; then
@@ -243,12 +251,19 @@ phase_channels() {
 
 phase_commit_channels() {
   note "commit the channel refresh"
-  step git add -A
+  # `refresh-channels.sh` only rewrites files under `packaging/`; staging the
+  # directory (not `-A`) keeps a stray file out for the same reason as above.
+  step git add packaging/
   if [[ "$DRY_RUN" != "1" ]] && git diff --cached --quiet; then
     note "  nothing to commit"
-    return
+  else
+    step git commit -m "chore(release): refresh the install channels for $release_version"
   fi
-  step git commit -m "chore(release): refresh the install channels for $release_version"
+  # `phase_push` already ran: the tag and the bump are on the remote, but this
+  # commit is created after it, so it needs its own push. Without it a
+  # pipeline-only release leaves the refreshed manifests local and origin/main
+  # keeps pointing at the previous release's packaging.
+  step git push "$PUSH_REMOTE" HEAD
 }
 
 phase_taps() {

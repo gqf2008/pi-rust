@@ -45,17 +45,17 @@ below are available through `task publish` too.
 
 | Phase | Does |
 | --- | --- |
-| `preflight` | clean tree, tag unused, version differs |
+| `preflight` | clean tree (**tracked and untracked**), tag unused, version differs |
 | `bump` | `Cargo.toml` workspace version + internal pins → `cargo update --workspace` |
 | `changelog` | cuts `## [Unreleased]` into `## [X.Y.Z] - <date>` |
-| `docs` | re-syncs `crates/kiqi-cli/embedded-docs` (CI enforces it) |
-| `validate` | `release-helper validate` (version consistency across the release crates) |
+| `docs` | rewrites the three "current release" rows, then re-syncs `crates/kiqi-cli/embedded-docs` (CI enforces it) |
+| `validate` | `release-helper validate` + `check-release-version-consistency.sh`; the packaging checks are deferred to `channels` via `KI_RELEASE_PENDING_CHANNELS=1` |
 | `commit` | `chore(release): X.Y.Z` |
 | `tag` | `git tag vX.Y.Z` |
 | `push` | pushes the branch + tag → `release-binaries.yml` builds the assets |
 | `wait` | polls the GitHub release until every archive + `.sha256` exists |
-| `channels` | rewrites Homebrew / Scoop / winget data (`scripts/refresh-channels.sh`) |
-| `commit-channels` | `chore(release): refresh the install channels for X.Y.Z` |
+| `channels` | rewrites Homebrew / Scoop / winget data (`scripts/refresh-channels.sh`) and verifies every manifest plus each digest row before returning |
+| `commit-channels` | `chore(release): refresh the install channels for X.Y.Z`, then pushes it (`push` ran before this commit existed) |
 | `taps` | pushes the formula/manifest into `homebrew-tap` + `scoop-bucket` |
 | `winget` | opens the `microsoft/winget-pkgs` PR (`scripts/winget-submit.sh`) |
 
