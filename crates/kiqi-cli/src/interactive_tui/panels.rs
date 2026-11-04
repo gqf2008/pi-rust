@@ -9,6 +9,35 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Panel(Mutex<ExtensionPanel>);
 /// Generic extension rows below the built-in usage footer, in both terminal modes.
+/// Render at most `max_rows` rows of an inner component.
+///
+/// Extension panels are the one dock child whose height this binary does not
+/// control: an extension decides how many lines a panel wants. The dock has no
+/// scroll region, so an unbounded panel could otherwise take the rows the
+/// editor and footer need. Capping is the dock's budget, not a panel feature:
+/// the panel still renders in full wherever its own paging exists.
+pub(super) struct Capped {
+    pub inner: Arc<dyn Component>,
+    pub max_rows: usize,
+}
+
+impl Component for Capped {
+    fn render(&self, width: usize) -> Vec<String> {
+        let mut rows = self.inner.render(width);
+        rows.truncate(self.max_rows);
+        rows
+    }
+
+    fn invalidate(&self) {
+        self.inner.invalidate();
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Extension panels anchored to the dock's footer slot.
 pub(super) struct FooterPanels(pub kiqi_host::ExtensionStatusMailbox);
 impl Component for FooterPanels {
     fn render(&self, width: usize) -> Vec<String> {
@@ -611,5 +640,17 @@ mod tests {
             assert!(!rows.join("\n").contains("truncated"));
         }
         assert!(panel.render(80).join("\n").contains("1 轮 87 步 252 tok/s"));
+    }
+
+    #[test]
+    fn capped_renders_at_most_the_budget() {
+        use super::*;
+        let inner: Arc<dyn Component> = Arc::new(kiqi_tui::Text::new("a\nb\nc\nd\ne", 0, 0));
+        let capped = Capped { inner, max_rows: 2 };
+        assert_eq!(
+            capped.render(10).len(),
+            2,
+            "the dock budget caps an extension panel"
+        );
     }
 }

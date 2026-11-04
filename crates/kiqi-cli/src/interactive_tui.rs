@@ -1632,20 +1632,42 @@ pub async fn interactive_tui(
     let dock_is_regular = matches!(args.tui_mode, crate::args::TuiMode::Regular);
     let regular_work = Arc::new(Container::new());
     if dock_is_regular {
-        regular_work.add_child(Arc::new(work_view::WorkView {
-            state: state.clone(),
-            inline: true,
+        regular_work.add_child(Arc::new(panels::Capped {
+            inner: Arc::new(work_view::WorkView {
+                state: state.clone(),
+                inline: true,
+            }),
+            max_rows: 8,
         }));
     }
+    // The dock is split into a flexible upper block and a pinned lower block.
+    //
+    // `shrink(0)` on the lower block means `layout_vstack_constrained_with` may
+    // never take a row from the status line, the input, the search bar or the
+    // footer: when the screen runs out, only the upper block (work view,
+    // extension panels, queued messages, autocomplete) yields. That is the
+    // structural half of "the bottom never breaks"; the other half is that
+    // every upper child is bounded — the panels are capped here, the queued
+    // messages cap themselves, and the inline work view caps its agent list.
+    //
+    // A terminal shorter than `editor(3) + footer + status` still clips the
+    // tail: no allocation can fit more rows than the screen has. Content can no
+    // longer cause that.
     let dock = Arc::new(VStack::from_children(vec![
-        StackChild::Entry(StackEntry::new(regular_work.clone())),
-        StackChild::Entry(StackEntry::new(Arc::new(panels::RegularPanels {
-            mailbox: reload_context.ext_status.clone(),
-            enabled: matches!(args.tui_mode, crate::args::TuiMode::Regular),
-        }))),
-        StackChild::Entry(StackEntry::new(state.pending_container().clone())),
-        StackChild::Entry(StackEntry::new(status_container.clone())),
-        StackChild::Entry(StackEntry::new(autocomplete_container.clone())),
+        StackChild::Entry(StackEntry::new(regular_work.clone()).shrink(1)),
+        StackChild::Entry(
+            StackEntry::new(Arc::new(panels::Capped {
+                inner: Arc::new(panels::RegularPanels {
+                    mailbox: reload_context.ext_status.clone(),
+                    enabled: matches!(args.tui_mode, crate::args::TuiMode::Regular),
+                }),
+                max_rows: 6,
+            }))
+            .shrink(1),
+        ),
+        StackChild::Entry(StackEntry::new(state.pending_container().clone()).shrink(1)),
+        StackChild::Entry(StackEntry::new(status_container.clone()).shrink(0)),
+        StackChild::Entry(StackEntry::new(autocomplete_container.clone()).shrink(0)),
         // NOTE: no Spacer here. The scroll content already ends with a blank line
         // (`document_container`), and a second one in the dock stacked into a
         // two-row gap between the last message and the input box. One row of
@@ -1656,11 +1678,15 @@ pub async fn interactive_tui(
                 .shrink(0)
                 .min_size(3),
         ),
-        StackChild::Entry(StackEntry::new(state.search_bar.clone())),
-        StackChild::Entry(StackEntry::new(footer.clone())),
-        StackChild::Entry(StackEntry::new(Arc::new(panels::FooterPanels(
-            reload_context.ext_status.clone(),
-        )))),
+        StackChild::Entry(StackEntry::new(state.search_bar.clone()).shrink(0)),
+        StackChild::Entry(StackEntry::new(footer.clone()).shrink(0)),
+        StackChild::Entry(
+            StackEntry::new(Arc::new(panels::Capped {
+                inner: Arc::new(panels::FooterPanels(reload_context.ext_status.clone())),
+                max_rows: 3,
+            }))
+            .shrink(1),
+        ),
     ]));
 
     let transcript_stack = Arc::new(kiqi_tui::HStack::from_entries(vec![StackEntry::new(

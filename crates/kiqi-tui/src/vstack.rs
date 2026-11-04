@@ -521,4 +521,21 @@ mod tests {
         ];
         assert_eq!(sizes(&children, 5), vec![1, 4]);
     }
+
+    /// The dock's lower block is `shrink(0)`: however much content the flexible
+    /// children ask for, the pinned rows keep every row they declared.
+    #[test]
+    fn pinned_rows_keep_their_size_and_content_absorbs_the_pressure() {
+        let children = vec![
+            StackEntry::new(Arc::new(Text::new("header", 0, 0))).shrink(0),
+            StackEntry::new(Arc::new(Text::new(&"line\n".repeat(50), 0, 0))).shrink(1),
+            StackEntry::new(Arc::new(Text::new("status\ninput\ninput2\nfooter", 0, 0))).shrink(0),
+        ];
+        let sizes = sizes(&children, 8);
+        assert_eq!(
+            sizes,
+            vec![1, 3, 4],
+            "pinned rows keep their rows; the flexible child takes what is left"
+        );
+    }
 }

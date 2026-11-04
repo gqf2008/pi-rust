@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Fixed
+
+- **底部区域不会被内容顶掉。** dock 拆成「弹性上半 + 固定下半」：状态行、输入框、
+  搜索栏、页脚都是 `shrink(0)`，`layout_vstack_constrained_with` 在空间不足时只能从
+  上半（工作视图、扩展面板、排队消息、自动补全）拿行。同时把上半的每个子项都设了
+  上限：扩展面板最多 6 行 / 页脚面板 3 行、内联工作视图 8 行且子代理只列前 5 个
+  （其余折叠成 `… N more agents`）、排队消息此前已改成单行预览。终端本身短于
+  「输入框 3 行 + 页脚 + 状态行」时仍会裁掉尾部——那是屏幕物理限制，内容不再是原因。
+  回归测试钉住：`pinned_rows_keep_their_size_and_content_absorbs_the_pressure`、
+  `capped_renders_at_most_the_budget`。
+
 ### Added
 
 - **顶部状态栏（3 行）。** 布局改成 `VStack[header, transcript, dock]`，顶部固定三行：

@@ -239,10 +239,18 @@ impl Component for WorkView {
         // the dock used by `--tui-mode regular` has no compositing layer, so it
         // lists them as one compact line each instead. The box stays out of the
         // way when nothing is happening: a finished turn is not "happening".
-        let dock_nodes = if self.inline {
-            self.state.node_snapshot()
+        // Inline (regular mode) the dock has no scroll region, so the agent
+        // list is a preview, not an inventory: show the first few and fold the
+        // rest into a count. Fullscreen uses draggable boxes instead.
+        const INLINE_MAX_AGENTS: usize = 5;
+        let (dock_nodes, hidden_nodes) = if self.inline {
+            let mut nodes = self.state.node_snapshot();
+            let total = nodes.len();
+            nodes.truncate(INLINE_MAX_AGENTS);
+            let hidden = total.saturating_sub(nodes.len());
+            (nodes, hidden)
         } else {
-            Vec::new()
+            (Vec::new(), 0)
         };
         let queued = self.state.queued_agent_calls();
         if running.is_empty()
@@ -307,6 +315,12 @@ impl Component for WorkView {
                     let text = kiqi_tui::utils::truncate_to_width(text.trim(), 72, "…");
                     lines.push(format!("    │ {text}"));
                 }
+            }
+            if hidden_nodes > 0 {
+                lines.push(format!(
+                    "  … {hidden_nodes} more agent{}",
+                    if hidden_nodes == 1 { "" } else { "s" }
+                ));
             }
         }
         let (turns, input, output, _cache) = self.state.llm_usage_snapshot();
