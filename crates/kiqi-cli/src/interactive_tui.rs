@@ -1392,6 +1392,8 @@ pub async fn interactive_tui(
     let header = Arc::new(header::HeaderComponent::new());
     header.set_cwd(&cwd.to_string_lossy());
     header.set_git_branch(git_branch_for(&cwd).as_deref());
+    header.set_model(&model_name);
+    header.set_module_count(kiqi_host::grants::installed_extensions().len());
     if let Some(m) = model_catalog.iter().find(|m| m.id == lane_model_id) {
         footer.set_context_window(m.context_window);
     }
