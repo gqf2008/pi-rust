@@ -2,6 +2,13 @@
 
 ### Added
 
+- **`ki lsmod`。** 与 `ki insmod` / `ki rmmod` 配套的第三个内核式动词：以表格列出已安装的
+  wasm 插件——id、组件大小、摘要状态（`ok` / `mismatch` / `unverified`）和已授权能力。
+  `ki extension list` 仍然保留（只列 id + 能力），`lsmod` 适合一眼看清装了什么、有没有被
+  改过。插件在会话启动时加载，本命令只读磁盘。
+
+### Added
+
 - **`watch` 可以常驻了。** `.ki/watch.json` 新增 `mode`：`probe`（默认，按间隔起一次命令比对
   输出）之外多了 `resident`——命令只启动一次并常驻，stdout/stderr 按 `intervalSecs` 合并注入，
   进程退出时立即报告退出码与剩余输出。会话结束、`/reload`、条目删除或修改时杀整个进程组。

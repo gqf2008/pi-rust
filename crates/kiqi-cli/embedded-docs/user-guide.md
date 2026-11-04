@@ -186,6 +186,7 @@ ki auth login|check|logout
 ki events path|tail    检查扩展事件日志（需 KI_EVENT_LOG=1）
 ki update                 # 更新 ki CLI 自身
 ki insmod <path.wasm>     # 安装 wasm 插件（--build 先编译 guest）
+ki lsmod                  # 列出已安装的 wasm 插件（大小/摘要/已授权能力）
 ki rmmod <id>             # 卸载 wasm 插件
 ```
 
@@ -519,7 +520,8 @@ ki insmod --build extensions/wasm/kiqi-todo
 # 安装已构建的组件
 ki insmod path/to/component.wasm --yes
 # 查看/卸载
-ki extension list
+ki lsmod                 # 表格：id、组件大小、摘要状态、已授权能力
+ki extension list        # 只要 id + 能力
 ki rmmod <id>
 ```
 

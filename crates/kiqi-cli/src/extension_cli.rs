@@ -11,11 +11,12 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use kiqi_host::grants::{
-    agent_dir, extension_dir_at, grants_path, installed_extensions, ExecCwd, GrantOptions, Grants,
-    HeadersMode, MessagesMode, OAuthFlow, OAuthGrant, OAuthProviderProfile, ObserveMode,
-    ProviderEndpoint, ProviderGrant, ProviderModel, ProviderProfile, ProviderRequestGrant,
-    RenderGrant, ResourcesGrant, OAUTH_MAX_REQUESTS_DEFAULT, OAUTH_TIMEOUT_DEFAULT_SECONDS,
-    RENDER_KIND_MARKDOWN, RESOURCES_KIND_PROMPTS, RESOURCES_KIND_SKILLS,
+    agent_dir, extension_dir_at, grants_path, installed_extensions, installed_extensions_at,
+    ExecCwd, GrantOptions, Grants, HeadersMode, MessagesMode, OAuthFlow, OAuthGrant,
+    OAuthProviderProfile, ObserveMode, ProviderEndpoint, ProviderGrant, ProviderModel,
+    ProviderProfile, ProviderRequestGrant, RenderGrant, ResourcesGrant, OAUTH_MAX_REQUESTS_DEFAULT,
+    OAUTH_TIMEOUT_DEFAULT_SECONDS, RENDER_KIND_MARKDOWN, RESOURCES_KIND_PROMPTS,
+    RESOURCES_KIND_SKILLS,
 };
 
 /// Extension-authored text is terminal input, not just text.
@@ -68,6 +69,87 @@ fn list() -> i32 {
         }
     }
     0
+}
+
+/// `ki lsmod` — list installed wasm modules, kernel-style.
+///
+/// `insmod`/`rmmod` load and unload; this is the third verb of the set. It reads
+/// the same store `ki extension list` does, but presents it as a table: id,
+/// component size on disk, whether the sidecar digest still matches, and the
+/// granted capabilities. A module is loaded when a session starts — nothing here
+/// is "running" yet.
+pub fn lsmod(args: &[String]) -> i32 {
+    if matches!(
+        args.first().map(String::as_str),
+        Some("--help" | "-h" | "help")
+    ) {
+        println!(
+            "usage: ki lsmod\n\n\
+             List installed wasm modules: id, size, digest state, granted capabilities.\n\
+             `ki insmod` installs, `ki rmmod` uninstalls; a module is loaded when a session starts."
+        );
+        return 0;
+    }
+    match agent_dir() {
+        Some(root) => print!("{}", lsmod_report_at(&root)),
+        None => println!("no modules installed"),
+    }
+    0
+}
+
+/// The table for an explicit agent root (the test seam).
+fn lsmod_report_at(root: &Path) -> String {
+    let ids = installed_extensions_at(root);
+    if ids.is_empty() {
+        return "no modules installed\n".to_string();
+    }
+    let mut out = format!(
+        "{:<28} {:>9}  {:<10} {}\n",
+        "MODULE", "SIZE", "DIGEST", "CAPABILITIES"
+    );
+    for id in &ids {
+        let wasm = extension_dir_at(root, id).join("extension.wasm");
+        let size = std::fs::metadata(&wasm).map(|meta| meta.len()).unwrap_or(0);
+        let digest = match digest_status(&wasm) {
+            Ok(DigestStatus::Ok { .. }) => "ok",
+            Ok(DigestStatus::Mismatch { .. }) => "mismatch",
+            Ok(DigestStatus::Missing) => "unverified",
+            Err(_) => "error",
+        };
+        let granted = Grants::load_for_at(root, id).granted();
+        let caps = if granted.is_empty() {
+            "-".to_string()
+        } else {
+            granted
+                .iter()
+                .map(|cap| printable(cap))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        out.push_str(&format!(
+            "{:<28} {:>9}  {:<10} {}\n",
+            printable(id),
+            human_size(size),
+            digest,
+            caps
+        ));
+    }
+    out.push_str(&format!("\n{} module(s)\n", ids.len()));
+    out
+}
+
+/// `ki lsmod` 的 SIZE 列：人类可读，且不改变排序（表按 id 排）。
+fn human_size(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    let value = bytes as f64;
+    if value >= MIB {
+        format!("{:.1}M", value / MIB)
+    } else if value >= KIB {
+        format!("{:.1}K", value / KIB)
+    } else {
+        format!("{bytes}B")
+    }
 }
 
 fn show(id: Option<&str>) -> i32 {
@@ -1419,6 +1501,7 @@ USAGE:
     ki insmod <path.wasm> [flags]        (same as `ki extension install`)
     ki insmod --build <guest-crate-dir>  build a guest for wasm32-wasip2 first
     ki rmmod <id>                        (same as `ki extension uninstall`)
+    ki lsmod                             installed modules as a table
     ki extension list
     ki extension show <id>
     ki extension install <path.wasm> [--id <id>] [--yes] [--host <host>]... [--command <cmd>]...
@@ -3923,5 +4006,39 @@ mod tests {
             let error = apply_grant(&mut grants, &parsed, root.path()).unwrap_err();
             assert!(error.contains("--observe or --patch"), "{error}");
         }
+    }
+
+    #[test]
+    fn lsmod_lists_modules_with_size_and_digest_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ext = extension_dir_at(root, "demo");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(ext.join("extension.wasm"), vec![0u8; 2048]).unwrap();
+
+        let report = lsmod_report_at(root);
+        assert!(report.starts_with("MODULE"), "{report}");
+        assert!(report.contains("demo"), "{report}");
+        assert!(report.contains("2.0K"), "{report}");
+        assert!(
+            report.contains("unverified"),
+            "no sidecar means unverified: {report}"
+        );
+        assert!(report.contains("1 module(s)"), "{report}");
+    }
+
+    #[test]
+    fn lsmod_says_so_when_nothing_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(lsmod_report_at(dir.path()), "no modules installed\n");
+    }
+
+    #[test]
+    fn lsmod_skips_uninstalled_remnants() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let removed = root.join("extensions").join("old.removed-123");
+        std::fs::create_dir_all(&removed).unwrap();
+        assert_eq!(lsmod_report_at(root), "no modules installed\n");
     }
 }

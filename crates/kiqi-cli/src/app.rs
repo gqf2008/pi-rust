@@ -138,6 +138,7 @@ async fn run_inner() -> i32 {
         // Kernel-flavoured spellings for the wasm tier.
         Some("insmod") => return crate::extension_cli::insmod(&argv[1..]),
         Some("rmmod") => return crate::extension_cli::rmmod(&argv[1..]),
+        Some("lsmod") => return crate::extension_cli::lsmod(&argv[1..]),
         Some("worktree") => return crate::worktree::run(&argv[1..]),
         // These removed commands are intentionally rejected instead of falling
         // through to the prompt path: a retired command must never silently

@@ -699,6 +699,8 @@ pub fn print_help() {
                                 ride the grants; `--build <guest-crate-dir>`
                                 compiles one first; see `ki extension --help`)
   rmmod <id>                     Uninstall a wasm extension (moves it aside)
+  lsmod                          List installed wasm extensions (size, digest,
+                                granted capabilities)
 
 {u}Built-in Tools:{r}
   {builtin}  (enabled by default)
