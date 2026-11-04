@@ -1,12 +1,12 @@
 {
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "Rust-native coding-agent runtime and terminal CLI",
   "homepage": "https://github.com/gqf2008/pi-rust",
   "license": "MIT",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/gqf2008/pi-rust/releases/download/v0.5.5/ki-v0.5.5-x86_64-pc-windows-msvc.zip",
-      "hash": "53835fbedffb203d370026588f999e9e3f4a6785968ad93ac1c896ab7340b0a6"
+      "url": "https://github.com/gqf2008/pi-rust/releases/download/v0.5.6/ki-v0.5.6-x86_64-pc-windows-msvc.zip",
+      "hash": "59a2fca659b5248fc2bc5217fa0afbe4241eb27b6a7f1fd89b82628f0979f972"
     }
   },
   "bin": "ki.exe",

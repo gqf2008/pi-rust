@@ -7,17 +7,17 @@
 #   brew tap gqf2008/tap
 #   brew install ki
 #
-# Hashes below are for v0.5.5. See packaging/README.md for the refresh procedure.
+# Hashes below are for v0.5.6. See packaging/README.md for the refresh procedure.
 class Ki < Formula
   desc "Rust-native coding-agent runtime and terminal CLI"
   homepage "https://github.com/gqf2008/pi-rust"
-  version "0.5.5"
+  version "0.5.6"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/gqf2008/pi-rust/releases/download/v0.5.5/ki-v0.5.5-aarch64-apple-darwin.tar.gz"
-      sha256 "80e47d7a4039203644affc72b0f17b15b33523727f1c16b38e4b0acaf4ee9e74"
+      url "https://github.com/gqf2008/pi-rust/releases/download/v0.5.6/ki-v0.5.6-aarch64-apple-darwin.tar.gz"
+      sha256 "f69bebeabdd3d81f73e2cc0bbf29024a334801604b5897ed759256f2d3a57241"
     end
     # Intel macOS prebuilt binaries are installed via scripts/install.sh.
     # This formula currently covers Apple silicon on macOS.
@@ -25,12 +25,12 @@ class Ki < Formula
 
   on_linux do
     on_arm do
-      url "https://github.com/gqf2008/pi-rust/releases/download/v0.5.5/ki-v0.5.5-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "12f8948cf5d4390914f19ccda773552cc618b7e517f145e6316881bc345c2670"
+      url "https://github.com/gqf2008/pi-rust/releases/download/v0.5.6/ki-v0.5.6-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "f885e462fe1a7b77b1ac7ba427d7970a3546e0045a62da8a4343ab0998895347"
     end
     on_intel do
-      url "https://github.com/gqf2008/pi-rust/releases/download/v0.5.5/ki-v0.5.5-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "cb7b7730ca34d3cc32c3aa226c6340058b483e2037e2e501bf873d0febfec03a"
+      url "https://github.com/gqf2008/pi-rust/releases/download/v0.5.6/ki-v0.5.6-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "0477c348c1c73f97a05e6c4df58021c953e1101367b0d7d9cbbdcb8013e67eff"
     end
   end
 
