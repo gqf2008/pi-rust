@@ -15,6 +15,8 @@
 
 use super::*;
 
+use std::sync::Arc;
+
 /// The panel is exactly this tall; `render` always returns this many rows.
 pub(super) const HEADER_ROWS: usize = 3;
 
@@ -24,10 +26,13 @@ pub(super) struct HeaderComponent {
     branch: std::sync::Mutex<Option<String>>,
     model: std::sync::Mutex<String>,
     modules: std::sync::Mutex<usize>,
+    /// The footer owns the context counters; the panel reads them from there
+    /// rather than keeping a second copy that could drift.
+    footer: Arc<FooterComponent>,
 }
 
 impl HeaderComponent {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(footer: Arc<FooterComponent>) -> Self {
         Self {
             cwd: std::sync::Mutex::new(None),
             home: std::sync::Mutex::new(
@@ -38,6 +43,7 @@ impl HeaderComponent {
             branch: std::sync::Mutex::new(None),
             model: std::sync::Mutex::new(String::new()),
             modules: std::sync::Mutex::new(0),
+            footer,
         }
     }
 
@@ -103,14 +109,15 @@ impl Component for HeaderComponent {
         );
         let mut rows = vec![compose(brand, colors.dim.fg(&model), width)];
 
-        // Row 2: the working directory, unclipped to the session root.
-        rows.push(truncate_row(
+        // Row 2: working directory left, context usage right.
+        rows.push(compose(
             format!(
                 " {}",
                 colors
                     .dim
                     .fg(&kiqi_tui::ansi::sanitize_external_text(&self.location()))
             ),
+            context_badge(&self.footer, &colors),
             width,
         ));
 
@@ -169,6 +176,50 @@ fn truncate_row(row: String, width: usize) -> String {
     }
 }
 
+/// `████░░░░ 42% · 84K/200K`, coloured by pressure.
+///
+/// The bar and the numbers come from the footer's counters, so a model switch
+/// rescales the denominator and a compaction resets the numerator exactly as
+/// the footer's own badge does.
+fn context_badge(footer: &FooterComponent, colors: &kiqi_tui::theme::ThemeColors) -> String {
+    const CELLS: usize = 8;
+    let (percent, tokens, window) = footer.context_badge();
+    let Some(percent) = percent else {
+        return colors.dim.fg("context ?");
+    };
+    let filled = (((percent / 100.0) * CELLS as f64).round() as usize).min(CELLS);
+    let bar: String = (0..CELLS)
+        .map(|cell| if cell < filled { '█' } else { '░' })
+        .collect();
+    let color = if percent >= 90.0 {
+        colors.error
+    } else if percent >= 70.0 {
+        colors.warning
+    } else {
+        colors.accent
+    };
+    let mut text = format!("{} {:>3.0}%", color.fg(&bar), percent);
+    if let (Some(tokens), Some(window)) = (tokens, window) {
+        text.push_str(&format!(
+            " · {}/{}",
+            compact_tokens(tokens),
+            compact_tokens(window as i64)
+        ));
+    }
+    text
+}
+
+/// `84_000` → `84K`, `1_200_000` → `1.2M`.
+fn compact_tokens(tokens: i64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{}K", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
 /// `/Users/me/project` → `~/project`; anything else is left alone.
 fn short_path(cwd: &str, home: Option<&str>) -> String {
     if cwd.is_empty() {
@@ -192,7 +243,7 @@ mod tests {
     use super::*;
 
     fn header(cwd: &str, branch: Option<&str>) -> HeaderComponent {
-        let header = HeaderComponent::new();
+        let header = HeaderComponent::new(Arc::new(FooterComponent::new()));
         header.set_cwd(cwd);
         header.set_git_branch(branch);
         header.set_model("claude-sonnet-5-5");
@@ -211,7 +262,12 @@ mod tests {
         let header = header("/work/project", Some("main"));
         assert_eq!(header.render(80).len(), HEADER_ROWS);
         // Missing data must not collapse the panel.
-        assert_eq!(HeaderComponent::new().render(80).len(), HEADER_ROWS);
+        assert_eq!(
+            HeaderComponent::new(Arc::new(FooterComponent::new()))
+                .render(80)
+                .len(),
+            HEADER_ROWS
+        );
     }
 
     #[test]
@@ -231,7 +287,7 @@ mod tests {
 
     #[test]
     fn home_is_rendered_as_a_tilde() {
-        let header = HeaderComponent::new();
+        let header = HeaderComponent::new(Arc::new(FooterComponent::new()));
         *header.home.lock().unwrap() = Some("/home/me".to_string());
         header.set_cwd("/home/me/project");
         assert_eq!(header.location(), "~/project");
@@ -256,5 +312,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn row_two_carries_the_context_badge() {
+        let footer = Arc::new(FooterComponent::new());
+        footer.set_context_window(Some(200_000));
+        footer.set_context_tokens(Some(84_000));
+        let header = HeaderComponent::new(footer);
+        header.set_cwd("/work/project");
+        let rows = plain(&header.render(80));
+        assert!(rows[1].contains("42%"), "{rows:?}");
+        assert!(rows[1].contains("84K/200K"), "{rows:?}");
+        assert!(rows[1].contains('█'), "{rows:?}");
+        assert!(rows[1].contains('░'), "{rows:?}");
+    }
+
+    #[test]
+    fn unknown_context_renders_a_placeholder() {
+        let header = HeaderComponent::new(Arc::new(FooterComponent::new()));
+        let rows = plain(&header.render(80));
+        assert!(rows[1].contains("context ?"), "{rows:?}");
     }
 }

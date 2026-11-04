@@ -1389,7 +1389,7 @@ pub async fn interactive_tui(
     }
     // Location lives in the top bar (see `header.rs`); the footer keeps what is
     // happening (model/usage/hints), so the two never repeat each other.
-    let header = Arc::new(header::HeaderComponent::new());
+    let header = Arc::new(header::HeaderComponent::new(footer.clone()));
     header.set_cwd(&cwd.to_string_lossy());
     header.set_git_branch(git_branch_for(&cwd).as_deref());
     header.set_model(&model_name);

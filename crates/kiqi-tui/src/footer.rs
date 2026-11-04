@@ -281,6 +281,19 @@ impl FooterComponent {
         }
     }
 
+    /// The context badge data: `(percent, tokens, window)`.
+    ///
+    /// The top panel mirrors this instead of tracking a second copy, so a model
+    /// switch, an assistant response and the post-compaction reset all reach
+    /// both surfaces through one path.
+    pub fn context_badge(&self) -> (Option<f64>, Option<i64>, Option<u64>) {
+        (
+            *self.context_percent.lock().unwrap(),
+            *self.context_tokens.lock().unwrap(),
+            *self.context_window.lock().unwrap(),
+        )
+    }
+
     /// Set whether auto-compaction is enabled (renders `(auto)`).
     pub fn set_auto_compact(&self, enabled: bool) {
         if let Ok(mut a) = self.auto_compact.lock() {
