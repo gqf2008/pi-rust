@@ -478,3 +478,47 @@ where
         .map(|(entry, size)| (entry.component.clone(), size))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Text;
+
+    fn sizes(children: &[StackEntry], height: usize) -> Vec<usize> {
+        layout_vstack_constrained_with(children, 20, height, 0, |component, width| {
+            component.render(width).len()
+        })
+        .into_iter()
+        .map(|(_, size)| size)
+        .collect()
+    }
+
+    /// The top bar is pinned with `shrink(0)`; when the stack overflows, that
+    /// entry must keep every row it asked for. Squeezing it is how the header
+    /// would silently disappear.
+    #[test]
+    fn a_shrink_zero_entry_keeps_its_rows_under_overflow() {
+        let children = vec![
+            StackEntry::new(Arc::new(Text::new("top", 0, 0))).shrink(0),
+            StackEntry::new(Arc::new(Text::new("a\nb\nc\nd\ne\nf", 0, 0)))
+                .basis(0)
+                .grow(1)
+                .shrink(1)
+                .min_size(1),
+        ];
+        let sizes = sizes(&children, 3);
+        assert_eq!(sizes[0], 1, "the pinned row survives overflow: {sizes:?}");
+    }
+
+    #[test]
+    fn the_growing_entry_takes_what_is_left() {
+        let children = vec![
+            StackEntry::new(Arc::new(Text::new("top", 0, 0))).shrink(0),
+            StackEntry::new(Arc::new(Text::new("x", 0, 0)))
+                .basis(0)
+                .grow(1)
+                .min_size(1),
+        ];
+        assert_eq!(sizes(&children, 5), vec![1, 4]);
+    }
+}

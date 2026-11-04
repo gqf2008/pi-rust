@@ -42,6 +42,7 @@ use sessions::*;
 mod run;
 use run::*;
 mod cron;
+mod header;
 use cron::*;
 pub(crate) mod events;
 use events::*;
@@ -1386,20 +1387,23 @@ pub async fn interactive_tui(
     if let Ok(level) = lane.get_thinking_level().await {
         footer.set_thinking_level(Some(thinking_level_name(level)));
     }
-    footer.set_cwd(&cwd.to_string_lossy());
-    footer.set_git_branch(git_branch_for(&cwd).as_deref());
+    // Location lives in the top bar (see `header.rs`); the footer keeps what is
+    // happening (model/usage/hints), so the two never repeat each other.
+    let header = Arc::new(header::HeaderComponent::new());
+    header.set_cwd(&cwd.to_string_lossy());
+    header.set_git_branch(git_branch_for(&cwd).as_deref());
     if let Some(m) = model_catalog.iter().find(|m| m.id == lane_model_id) {
         footer.set_context_window(m.context_window);
     }
     footer.set_hints("Enter: Send | Shift+Enter: New line | Ctrl+C: Clear/Exit | Esc: Abort | Ctrl+L: Model | Ctrl+P: Cycle | Ctrl+O: Expand/collapse tools | Ctrl+T: Show/hide thinking | /help");
 
     // Live git-branch refresh (native fs-watch on `.git/HEAD`): a checkout or
-    // commit updates the footer's branch without a manual refresh.
+    // commit updates the top bar's branch without a manual refresh.
     let _branch_watcher = find_git_head_path(&cwd).map(|head| {
-        let footer_ref = footer.clone();
+        let header_ref = header.clone();
         let cwd_ref = cwd.clone();
         crate::fs_watch::watch_path(head, move || {
-            footer_ref.set_git_branch(git_branch_for(&cwd_ref).as_deref());
+            header_ref.set_git_branch(git_branch_for(&cwd_ref).as_deref());
         })
     });
 
@@ -1663,6 +1667,9 @@ pub async fn interactive_tui(
     .shrink(1)
     .min_size(1)]));
     let root = VStack::from_children(vec![
+        // The top bar is structural: `shrink(0)` means the allocator may never
+        // take a row from it, whatever the transcript or the dock wants.
+        StackChild::Entry(StackEntry::new(header.clone()).shrink(0)),
         StackChild::Entry(
             StackEntry::new(transcript_stack.clone())
                 .basis(0)
