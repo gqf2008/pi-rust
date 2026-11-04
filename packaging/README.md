@@ -69,12 +69,12 @@ also builds Intel macOS as `ki-v<version>-x86_64-apple-darwin.tar.gz`, with a
 matching `.sha256`; this asset is available in releases whose tag includes that
 target.
 
-| Target | Asset | sha256 (v0.5.4) |
+| Target | Asset | sha256 (v0.5.5) |
 | --- | --- | --- |
-| `x86_64-unknown-linux-gnu` | `ki-v0.5.4-x86_64-unknown-linux-gnu.tar.gz` | `49c8e164f1773a5ee1efc769543e00cab77fd39d8728accf1e4b63f36440d285` |
-| `aarch64-unknown-linux-gnu` | `ki-v0.5.4-aarch64-unknown-linux-gnu.tar.gz` | `baa00823c118c25241658e3aa3e254bf3555303709b48247012bc3173ef7a82b` |
-| `aarch64-apple-darwin` | `ki-v0.5.4-aarch64-apple-darwin.tar.gz` | `b73deb91c6d6835c9ecc1dd43edf81783e2e1897358b26fe5f21d96cf14871fd` |
-| `x86_64-pc-windows-msvc` | `ki-v0.5.4-x86_64-pc-windows-msvc.zip` | `8a281a848c92b93b2231b62d16d37e7415220a79cf7153177933390d971e5368` |
+| `x86_64-unknown-linux-gnu` | `ki-v0.5.5-x86_64-unknown-linux-gnu.tar.gz` | `cb7b7730ca34d3cc32c3aa226c6340058b483e2037e2e501bf873d0febfec03a` |
+| `aarch64-unknown-linux-gnu` | `ki-v0.5.5-aarch64-unknown-linux-gnu.tar.gz` | `12f8948cf5d4390914f19ccda773552cc618b7e517f145e6316881bc345c2670` |
+| `aarch64-apple-darwin` | `ki-v0.5.5-aarch64-apple-darwin.tar.gz` | `80e47d7a4039203644affc72b0f17b15b33523727f1c16b38e4b0acaf4ee9e74` |
+| `x86_64-pc-windows-msvc` | `ki-v0.5.5-x86_64-pc-windows-msvc.zip` | `53835fbedffb203d370026588f999e9e3f4a6785968ad93ac1c896ab7340b0a6` |
 
 Two consequences worth knowing:
 
@@ -93,7 +93,7 @@ release-asset host. Read the digests from the API instead, which is what
 `scripts/refresh-channels.sh` does:
 
 ```bash
-TAG=v0.5.4                      # the tag being packaged
+TAG=v0.5.5                      # the tag being packaged
 gh api "repos/gqf2008/pi-rust/releases/tags/$TAG" \
   --jq '.assets[] | .name + " " + (.digest // "NO_DIGEST")'
 ```
