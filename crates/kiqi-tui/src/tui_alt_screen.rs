@@ -607,7 +607,7 @@ impl TuiAltScreen {
     fn exit_alt_screen(&self, preserve_screen: bool) {
         if let Ok(terminal) = self.terminal.lock() {
             // Autowrap is a terminal mode, not restored by leaving the buffer.
-            terminal.write("\x1b[?7h");
+            terminal.write("\x1b[?7h\x1b[0 q");
             if preserve_screen {
                 terminal.write("\x1b[?1049l\x1b[?25h");
             } else {
@@ -653,6 +653,14 @@ impl TuiAltScreen {
         }
         if let Ok(terminal) = self.terminal.lock() {
             terminal.enter_raw_mode();
+            // A blinking block caret. The editor positions the hardware cursor
+            // at the insertion point, but the glyph itself is whatever DECSCUSR
+            // mode the user's profile set (often a steady bar) — `1 q` asks for
+            // a blinking block, and `stop` restores the profile default with
+            // `0 q`. Terminals that ignore DECSCUSR keep their own cursor.
+            if self.get_show_hardware_cursor() {
+                terminal.write("\x1b[1 q");
+            }
             if self.uses_main_screen() {
                 terminal.disable_mouse();
             } else {
@@ -1340,7 +1348,7 @@ impl TUI for TuiAltScreen {
             if let Ok(terminal) = self.terminal.lock() {
                 // Leave the shell prompt below the rendered footer while
                 // preserving all conversation rows in terminal scrollback.
-                terminal.write("\x1b[?25h\r\n");
+                terminal.write("\x1b[0 q\x1b[?25h\r\n");
                 terminal.stop();
             }
         } else {
@@ -1437,6 +1445,14 @@ impl TuiAltScreen {
         }
         if let Ok(terminal) = self.terminal.lock() {
             terminal.enter_raw_mode();
+            // A blinking block caret. The editor positions the hardware cursor
+            // at the insertion point, but the glyph itself is whatever DECSCUSR
+            // mode the user's profile set (often a steady bar) — `1 q` asks for
+            // a blinking block, and `stop` restores the profile default with
+            // `0 q`. Terminals that ignore DECSCUSR keep their own cursor.
+            if self.get_show_hardware_cursor() {
+                terminal.write("\x1b[1 q");
+            }
             if self.uses_main_screen() {
                 // Give wheel/touchpad gestures back to the terminal emulator;
                 // it can now scroll its native history smoothly.
@@ -2066,6 +2082,27 @@ mod tests {
             "200 requests in ~250 ms must coalesce into ~16 ms frames, painted {frames}"
         );
         tui.stop(TuiStopOptions::default());
+    }
+    #[test]
+    fn the_caret_asks_to_blink_and_the_style_is_restored_on_stop() {
+        let output = Arc::new(Mutex::new(String::new()));
+        let tui = TuiAltScreen::new(
+            Box::new(RecordingTerminal {
+                output: output.clone(),
+            }),
+            true,
+            None,
+        );
+        tui.start_readerless();
+        assert!(
+            output.lock().unwrap().contains("\x1b[1 q"),
+            "start must request a blinking block cursor"
+        );
+        tui.stop(Default::default());
+        assert!(
+            output.lock().unwrap().contains("\x1b[0 q"),
+            "stop must restore the profile cursor style"
+        );
     }
 }
 

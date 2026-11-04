@@ -281,6 +281,22 @@ impl FooterComponent {
         }
     }
 
+    /// The model label as the footer renders it (`(provider) model`).
+    pub fn model_label(&self) -> String {
+        self.model
+            .lock()
+            .map(|cell| cell.clone())
+            .unwrap_or_default()
+    }
+
+    /// The current thinking level, when the model has one.
+    pub fn thinking_level(&self) -> Option<String> {
+        self.thinking_level
+            .lock()
+            .ok()
+            .and_then(|cell| cell.clone())
+    }
+
     /// The context badge data: `(percent, tokens, window)`.
     ///
     /// The top panel mirrors this instead of tracking a second copy, so a model

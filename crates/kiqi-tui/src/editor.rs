@@ -27,7 +27,7 @@ pub struct EditorStyle {
 impl Default for EditorStyle {
     fn default() -> Self {
         Self {
-            prompt: "> ".to_string(),
+            prompt: String::new(),
             placeholder: String::new(),
         }
     }
@@ -1438,14 +1438,31 @@ impl Component for Editor {
         let mut content_lines = Vec::new();
 
         let pad = " ".repeat(self.options.padding_x);
-        // `prompt` is no longer rendered (mirrors the TS editor, which draws a
-        // bordered box with padding-only lines and no `> ` prefix — see
-        // `editor.ts:539-578`). The `EditorStyle.prompt` field is retained for
-        // API compatibility but unread here.
-        let content_width = width.saturating_sub(self.options.padding_x).max(1);
+        // The prompt (`❯ ` in ki) sits inside the box, on the first visual row;
+        // continuation rows are indented by its width so wrapped text keeps its
+        // left edge. An empty prompt is the default and renders exactly as
+        // before (the TS editor draws no prefix).
+        let prompt = self.style.prompt.clone();
+        let prompt_w = crate::ansi::visible_width(&prompt);
+        let prompt_fits = prompt_w > 0
+            && width
+                > self
+                    .options
+                    .padding_x
+                    .saturating_add(prompt_w)
+                    .saturating_add(1);
+        let lead = self.options.padding_x + if prompt_fits { prompt_w } else { 0 };
+        let prompt_styled = if prompt_fits {
+            crate::theme::theme().colors.accent.fg(&prompt)
+        } else {
+            String::new()
+        };
+        let indent = " ".repeat(if prompt_fits { prompt_w } else { 0 });
+        let content_width = width.saturating_sub(lead).max(1);
         // Leave one cell for the cursor marker on the active logical line so
         // the terminal never performs an implicit wrap at the right border.
         let active_width = content_width.saturating_sub(1).max(1);
+        let mut visual_row = 0usize;
         for (row_idx, line) in state.lines.iter().enumerate() {
             let ranges = wrap_line_ranges(
                 line,
@@ -1489,11 +1506,7 @@ impl Component for Editor {
                 // Pad the line out to the full width (left padding + content +
                 // right padding) so the border box has a uniform interior width
                 // (mirrors editor.ts:522-578).
-                let right_pad = " ".repeat(
-                    width
-                        .saturating_sub(self.options.padding_x)
-                        .saturating_sub(visible_w),
-                );
+                let right_pad = " ".repeat(width.saturating_sub(lead).saturating_sub(visible_w));
                 let right_pad_cursor = if state.focused && row_idx == state.cursor_row {
                     right_pad
                         .get(..right_pad.len().saturating_sub(1))
@@ -1525,16 +1538,30 @@ impl Component for Editor {
                     rendered = insert_cursor_marker(&rendered, self.options.padding_x + cursor_col);
                 }
 
-                content_lines.push(rendered);
+                // The prompt leads the first visual row; later rows are indented
+                // by its width. Prepending *after* the cursor marker keeps the
+                // marker's byte offset math untouched.
+                let prefix = if visual_row == 0 {
+                    prompt_styled.as_str()
+                } else {
+                    indent.as_str()
+                };
+                content_lines.push(format!("{prefix}{rendered}"));
+                visual_row += 1;
             }
         }
 
         // Guard against an empty `lines` vector (the invariant is `[""]`, but
         // be defensive): emit one blank interior row so the box still renders.
         if content_lines.is_empty() {
+            let prefix = if prompt_fits {
+                prompt_styled.as_str()
+            } else {
+                ""
+            };
             content_lines.push(format!(
-                "{pad}{}",
-                " ".repeat(width.saturating_sub(self.options.padding_x))
+                "{prefix}{pad}{}",
+                " ".repeat(width.saturating_sub(lead))
             ));
         }
 
@@ -2552,5 +2579,40 @@ l12",
         editor.handle_paste(&"\x1b[104;5u".repeat(1200));
         assert_eq!(editor.get_text(), "");
         assert_eq!(editor.get_expanded_text(), "");
+    }
+
+    #[test]
+    fn a_prompt_leads_the_first_row_and_narrows_the_content() {
+        let editor = Editor::new(
+            EditorOptions {
+                padding_x: 1,
+                ..Default::default()
+            },
+            EditorStyle {
+                prompt: "❯".to_string(),
+                ..Default::default()
+            },
+            Arc::new(Keybindings::new()),
+        );
+        editor.set_text("hello");
+        let rows = editor.render(20);
+        let content = crate::ansi::strip_ansi(&rows[1]);
+        assert!(content.contains("❯ hello"), "{content:?}");
+        for row in &rows {
+            assert!(
+                crate::ansi::visible_width(row) <= 20,
+                "row wider than the terminal: {:?}",
+                crate::ansi::strip_ansi(row)
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_prompt_leaves_the_editor_unchanged() {
+        let editor = Editor::simple();
+        editor.set_text("hi");
+        let rows = editor.render(20);
+        let content = crate::ansi::strip_ansi(&rows[1]);
+        assert!(!content.contains('❯'), "{content:?}");
     }
 }

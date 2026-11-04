@@ -24,7 +24,6 @@ pub(super) struct HeaderComponent {
     cwd: std::sync::Mutex<Option<String>>,
     home: std::sync::Mutex<Option<String>>,
     branch: std::sync::Mutex<Option<String>>,
-    model: std::sync::Mutex<String>,
     modules: std::sync::Mutex<usize>,
     /// The footer owns the context counters; the panel reads them from there
     /// rather than keeping a second copy that could drift.
@@ -41,7 +40,6 @@ impl HeaderComponent {
                     .or_else(|| std::env::var("USERPROFILE").ok()),
             ),
             branch: std::sync::Mutex::new(None),
-            model: std::sync::Mutex::new(String::new()),
             modules: std::sync::Mutex::new(0),
             footer,
         }
@@ -58,13 +56,6 @@ impl HeaderComponent {
     pub(super) fn set_git_branch(&self, branch: Option<&str>) {
         if let Ok(mut cell) = self.branch.lock() {
             *cell = branch.map(str::to_string);
-        }
-    }
-
-    /// The active model id, shown on the first row.
-    pub(super) fn set_model(&self, model: &str) {
-        if let Ok(mut cell) = self.model.lock() {
-            *cell = model.to_string();
         }
     }
 
@@ -93,11 +84,7 @@ impl Component for HeaderComponent {
             return Vec::new();
         }
         let colors = current_theme().colors;
-        let model = self
-            .model
-            .lock()
-            .map(|cell| cell.clone())
-            .unwrap_or_default();
+        let model = model_badge(&self.footer, &colors);
         let modules = self.modules.lock().map(|cell| *cell).unwrap_or(0);
 
         // Row 1: brand left, model right.
@@ -107,7 +94,7 @@ impl Component for HeaderComponent {
             tui_bold(&colors.muted.fg("kiqi")),
             colors.dim.fg(&format!("v{}", crate::VERSION))
         );
-        let mut rows = vec![compose(brand, colors.dim.fg(&model), width)];
+        let mut rows = vec![compose(brand, model, width)];
 
         // Row 2: working directory left, context usage right.
         rows.push(compose(
@@ -178,6 +165,28 @@ fn truncate_row(row: String, width: usize) -> String {
 
 /// `████░░░░ 42% · 84K/200K`, coloured by pressure.
 ///
+/// `deepseek/deepseek-flash • medium`.
+///
+/// The footer owns both halves (`(provider) model` + the thinking level), so a
+/// `/model` switch or a thinking-level change reaches this row without a second
+/// copy to keep in sync. The footer's parenthesised provider is rewritten to
+/// the `provider/model` spelling the panel uses.
+fn model_badge(footer: &FooterComponent, colors: &kiqi_tui::theme::ThemeColors) -> String {
+    let raw = footer.model_label();
+    if raw.is_empty() {
+        return String::new();
+    }
+    let model = match raw.strip_prefix('(').and_then(|rest| rest.split_once(") ")) {
+        Some((provider, model)) => format!("{provider}/{model}"),
+        None => raw,
+    };
+    let text = match footer.thinking_level() {
+        Some(level) if !level.is_empty() => format!("{model} • {level}"),
+        _ => model,
+    };
+    colors.dim.fg(&text)
+}
+
 /// The bar and the numbers come from the footer's counters, so a model switch
 /// rescales the denominator and a compaction resets the numerator exactly as
 /// the footer's own badge does.
@@ -246,7 +255,8 @@ mod tests {
         let header = HeaderComponent::new(Arc::new(FooterComponent::new()));
         header.set_cwd(cwd);
         header.set_git_branch(branch);
-        header.set_model("claude-sonnet-5-5");
+        header.footer.set_model("(deepseek) deepseek-flash");
+        header.footer.set_thinking_level(Some("medium"));
         header.set_module_count(9);
         header
     }
@@ -279,7 +289,10 @@ mod tests {
             rows[0].contains(&format!("v{}", crate::VERSION)),
             "{rows:?}"
         );
-        assert!(rows[0].contains("claude-sonnet-5-5"), "{rows:?}");
+        assert!(
+            rows[0].contains("deepseek/deepseek-flash • medium"),
+            "{rows:?}"
+        );
         assert!(rows[1].contains("/work/project"), "{rows:?}");
         assert!(rows[2].contains("main"), "{rows:?}");
         assert!(rows[2].contains("9 modules"), "{rows:?}");
