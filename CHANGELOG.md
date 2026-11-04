@@ -1,5 +1,7 @@
 ## [Unreleased]
 
+## [0.5.5] - 2026-11-04
+
 ### Added
 
 - **`ki lsmod`。** 与 `ki insmod` / `ki rmmod` 配套的第三个内核式动词：以表格列出已安装的
