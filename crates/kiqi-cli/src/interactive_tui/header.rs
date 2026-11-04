@@ -5,7 +5,7 @@
 //! long transcript can take a row from it:
 //!
 //! ```text
-//!  ▃ ▅ ▂  kiqi  v0.5.5                          claude-sonnet-5-5
+//!  ▃ ▅ ▂  kiqi  v0.5.6                          claude-sonnet-5-5
 //!  ~/GitHub/pi-rust
 //!  main · 9 modules
 //! ```

@@ -74,7 +74,7 @@ The crates are not published to crates.io, so `cargo install kiqi-cli` does not 
 it would fetch a different (or no) package.
 
 **Package managers:** `gqf2008/homebrew-tap` and `gqf2008/scoop-bucket` carry
-ki 0.5.3 (`brew tap gqf2008/tap && brew install ki`, or
+the current release (`brew tap gqf2008/tap && brew install ki`, or
 `scoop bucket add gqf2008 https://github.com/gqf2008/scoop-bucket && scoop install ki`).
 The `bigfish1913` taps belong to an unrelated project — they carry that project's
 `rpi` formula/manifest, not `ki`. The `gqf2008.ki` winget submission is

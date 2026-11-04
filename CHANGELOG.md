@@ -2196,7 +2196,10 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 Early crates.io publications while the workspace layout, provider layer and
 agent loop were being established. See `git log` for details.
 
-[Unreleased]: https://github.com/gqf2008/pi-rust/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/gqf2008/pi-rust/compare/v0.5.6...HEAD
+[0.5.6]: https://github.com/gqf2008/pi-rust/compare/v0.5.5...v0.5.6
+[0.5.5]: https://github.com/gqf2008/pi-rust/compare/v0.5.4...v0.5.5
+[0.5.4]: https://github.com/gqf2008/pi-rust/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/gqf2008/pi-rust/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/gqf2008/pi-rust/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/gqf2008/pi-rust/compare/v0.5.0...v0.5.1

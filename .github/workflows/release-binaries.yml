@@ -207,7 +207,7 @@ jobs:
             --password "${APPLE_APP_PASSWORD}" --wait
           xcrun stapler staple "${pkg}"
           xcrun stapler validate "${pkg}"
-          shasum -a 256 "${pkg}" > "${pkg}.sha256"
+          ( cd "$(dirname "${pkg}")" && shasum -a 256 "$(basename "${pkg}")" ) > "${pkg}.sha256"
 
           security delete-keychain "${keychain}" || true
 

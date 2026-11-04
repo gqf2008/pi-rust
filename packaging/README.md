@@ -1,9 +1,10 @@
 # Install channels
 
-ki has one live binary install path today (`scripts/install.sh`), plus a source build.
-The package-manager manifests in this directory are prepared for the project's
-own owner (`gqf2008`) but have **not been published**; the taps under
-`bigfish1913` belong to an unrelated project and carry a different tool (`rpi`).
+ki ships prebuilt binaries through `scripts/install.sh` and the published
+Homebrew/Scoop taps, plus a source build.
+The package-manager manifests in this directory are for the project's own owner
+(`gqf2008`); the taps under `bigfish1913` belong to an unrelated project and
+carry a different tool (`rpi`).
 Every manifest still points at a **real release asset** with its **real
 checksum** — none of it is a template with placeholders.
 
@@ -21,7 +22,7 @@ current release; winget submissions stay open PRs until a moderator merges them
 (see Status).
 
 The manifests and scripts already point at `gqf2008/pi-rust` releases with real
-digests (currently v0.5.3). Publishing is a later owner decision: create the
+digests. Publishing is a later owner decision: create the
 `gqf2008` taps, run `scripts/push-taps.sh`, submit a `gqf2008.ki` winget
 manifest, and publish the crates; only then should the catalogue claims change.
 
@@ -32,8 +33,8 @@ manifest, and publish the crates; only then should the catalogue claims change.
 | `cargo install kiqi-cli` | crates.io | **not published** | every crate is `publish = false`; use `install.sh` or a source build |
 | `curl … install.sh \| sh` | [`scripts/install.sh`](../scripts/install.sh) | **live** | none |
 | `cargo binstall kiqi-cli` | [`crates/kiqi-cli/Cargo.toml`](../crates/kiqi-cli/Cargo.toml) | **not available** | takes effect only after the crates are published (`publish = false` today) |
-| Homebrew | `gqf2008/homebrew-tap` | **published (0.5.3)** | `brew tap gqf2008/tap && brew install ki`; `bigfish1913/homebrew-tap` serves `rpi`, not `ki` |
-| Scoop | `gqf2008/scoop-bucket` | **published (0.5.3)** | `scoop bucket add gqf2008 https://github.com/gqf2008/scoop-bucket && scoop install ki`; `bigfish1913/scoop-bucket` serves `rpi`, not `ki` |
+| Homebrew | `gqf2008/homebrew-tap` | **published (current release)** | `brew tap gqf2008/tap && brew install ki`; `bigfish1913/homebrew-tap` serves `rpi`, not `ki` |
+| Scoop | `gqf2008/scoop-bucket` | **published (current release)** | `scoop bucket add gqf2008 https://github.com/gqf2008/scoop-bucket && scoop install ki`; `bigfish1913/scoop-bucket` serves `rpi`, not `ki` |
 | winget | [open at `microsoft/winget-pkgs#469391`](https://github.com/microsoft/winget-pkgs/pull/469391) | **submitted, pending moderator merge** | PR #469391 adds `gqf2008.ki` 0.5.3 under `manifests/g/…`; #441442 is the unrelated `bigfish1913.rpi` package |
 
 The files in this directory are the source of truth for the two taps; the tap
@@ -46,9 +47,9 @@ traffic the website cannot reach.
 ## Cutting a release
 
 The whole pipeline — bump, tag, wait for the release binaries, refresh every
-manifest below, push the taps, open the winget PR, (skip crates.io while
-`publish = false`), deploy
-the site — is one command; see [`docs/maintaining/releasing.md`](../docs/maintaining/releasing.md):
+manifest below, push the taps, open the winget PR (skipping crates.io while
+`publish = false`) — is one command; see
+[`docs/maintaining/releasing.md`](../docs/maintaining/releasing.md):
 
 ```bash
 task publish                 # auto-increments the version
@@ -106,8 +107,9 @@ Then update, in this order:
    automatic.
 3. **Homebrew** — `homebrew/ki.rb`: `version` and the three `url`/`sha256`
    pairs.
-4. **winget** — all three files' `PackageVersion`, the `InstallerUrl`, and the
-   **uppercase** `InstallerSha256`.
+4. **winget** — all three files' `PackageVersion`, the `InstallerUrl`, the
+   **uppercase** `InstallerSha256`, the locale manifest's `ReleaseNotesUrl`, and
+   the installer's `ReleaseDate`.
 
 The winget manifests track the **current** repo convention rather than the
 oldest supported schema: `ManifestVersion 1.12.0` with the
@@ -154,13 +156,13 @@ Verified on this machine:
 - `winget validate packaging/winget` validated the old `0.3.21` manifests. The
   current `gqf2008.ki` manifests have not been re-validated here (no `winget`
   on this machine).
-- The current v0.5.3 URLs and hashes were read from the GitHub API
-  (`releases/tags/v0.5.3`, `assets[].digest`), not copied from a template.
+- The v0.5.6 URLs and hashes were read from the GitHub API
+  (`releases/tags/v0.5.6`, `assets[].digest`), not copied from a template.
 - `scoop/ki.json` parses, and its `bin` (`ki.exe`) matches the zip's root
   entry produced by the workflow's `7z a -tzip … .` step.
-- The v0.5.3 digests recorded in `scoop/ki.json` and `homebrew/ki.rb` match
-  the GitHub API's `assets[].digest` (Windows zip `48b253f2…5c49`, macOS arm64
-  tarball `beb7d34d…4942`), and the API's asset list confirms the filenames the
+- The v0.5.6 digests recorded in `scoop/ki.json` and `homebrew/ki.rb` match
+  the GitHub API's `assets[].digest` (Windows zip `59a2fca6…f972`, macOS arm64
+  tarball `f69bebea…7241`), and the API's asset list confirms the filenames the
   manifests build. A downloaded archive was not re-hashed in this pass; older
   releases had `ki.exe` at the zip root, which is what `bin` claims.
 - The `gqf2008/*` taps exist and carry the current release; `brew install ki` /
@@ -170,7 +172,7 @@ Verified on this machine:
 **Not** verified here, and worth one manual pass before relying on them:
 
 - **Homebrew** — no `brew`/`ruby` on this machine, so the formula was never
-  syntax-checked or installed (nothing is published yet). `brew audit
+  syntax-checked or installed. `brew audit
   --new-formula ki` in the tap is the cheap check.
 - **binstall** — `cargo-binstall` is not installed here, so the metadata is
   written from the documented schema (`SUPPORT.md` in `cargo-bins/cargo-binstall`)
