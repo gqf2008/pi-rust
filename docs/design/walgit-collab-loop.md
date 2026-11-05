@@ -74,7 +74,7 @@ walgit collab entry --kind issue --id <thread-id> --actor ki-agent --parent "" \
   --body '{"title":"…","body":"…"}' --push walgit
 
 walgit collab entry --kind status --id <thread-id> --actor ki-agent --parent <issue-oid> \
-  --body '{"status":"in-progress","owner":"ki-agent","worktree":".claude/worktrees/wt-<id>","branch":"wt-<id>","work":"…"}' \
+  --body '{"status":"in-progress","owner":"ki-agent","worktree":".worktrees/wt-<id>","branch":"team/wt-<id>","work":"…"}' \
   --push walgit
 
 walgit collab entry --kind patch --id <thread-id> --actor ki-agent --parent <status-oid> \
@@ -125,10 +125,10 @@ scripts/collab-entry-retry.sh --kind status --id <thread> --actor ki-agent \
    一个工作项一个线程 id，不把两个目标揉进一张卡片。
 2. **开 issue + status(owner)**：两次 `collab entry --push walgit`，第二步的 status 必须写
    `owner`（否则卡片是 unowned），把 `worktree` / `branch` / `work` 一并写上，卡片才算被认领。
-3. **建 worktree**：`.claude/worktrees/wt-<id>`（见 §6），一个工作项一个 worktree，互不干扰。
+3. **建 worktree**：`.worktrees/wt-<id>`（见 §6），一个工作项一个 worktree，互不干扰。
 4. **实现 + 加断言**：修 bug 必须补一条能证伪的测试；不能被突变打红的断言不算断言
    （第 0 轮 R1/R4 就是靠重跑突变证明的）。
-5. **patch 条目**：`--base` / `--head` 写真实 ref 或 SHA（`refs/heads/main`、`refs/heads/wt-<id>`
+5. **patch 条目**：`--base` / `--head` 写真实 ref 或 SHA（`refs/heads/main`、`refs/heads/team/wt-<id>`
    或提交 SHA），正文写清楚改了什么、为什么。
 6. **review 条目**：由**另一方**（自己的 principal/key，或 headless sub-agent）出
    `decision`；同一条线程里 `request_changes` 未处理完，不进合并。
@@ -145,8 +145,8 @@ scripts/collab-entry-retry.sh --kind status --id <thread> --actor ki-agent \
 | 对象 | 形态 | 说明 |
 |---|---|---|
 | 线程 id | `<主题-slug>`（如 `ask-user-guest-call-panic`）；审查类 `review-<base-sha>-<head-sha>-<主题>` | 第 0 轮既有形态，沿用 |
-| worktree | `.claude/worktrees/wt-<id>` | 与 `AGENTS.md` 的「一批一个 worktree `wt-<批名>`」同形，`<id>` = 线程 id 或工作项 slug |
-| 分支 | `wt-<id>` | 与 worktree 同名，patch 的 `--head` 指它 |
+| worktree | `.worktrees/wt-<id>` | 与 `AGENTS.md` 的 `<WORKTREE_ROOT>/<role>` 同形，`<id>` = 线程 id 或工作项 slug |
+| 分支 | `team/wt-<id>` | 与 worktree 同名，带 `AGENTS.md` 的 `team/` 前缀，patch 的 `--head` 指它 |
 | 提交信息 | Conventional Commits（`fix(cli): …` / `feat(goal): …` / `chore(docs): …`） | `AGENTS.md` 硬约束；一批一个 worktree，完成后 ff 合入 `main` |
 
 上限/超时/额度这类常量上调，**单独一个 commit** 并写明新旧值与理由（`RULE_阈值变更.md`）。

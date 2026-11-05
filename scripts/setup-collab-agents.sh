@@ -4,7 +4,7 @@
 # isolated. Idempotent; never deletes anything.
 #
 #   sh scripts/setup-collab-agents.sh [count] [--dry-run]
-#   cd .claude/worktrees/collab-agent-1 && ki -a
+#   cd .worktrees/collab-agent-1 && ki -a
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -29,8 +29,8 @@ fi
 
 i=1
 while [ "$i" -le "$count" ]; do
-    wt="$ROOT/.claude/worktrees/collab-agent-$i"
-    branch="collab/agent-$i"
+    wt="$ROOT/.worktrees/collab-agent-$i"
+    branch="team/collab-agent-$i"
     principal="ki-agent-$i"
     if [ -e "$wt" ]; then
         echo "skip: $wt already exists"

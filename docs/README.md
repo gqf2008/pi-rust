@@ -16,6 +16,7 @@
 | 重复思考、取消与崩溃恢复排查 | [问题复盘](debugging/llm-repetition-forensics.md)（历史证据与修复过程） |
 | 启动、内存与安装体积测量 | [性能基准](performance/benchmark-vs-pi.md)（含测量日期与边界） |
 | 发版与跨平台分发 | [发布流程](maintaining/releasing.md) |
+| 团队协作、派工与验收 | [协作章程](../AGENTS.md)、[仓库技术事实](maintaining/agents-repo-facts.md) |
 | 对外介绍与文章草稿 | [推广素材](promotion/README.md) |
 | CLI `docs` 工具的模型可读输入 | [内置文档源](kiqi-tool/README.md) |
 
